@@ -1931,6 +1931,115 @@ def fetch_solana_tracker_ath(http, token_address):
     return http.get_json(f"https://data.solanatracker.io/tokens/{token_address}/ath", headers=headers)
 
 
+def apply_solana_tracker_ath(entry, ath, observed_at):
+    if ath.get("highest_market_cap") is not None:
+        entry["ath_mcap_usd"] = to_float(ath.get("highest_market_cap"))
+    if ath.get("highest_price") is not None:
+        entry["ath_price_usd"] = to_float(ath.get("highest_price"))
+    if ath.get("timestamp"):
+        timestamp = int(ath["timestamp"])
+        if timestamp > 10_000_000_000:
+            timestamp = timestamp // 1000
+        entry["ath_mcap_at"] = iso(timestamp)
+    if ath.get("pool_id"):
+        entry["ath_pool_address"] = ath.get("pool_id")
+    entry["ath_source"] = "solana_tracker"
+    entry["ath_status"] = "ready"
+    entry["ath_latest_checked_at"] = observed_at
+    entry.pop("ath_error", None)
+    entry.pop("ath_error_checked_at", None)
+
+
+def trusted_ath_mcap(entry):
+    if not entry:
+        return 0.0
+    if entry.get("ath_source") not in ("solana_tracker", "ohlcv_high"):
+        return 0.0
+    return to_float(entry.get("ath_mcap_usd"))
+
+
+def filter_reactivation_by_ath(http, state, pools, config, observed_at):
+    max_ratio = config.get("ath_max_current_ratio")
+    if config.get("lane") != "reactivation" or max_ratio is None:
+        return pools
+
+    max_ratio = float(max_ratio)
+    market = state.setdefault("market", {})
+    now = int(time.time())
+    error_ttl = int(config.get("ath_error_cache_ttl_minutes", 20)) * 60
+    delay = float(config.get("ath_request_delay_seconds", 0.25))
+    fetch_limit = int(config.get("ath_filter_max_tokens_per_scan", config.get("ath_max_tokens_per_scan", 25)))
+    require_trusted = bool(config.get("ath_require_trusted", True))
+    api_key = os.environ.get("SOLANA_TRACKER_API_KEY")
+    fetched = 0
+    rate_limited = False
+    kept = []
+    stats = Counter()
+
+    for pool in pools:
+        token = pool.token_address or pool.pool_address
+        if not token or pool.mcap_usd <= 0:
+            stats["missing_token_or_mcap"] += 1
+            continue
+        entry = market.setdefault(token, {"token_address": token})
+        ath_mcap = trusted_ath_mcap(entry)
+
+        if not ath_mcap and api_key and not rate_limited:
+            recent_error = entry.get("ath_error_checked_at") and now - int(entry.get("ath_error_checked_at", 0)) < error_ttl
+            if not recent_error and fetched < fetch_limit:
+                try:
+                    ath = fetch_solana_tracker_ath(http, token)
+                    fetched += 1
+                    if ath and not ath.get("error"):
+                        entry["ath_checked_at"] = now
+                        apply_solana_tracker_ath(entry, ath, observed_at)
+                        ath_mcap = trusted_ath_mcap(entry)
+                    elif ath and ath.get("error"):
+                        entry["ath_error"] = ath.get("error")
+                        entry["ath_error_checked_at"] = now
+                        entry["ath_status"] = "error"
+                    else:
+                        entry["ath_error"] = "empty_ath_response"
+                        entry["ath_error_checked_at"] = now
+                        entry["ath_status"] = "error"
+                    time.sleep(delay)
+                except Exception as exc:
+                    message = str(exc)
+                    print(f"warn: reactivation ath filter failed for {token}: {message}", file=sys.stderr)
+                    entry["ath_error"] = message
+                    entry["ath_error_checked_at"] = now
+                    entry["ath_status"] = "error"
+                    fetched += 1
+                    if "429" in message or "Too Many" in message:
+                        rate_limited = True
+
+        if not ath_mcap:
+            if require_trusted:
+                stats["missing_ath"] += 1
+                continue
+            kept.append(pool)
+            stats["kept_without_ath"] += 1
+            continue
+
+        ratio = pool.mcap_usd / ath_mcap
+        entry["ath_current_ratio"] = ratio
+        entry["ath_drawdown_pct"] = max(0.0, (1 - ratio) * 100)
+        entry["ath_filter_checked_at"] = observed_at
+        if ratio <= max_ratio:
+            kept.append(pool)
+            stats["kept_corrected"] += 1
+        else:
+            stats["too_close_to_ath"] += 1
+
+    stats["input_pools"] = len(pools)
+    stats["kept_pools"] = len(kept)
+    stats["ath_fetches"] = fetched
+    if rate_limited:
+        stats["rate_limited"] = 1
+    config["_ath_filter_stats"] = dict(stats)
+    return kept
+
+
 def enrich_market_ath(http, state, pools, alerts, config, observed_at):
     if not config.get("ath_enabled", True):
         return
@@ -1983,22 +2092,7 @@ def enrich_market_ath(http, state, pools, alerts, config, observed_at):
         fetched += 1
         if ath and not ath.get("error"):
             entry["ath_checked_at"] = now
-            if ath.get("highest_market_cap") is not None:
-                entry["ath_mcap_usd"] = to_float(ath.get("highest_market_cap"))
-            if ath.get("highest_price") is not None:
-                entry["ath_price_usd"] = to_float(ath.get("highest_price"))
-            if ath.get("timestamp"):
-                timestamp = int(ath["timestamp"])
-                if timestamp > 10_000_000_000:
-                    timestamp = timestamp // 1000
-                entry["ath_mcap_at"] = iso(timestamp)
-            if ath.get("pool_id"):
-                entry["ath_pool_address"] = ath.get("pool_id")
-            entry["ath_source"] = "solana_tracker"
-            entry["ath_status"] = "ready"
-            entry["ath_latest_checked_at"] = observed_at
-            entry.pop("ath_error", None)
-            entry.pop("ath_error_checked_at", None)
+            apply_solana_tracker_ath(entry, ath, observed_at)
         elif ath and ath.get("error"):
             entry["ath_error"] = ath.get("error")
             entry["ath_error_checked_at"] = now
@@ -2085,6 +2179,9 @@ def apply_market_meta(pool_dict, state):
         "ath_status",
         "ath_error",
         "ath_error_checked_at",
+        "ath_current_ratio",
+        "ath_drawdown_pct",
+        "ath_filter_checked_at",
         "latest_mcap_usd",
         "latest_price_usd",
         "latest_liquidity_usd",
@@ -2267,6 +2364,16 @@ def scan_with_config(http, rpc, state, config):
     label = config.get("lane") or config.get("mode") or "scan"
     print(f"Building market universe for {label}...", flush=True)
     universe = build_universe(http, config)
+    observed_at = utc_now().isoformat().replace("+00:00", "Z")
+    before_ath_filter = len(universe)
+    universe = filter_reactivation_by_ath(http, state, universe, config, observed_at)
+    ath_filter_stats = config.get("_ath_filter_stats") or {}
+    if ath_filter_stats:
+        print(
+            f"{label}: ATH correction filter kept {len(universe)}/{before_ath_filter} pools "
+            f"(max current/ATH {float(config['ath_max_current_ratio']) * 100:.0f}%)",
+            flush=True,
+        )
     scan_targets = universe[: int(config["active_pool_limit"])]
     print(f"{label}: universe {len(universe)} pools, scanning {len(scan_targets)}", flush=True)
     classification_budget = {"remaining": int(config["max_wallet_classifications_per_scan"])}
@@ -2324,6 +2431,9 @@ def run_once(config, lane_name=None):
             "volume_1h_max_usd": lane_config.get("volume_1h_max_usd"),
             "volume_1h_to_mcap_min": lane_config.get("volume_1h_to_mcap_min"),
             "volume_1h_to_liquidity_min": lane_config.get("volume_1h_to_liquidity_min"),
+            "ath_max_current_ratio": lane_config.get("ath_max_current_ratio"),
+            "ath_require_trusted": lane_config.get("ath_require_trusted"),
+            "ath_filter_stats": lane_config.get("_ath_filter_stats"),
         }
 
     generated_at = utc_now().isoformat().replace("+00:00", "Z")

@@ -48,8 +48,8 @@ const FILTER_META = {
   },
   reactivation: {
     label: "Reactivation",
-    criteria: "30d+ / $100k-$5m mcap / liq >= $10k / low-volume setup",
-    thesis: "older tokens with low-volume accumulation or dormant-wallet activity.",
+    criteria: "30d+ / $100k-$5m mcap / liq >= $10k / <=40% ATH / low-volume setup",
+    thesis: "older tokens that are materially corrected from ATH and show low-volume accumulation or dormant-wallet activity.",
   },
   legacy: {
     label: "Legacy",
@@ -208,6 +208,7 @@ const FILTER_RULES = {
     liquidityMin: 10_000,
     volumeMin: 500,
     volumeMax: 150_000,
+    athMaxRatio: 0.4,
   },
 };
 
@@ -254,11 +255,12 @@ function alertMarketSnapshot(alert = {}) {
       pool.latest_liquidity_usd
     ),
     volume1hUsd: finiteNumber(pool.volume_1h_usd),
+    athMcapUsd: finiteNumber(pool.ath_mcap_usd),
   };
 }
 
 function matchesFilterRule(snapshot, rule) {
-  const { ageHours, mcapUsd, liquidityUsd, volume1hUsd } = snapshot;
+  const { ageHours, mcapUsd, liquidityUsd, volume1hUsd, athMcapUsd } = snapshot;
   if (ageHours === null || mcapUsd === null || liquidityUsd === null) return false;
   if (ageHours < rule.ageMin) return false;
   if (rule.ageMax !== null && ageHours >= rule.ageMax) return false;
@@ -273,6 +275,9 @@ function matchesFilterRule(snapshot, rule) {
   }
   if (rule.volumeToLiquidityMin !== undefined) {
     if (volume1hUsd === null || volume1hUsd / liquidityUsd < rule.volumeToLiquidityMin) return false;
+  }
+  if (rule.athMaxRatio !== undefined) {
+    if (athMcapUsd === null || athMcapUsd <= 0 || mcapUsd / athMcapUsd > rule.athMaxRatio) return false;
   }
   return true;
 }

@@ -105,7 +105,7 @@ Lanes:
 - `incubation`: `3h-72h`, `50k-1.5m mcap`, `liq >=3k`, HANTA-style early accumulation.
 - `young`: `3d-30d`, `100k-5m mcap`, `liq >=10k`, post-launch accumulation.
 - `breakout`: `3d-30d`, `5m-25m mcap`, `liq >=50k`, `1h vol >=100k`, momentum/anomaly expansion.
-- `reactivation`: `30d+`, `100k-5m mcap`, `liq >=10k`, low-volume old-token reactivation.
+- `reactivation`: `30d+`, `100k-5m mcap`, `liq >=10k`, current mcap `<=40%` of Solana Tracker ATH, low-volume old-token reactivation.
 
 ## Outputs
 

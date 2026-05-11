@@ -160,7 +160,7 @@ Every caught-token deep dive should use the same visible order:
 16. `Source links`, token address, GMGN token terminal link.
 17. Deep sections: caller network, noticed-wallet PnL, signal timeline.
 
-Market phase is not the same as scanner filter. Example: an old token can be technically caught by the `Reactivation` filter because of age and low-volume suspicious flow, but if it trades at `>= 40%` of Solana Tracker ATH it should be visibly marked as `Upper range`, not treated as a clean low-zone reactivation thesis. The reactivation caution should appear only for tokens actually caught by the `Reactivation` filter.
+Market phase is not the same as scanner filter. The live `Reactivation` filter requires a trusted ATH and only admits tokens whose current scanner market cap is `<= 40%` of Solana Tracker ATH. Older historical alerts created before this rule may still appear as `Upper range` or `Near ATH`; those should be visibly marked as not a clean low-zone reactivation thesis rather than treated as fresh Reactivation evidence.
 
 Do not add duplicate rows for the same concept. In particular:
 
