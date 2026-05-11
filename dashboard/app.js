@@ -807,11 +807,17 @@ async function loadStaticData() {
 async function loadData() {
   let payload;
   state.staticMode = false;
+  const staticHost = window.location.hostname.endsWith("github.io") || window.location.protocol === "file:";
+  if (staticHost) {
+    payload = await loadStaticData();
+    state.staticMode = true;
+  } else {
   try {
     payload = await fetchJson("/api/report");
   } catch {
     payload = await loadStaticData();
     state.staticMode = true;
+  }
   }
   state.report = payload.report || {};
   state.history = payload.history || [];
