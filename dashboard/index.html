@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Solana Radar</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Solana Radar</h1>
+        <p id="subtitle">Loading latest scan</p>
+      </div>
+      <div class="actions">
+        <select id="modeSelect" aria-label="Scan lane">
+          <option value="all">all lanes</option>
+          <option value="incubation">incubation</option>
+          <option value="young">young</option>
+          <option value="breakout">breakout</option>
+          <option value="reactivation">reactivation</option>
+        </select>
+        <button id="runScan" type="button">Force scan</button>
+        <button id="refresh" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="status-row" id="statusRow"></section>
+
+      <section class="metrics" id="metrics"></section>
+
+      <section class="toolbar">
+        <div class="tabs" role="tablist">
+          <button class="tab is-active" data-tab="filters" type="button">Filters</button>
+          <button class="tab" data-tab="tokens" type="button">Tokens</button>
+          <button class="tab" data-tab="narratives" type="button">Narratives</button>
+          <button class="tab" data-tab="alerts" type="button">Raw alerts</button>
+        </div>
+        <div class="filters">
+          <input id="searchInput" type="search" placeholder="Search symbol, pool, wallet">
+          <select id="heatFilter" aria-label="Social heat">
+            <option value="all">all social</option>
+            <option value="unchecked">not checked</option>
+            <option value="disabled">disabled</option>
+            <option value="none">no mentions</option>
+            <option value="quiet">quiet</option>
+            <option value="warming">warming</option>
+            <option value="hot">hot</option>
+          </select>
+          <select id="laneFilter" aria-label="Lane">
+            <option value="all">all lanes</option>
+            <option value="incubation">incubation</option>
+            <option value="young">young</option>
+            <option value="breakout">breakout</option>
+            <option value="reactivation">reactivation</option>
+          </select>
+          <label>
+            Min score
+            <input id="scoreInput" type="number" min="0" max="100" value="0">
+          </label>
+        </div>
+      </section>
+
+      <section id="content" class="content"></section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

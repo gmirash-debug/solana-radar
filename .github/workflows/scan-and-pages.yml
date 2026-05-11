@@ -1,0 +1,81 @@
+name: Scan and deploy dashboard
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/scan-and-pages.yml"
+      - "scanner.py"
+      - "config.example.json"
+      - "config.json"
+      - "requirements.txt"
+      - "dashboard/**"
+      - "NARRATIVE_PROTOCOL.md"
+
+concurrency:
+  group: solana-radar-scan
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run scanner
+        env:
+          HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
+          SOLANA_TRACKER_API_KEY: ${{ secrets.SOLANA_TRACKER_API_KEY }}
+          BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
+        run: python scanner.py --once --lane all
+
+      - name: Commit scanner data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/latest_report.json data/latest_report.md data/alerts.jsonl data/state.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Update scanner data"
+            git push
+          fi
+
+      - name: Build Pages artifact
+        run: |
+          rm -rf .pages
+          mkdir -p .pages/data
+          cp dashboard/index.html dashboard/app.js dashboard/styles.css .pages/
+          cp data/latest_report.json data/latest_report.md data/alerts.jsonl data/state.json .pages/data/
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .pages
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

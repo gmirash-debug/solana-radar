@@ -1,0 +1,8 @@
+.DS_Store
+.env
+.env.*
+__pycache__/
+*.pyc
+.pages/
+data/server.log
+data/server.pid
