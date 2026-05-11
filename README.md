@@ -83,8 +83,10 @@ python3 solana-radar/scanner.py --watch --lane all
 
 The repository includes `.github/workflows/scan-and-pages.yml`.
 
-It runs the scanner every 15 minutes, commits updated `data/` snapshots, and
-deploys a static dashboard to GitHub Pages. The static dashboard reads:
+It runs the scanner every 15 minutes and commits updated `data/` snapshots.
+GitHub Pages is not enabled by default because free private repositories do not
+support Pages. If the repository is made public or Pages is available on the
+account plan, the dashboard can be deployed as a static site that reads:
 
 - `data/latest_report.json`
 - `data/alerts.jsonl`
