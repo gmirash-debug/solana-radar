@@ -53,8 +53,8 @@ const FILTER_META = {
   },
   legacy: {
     label: "Legacy",
-    criteria: "fallback only when market snapshot is insufficient for filter inference",
-    thesis: "historical scanner catch that cannot be mapped to a current filter.",
+    criteria: "fallback for insufficient snapshots or old catches outside current filter rules",
+    thesis: "historical scanner catches that are missing filter evidence or no longer fit the active lane rules.",
   },
 };
 
@@ -287,9 +287,34 @@ function inferAlertFilter(alert = {}) {
   return INFERRABLE_FILTERS.find((name) => matchesFilterRule(snapshot, FILTER_RULES[name])) || "legacy";
 }
 
-function effectiveAlertLane(alert = {}) {
+function baseAlertLane(alert = {}) {
   if (INFERRABLE_FILTERS.includes(alert.lane)) return alert.lane;
   return inferAlertFilter(alert);
+}
+
+function effectiveAlertLane(alert = {}) {
+  return alert.filterLane || baseAlertLane(alert);
+}
+
+function tokenMarketSnapshot(token = {}) {
+  return {
+    ageHours: Number.isFinite(Number(token.tokenAgeHours)) ? Number(token.tokenAgeHours) : null,
+    mcapUsd: finiteNumber(token.scanMcapUsd, token.currentMcap, token.firstObsMcapUsd, token.firstMcap),
+    liquidityUsd: finiteNumber(token.liquidityUsd, token.latestPool?.liquidity_usd, token.latestPool?.latest_liquidity_usd),
+    volume1hUsd: finiteNumber(token.latestPool?.volume_1h_usd),
+    athMcapUsd: finiteNumber(token.athMcapUsd),
+  };
+}
+
+function tokenFitsReactivationBucket(token) {
+  const snapshot = tokenMarketSnapshot(token);
+  const rule = FILTER_RULES.reactivation;
+  if (snapshot.ageHours === null || snapshot.mcapUsd === null || snapshot.liquidityUsd === null) return false;
+  if (snapshot.ageHours < rule.ageMin) return false;
+  if (snapshot.mcapUsd < rule.mcapMin || snapshot.mcapUsd > rule.mcapMax) return false;
+  if (snapshot.liquidityUsd < rule.liquidityMin) return false;
+  if (snapshot.athMcapUsd === null || snapshot.athMcapUsd <= 0) return false;
+  return snapshot.mcapUsd / snapshot.athMcapUsd <= rule.athMaxRatio;
 }
 
 function alertId(alert) {
@@ -577,7 +602,8 @@ function buildTokenSignals() {
   const tokens = [...groups.values()].map((token) => {
     token.alerts.sort((a, b) => new Date(a.window_start || a.created_at) - new Date(b.window_start || b.created_at));
     token.alerts.forEach((alert) => {
-      alert.filterLane = effectiveAlertLane(alert);
+      alert.baseFilterLane = baseAlertLane(alert);
+      alert.filterLane = alert.baseFilterLane;
       alert.filterInferred = !INFERRABLE_FILTERS.includes(alert.lane);
     });
     const first = token.alerts[0];
@@ -697,10 +723,19 @@ function buildTokenSignals() {
     token.uniqueWallets = wallets.length;
     token.bestWalletPnl = walletPnls.length ? Math.max(...walletPnls) : null;
     token.medianWalletPnl = median(walletPnls);
+    const fitsReactivationNow = tokenFitsReactivationBucket(token);
+    token.alerts.forEach((alert) => {
+      const baseLane = alert.baseFilterLane || baseAlertLane(alert);
+      if (baseLane === "reactivation" || (baseLane === "legacy" && fitsReactivationNow)) {
+        alert.filterLane = fitsReactivationNow ? "reactivation" : "legacy";
+      } else {
+        alert.filterLane = baseLane;
+      }
+    });
     token.lanes = [...new Set(token.alerts.map((alert) => alert.filterLane || "legacy"))];
     token.filterCategories = token.lanes;
     token.primaryFilter = first.filterLane || token.filterCategories[0] || "legacy";
-    token.hasInferredFilters = token.alerts.some((alert) => alert.filterInferred);
+    token.hasInferredFilters = token.alerts.some((alert) => alert.filterInferred || alert.filterLane !== alert.baseFilterLane);
     const heats = token.alerts.map(socialHeat);
     const disabledSocial = token.alerts.map((alert) => alert.social).find((social) => social?.enabled === false);
     token.socialHeat = heats.includes("hot")
@@ -1195,7 +1230,7 @@ function marketPhase(token) {
   const ratio = tokenAthRatio(token);
   if (ratio === null) return null;
   if (ratio >= 0.85) return { label: "Near ATH", tone: "bad", detail: `${(ratio * 100).toFixed(0)}% of ATH` };
-  if (ratio >= 0.4) return { label: "Upper range", tone: "warn", detail: `${(ratio * 100).toFixed(0)}% of ATH` };
+  if (ratio > 0.4) return { label: "Upper range", tone: "warn", detail: `${(ratio * 100).toFixed(0)}% of ATH` };
   if (ratio <= 0.2) return { label: "Low range", tone: "good", detail: `${(ratio * 100).toFixed(0)}% of ATH` };
   return { label: "Mid-range", tone: "", detail: `${(ratio * 100).toFixed(0)}% of ATH` };
 }
