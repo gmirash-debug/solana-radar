@@ -1,4 +1,4 @@
-name: Scan data
+name: Scan and deploy dashboard
 
 on:
   workflow_dispatch:
@@ -22,10 +22,15 @@ concurrency:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Check out repository
@@ -55,3 +60,24 @@ jobs:
             git commit -m "Update scanner data"
             git push
           fi
+
+      - name: Build Pages artifact
+        run: |
+          rm -rf .pages
+          mkdir -p .pages/data
+          cp dashboard/index.html dashboard/app.js dashboard/styles.css .pages/
+          cp data/latest_report.json data/latest_report.md data/alerts.jsonl data/state.json .pages/data/
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .pages
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
