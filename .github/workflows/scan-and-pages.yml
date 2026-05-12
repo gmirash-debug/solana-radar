@@ -77,7 +77,8 @@ jobs:
 
       - name: Skip fresh scheduled scan
         if: steps.freshness.outputs.should_scan != 'true'
-        run: echo "Skipping scanner because latest report is still fresh: ${{ steps.freshness.outputs.reason }}"
+        run: |
+          echo "Skipping scanner because latest report is still fresh: ${{ steps.freshness.outputs.reason }}"
 
       - name: Install dependencies
         if: steps.freshness.outputs.should_scan == 'true'
