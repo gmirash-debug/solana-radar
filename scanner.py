@@ -1713,8 +1713,12 @@ def parse_pool_swap(tx, pool):
     }
 
 
+def wallet_cache_key(wallet, before_signature):
+    return f"{wallet}:{before_signature}"
+
+
 def classify_wallet(rpc, wallet, before_signature, buy_time, config, state):
-    cache_key = f"{wallet}:{before_signature}"
+    cache_key = wallet_cache_key(wallet, before_signature)
     wallet_cache = state.setdefault("wallet_cache", {})
     if cache_key in wallet_cache:
         return wallet_cache[cache_key]
@@ -1882,22 +1886,41 @@ def build_alerts(pool, events, config):
     return sorted(deduped.values(), key=lambda alert: alert["score"], reverse=True)[:5]
 
 
-def helius_page_budget(pool, config, kind):
-    pages = int(config.get(f"helius_{kind}_pages", config.get("helius_transactions_pages", 4)))
+def helius_page_budget(pool, config, kind, phase=None):
+    phase_prefix = f"helius_{phase}_" if phase else "helius_"
+    pages = int(
+        config.get(
+            f"{phase_prefix}{kind}_pages",
+            config.get(f"helius_{kind}_pages", config.get("helius_transactions_pages", 4)),
+        )
+    )
     txns_1h = int(pool.txns_1h or 0)
     high_threshold = int(config.get("helius_high_txn_threshold", 10_000))
     medium_threshold = int(config.get("helius_medium_txn_threshold", 1_000))
     if txns_1h >= high_threshold:
-        pages = max(pages, int(config.get(f"helius_{kind}_high_tx_pages", config.get("helius_high_tx_pages", pages))))
+        pages = max(
+            pages,
+            int(
+                config.get(
+                    f"{phase_prefix}{kind}_high_tx_pages",
+                    config.get(f"helius_{kind}_high_tx_pages", config.get("helius_high_tx_pages", pages)),
+                )
+            ),
+        )
     elif txns_1h >= medium_threshold:
         pages = max(
             pages,
-            int(config.get(f"helius_{kind}_medium_tx_pages", config.get("helius_medium_tx_pages", pages))),
+            int(
+                config.get(
+                    f"{phase_prefix}{kind}_medium_tx_pages",
+                    config.get(f"helius_{kind}_medium_tx_pages", config.get("helius_medium_tx_pages", pages)),
+                )
+            ),
         )
     return max(1, pages)
 
 
-def fetch_helius_pool_transactions(rpc, pool, config, pool_state):
+def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
     now = int(time.time())
     limit = int(config.get("helius_transactions_limit", 100))
     lookback_minutes = int(config.get("helius_recent_lookback_minutes", max(60, int(config["alert_window_minutes"]))))
@@ -1907,6 +1930,7 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state):
     seen = set()
     stats = {
         "source": "helius_transactions",
+        "phase": phase or "full",
         "pages": 0,
         "transactions": 0,
         "passes": [],
@@ -1973,14 +1997,14 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state):
         run_pass(
             "incremental",
             "asc",
-            helius_page_budget(pool, config, "incremental"),
+            helius_page_budget(pool, config, "incremental", phase=phase),
             block_time={"gt": incremental_from},
         )
     else:
         run_pass(
             "recent",
             "desc",
-            helius_page_budget(pool, config, "recent"),
+            helius_page_budget(pool, config, "recent", phase=phase),
             block_time={"gte": recent_from},
         )
 
@@ -1997,22 +2021,37 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state):
         run_pass(
             "launch_backfill",
             "asc",
-            helius_page_budget(pool, config, "initial_backfill"),
+            helius_page_budget(pool, config, "initial_backfill", phase=phase),
             block_time={"gte": launch_from},
             pagination_token=pool_state.get("helius_initial_backfill_cursor"),
             save_cursor_key="helius_initial_backfill_cursor",
         )
 
     if int(pool.txns_1h or 0) >= int(config.get("helius_high_txn_threshold", 10_000)):
+        tail_pages_key = f"helius_{phase}_high_tx_tail_pages" if phase else "helius_high_tx_tail_pages"
         run_pass(
             "high_tx_tail",
             "desc",
-            int(config.get("helius_high_tx_tail_pages", 4)),
+            int(config.get(tail_pages_key, config.get("helius_high_tx_tail_pages", 4))),
             block_time={"gte": recent_from},
         )
 
     stats["transactions"] = len(transactions)
     return sorted(transactions, key=lambda tx: (tx.get("blockTime") or 0, tx.get("transactionIndex") or 0)), stats
+
+
+def merge_transactions(*transaction_groups):
+    by_signature = {}
+    for group in transaction_groups:
+        for tx in group or []:
+            signature = (tx.get("transaction") or {}).get("signatures", [""])[0]
+            if not signature:
+                continue
+            by_signature[signature] = tx
+    return sorted(
+        by_signature.values(),
+        key=lambda tx: (tx.get("blockTime") or 0, tx.get("transactionIndex") or 0),
+    )
 
 
 def update_pool_transaction_state(pool_state, pool, txs):
@@ -2035,13 +2074,20 @@ def select_buy_swaps_for_classification(candidates, config, budget_limit):
     if budget_limit <= 0:
         return []
     by_signature = {}
+    by_wallet = set()
     ordered = []
+    dedupe_wallets = bool(config.get("helius_dedupe_classification_wallets", True))
 
     def add(swaps):
         for swap in swaps:
             signature = swap.get("signature")
             if not signature or signature in by_signature:
                 continue
+            signer = swap.get("signer")
+            if dedupe_wallets and signer:
+                if signer in by_wallet:
+                    continue
+                by_wallet.add(signer)
             by_signature[signature] = swap
             ordered.append(swap)
             if len(ordered) >= budget_limit:
@@ -2087,25 +2133,19 @@ def classify_buy_swaps(rpc, swaps, config, state, classification_budget):
     selected = select_buy_swaps_for_classification(candidates, config, budget_limit)
     events = []
     for swap in selected:
-        if classification_budget["remaining"] <= 0:
+        cache_key = wallet_cache_key(swap["signer"], swap["signature"])
+        cache_hit = cache_key in state.setdefault("wallet_cache", {})
+        if not cache_hit and classification_budget["remaining"] <= 0:
             break
-        classification_budget["remaining"] -= 1
+        if not cache_hit:
+            classification_budget["remaining"] -= 1
         wallet_info = classify_wallet(rpc, swap["signer"], swap["signature"], swap["block_time"], config, state)
         swap.update(wallet_info)
         events.append(swap)
     return events, len(candidates)
 
 
-def scan_pool_helius_transactions(rpc, pool, config, state, classification_budget):
-    pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
-    try:
-        txs, fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state)
-    except Exception as exc:
-        if not config.get("helius_transactions_fallback_signatures", True):
-            return [], {"pool": pool.as_dict(), "error": str(exc), "trade_source": "helius_transactions"}
-        return scan_pool_signatures(rpc, pool, config, state, classification_budget, fallback_error=str(exc))
-
-    update_pool_transaction_state(pool_state, pool, txs)
+def parse_helius_swaps(txs, pool):
     swaps = []
     parse_errors = 0
     for tx in txs:
@@ -2116,8 +2156,153 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
             continue
         if swap:
             swaps.append(swap)
+    return swaps, parse_errors
 
-    events, candidate_buys = classify_buy_swaps(rpc, swaps, config, state, classification_budget)
+
+def merge_events(*event_groups):
+    by_signature = {}
+    for group in event_groups:
+        for event in group or []:
+            signature = event.get("signature")
+            if not signature:
+                continue
+            by_signature[signature] = event
+    return sorted(by_signature.values(), key=lambda event: event.get("block_time") or 0)
+
+
+def probe_classification_config(config):
+    probe_config = dict(config)
+    probe_limit = int(config.get("helius_probe_wallet_limit", config.get("max_wallet_classifications_per_pool", 60)))
+    probe_config["max_wallet_classifications_per_pool"] = min(
+        probe_limit,
+        int(config.get("max_wallet_classifications_per_pool", probe_limit)),
+    )
+    if config.get("helius_probe_classify_global_buy_limit") is not None:
+        probe_config["helius_classify_global_buy_limit"] = int(config["helius_probe_classify_global_buy_limit"])
+    else:
+        probe_config["helius_classify_global_buy_limit"] = min(
+            int(config.get("helius_classify_global_buy_limit", probe_limit)),
+            probe_limit,
+        )
+    if config.get("helius_probe_classify_top_buys_per_window") is not None:
+        probe_config["helius_classify_top_buys_per_window"] = int(config["helius_probe_classify_top_buys_per_window"])
+    return probe_config
+
+
+def should_deep_scan(pool, config, pool_state, events, candidate_buys, alerts, classification_budget):
+    if not config.get("helius_deep_scan_enabled", True):
+        return False, "deep_disabled"
+    if not config.get("helius_probe_enabled", True):
+        return True, "probe_disabled"
+    if alerts:
+        return True, "probe_alert"
+
+    score, suspicious, common_funders, common_recipients = score_events(events, config)
+    suspicious_wallets = {event["signer"] for event in suspicious if event.get("signer")}
+    suspicious_sol = sum(event.get("sol_amount", 0.0) for event in suspicious)
+    if common_funders or common_recipients:
+        return True, "linked_wallets"
+    if any(event.get("wallet_class") == "dormant" for event in suspicious):
+        return True, "dormant_wallet"
+    if len(suspicious_wallets) >= int(config.get("helius_deep_min_suspicious_wallets", 2)):
+        return True, "suspicious_wallet_probe"
+    if suspicious_sol >= float(config.get("helius_deep_min_suspicious_sol", 8)):
+        return True, "suspicious_flow_probe"
+
+    min_candidates = int(config.get("helius_deep_min_candidate_buys", 20))
+    probe_buy_sol = sum(event.get("sol_amount", 0.0) for event in events)
+    if (
+        candidate_buys >= min_candidates
+        and probe_buy_sol >= float(config.get("helius_deep_min_probe_buy_sol", 15))
+        and score > 0
+    ):
+        return True, "flow_probe"
+
+    audit_interval = float(config.get("helius_deep_audit_interval_hours", 0))
+    audits_remaining = int(classification_budget.get("deep_audits_remaining", 0))
+    if audit_interval > 0 and audits_remaining > 0 and candidate_buys >= min_candidates:
+        last_deep = parse_timestamp(pool_state.get("helius_deep_scanned_at"))
+        if not last_deep or time.time() - last_deep >= audit_interval * 3600:
+            classification_budget["deep_audits_remaining"] = audits_remaining - 1
+            return True, "scheduled_deep_audit"
+
+    return False, "probe_clean"
+
+
+def combine_fetch_stats(probe_stats, deep_stats):
+    combined = dict(deep_stats or probe_stats or {})
+    if not probe_stats or not deep_stats:
+        return combined
+    combined["phase"] = "probe_plus_deep"
+    combined["pages"] = int(probe_stats.get("pages", 0)) + int(deep_stats.get("pages", 0))
+    combined["transactions"] = int(probe_stats.get("transactions", 0)) + int(deep_stats.get("transactions", 0))
+    combined["passes"] = [*(probe_stats.get("passes") or []), *(deep_stats.get("passes") or [])]
+    combined["truncated"] = bool(probe_stats.get("truncated") or deep_stats.get("truncated"))
+    combined["probe"] = probe_stats
+    combined["deep"] = deep_stats
+    return combined
+
+
+def scan_pool_helius_transactions(rpc, pool, config, state, classification_budget):
+    pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
+    preclassified = False
+    swaps = []
+    parse_errors = 0
+    events = []
+    seed_events = []
+    candidate_buys = 0
+    try:
+        if config.get("helius_probe_enabled", True):
+            probe_txs, probe_fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="probe")
+            update_pool_transaction_state(pool_state, pool, probe_txs)
+            probe_swaps, probe_parse_errors = parse_helius_swaps(probe_txs, pool)
+            probe_config = probe_classification_config(config)
+            probe_events, probe_candidate_buys = classify_buy_swaps(
+                rpc,
+                probe_swaps,
+                probe_config,
+                state,
+                classification_budget,
+            )
+            probe_alerts = build_alerts(pool, probe_events, config)
+            deepen, deep_reason = should_deep_scan(
+                pool,
+                config,
+                pool_state,
+                probe_events,
+                probe_candidate_buys,
+                probe_alerts,
+                classification_budget,
+            )
+            if deepen:
+                deep_txs, deep_fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="deep")
+                txs = merge_transactions(probe_txs, deep_txs)
+                fetch_stats = combine_fetch_stats(probe_fetch_stats, deep_fetch_stats)
+                fetch_stats["deep_reason"] = deep_reason
+                pool_state["helius_deep_scanned_at"] = utc_now().isoformat().replace("+00:00", "Z")
+                seed_events = probe_events
+            else:
+                txs = probe_txs
+                fetch_stats = dict(probe_fetch_stats)
+                fetch_stats["deep_skipped"] = True
+                fetch_stats["deep_reason"] = deep_reason
+                swaps = probe_swaps
+                parse_errors = probe_parse_errors
+                events = probe_events
+                candidate_buys = probe_candidate_buys
+                preclassified = True
+        else:
+            txs, fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="deep")
+    except Exception as exc:
+        if not config.get("helius_transactions_fallback_signatures", True):
+            return [], {"pool": pool.as_dict(), "error": str(exc), "trade_source": "helius_transactions"}
+        return scan_pool_signatures(rpc, pool, config, state, classification_budget, fallback_error=str(exc))
+
+    update_pool_transaction_state(pool_state, pool, txs)
+    if not preclassified:
+        swaps, parse_errors = parse_helius_swaps(txs, pool)
+        classified_events, candidate_buys = classify_buy_swaps(rpc, swaps, config, state, classification_budget)
+        events = merge_events(seed_events, classified_events)
     alerts = build_alerts(pool, events, config)
     return alerts, {
         "pool": pool.as_dict(),
@@ -2676,7 +2861,10 @@ def scan_with_config(http, rpc, state, config):
         )
     scan_targets = universe[: int(config["active_pool_limit"])]
     print(f"{label}: universe {len(universe)} pools, scanning {len(scan_targets)}", flush=True)
-    classification_budget = {"remaining": int(config["max_wallet_classifications_per_scan"])}
+    classification_budget = {
+        "remaining": int(config["max_wallet_classifications_per_scan"]),
+        "deep_audits_remaining": int(config.get("helius_deep_audit_max_pools_per_scan", 0)),
+    }
 
     all_alerts = []
     summaries = []

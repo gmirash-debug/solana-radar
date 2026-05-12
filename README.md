@@ -131,9 +131,13 @@ When `SOLANA_TRACKER_API_KEY` is present, the scanner uses Solana Tracker
 fallback discovery.
 
 Onchain buy extraction is Helius-first. The scanner uses
-`getTransactionsForAddress` in full/jsonParsed mode, keeps pagination state per
-pool, and increases page depth for high-throughput pools. If this Helius path
-fails, it can fall back to the older pool-signature scan.
+`getTransactionsForAddress` in full/jsonParsed mode and keeps pagination state
+per pool. Each hourly run starts with a cheap probe: a shallow transaction page
+scan plus classification of unique buyer wallets. A deeper scan is triggered
+only when the probe sees suspicious wallet classes, linked wallets, material
+flow, an alert-level score, or a scheduled deep-audit slot. This keeps API usage
+lower without abandoning slow backfills. If this Helius path fails, it can fall
+back to the older pool-signature scan.
 
 When a Bright Data key is present (`BRIGHTDATA_API_KEY`, `BRIGHT_DATA_API_KEY`,
 or `BRIGHT_DATA_API_TOKEN`), only triggered alerts are enriched with X search
