@@ -29,7 +29,7 @@ scan_status = {
     "stderr": "",
     "source": None,
     "auto_enabled": True,
-    "auto_interval_seconds": 900,
+    "auto_interval_seconds": 3600,
     "next_scan_at": None,
     "timeout_seconds": 840,
 }
@@ -199,7 +199,7 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--auto-lane", choices=sorted(LANES), default="all")
-    parser.add_argument("--auto-interval-seconds", type=int, default=900)
+    parser.add_argument("--auto-interval-seconds", type=int, default=3600)
     parser.add_argument("--scan-timeout-seconds", type=int, default=840)
     parser.add_argument("--no-auto", action="store_true")
     parser.add_argument("--initial-scan-delay-seconds", type=int, default=5)

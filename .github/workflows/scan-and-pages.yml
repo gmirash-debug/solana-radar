@@ -3,7 +3,7 @@ name: Scan and deploy dashboard
 on:
   workflow_dispatch:
   schedule:
-    - cron: "7,22,37,52 * * * *"
+    - cron: "7 * * * *"
   push:
     branches:
       - main

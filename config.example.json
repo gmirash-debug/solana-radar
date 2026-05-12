@@ -134,7 +134,7 @@
   "mcap_max_usd": 1000000,
   "liquidity_min_usd": 20000,
   "volume_1h_min_usd": 5000,
-  "scan_interval_seconds": 600,
+  "scan_interval_seconds": 3600,
   "light_pool_limit": 500,
   "active_pool_limit": 40,
   "solana_tracker_enabled": true,

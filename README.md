@@ -60,7 +60,7 @@ python3 solana-radar/scanner.py --once --lane reactivation
 ## Local dashboard
 
 ```bash
-python3 solana-radar/server.py --port 8765 --auto-lane all --auto-interval-seconds 900
+python3 solana-radar/server.py --port 8765 --auto-lane all --auto-interval-seconds 3600
 ```
 
 Open `http://127.0.0.1:8765`.
@@ -83,7 +83,7 @@ python3 solana-radar/scanner.py --watch --lane all
 
 The repository includes `.github/workflows/scan-and-pages.yml`.
 
-It runs the scanner every 15 minutes, commits updated `data/` snapshots, and
+It runs the scanner once per hour, commits updated `data/` snapshots, and
 deploys the static dashboard to GitHub Pages. The dashboard reads:
 
 - `data/latest_report.json`
