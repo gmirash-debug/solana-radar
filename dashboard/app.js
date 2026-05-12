@@ -1,3 +1,21 @@
+const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
+
+function loadHiddenTokenKeys() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(HIDDEN_TOKENS_KEY) || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveHiddenTokenKeys(keys) {
+  try {
+    localStorage.setItem(HIDDEN_TOKENS_KEY, JSON.stringify([...keys]));
+  } catch {
+    // Local hide state is an optional browser preference.
+  }
+}
+
 const state = {
   report: null,
   history: [],
@@ -12,6 +30,8 @@ const state = {
   selectedNarrative: null,
   selectedFilter: null,
   selectedAlertId: null,
+  showHidden: false,
+  hiddenTokenKeys: loadHiddenTokenKeys(),
   staticMode: false,
 };
 
@@ -27,6 +47,7 @@ const els = {
   heatFilter: document.querySelector("#heatFilter"),
   laneFilter: document.querySelector("#laneFilter"),
   scoreInput: document.querySelector("#scoreInput"),
+  showHiddenInput: document.querySelector("#showHiddenInput"),
   tabs: document.querySelectorAll(".tab"),
 };
 
@@ -363,6 +384,35 @@ function filterMeta(name = "legacy") {
 
 function chip(text, tone = "") {
   return `<span class="chip ${tone}">${esc(text)}</span>`;
+}
+
+function tokenKey(value) {
+  return typeof value === "string" ? value : value?.key || tokenKeyFromPool(value?.pool || value || {});
+}
+
+function isTokenHidden(value) {
+  const key = tokenKey(value);
+  return Boolean(key && state.hiddenTokenKeys.has(key));
+}
+
+function setTokenHidden(key, hidden) {
+  if (!key) return;
+  if (hidden) state.hiddenTokenKeys.add(key);
+  else state.hiddenTokenKeys.delete(key);
+  saveHiddenTokenKeys(state.hiddenTokenKeys);
+}
+
+function renderHiddenAction(token, compact = false) {
+  const hidden = isTokenHidden(token);
+  return `
+    <button
+      class="${compact ? "chip-action" : "secondary-action"} token-hide-toggle"
+      type="button"
+      data-token-key="${esc(token.key)}"
+      data-hidden="${hidden ? "true" : "false"}"
+      title="${hidden ? "Return token to normal lists" : "Hide this token from dashboard lists"}"
+    >${hidden ? "Unhide" : "Hide"}</button>
+  `;
 }
 
 function normalizeDex(value) {
@@ -764,6 +814,7 @@ function buildTokenSignals() {
     token.socialReason = disabledSocial?.reason || "";
     token.narrative = choosePrimaryNarrative(token);
     token.narratives = [token.narrative.primary];
+    token.hidden = isTokenHidden(token);
     return token;
   });
 
@@ -777,6 +828,7 @@ function buildTokenSignals() {
 function filteredTokens(tokens) {
   const query = state.query.toLowerCase();
   return tokens.filter((token) => {
+    if (!state.showHidden && token.hidden) return false;
     const text = [
       token.symbol,
       token.name,
@@ -800,6 +852,13 @@ function metric(label, value) {
       <div class="metric-value">${esc(value)}</div>
     </div>
   `;
+}
+
+function emptyMessage(text) {
+  const hiddenHint = !state.showHidden && state.hiddenTokenKeys.size
+    ? ` <span class="muted-inline">Enable Show hidden to review ${esc(state.hiddenTokenKeys.size)} locally hidden token${state.hiddenTokenKeys.size === 1 ? "" : "s"}.</span>`
+    : "";
+  return `<div class="empty">${esc(text)}${hiddenHint}</div>`;
 }
 
 async function fetchJson(path, optional = false) {
@@ -876,7 +935,11 @@ async function loadData() {
   state.market = payload.market || {};
   state.scanStatus = payload.scan_status || {};
   const tokens = buildTokenSignals();
-  if (!state.selectedTokenKey && tokens.length) state.selectedTokenKey = tokens[0].key;
+  const visibleTokens = filteredTokens(tokens);
+  if (!state.selectedTokenKey && visibleTokens.length) state.selectedTokenKey = visibleTokens[0].key;
+  if (!state.showHidden && isTokenHidden(state.selectedTokenKey)) {
+    state.selectedTokenKey = visibleTokens[0]?.key || null;
+  }
   render();
 }
 
@@ -884,6 +947,7 @@ function renderStatus() {
   const report = state.report || {};
   const status = state.scanStatus || {};
   const running = Boolean(status.running);
+  if (els.showHiddenInput) els.showHiddenInput.checked = state.showHidden;
   const reportLanes = (report.lanes_scanned || []).filter((name) => FILTER_ORDER.includes(name) && name !== "legacy");
   const laneText = status.lane || status.mode || reportLanes.join(", ") || report.mode || "-";
   els.subtitle.textContent = report.generated_at
@@ -894,6 +958,7 @@ function renderStatus() {
   els.statusRow.innerHTML = [
     `<span class="status-pill"><span class="dot ${running ? "warn" : ""}"></span>${running ? "scan running" : "idle"}</span>`,
     `<span class="status-pill">lane ${esc(laneText)}</span>`,
+    state.hiddenTokenKeys.size ? `<span class="status-pill">${esc(state.hiddenTokenKeys.size)} hidden locally</span>` : "",
     state.staticMode ? `<span class="status-pill">auto via GitHub Actions</span>` : "",
     status.next_scan_at ? `<span class="status-pill">next auto ${esc(dateLabel(status.next_scan_at))}</span>` : "",
     status.returncode === 0 ? `<span class="status-pill"><span class="dot"></span>last scan ok</span>` : "",
@@ -916,17 +981,19 @@ function renderMetrics(tokens) {
 
 function renderTokenRow(token) {
   const selected = token.key === state.selectedTokenKey ? " is-selected" : "";
+  const hidden = token.hidden ? " is-hidden" : "";
   const athText = token.athMcapUsd
     ? `${token.athLabel} ${money(token.athMcapUsd)}`
     : `${token.athLabel} ${athStatusLabel(token.athStatus)}`;
   const gmgnUrl = gmgnTokenUrl(token);
   const phase = marketPhase(token);
   return `
-    <article class="token-row${selected}" data-token-key="${esc(token.key)}">
+    <article class="token-row${selected}${hidden}" data-token-key="${esc(token.key)}">
       <div class="token-main">
         <div class="symbol-line">
           <span class="symbol">${esc(token.symbol)}</span>
           <span class="muted">${esc(token.name)}</span>
+          ${token.hidden ? chip("hidden", "warn") : ""}
         </div>
         <div class="meta">
           <span>first ${esc(dateLabel(token.firstSignalAt))}</span>
@@ -944,6 +1011,7 @@ function renderTokenRow(token) {
           ${phase && phase.label !== "Mid-range" ? chip(phase.label, phase.tone) : ""}
           ${chip(socialLabel(token.socialHeat, token.socialReason), token.socialHeat === "disabled" ? "warn" : "")}
           ${gmgnUrl ? `<a class="chip token-terminal-link" href="${esc(gmgnUrl)}" target="_blank" rel="noreferrer">GMGN</a>` : ""}
+          ${renderHiddenAction(token, true)}
         </div>
       </div>
       <div class="token-numbers">
@@ -968,6 +1036,18 @@ function selectedToken(tokens) {
 
 function selectedNarrativeGroup(groups) {
   return groups.find((group) => group.name === state.selectedNarrative) || groups[0] || null;
+}
+
+function bindTokenHideActions() {
+  document.querySelectorAll(".token-hide-toggle").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const key = button.dataset.tokenKey;
+      setTokenHidden(key, button.dataset.hidden !== "true");
+      render();
+    });
+  });
 }
 
 function renderWalletRows(token) {
@@ -1297,7 +1377,10 @@ function renderTokenDetail(token) {
   const gmgnUrl = gmgnTokenUrl(token);
   return `
     <aside class="detail token-detail">
-      <h2>${esc(token.symbol)} <span class="muted">${esc(token.name)}</span></h2>
+      <div class="detail-head">
+        <h2>${esc(token.symbol)} <span class="muted">${esc(token.name)}</span>${token.hidden ? ` ${chip("hidden", "warn")}` : ""}</h2>
+        ${renderHiddenAction(token)}
+      </div>
       <div class="detail-hero">
         <div>
           <strong class="${pClass(token.profitPct)}">${pct(token.profitPct)}</strong>
@@ -1344,7 +1427,7 @@ function renderTokens() {
   const tokens = filteredTokens(buildTokenSignals());
   renderMetrics(tokens);
   if (!tokens.length) {
-    els.content.innerHTML = `<div class="empty">No caught tokens match the filters.</div>`;
+    els.content.innerHTML = emptyMessage("No caught tokens match the filters.");
     return;
   }
   const token = selectedToken(tokens);
@@ -1364,6 +1447,7 @@ function renderTokens() {
   document.querySelectorAll(".token-terminal-link").forEach((link) => {
     link.addEventListener("click", (event) => event.stopPropagation());
   });
+  bindTokenHideActions();
 }
 
 function narrativeGroups(tokens) {
@@ -1421,10 +1505,10 @@ function narrativeGroups(tokens) {
 
 function renderNarrativeTokenRows(group) {
   return group.tokens.map((token) => `
-    <button class="narrative-token-row" type="button" data-token-key="${esc(token.key)}">
+    <button class="narrative-token-row${token.hidden ? " is-hidden" : ""}" type="button" data-token-key="${esc(token.key)}">
       <span>
         <strong>${esc(token.symbol)}</strong>
-        <small>${esc(token.name || token.narrative.primary)}</small>
+        <small>${esc([token.name || token.narrative.primary, token.hidden ? "hidden" : ""].filter(Boolean).join(" / "))}</small>
       </span>
       <span class="${pClass(token.profitPct)}">${pct(token.profitPct)}</span>
       <span>${money(token.currentMcap)}</span>
@@ -1476,7 +1560,7 @@ function renderNarratives() {
   renderMetrics(tokens);
   const groups = narrativeGroups(tokens);
   if (!groups.length) {
-    els.content.innerHTML = `<div class="empty">No narratives match the filters.</div>`;
+    els.content.innerHTML = emptyMessage("No narratives match the filters.");
     return;
   }
   const group = selectedNarrativeGroup(groups);
@@ -1598,11 +1682,12 @@ function renderFilterTokenRows(group) {
     const flow = sumEventSol(laneEvents);
     const phase = marketPhase(token);
     const selected = token.key === state.selectedTokenKey ? " is-selected" : "";
+    const hidden = token.hidden ? " is-hidden" : "";
     return `
-      <button class="filter-token-row${selected}" type="button" data-token-key="${esc(token.key)}">
+      <button class="filter-token-row${selected}${hidden}" type="button" data-token-key="${esc(token.key)}">
         <span class="filter-token-name">
           <strong>${esc(token.symbol)}</strong>
-          <small>${esc([token.name || token.narrative.primary, phase?.label].filter(Boolean).join(" / "))}</small>
+          <small>${esc([token.name || token.narrative.primary, phase?.label, token.hidden ? "hidden" : ""].filter(Boolean).join(" / "))}</small>
         </span>
         <span class="filter-token-value">
           <strong>${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)}</strong>
@@ -1661,7 +1746,7 @@ function renderFilters() {
   renderMetrics(tokens);
   const groups = filterGroups(tokens);
   if (!groups.length) {
-    els.content.innerHTML = `<div class="empty">No scanner filters match the current filters.</div>`;
+    els.content.innerHTML = emptyMessage("No scanner filters match the current filters.");
     return;
   }
   const group = selectedFilterGroup(groups);
@@ -1711,16 +1796,19 @@ function renderFilters() {
   document.querySelectorAll(".token-terminal-link").forEach((link) => {
     link.addEventListener("click", (event) => event.stopPropagation());
   });
+  bindTokenHideActions();
 }
 
 function alertMatches(alert) {
-  const token = buildTokenSignals().find((item) => item.key === tokenKeyFromPool(alert.pool || {}));
+  const pool = alert.pool || {};
+  const key = tokenKeyFromPool(pool);
+  if (!state.showHidden && isTokenHidden(key)) return false;
+  const token = buildTokenSignals().find((item) => item.key === key);
   if (state.lane !== "all" && effectiveAlertLane(alert) !== state.lane) return false;
   if (state.heat !== "all" && socialHeat(alert) !== state.heat) return false;
   if (Number(alert.score || 0) < state.minScore) return false;
   const query = state.query.toLowerCase();
   if (!query) return true;
-  const pool = alert.pool || {};
   return [pool.symbol, pool.name, pool.token_address, pool.pool_address, token?.narratives?.join(" ")].join(" ").toLowerCase().includes(query);
 }
 
@@ -1755,7 +1843,7 @@ function renderRawAlerts() {
   const alerts = allAlerts().filter(alertMatches);
   renderMetrics(filteredTokens(buildTokenSignals()));
   if (!alerts.length) {
-    els.content.innerHTML = `<div class="empty">No raw alerts match the filters.</div>`;
+    els.content.innerHTML = emptyMessage("No raw alerts match the filters.");
     return;
   }
   els.content.innerHTML = `<div class="list">${alerts.slice(0, 80).map(renderAlertRow).join("")}</div>`;
@@ -1805,6 +1893,13 @@ els.laneFilter.addEventListener("change", (event) => {
 });
 els.scoreInput.addEventListener("input", (event) => {
   state.minScore = Number(event.target.value || 0);
+  render();
+});
+els.showHiddenInput.addEventListener("change", (event) => {
+  state.showHidden = event.target.checked;
+  if (!state.showHidden && isTokenHidden(state.selectedTokenKey)) {
+    state.selectedTokenKey = null;
+  }
   render();
 });
 els.tabs.forEach((tab) => {

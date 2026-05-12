@@ -195,6 +195,15 @@ main {
   gap: 7px;
 }
 
+.filters .toggle-filter {
+  color: var(--text);
+}
+
+.toggle-filter input {
+  min-height: 0;
+  width: 16px;
+}
+
 #searchInput {
   min-width: 280px;
 }
@@ -380,6 +389,25 @@ main {
   color: var(--bad);
 }
 
+.chip-action {
+  align-items: center;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  min-height: 24px;
+  padding: 3px 8px;
+}
+
+.chip-action:hover,
+.secondary-action:hover {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
 .token-terminal-link {
   background: #eef7f7;
   border-color: #b9dddd;
@@ -406,6 +434,25 @@ main {
 .detail h2 {
   font-size: 18px;
   margin: 0 0 12px;
+}
+
+.detail-head {
+  align-items: start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.detail-head h2 {
+  margin: 0;
+}
+
+.secondary-action {
+  background: #fff;
+  color: var(--muted);
+  min-height: 32px;
+  white-space: nowrap;
 }
 
 .detail-hero {
@@ -609,6 +656,18 @@ tr:last-child td {
 
 .narrative-token-row:hover {
   background: #f6f8fa;
+}
+
+.token-row.is-hidden,
+.narrative-token-row.is-hidden,
+.filter-token-row.is-hidden {
+  opacity: 0.58;
+}
+
+.token-row.is-hidden,
+.filter-token-row.is-hidden {
+  background: #fafafa;
+  border-style: dashed;
 }
 
 .narrative-token-row:last-child {
