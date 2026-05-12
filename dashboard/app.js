@@ -59,6 +59,7 @@ const FILTER_META = {
 };
 
 const FILTER_ORDER = ["incubation", "young", "breakout", "reactivation", "legacy"];
+const PUMPFUN_DEX_ALLOWLIST = new Set(["pumpfun-amm", "pumpswap", "pumpfun"]);
 
 const TOKEN_MARKET_CONTEXT = {
   HANTAYLiPiQ8d8dkJizcL8gJQHWBKF5ZeL1neeLqwbzc: {
@@ -364,6 +365,14 @@ function chip(text, tone = "") {
   return `<span class="chip ${tone}">${esc(text)}</span>`;
 }
 
+function normalizeDex(value) {
+  return String(value || "").trim().toLowerCase().replaceAll("_", "-");
+}
+
+function isPumpfunPool(pool = {}) {
+  return PUMPFUN_DEX_ALLOWLIST.has(normalizeDex(pool.dex));
+}
+
 function narrativeTone(narrative) {
   return narrative?.source === "scanner_token_intel" ? "good" : "warn";
 }
@@ -382,6 +391,7 @@ function pClass(value) {
 function allAlerts() {
   const byId = new Map();
   [...(state.history || []), ...(state.report?.alerts || [])].forEach((alert) => {
+    if (!isPumpfunPool(alert.pool || {})) return;
     byId.set(alertId(alert), alert);
   });
   return [...byId.values()].sort((a, b) => new Date(b.window_start || b.created_at) - new Date(a.window_start || a.created_at));
@@ -400,6 +410,7 @@ function currentPoolsByToken() {
   const map = new Map();
   const put = (pool, observedAt) => {
     if (!pool) return;
+    if (!isPumpfunPool(pool)) return;
     const key = tokenKeyFromPool(pool);
     if (!key) return;
     const existing = map.get(key);
@@ -426,6 +437,7 @@ function poolObservationsByToken() {
   const map = new Map();
   const add = (pool, observedAt, source) => {
     if (!pool) return;
+    if (!isPumpfunPool(pool)) return;
     const key = tokenKeyFromPool(pool);
     const mcapUsd = Number(pool.mcap_usd || 0);
     if (!key || !mcapUsd) return;
