@@ -79,7 +79,7 @@
       "max_wallet_classifications_per_pool": 180,
       "max_new_signatures_per_pool": 30,
       "initial_backfill_signatures": 20,
-      "max_wallet_classifications_per_scan": 900
+      "max_wallet_classifications_per_scan": 6300
     },
     "young": {
       "age_min_hours": 72,
@@ -108,7 +108,7 @@
       "max_wallet_classifications_per_pool": 160,
       "max_new_signatures_per_pool": 35,
       "initial_backfill_signatures": 20,
-      "max_wallet_classifications_per_scan": 800
+      "max_wallet_classifications_per_scan": 5600
     },
     "breakout": {
       "age_min_hours": 72,
@@ -139,7 +139,7 @@
       "max_wallet_classifications_per_pool": 180,
       "max_new_signatures_per_pool": 50,
       "initial_backfill_signatures": 25,
-      "max_wallet_classifications_per_scan": 800,
+      "max_wallet_classifications_per_scan": 4500,
       "solana_tracker_pages": 2
     },
     "reactivation": {
@@ -171,7 +171,7 @@
       "max_wallet_classifications_per_pool": 160,
       "max_new_signatures_per_pool": 40,
       "initial_backfill_signatures": 25,
-      "max_wallet_classifications_per_scan": 800,
+      "max_wallet_classifications_per_scan": 8000,
       "solana_tracker_pages": 2
     }
   },
