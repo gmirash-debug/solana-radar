@@ -2198,13 +2198,17 @@ def should_deep_scan(pool, config, pool_state, events, candidate_buys, alerts, c
         return True, "probe_alert"
 
     score, suspicious, common_funders, common_recipients = score_events(events, config)
-    suspicious_wallets = {event["signer"] for event in suspicious if event.get("signer")}
+    high_conviction_wallets = {
+        event["signer"]
+        for event in suspicious
+        if event.get("signer") and event.get("wallet_class") in ("fresh", "freshish", "dormant")
+    }
     suspicious_sol = sum(event.get("sol_amount", 0.0) for event in suspicious)
     if common_funders or common_recipients:
         return True, "linked_wallets"
     if any(event.get("wallet_class") == "dormant" for event in suspicious):
         return True, "dormant_wallet"
-    if len(suspicious_wallets) >= int(config.get("helius_deep_min_suspicious_wallets", 2)):
+    if len(high_conviction_wallets) >= int(config.get("helius_deep_min_suspicious_wallets", 2)):
         return True, "suspicious_wallet_probe"
     if suspicious_sol >= float(config.get("helius_deep_min_suspicious_sol", 8)):
         return True, "suspicious_flow_probe"
