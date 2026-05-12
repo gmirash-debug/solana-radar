@@ -454,6 +454,17 @@ def fetch_dex_pair_for_pool(http, pool_address):
     return dexscreener_pool_from_pair(pairs[0], "manual_pool")
 
 
+def normalize_dex_name(value):
+    return clean_social_text(value).lower().replace("_", "-")
+
+
+def pool_dex_allowed(pool, config):
+    allowlist = [normalize_dex_name(item) for item in config.get("dex_allowlist", []) if item]
+    if not allowlist:
+        return True
+    return normalize_dex_name(pool.dex) in allowlist
+
+
 def build_universe(http, config):
     pools = fetch_solana_tracker_universe(http, config)
 
@@ -475,6 +486,8 @@ def build_universe(http, config):
     filtered = []
     for pool in pools.values():
         if not pool.pool_address:
+            continue
+        if not pool_dex_allowed(pool, config):
             continue
         is_manual = pool.source in ("manual_pool", "manual_token")
         if not is_manual:
