@@ -227,6 +227,30 @@ class HeliusRpc:
             [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
         )
 
+    def transactions_for_address(
+        self,
+        address,
+        limit=100,
+        sort_order="desc",
+        pagination_token=None,
+        block_time=None,
+        status="succeeded",
+    ):
+        filters = {"status": status}
+        if block_time:
+            filters["blockTime"] = block_time
+        opts = {
+            "transactionDetails": "full",
+            "encoding": "jsonParsed",
+            "maxSupportedTransactionVersion": 0,
+            "sortOrder": sort_order,
+            "limit": min(int(limit), 100),
+            "filters": filters,
+        }
+        if pagination_token:
+            opts["paginationToken"] = pagination_token
+        return self.call("getTransactionsForAddress", [address, opts], timeout=60) or {}
+
 
 def gecko_pool_from_item(item, source):
     attrs = item.get("attributes", {})
@@ -1845,7 +1869,260 @@ def build_alerts(pool, events, config):
     return sorted(deduped.values(), key=lambda alert: alert["score"], reverse=True)[:5]
 
 
-def scan_pool(rpc, pool, config, state, classification_budget):
+def helius_page_budget(pool, config, kind):
+    pages = int(config.get(f"helius_{kind}_pages", config.get("helius_transactions_pages", 4)))
+    txns_1h = int(pool.txns_1h or 0)
+    high_threshold = int(config.get("helius_high_txn_threshold", 10_000))
+    medium_threshold = int(config.get("helius_medium_txn_threshold", 1_000))
+    if txns_1h >= high_threshold:
+        pages = max(pages, int(config.get(f"helius_{kind}_high_tx_pages", config.get("helius_high_tx_pages", pages))))
+    elif txns_1h >= medium_threshold:
+        pages = max(
+            pages,
+            int(config.get(f"helius_{kind}_medium_tx_pages", config.get("helius_medium_tx_pages", pages))),
+        )
+    return max(1, pages)
+
+
+def fetch_helius_pool_transactions(rpc, pool, config, pool_state):
+    now = int(time.time())
+    limit = int(config.get("helius_transactions_limit", 100))
+    lookback_minutes = int(config.get("helius_recent_lookback_minutes", max(60, int(config["alert_window_minutes"]))))
+    recent_from = max(0, now - lookback_minutes * 60)
+    previous_time = int(pool_state.get("helius_latest_block_time") or 0)
+    transactions = []
+    seen = set()
+    stats = {
+        "source": "helius_transactions",
+        "pages": 0,
+        "transactions": 0,
+        "passes": [],
+        "truncated": False,
+    }
+
+    def add_batch(batch):
+        added = 0
+        for tx in batch:
+            signature = (tx.get("transaction") or {}).get("signatures", [""])[0]
+            if not signature or signature in seen:
+                continue
+            seen.add(signature)
+            transactions.append(tx)
+            added += 1
+        return added
+
+    def run_pass(name, sort_order, max_pages, block_time=None, pagination_token=None, save_cursor_key=None):
+        cursor = pagination_token
+        pages = 0
+        pass_stats = {
+            "name": name,
+            "sort_order": sort_order,
+            "pages": 0,
+            "transactions": 0,
+            "added": 0,
+            "truncated": False,
+        }
+        if max_pages <= 0:
+            stats["passes"].append(pass_stats)
+            return
+        while pages < max_pages:
+            result = rpc.transactions_for_address(
+                pool.pool_address,
+                limit=limit,
+                sort_order=sort_order,
+                pagination_token=cursor,
+                block_time=block_time,
+            )
+            batch = result.get("data") or []
+            pages += 1
+            stats["pages"] += 1
+            pass_stats["pages"] += 1
+            pass_stats["transactions"] += len(batch)
+            pass_stats["added"] += add_batch(batch)
+            cursor = result.get("paginationToken")
+            if not result.get("paginationToken") or not batch:
+                if save_cursor_key:
+                    pool_state.pop(save_cursor_key, None)
+                    pool_state[f"{save_cursor_key}_complete"] = True
+                break
+            if save_cursor_key:
+                pool_state[save_cursor_key] = cursor
+                pool_state.pop(f"{save_cursor_key}_complete", None)
+        else:
+            pass_stats["truncated"] = True
+            stats["truncated"] = True
+            if save_cursor_key and cursor:
+                pool_state[save_cursor_key] = cursor
+        stats["passes"].append(pass_stats)
+
+    if previous_time:
+        incremental_from = max(0, previous_time - int(config.get("helius_incremental_overlap_seconds", 30)))
+        run_pass(
+            "incremental",
+            "asc",
+            helius_page_budget(pool, config, "incremental"),
+            block_time={"gt": incremental_from},
+        )
+    else:
+        run_pass(
+            "recent",
+            "desc",
+            helius_page_budget(pool, config, "recent"),
+            block_time={"gte": recent_from},
+        )
+
+    age_hours = pool.age_hours()
+    initial_max_age = float(config.get("helius_initial_backfill_max_age_hours", 96))
+    should_backfill = (
+        pool.pair_created_at
+        and age_hours is not None
+        and age_hours <= initial_max_age
+        and not pool_state.get("helius_initial_backfill_cursor_complete")
+    )
+    if should_backfill:
+        launch_from = max(0, int(pool.pair_created_at) - int(config.get("helius_launch_time_cushion_seconds", 120)))
+        run_pass(
+            "launch_backfill",
+            "asc",
+            helius_page_budget(pool, config, "initial_backfill"),
+            block_time={"gte": launch_from},
+            pagination_token=pool_state.get("helius_initial_backfill_cursor"),
+            save_cursor_key="helius_initial_backfill_cursor",
+        )
+
+    if int(pool.txns_1h or 0) >= int(config.get("helius_high_txn_threshold", 10_000)):
+        run_pass(
+            "high_tx_tail",
+            "desc",
+            int(config.get("helius_high_tx_tail_pages", 4)),
+            block_time={"gte": recent_from},
+        )
+
+    stats["transactions"] = len(transactions)
+    return sorted(transactions, key=lambda tx: (tx.get("blockTime") or 0, tx.get("transactionIndex") or 0)), stats
+
+
+def update_pool_transaction_state(pool_state, pool, txs):
+    if not txs:
+        return
+    latest = max(txs, key=lambda tx: ((tx.get("blockTime") or 0), tx.get("transactionIndex") or 0))
+    signature = (latest.get("transaction") or {}).get("signatures", [""])[0]
+    block_time = int(latest.get("blockTime") or 0)
+    if signature:
+        pool_state["latest_signature"] = signature
+        pool_state["helius_latest_signature"] = signature
+    if block_time:
+        pool_state["latest_time"] = iso(block_time)
+        pool_state["helius_latest_time"] = iso(block_time)
+        pool_state["helius_latest_block_time"] = block_time
+    pool_state["symbol"] = pool.symbol
+
+
+def select_buy_swaps_for_classification(candidates, config, budget_limit):
+    if budget_limit <= 0:
+        return []
+    by_signature = {}
+    ordered = []
+
+    def add(swaps):
+        for swap in swaps:
+            signature = swap.get("signature")
+            if not signature or signature in by_signature:
+                continue
+            by_signature[signature] = swap
+            ordered.append(swap)
+            if len(ordered) >= budget_limit:
+                return
+
+    global_limit = min(
+        budget_limit,
+        int(config.get("helius_classify_global_buy_limit", max(20, budget_limit // 3))),
+    )
+    top_global = sorted(
+        candidates,
+        key=lambda swap: (swap.get("sol_amount", 0.0), swap.get("block_time") or 0),
+        reverse=True,
+    )[:global_limit]
+    add(top_global)
+
+    window_seconds = int(config.get("helius_classify_window_minutes", config["alert_window_minutes"])) * 60
+    per_window = int(config.get("helius_classify_top_buys_per_window", 12))
+    buckets = defaultdict(list)
+    for swap in candidates:
+        block_time = int(swap.get("block_time") or 0)
+        bucket = block_time // window_seconds if window_seconds else 0
+        buckets[bucket].append(swap)
+    for bucket in sorted(buckets):
+        if len(ordered) >= budget_limit:
+            break
+        add(
+            sorted(
+                buckets[bucket],
+                key=lambda swap: (swap.get("sol_amount", 0.0), swap.get("block_time") or 0),
+                reverse=True,
+            )[:per_window]
+        )
+
+    return ordered[:budget_limit]
+
+
+def classify_buy_swaps(rpc, swaps, config, state, classification_budget):
+    min_sol = float(config["classify_buy_min_sol"])
+    candidates = [swap for swap in swaps if swap.get("kind") == "buy" and swap.get("sol_amount", 0.0) >= min_sol]
+    per_pool_limit = int(config.get("max_wallet_classifications_per_pool", classification_budget["remaining"]))
+    budget_limit = min(classification_budget["remaining"], per_pool_limit)
+    selected = select_buy_swaps_for_classification(candidates, config, budget_limit)
+    events = []
+    for swap in selected:
+        if classification_budget["remaining"] <= 0:
+            break
+        classification_budget["remaining"] -= 1
+        wallet_info = classify_wallet(rpc, swap["signer"], swap["signature"], swap["block_time"], config, state)
+        swap.update(wallet_info)
+        events.append(swap)
+    return events, len(candidates)
+
+
+def scan_pool_helius_transactions(rpc, pool, config, state, classification_budget):
+    pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
+    try:
+        txs, fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state)
+    except Exception as exc:
+        if not config.get("helius_transactions_fallback_signatures", True):
+            return [], {"pool": pool.as_dict(), "error": str(exc), "trade_source": "helius_transactions"}
+        return scan_pool_signatures(rpc, pool, config, state, classification_budget, fallback_error=str(exc))
+
+    update_pool_transaction_state(pool_state, pool, txs)
+    swaps = []
+    parse_errors = 0
+    for tx in txs:
+        try:
+            swap = parse_pool_swap(tx, pool)
+        except Exception:
+            parse_errors += 1
+            continue
+        if swap:
+            swaps.append(swap)
+
+    events, candidate_buys = classify_buy_swaps(rpc, swaps, config, state, classification_budget)
+    alerts = build_alerts(pool, events, config)
+    return alerts, {
+        "pool": pool.as_dict(),
+        "lane": config.get("lane") or config.get("mode"),
+        "trade_source": "helius_transactions",
+        "new_signatures": len(txs),
+        "transactions_scanned": len(txs),
+        "parsed_swaps": len(swaps),
+        "candidate_buys": candidate_buys,
+        "classified_buys": len(events),
+        "classes": dict(Counter(event.get("wallet_class") for event in events)),
+        "buy_sol": sum(event.get("sol_amount", 0.0) for event in events),
+        "parse_errors": parse_errors,
+        "trade_fetch": fetch_stats,
+    }
+
+
+def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallback_error=None):
     pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
     previous_latest = pool_state.get("latest_signature")
     limit = int(config["max_new_signatures_per_pool"]) if previous_latest else int(config["initial_backfill_signatures"])
@@ -1853,7 +2130,7 @@ def scan_pool(rpc, pool, config, state, classification_budget):
     try:
         signatures = rpc.signatures_for_address(pool.pool_address, limit=limit)
     except Exception as exc:
-        return [], {"pool": pool.as_dict(), "error": str(exc)}
+        return [], {"pool": pool.as_dict(), "error": str(exc), "trade_source": "pool_signatures"}
 
     if signatures:
         pool_state["latest_signature"] = signatures[0]["signature"]
@@ -1887,14 +2164,24 @@ def scan_pool(rpc, pool, config, state, classification_budget):
         events.append(swap)
 
     alerts = build_alerts(pool, events, config)
-    return alerts, {
+    summary = {
         "pool": pool.as_dict(),
         "lane": config.get("lane") or config.get("mode"),
+        "trade_source": "pool_signatures",
         "new_signatures": len(new_signatures),
         "classified_buys": len(events),
         "classes": dict(Counter(event.get("wallet_class") for event in events)),
         "buy_sol": sum(event.get("sol_amount", 0.0) for event in events),
     }
+    if fallback_error:
+        summary["fallback_error"] = fallback_error
+    return alerts, summary
+
+
+def scan_pool(rpc, pool, config, state, classification_budget):
+    if config.get("helius_transactions_enabled", True):
+        return scan_pool_helius_transactions(rpc, pool, config, state, classification_budget)
+    return scan_pool_signatures(rpc, pool, config, state, classification_budget)
 
 
 def write_alerts(alerts):

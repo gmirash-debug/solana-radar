@@ -5,7 +5,7 @@ Local BBB-lite scanner for Solana meme pools.
 It uses free DEX data for market discovery and Helius only for onchain work:
 
 - find pools across lane-based filters: incubation, young, breakout, reactivation;
-- check only new pool signatures after the previous scan;
+- fetch parsed Helius transactions with pagination instead of relying on raw pool signatures;
 - parse swaps;
 - classify buy wallets as fresh, freshish, low-tx, normal, or dormant;
 - enrich triggered alerts with public X activity through Bright Data Discover;
@@ -111,7 +111,7 @@ Lanes:
 
 ## Outputs
 
-- `solana-radar/data/state.json` - last seen pool signatures and wallet cache.
+- `solana-radar/data/state.json` - last seen Helius transaction cursors, pool state, and wallet cache.
 - `solana-radar/data/alerts.jsonl` - machine-readable alerts.
 - `solana-radar/data/latest_report.md` - human-readable latest scan.
 - `solana-radar/data/latest_report.json` - structured dashboard data.
@@ -125,6 +125,11 @@ universe needs a market data API such as Solana Tracker Data API.
 When `SOLANA_TRACKER_API_KEY` is present, the scanner uses Solana Tracker
 `/search` as the primary universe source and keeps DexScreener/GeckoTerminal as
 fallback discovery.
+
+Onchain buy extraction is Helius-first. The scanner uses
+`getTransactionsForAddress` in full/jsonParsed mode, keeps pagination state per
+pool, and increases page depth for high-throughput pools. If this Helius path
+fails, it can fall back to the older pool-signature scan.
 
 When a Bright Data key is present (`BRIGHTDATA_API_KEY`, `BRIGHT_DATA_API_KEY`,
 or `BRIGHT_DATA_API_TOKEN`), only triggered alerts are enriched with X search
