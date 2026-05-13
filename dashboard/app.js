@@ -173,6 +173,24 @@ function durationLabel(hours) {
   return `${(months / 12).toFixed(1)}y`;
 }
 
+function reportFreshness(generatedAt) {
+  if (!generatedAt) {
+    return { label: "no report", tone: "bad", ageHours: null };
+  }
+  const generated = new Date(generatedAt);
+  if (Number.isNaN(generated.getTime())) {
+    return { label: "unknown age", tone: "warn", ageHours: null };
+  }
+  const ageHours = Math.max(0, (Date.now() - generated.getTime()) / 3_600_000);
+  if (ageHours <= 1.25) {
+    return { label: `fresh ${durationLabel(ageHours)}`, tone: "good", ageHours };
+  }
+  if (ageHours <= 2) {
+    return { label: `delayed ${durationLabel(ageHours)}`, tone: "warn", ageHours };
+  }
+  return { label: `stale ${durationLabel(ageHours)}`, tone: "bad", ageHours };
+}
+
 function poolCreatedAt(pool = {}) {
   if (pool.pair_created_at_iso) {
     const date = new Date(pool.pair_created_at_iso);
@@ -947,6 +965,7 @@ function renderStatus() {
   const report = state.report || {};
   const status = state.scanStatus || {};
   const running = Boolean(status.running);
+  const freshness = reportFreshness(report.generated_at);
   if (els.showHiddenInput) els.showHiddenInput.checked = state.showHidden;
   const reportLanes = (report.lanes_scanned || []).filter((name) => FILTER_ORDER.includes(name) && name !== "legacy");
   const laneText = status.lane || status.mode || reportLanes.join(", ") || report.mode || "-";
@@ -957,9 +976,10 @@ function renderStatus() {
   els.runScan.title = state.staticMode ? "Scanner runs by GitHub Actions schedule" : "";
   els.statusRow.innerHTML = [
     `<span class="status-pill"><span class="dot ${running ? "warn" : ""}"></span>${running ? "scan running" : "idle"}</span>`,
+    `<span class="status-pill freshness-${freshness.tone}"><span class="dot ${freshness.tone === "good" ? "" : freshness.tone}"></span>${esc(freshness.label)}</span>`,
     `<span class="status-pill">lane ${esc(laneText)}</span>`,
     state.hiddenTokenKeys.size ? `<span class="status-pill">${esc(state.hiddenTokenKeys.size)} hidden locally</span>` : "",
-    state.staticMode ? `<span class="status-pill">auto via GitHub Actions</span>` : "",
+    state.staticMode ? `<span class="status-pill">auto via Cloudflare + GitHub Actions</span>` : "",
     status.next_scan_at ? `<span class="status-pill">next auto ${esc(dateLabel(status.next_scan_at))}</span>` : "",
     status.returncode === 0 ? `<span class="status-pill"><span class="dot"></span>last scan ok</span>` : "",
   ].filter(Boolean).join("");
@@ -975,7 +995,7 @@ function renderMetrics(tokens) {
     metric("Profitable", profitable),
     metric("Best signal", pct(best)),
     metric("Scanned pools", stats.scanned_pools ?? 0),
-    metric("Lanes", (report.lanes_scanned || []).filter((name) => FILTER_ORDER.includes(name) && name !== "legacy").length || FILTER_ORDER.filter((name) => name !== "legacy").length),
+    metric("Report age", reportFreshness(report.generated_at).label),
   ].join("");
 }
 

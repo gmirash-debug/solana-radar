@@ -1,0 +1,12 @@
+name = "solana-radar-scan-dispatcher"
+main = "src/index.js"
+compatibility_date = "2026-05-14"
+
+[triggers]
+crons = ["7 * * * *"]
+
+[vars]
+GITHUB_OWNER = "gmirash-debug"
+GITHUB_REPO = "solana-radar"
+GITHUB_WORKFLOW = "scan-and-pages.yml"
+GITHUB_REF = "main"

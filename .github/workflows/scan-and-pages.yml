@@ -2,8 +2,13 @@ name: Scan and deploy dashboard
 
 on:
   workflow_dispatch:
+    inputs:
+      source:
+        description: "Who triggered the scan"
+        required: false
+        default: "manual"
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "37 * * * *"
   push:
     branches:
       - main

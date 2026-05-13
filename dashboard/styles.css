@@ -126,6 +126,18 @@ main {
   padding: 0 11px;
 }
 
+.status-pill.freshness-warn {
+  background: #fff8eb;
+  border-color: #f0c37a;
+  color: var(--warn);
+}
+
+.status-pill.freshness-bad {
+  background: #fff1ef;
+  border-color: #efaca5;
+  color: var(--bad);
+}
+
 .dot {
   background: var(--good);
   border-radius: 999px;
