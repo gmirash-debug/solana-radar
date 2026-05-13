@@ -18,7 +18,7 @@ For a fine-grained GitHub token, grant this repository read/write access to Acti
 ## Manual Trigger
 
 ```bash
-curl -X POST "https://solana-radar-scan-dispatcher.<account>.workers.dev/dispatch" \
+curl -X POST "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/dispatch" \
   -H "x-dispatch-secret: <DISPATCH_SECRET>"
 ```
 

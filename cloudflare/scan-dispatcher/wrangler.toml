@@ -1,6 +1,6 @@
 name = "solana-radar-scan-dispatcher"
 main = "src/index.js"
-compatibility_date = "2026-05-14"
+compatibility_date = "2026-05-13"
 
 [triggers]
 crons = ["7 * * * *"]
