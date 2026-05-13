@@ -85,9 +85,10 @@ python3 solana-radar/scanner.py --watch --lane all
 The repository includes `.github/workflows/scan-and-pages.yml`.
 
 It runs the scanner at most once per hour, commits updated `data/` snapshots,
-and deploys the static dashboard to GitHub Pages. The workflow has two scheduled
-attempts per hour and a freshness guard, so if GitHub drops one cron slot the
-next slot can still run, while fresh reports are skipped. The dashboard reads:
+and deploys the static dashboard to GitHub Pages. The workflow uses a 10-minute
+watchdog plus a freshness guard: fresh reports are skipped before any paid API
+work, while stale reports trigger the full scan. Already running scans are not
+cancelled by the next watchdog tick. The dashboard reads:
 
 - `data/latest_report.json`
 - `data/alerts.jsonl`

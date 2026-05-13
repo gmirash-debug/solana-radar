@@ -196,16 +196,23 @@ class Http:
 
 
 class HeliusRpc:
-    def __init__(self, api_key):
+    def __init__(self, api_key, timeout_seconds=30, transactions_timeout_seconds=25):
         self.url = f"https://mainnet.helius-rpc.com/?api-key={api_key}"
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
         self.calls = Counter()
+        self.timeout_seconds = int(timeout_seconds)
+        self.transactions_timeout_seconds = int(transactions_timeout_seconds)
 
-    def call(self, method, params=None, timeout=30):
+    def request_timeout(self, timeout):
+        seconds = float(timeout if timeout is not None else self.timeout_seconds)
+        connect_timeout = min(10.0, max(3.0, seconds / 3))
+        return (connect_timeout, seconds)
+
+    def call(self, method, params=None, timeout=None):
         self.calls[method] += 1
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []}
-        response = self.session.post(self.url, json=payload, timeout=timeout)
+        response = self.session.post(self.url, json=payload, timeout=self.request_timeout(timeout))
         response.raise_for_status()
         body = response.json()
         if body.get("error"):
@@ -249,7 +256,7 @@ class HeliusRpc:
         }
         if pagination_token:
             opts["paginationToken"] = pagination_token
-        return self.call("getTransactionsForAddress", [address, opts], timeout=60) or {}
+        return self.call("getTransactionsForAddress", [address, opts], timeout=self.transactions_timeout_seconds) or {}
 
 
 def gecko_pool_from_item(item, source):
@@ -2873,6 +2880,7 @@ def scan_with_config(http, rpc, state, config):
     all_alerts = []
     summaries = []
     for index, pool in enumerate(scan_targets, start=1):
+        print(f"{label}: scanning {index}/{len(scan_targets)} {pool.symbol}", flush=True)
         alerts, summary = scan_pool(rpc, pool, config, state, classification_budget)
         summaries.append(summary)
         all_alerts.extend(alerts)
@@ -2891,7 +2899,11 @@ def run_once(config, lane_name=None):
         raise SystemExit("HELIUS_API_KEY is missing. Put it in .env or environment.")
 
     http = Http()
-    rpc = HeliusRpc(api_key)
+    rpc = HeliusRpc(
+        api_key,
+        timeout_seconds=int(config.get("helius_rpc_timeout_seconds", 30)),
+        transactions_timeout_seconds=int(config.get("helius_transactions_timeout_seconds", 25)),
+    )
     health = rpc.health()
     if health != "ok":
         raise SystemExit(f"Helius health is not ok: {health}")
