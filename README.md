@@ -88,7 +88,8 @@ It runs the scanner at most once per hour, commits updated `data/` snapshots,
 and deploys the static dashboard to GitHub Pages. The workflow uses a 10-minute
 watchdog plus a freshness guard: fresh reports are skipped before any paid API
 work, while stale reports trigger the full scan. Already running scans are not
-cancelled by the next watchdog tick. The dashboard reads:
+cancelled by the next watchdog tick. Pushes to `data/` redeploy Pages from the
+new snapshot without forcing another scanner pass. The dashboard reads:
 
 - `data/latest_report.json`
 - `data/alerts.jsonl`
