@@ -1,6 +1,18 @@
 {
-  "entries": {},
-  "pools": [],
-  "tokens": [],
-  "updated_at": null
+  "entries": {
+    "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump": {
+      "token_address": "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
+      "pool_address": "6TB1AwLDFQpT6dC4GdG9QiiT6BTDyxAdn2Dojm73gJrS",
+      "symbol": "Crack",
+      "name": "Crack",
+      "deleted_at": "2026-05-16T23:25:46.028Z"
+    }
+  },
+  "pools": [
+    "6TB1AwLDFQpT6dC4GdG9QiiT6BTDyxAdn2Dojm73gJrS"
+  ],
+  "tokens": [
+    "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump"
+  ],
+  "updated_at": "2026-05-16T23:25:46.028Z"
 }
