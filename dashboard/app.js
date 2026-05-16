@@ -23,7 +23,6 @@ const state = {
   scanStatus: {},
   tab: "filters",
   query: "",
-  scope: "current",
   tier: "focus",
   heat: "all",
   lane: "all",
@@ -46,7 +45,6 @@ const els = {
   runScan: document.querySelector("#runScan"),
   modeSelect: document.querySelector("#modeSelect"),
   searchInput: document.querySelector("#searchInput"),
-  scopeFilter: document.querySelector("#scopeFilter"),
   tierFilter: document.querySelector("#tierFilter"),
   heatFilter: document.querySelector("#heatFilter"),
   laneFilter: document.querySelector("#laneFilter"),
@@ -390,7 +388,12 @@ function tokenFitsReactivationBucket(token) {
 }
 
 function alertId(alert) {
-  return `${alert?.pool?.pool_address || "pool"}:${alert?.window_start || "window"}:${alert?.score || 0}`;
+  const pool = alert?.pool || {};
+  return [
+    pool.pool_address || pool.token_address || pool.symbol || "pool",
+    alert?.window_start || alert?.created_at || "window",
+    alert?.window_end || "",
+  ].join(":");
 }
 
 function tokenKeyFromPool(pool = {}) {
@@ -587,20 +590,10 @@ function pClass(value) {
   return Number(value) >= 0 ? "good" : "bad";
 }
 
-function alertTimeMs(alert = {}) {
-  const date = new Date(alert.window_start || alert.created_at || 0);
-  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
-}
-
 function sourceAlerts() {
   const current = (state.report?.alerts || []).map((alert) => ({ ...alert, _scope_source: "current" }));
-  if (state.scope === "current") return current;
   const history = (state.history || []).map((alert) => ({ ...alert, _scope_source: "history" }));
-  const combined = [...history, ...current];
-  if (state.scope !== "24h") return combined;
-  const anchor = new Date(state.report?.generated_at || Date.now()).getTime();
-  const cutoff = anchor - 24 * 3_600_000;
-  return combined.filter((alert) => alertTimeMs(alert) >= cutoff);
+  return [...history, ...current];
 }
 
 function allAlerts() {
@@ -995,11 +988,14 @@ function buildTokenSignals() {
       || "legacy"
     );
     token.currentFilter = normalizeFilterName(last.filterLane || token.observedFilters[token.observedFilters.length - 1] || token.caughtFilter);
-    token.filterCategories = [token.caughtFilter];
-    token.primaryFilter = token.caughtFilter;
+    token.filterCategories = [token.currentFilter];
+    token.primaryFilter = token.currentFilter;
     token.lanes = token.filterCategories;
     token.hasObservedFilterDrift = token.observedFilters.some((name) => name !== token.caughtFilter);
     token.hasFilterDrift = token.currentFilter !== token.caughtFilter;
+    token.currentScanAlerts = token.alerts.filter((alert) => alert._scope_source === "current");
+    token.currentScanAlertCount = token.currentScanAlerts.length;
+    token.latestUpdateAt = token.lastSignalAt;
     token.hasInferredFilters = token.alerts.some((alert) => alert.filterInferred || alert.filterLane !== alert.baseFilterLane);
     token.alertTiers = token.alerts.map(alertTier);
     token.tierCounts = token.alertTiers.reduce((counts, tier) => {
@@ -1162,7 +1158,6 @@ function renderStatus() {
   const running = Boolean(status.running);
   const freshness = reportFreshness(report.generated_at);
   if (els.showHiddenInput) els.showHiddenInput.checked = state.showHidden;
-  if (els.scopeFilter) els.scopeFilter.value = state.scope;
   if (els.tierFilter) els.tierFilter.value = state.tier;
   const reportLanes = (report.lanes_scanned || []).filter((name) => FILTER_ORDER.includes(name) && name !== "legacy");
   const laneText = status.lane || status.mode || reportLanes.join(", ") || report.mode || "-";
@@ -1219,15 +1214,16 @@ function renderTokenRow(token) {
           <span>caught ${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)} mcap</span>
           <span>${esc(athText)}</span>
           <span>${money(token.liquidityUsd)} liq</span>
-          <span>${token.alertCount} signals</span>
+          <span>${token.alertCount} updates</span>
+          ${token.currentScanAlertCount ? `<span>${token.currentScanAlertCount} latest scan</span>` : ""}
           <span>${token.uniqueWallets} wallets</span>
         </div>
         <div class="chips">
           ${tierChip(token.actionTier)}
           ${chip(`${token.narrative.primary} - ${token.narrative.tilt}`, narrativeTone(token.narrative))}
           ${token.narrative.secondary.slice(0, 1).map((name) => chip(`${name} flavor`)).join("")}
-          ${chip(`caught ${filterMeta(token.caughtFilter).label}`)}
-          ${token.hasFilterDrift ? chip(`now ${filterMeta(token.currentFilter).label}`, "warn") : ""}
+          ${chip(`now ${filterMeta(token.currentFilter).label}`)}
+          ${token.hasFilterDrift ? chip(`caught ${filterMeta(token.caughtFilter).label}`, "warn") : ""}
           ${phase && phase.label !== "Mid-range" ? chip(phase.label, phase.tone) : ""}
           ${chip(socialLabel(token.socialHeat, token.socialReason), token.socialHeat === "disabled" ? "warn" : "")}
           ${gmgnUrl ? `<a class="chip token-terminal-link" href="${esc(gmgnUrl)}" target="_blank" rel="noreferrer">GMGN</a>` : ""}
@@ -1498,11 +1494,11 @@ function renderFilterLine(token) {
   const caught = token.caughtFilter || token.primaryFilter || "legacy";
   const current = token.currentFilter || caught;
   const chips = [
-    chip(`caught ${filterMeta(caught).label}`),
-    current !== caught ? chip(`now ${filterMeta(current).label}`, "warn") : "",
+    chip(`now ${filterMeta(current).label}`),
+    current !== caught ? chip(`caught ${filterMeta(caught).label}`, "warn") : "",
   ].filter(Boolean).join(" ");
   const inferred = token.hasInferredFilters ? ` ${chip("inferred from snapshot", "warn")}` : "";
-  const primary = filterMeta(caught);
+  const primary = filterMeta(current);
   return `${chips}${inferred} <span class="muted-inline">${esc(primary.criteria)}</span>`;
 }
 
@@ -1631,6 +1627,7 @@ function renderTokenDetail(token) {
       <div class="kv"><span>Market now</span><span>${moneyMaybe(token.scanMcapUsd || token.currentMcap)} mcap / ${money(token.liquidityUsd)} liq${token.scanMcapAt ? ` / ${esc(dateLabel(token.scanMcapAt))}` : ""}</span></div>
       ${renderMarketPhase(token)}
       ${renderLaunchContext(token)}
+      <div class="kv"><span>Signal log</span><span>${esc(token.alertCount)} accumulated updates / latest ${esc(dateLabel(token.latestUpdateAt))}${token.currentScanAlertCount ? ` / ${esc(token.currentScanAlertCount)} in latest scan` : ""}</span></div>
       <div class="kv"><span>Signal tier</span><span>${renderSignalTier(token)}</span></div>
       <div class="kv"><span>Scanner filter</span><span>${renderFilterLine(token)}</span></div>
       <div class="kv"><span>Signal quality</span><span>${renderSignalQuality(token)}</span></div>
@@ -1647,9 +1644,9 @@ function renderTokenDetail(token) {
       ${renderWalletRows(token)}
       <h2>Signal Timeline</h2>
       <div class="timeline">
-        ${token.alerts.map((alert) => `
+        ${[...token.alerts].reverse().map((alert) => `
           <div class="timeline-item">
-            <strong>${esc(dateLabel(alert.window_start))} ${tierChip(alertTier(alert))}</strong>
+            <strong>${esc(dateLabel(alert.window_start))} ${tierChip(alertTier(alert))}${alert._scope_source === "current" ? ` ${chip("latest scan", "good")}` : ""}</strong>
             <span>OBS ${moneyMaybe(alert.obs_mcap_usd || alert.pool?.mcap_usd)} / score ${esc(alert.score)} / hard ${sol(alert.hard_sol || 0)} / support ${sol(alert.support_sol || 0)} / ${esc(alert.filterLane || effectiveAlertLane(alert))}</span>
           </div>
         `).join("")}
@@ -1919,7 +1916,7 @@ function renderFilterTokenRows(group) {
   return group.tokens.map((token) => {
     const flow = sumAlertField(token.alerts, "suspicious_sol") || sumEventSol(uniqueAlertEvents(token.alerts));
     const phase = marketPhase(token);
-    const driftLabel = token.hasFilterDrift ? `now ${filterMeta(token.currentFilter).label}` : "";
+    const driftLabel = token.hasFilterDrift ? `caught ${filterMeta(token.caughtFilter).label}` : "";
     const selected = token.key === state.selectedTokenKey ? " is-selected" : "";
     const hidden = token.hidden ? " is-hidden" : "";
     return `
@@ -2123,12 +2120,6 @@ els.refresh.addEventListener("click", loadData);
 els.runScan.addEventListener("click", runScan);
 els.searchInput.addEventListener("input", (event) => {
   state.query = event.target.value;
-  render();
-});
-els.scopeFilter.addEventListener("change", (event) => {
-  state.scope = event.target.value;
-  state.selectedTokenKey = null;
-  state.selectedFilter = null;
   render();
 });
 els.tierFilter.addEventListener("change", (event) => {
