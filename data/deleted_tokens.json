@@ -34,21 +34,30 @@
       "symbol": "CHINIFY",
       "name": "Chinification",
       "deleted_at": "2026-05-16T23:25:49.552Z"
+    },
+    "B5xwCQUKfx8BJZsgvuBvW6XgrxtkqLTrDEAYjpLJpump": {
+      "token_address": "B5xwCQUKfx8BJZsgvuBvW6XgrxtkqLTrDEAYjpLJpump",
+      "pool_address": "Atx6zyC1WkbBpCwhZG8UZ2n51184Ps78zTQMzsMV2uDy",
+      "symbol": "PAC",
+      "name": "Public Asset Control",
+      "deleted_at": "2026-05-16T23:25:50.477Z"
     }
   },
   "pools": [
     "2J6LTZkLMp4bfcqPMA3CqFMNk1dYcX4T55e9ySrxw48U",
     "52VFGEzYirC8GYVjs7B6YTqLoL5oKSVQbCPpwKqZTKqp",
     "6TB1AwLDFQpT6dC4GdG9QiiT6BTDyxAdn2Dojm73gJrS",
+    "Atx6zyC1WkbBpCwhZG8UZ2n51184Ps78zTQMzsMV2uDy",
     "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
     "HCTAwVjrz9HJ8L3d1AQDXFFceYpmEFn9S3RMDGFCE9Tk"
   ],
   "tokens": [
     "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
     "ADVAviLMaZXLVjxYDHNd3VcV68EE8HUbo9FowLPbpump",
+    "B5xwCQUKfx8BJZsgvuBvW6XgrxtkqLTrDEAYjpLJpump",
     "FF6PSUPxbX6Rt4Etw9mefVA1JfEZfKtNpVdLTjWFKxXZ",
     "GFKNuUKCDP3kQtTAjaV5VVMJFtNvMGG62xKP3XGXpump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-16T23:25:49.552Z"
+  "updated_at": "2026-05-16T23:25:50.477Z"
 }
