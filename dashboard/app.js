@@ -1545,6 +1545,35 @@ function renderFilterLine(token) {
   return `${chips}${inferred} <span class="muted-inline">${esc(primary.criteria)}</span>`;
 }
 
+function signalRankScore(token) {
+  return Math.max(0, Number(token.profitPct || 0))
+    + Number(token.totalSuspiciousSol || 0) / 5
+    + Number(token.maxScore || 0);
+}
+
+function tokenFreshnessMs(token) {
+  const latestScanMs = token.currentScanAlerts.reduce((best, alert) => {
+    const value = new Date(alert.window_start || alert.created_at || 0).getTime();
+    return Number.isNaN(value) ? best : Math.max(best, value);
+  }, 0);
+  const lastSignalMs = new Date(token.lastSignalAt || 0).getTime();
+  const firstSignalMs = new Date(token.firstSignalAt || 0).getTime();
+  return latestScanMs || (Number.isNaN(lastSignalMs) ? 0 : lastSignalMs) || (Number.isNaN(firstSignalMs) ? 0 : firstSignalMs);
+}
+
+function compareFilterTokens(a, b) {
+  const latestScanDiff = Number(b.currentScanAlertCount > 0) - Number(a.currentScanAlertCount > 0);
+  if (latestScanDiff) return latestScanDiff;
+
+  const freshnessDiff = tokenFreshnessMs(b) - tokenFreshnessMs(a);
+  if (freshnessDiff) return freshnessDiff;
+
+  const caughtDiff = new Date(b.firstSignalAt || 0).getTime() - new Date(a.firstSignalAt || 0).getTime();
+  if (caughtDiff) return caughtDiff;
+
+  return signalRankScore(b) - signalRankScore(a);
+}
+
 function renderSignalQuality(token) {
   const duplicateChip = token.duplicateEventCount
     ? ` ${chip(`${token.duplicateEventCount} duplicate rows collapsed`, "warn")}`
@@ -1767,11 +1796,7 @@ function narrativeGroups(tokens) {
     });
   });
   return [...groups.values()].map((group) => {
-    group.tokens.sort((a, b) => {
-      const aScore = Math.max(0, Number(a.profitPct || 0)) + Number(a.totalSuspiciousSol || 0) / 5 + Number(a.maxScore || 0);
-      const bScore = Math.max(0, Number(b.profitPct || 0)) + Number(b.totalSuspiciousSol || 0) / 5 + Number(b.maxScore || 0);
-      return bScore - aScore;
-    });
+    group.tokens.sort(compareFilterTokens);
     group.secondaryList = [...group.secondary.entries()].sort((a, b) => b[1] - a[1]);
     group.uniqueWallets = group.wallets.size;
     return group;
@@ -1941,11 +1966,7 @@ function filterGroups(tokens) {
     });
   });
   return [...groups.values()].map((group) => {
-    group.tokens.sort((a, b) => {
-      const aScore = Math.max(0, Number(a.profitPct || 0)) + Number(a.totalSuspiciousSol || 0) / 5 + Number(a.maxScore || 0);
-      const bScore = Math.max(0, Number(b.profitPct || 0)) + Number(b.totalSuspiciousSol || 0) / 5 + Number(b.maxScore || 0);
-      return bScore - aScore;
-    });
+    group.tokens.sort(compareFilterTokens);
     group.uniqueWallets = group.wallets.size;
     return group;
   }).sort((a, b) => {
@@ -1966,7 +1987,7 @@ function renderFilterTokenRows(group) {
       <button class="filter-token-row${selected}${hidden}" type="button" data-token-key="${esc(token.key)}">
         <span class="filter-token-name">
           <strong>${esc(token.symbol)}</strong>
-          <small>${esc([tierMeta(token.actionTier).label, token.name || token.narrative.primary, driftLabel, phase?.label, token.hidden ? "hidden" : ""].filter(Boolean).join(" / "))}</small>
+          <small>${esc([token.currentScanAlertCount ? `${token.currentScanAlertCount} latest scan` : "", tierMeta(token.actionTier).label, token.name || token.narrative.primary, driftLabel, phase?.label, token.hidden ? "hidden" : ""].filter(Boolean).join(" / "))}</small>
         </span>
         <span class="filter-token-value">
           <strong>${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)}</strong>
