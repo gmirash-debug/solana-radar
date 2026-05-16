@@ -40,6 +40,19 @@
         </div>
         <div class="filters">
           <input id="searchInput" type="search" placeholder="Search symbol, pool, wallet">
+          <select id="scopeFilter" aria-label="Signal window">
+            <option value="current">current scan</option>
+            <option value="24h">last 24h</option>
+            <option value="all">all history</option>
+          </select>
+          <select id="tierFilter" aria-label="Signal tier">
+            <option value="focus">actionable + watch</option>
+            <option value="actionable">actionable only</option>
+            <option value="watch">watch only</option>
+            <option value="late_chase">late/chase</option>
+            <option value="noise">noise</option>
+            <option value="all">all tiers</option>
+          </select>
           <select id="heatFilter" aria-label="Social heat">
             <option value="all">all social</option>
             <option value="unchecked">not checked</option>

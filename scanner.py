@@ -1797,12 +1797,31 @@ def extract_funding_source(rpc, signature, target_wallet):
     return senders[0][0], target_delta
 
 
+HARD_WALLET_CLASSES = {"fresh", "freshish", "dormant"}
+SUPPORT_WALLET_CLASSES = {"low_tx"}
+
+
+def wallet_count(events):
+    return len({event.get("signer") for event in events if event.get("signer")})
+
+
+def sol_sum(events):
+    return sum(event.get("sol_amount", 0.0) for event in events)
+
+
 def score_events(events, config):
-    suspicious_classes = {"fresh", "freshish", "low_tx", "dormant"}
-    suspicious = [event for event in events if event.get("wallet_class") in suspicious_classes]
-    suspicious_wallets = {event["signer"] for event in suspicious}
-    suspicious_sol = sum(event.get("sol_amount", 0.0) for event in suspicious)
-    class_counts = Counter(event.get("wallet_class") for event in events)
+    hard_events = [event for event in events if event.get("wallet_class") in HARD_WALLET_CLASSES]
+    support_events = [event for event in events if event.get("wallet_class") in SUPPORT_WALLET_CLASSES]
+    suspicious = [*hard_events, *support_events]
+    hard_wallet_count = wallet_count(hard_events)
+    support_wallet_count = wallet_count(support_events)
+    hard_sol = sol_sum(hard_events)
+    support_sol = sol_sum(support_events)
+    hard_classes = Counter(event.get("wallet_class") for event in hard_events)
+    support_classes = Counter(event.get("wallet_class") for event in support_events)
+    min_wallets = int(config["alert_min_suspicious_wallets"])
+    min_sol = float(config["alert_min_suspicious_sol"])
+
     funding_sources = Counter(event.get("funding_source") for event in suspicious if event.get("funding_source"))
     token_recipients = Counter(
         event.get("token_recipient") for event in suspicious if event.get("token_recipient")
@@ -1819,19 +1838,130 @@ def score_events(events, config):
     ]
 
     score = 0
-    if class_counts.get("dormant", 0):
+    if hard_classes.get("dormant", 0):
         score += 35
-    if len(suspicious_wallets) >= int(config["alert_min_suspicious_wallets"]):
+    if hard_wallet_count >= min_wallets:
         score += 25
-    if suspicious_sol >= float(config["alert_min_suspicious_sol"]):
-        score += 25
-    if common_funders:
-        score += 20
-    if common_recipients:
+    elif hard_wallet_count >= max(2, min_wallets - 1):
         score += 15
-    if any(event.get("sol_amount", 0.0) >= float(config["big_buy_sol"]) for event in suspicious):
+    if hard_sol >= min_sol:
+        score += 25
+    elif hard_sol >= min_sol * 0.5:
         score += 10
-    return min(score, 100), suspicious, common_funders, common_recipients
+    if common_funders:
+        score += 25
+    if common_recipients:
+        score += 20
+    if any(event.get("sol_amount", 0.0) >= float(config["big_buy_sol"]) for event in hard_events):
+        score += 10
+    if support_wallet_count >= min_wallets and (hard_wallet_count or common_funders or common_recipients):
+        score += 10
+    elif support_wallet_count >= min_wallets * 2:
+        score += 5
+
+    evidence = {
+        "hard_wallets": hard_wallet_count,
+        "support_wallets": support_wallet_count,
+        "hard_sol": hard_sol,
+        "support_sol": support_sol,
+        "hard_classes": dict(hard_classes),
+        "support_classes": dict(support_classes),
+        "support_only": bool(support_events) and not hard_events and not common_funders and not common_recipients,
+    }
+    return min(score, 100), suspicious, common_funders, common_recipients, evidence
+
+
+def pool_ath_ratio(pool):
+    existing_ratio = getattr(pool, "ath_current_ratio", None)
+    if existing_ratio is not None:
+        return float(existing_ratio)
+    ath_mcap = float(getattr(pool, "ath_mcap_usd", 0) or 0)
+    current_mcap = float(getattr(pool, "mcap_usd", 0) or 0)
+    return current_mcap / ath_mcap if ath_mcap and current_mcap else None
+
+
+def classify_alert_tier(pool, alert, evidence, config):
+    lane = config.get("lane") or config.get("mode") or "scan"
+    mcap = float(getattr(pool, "mcap_usd", 0) or 0)
+    volume_1h = float(getattr(pool, "volume_1h_usd", 0) or 0)
+    volume_to_mcap = volume_1h / mcap if mcap else None
+    min_wallets = int(config["alert_min_suspicious_wallets"])
+    min_sol = float(config["alert_min_suspicious_sol"])
+    actionable_mcap = float(config.get("actionable_mcap_max_usd") or 0)
+    watch_mcap = float(config.get("watch_mcap_max_usd") or config.get("mcap_max_usd") or 0)
+    action_volume_ratio = config.get("volume_1h_to_mcap_max_actionable")
+    watch_volume_ratio = config.get("volume_1h_to_mcap_max_watch")
+    action_volume_ratio = float(action_volume_ratio) if action_volume_ratio is not None else None
+    watch_volume_ratio = float(watch_volume_ratio) if watch_volume_ratio is not None else None
+    reasons = []
+    penalties = []
+
+    hard_wallets = int(evidence.get("hard_wallets") or 0)
+    support_wallets = int(evidence.get("support_wallets") or 0)
+    hard_sol = float(evidence.get("hard_sol") or 0)
+    hard_classes = evidence.get("hard_classes") or {}
+    coordination = bool(alert.get("common_funders") or alert.get("common_recipients") or alert.get("routed_buys"))
+    hard_cluster = hard_wallets >= min_wallets
+    hard_flow = hard_sol >= min_sol
+    dormant = bool(hard_classes.get("dormant"))
+    support_only = bool(evidence.get("support_only"))
+
+    if hard_cluster:
+        reasons.append("hard wallet cluster")
+    if hard_flow:
+        reasons.append("hard flow")
+    if dormant:
+        reasons.append("dormant wallet")
+    if coordination:
+        reasons.append("linked wallets")
+    if support_wallets:
+        reasons.append("low_tx support")
+
+    if support_only:
+        penalties.append("low_tx only")
+    if actionable_mcap and mcap > actionable_mcap:
+        penalties.append("above actionable mcap")
+    if watch_mcap and mcap > watch_mcap:
+        penalties.append("late mcap")
+    if volume_to_mcap is not None and watch_volume_ratio is not None and volume_to_mcap > watch_volume_ratio:
+        penalties.append("blowoff volume")
+    elif volume_to_mcap is not None and action_volume_ratio is not None and volume_to_mcap > action_volume_ratio:
+        penalties.append("hot volume")
+    if (
+        float(alert.get("suspicious_sol") or 0) >= float(config.get("excess_flow_sol", 100))
+        and actionable_mcap
+        and mcap > actionable_mcap
+        and not coordination
+    ):
+        penalties.append("excess flow after move")
+
+    ath_ratio = pool_ath_ratio(pool)
+    if lane == "reactivation" and ath_ratio is not None:
+        action_ratio = float(config.get("ath_actionable_max_current_ratio", 0.25))
+        watch_ratio = float(config.get("ath_watch_max_current_ratio", config.get("ath_max_current_ratio", 0.4)))
+        if ath_ratio > watch_ratio:
+            penalties.append("too close to ATH")
+        elif ath_ratio > action_ratio:
+            penalties.append("mid-range, not deep correction")
+
+    hard_signal = hard_cluster or hard_flow or dormant or coordination
+    if not hard_signal:
+        tier = "noise" if support_only else "watch"
+    elif "late mcap" in penalties or "blowoff volume" in penalties or "excess flow after move" in penalties:
+        tier = "late_chase"
+    elif lane == "reactivation":
+        tier = "actionable" if coordination and (hard_cluster or hard_flow or dormant) and "mid-range, not deep correction" not in penalties and "too close to ATH" not in penalties else "watch"
+    elif actionable_mcap and mcap > actionable_mcap:
+        tier = "watch"
+    elif "hot volume" in penalties and not coordination:
+        tier = "watch"
+    else:
+        tier = "actionable"
+
+    return tier, reasons, penalties, {
+        "volume_1h_to_mcap": volume_to_mcap,
+        "ath_current_ratio": ath_ratio,
+    }
 
 
 def build_alerts(pool, events, config):
@@ -1844,39 +1974,62 @@ def build_alerts(pool, events, config):
         start = event.get("block_time") or 0
         end = start + window_seconds
         window = [item for item in events[index:] if (item.get("block_time") or 0) <= end]
-        score, suspicious, common_funders, common_recipients = score_events(window, config)
+        score, suspicious, common_funders, common_recipients, evidence = score_events(window, config)
         suspicious_wallet_count = len({item["signer"] for item in suspicious})
         suspicious_sol = sum(item.get("sol_amount", 0.0) for item in suspicious)
         if score < 40:
             continue
+        hard_signal = (
+            evidence["hard_wallets"] >= int(config["alert_min_suspicious_wallets"])
+            or evidence["hard_sol"] >= float(config["alert_min_suspicious_sol"])
+            or bool(evidence["hard_classes"].get("dormant"))
+            or bool(common_funders)
+            or bool(common_recipients)
+        )
+        if evidence["support_only"] and not config.get("low_tx_support_only_alerts", False):
+            continue
         if (
-            suspicious_wallet_count < int(config["alert_min_suspicious_wallets"])
+            not hard_signal
+            and suspicious_wallet_count < int(config["alert_min_suspicious_wallets"])
             and suspicious_sol < float(config["alert_min_suspicious_sol"])
-            and not any(item.get("wallet_class") == "dormant" for item in suspicious)
         ):
             continue
         created_at = utc_now().isoformat().replace("+00:00", "Z")
-        alerts.append(
+        alert = {
+            "created_at": created_at,
+            "score": score,
+            "lane": config.get("lane") or config.get("mode"),
+            "pool": pool.as_dict(),
+            "obs_mcap_usd": pool.mcap_usd,
+            "obs_price_usd": pool.price_usd,
+            "obs_liquidity_usd": pool.liquidity_usd,
+            "obs_mcap_at": created_at,
+            "window_start": iso(start),
+            "window_end": iso(end),
+            "suspicious_wallets": suspicious_wallet_count,
+            "suspicious_sol": suspicious_sol,
+            "hard_wallets": evidence["hard_wallets"],
+            "support_wallets": evidence["support_wallets"],
+            "hard_sol": evidence["hard_sol"],
+            "support_sol": evidence["support_sol"],
+            "classes": dict(Counter(item.get("wallet_class") for item in suspicious)),
+            "hard_classes": evidence["hard_classes"],
+            "support_classes": evidence["support_classes"],
+            "common_funders": common_funders,
+            "common_recipients": common_recipients,
+            "routed_buys": sum(1 for item in suspicious if item.get("routed")),
+            "events": suspicious[: int(config.get("alert_event_export_limit", 80))],
+        }
+        tier, reasons, penalties, quality_metrics = classify_alert_tier(pool, alert, evidence, config)
+        alert.update(
             {
-                "created_at": created_at,
-                "score": score,
-                "lane": config.get("lane") or config.get("mode"),
-                "pool": pool.as_dict(),
-                "obs_mcap_usd": pool.mcap_usd,
-                "obs_price_usd": pool.price_usd,
-                "obs_liquidity_usd": pool.liquidity_usd,
-                "obs_mcap_at": created_at,
-                "window_start": iso(start),
-                "window_end": iso(end),
-                "suspicious_wallets": suspicious_wallet_count,
-                "suspicious_sol": suspicious_sol,
-                "classes": dict(Counter(item.get("wallet_class") for item in suspicious)),
-                "common_funders": common_funders,
-                "common_recipients": common_recipients,
-                "routed_buys": sum(1 for item in suspicious if item.get("routed")),
-                "events": suspicious[:20],
+                "action_tier": tier,
+                "quality_reasons": reasons,
+                "quality_penalties": penalties,
+                "quality_metrics": quality_metrics,
             }
         )
+        alerts.append(alert)
     deduped = {}
     for alert in alerts:
         key = alert["pool"]["pool_address"]
@@ -2204,21 +2357,24 @@ def should_deep_scan(pool, config, pool_state, events, candidate_buys, alerts, c
     if alerts:
         return True, "probe_alert"
 
-    score, suspicious, common_funders, common_recipients = score_events(events, config)
+    score, suspicious, common_funders, common_recipients, evidence = score_events(events, config)
     high_conviction_wallets = {
         event["signer"]
         for event in suspicious
         if event.get("signer") and event.get("wallet_class") in ("fresh", "freshish", "dormant")
     }
-    suspicious_sol = sum(event.get("sol_amount", 0.0) for event in suspicious)
+    hard_sol = float(evidence.get("hard_sol") or 0)
+    support_sol = float(evidence.get("support_sol") or 0)
     if common_funders or common_recipients:
         return True, "linked_wallets"
     if any(event.get("wallet_class") == "dormant" for event in suspicious):
         return True, "dormant_wallet"
     if len(high_conviction_wallets) >= int(config.get("helius_deep_min_suspicious_wallets", 2)):
         return True, "suspicious_wallet_probe"
-    if suspicious_sol >= float(config.get("helius_deep_min_suspicious_sol", 8)):
+    if hard_sol >= float(config.get("helius_deep_min_suspicious_sol", 8)):
         return True, "suspicious_flow_probe"
+    if high_conviction_wallets and hard_sol + support_sol >= float(config.get("helius_deep_min_suspicious_sol", 8)):
+        return True, "supported_suspicious_flow_probe"
 
     min_candidates = int(config.get("helius_deep_min_candidate_buys", 20))
     probe_buy_sol = sum(event.get("sol_amount", 0.0) for event in events)
@@ -2518,6 +2674,8 @@ def filter_reactivation_by_ath(http, state, pools, config, observed_at):
             continue
 
         ratio = pool.mcap_usd / ath_mcap
+        pool.ath_mcap_usd = ath_mcap
+        pool.ath_current_ratio = ratio
         entry["ath_current_ratio"] = ratio
         entry["ath_drawdown_pct"] = max(0.0, (1 - ratio) * 100)
         entry["ath_filter_checked_at"] = observed_at
@@ -2734,6 +2892,10 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "liquidity_min_usd": config["liquidity_min_usd"],
             "classify_buy_min_sol": config["classify_buy_min_sol"],
             "alert_window_minutes": config["alert_window_minutes"],
+            "low_tx_support_only_alerts": config.get("low_tx_support_only_alerts", False),
+            "alert_event_export_limit": config.get("alert_event_export_limit", 80),
+            "actionable_mcap_max_usd": config.get("actionable_mcap_max_usd"),
+            "watch_mcap_max_usd": config.get("watch_mcap_max_usd"),
         },
         "stats": {
             "universe_pools": len(universe),
