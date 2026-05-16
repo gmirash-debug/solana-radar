@@ -432,6 +432,10 @@ function filterMeta(name = "legacy") {
   };
 }
 
+function normalizeFilterName(name) {
+  return FILTER_META[name] ? name : "legacy";
+}
+
 function chip(text, tone = "") {
   return `<span class="chip ${tone}">${esc(text)}</span>`;
 }
@@ -980,9 +984,22 @@ function buildTokenSignals() {
         alert.filterLane = baseLane;
       }
     });
-    token.lanes = [...new Set(token.alerts.map((alert) => alert.filterLane || "legacy"))];
-    token.filterCategories = token.lanes;
-    token.primaryFilter = first.filterLane || token.filterCategories[0] || "legacy";
+    token.observedFilters = [...new Set(token.alerts.map((alert) => normalizeFilterName(alert.filterLane || "legacy")))];
+    token.caughtFilter = normalizeFilterName(
+      first.first_obs_lane
+      || first.obs_lane
+      || firstPool.first_obs_lane
+      || latestPool.first_obs_lane
+      || first.filterLane
+      || token.observedFilters[0]
+      || "legacy"
+    );
+    token.currentFilter = normalizeFilterName(last.filterLane || token.observedFilters[token.observedFilters.length - 1] || token.caughtFilter);
+    token.filterCategories = [token.caughtFilter];
+    token.primaryFilter = token.caughtFilter;
+    token.lanes = token.filterCategories;
+    token.hasObservedFilterDrift = token.observedFilters.some((name) => name !== token.caughtFilter);
+    token.hasFilterDrift = token.currentFilter !== token.caughtFilter;
     token.hasInferredFilters = token.alerts.some((alert) => alert.filterInferred || alert.filterLane !== alert.baseFilterLane);
     token.alertTiers = token.alerts.map(alertTier);
     token.tierCounts = token.alertTiers.reduce((counts, tier) => {
@@ -1209,7 +1226,8 @@ function renderTokenRow(token) {
           ${tierChip(token.actionTier)}
           ${chip(`${token.narrative.primary} - ${token.narrative.tilt}`, narrativeTone(token.narrative))}
           ${token.narrative.secondary.slice(0, 1).map((name) => chip(`${name} flavor`)).join("")}
-          ${token.lanes.map((name) => chip(name)).join("")}
+          ${chip(`caught ${filterMeta(token.caughtFilter).label}`)}
+          ${token.hasFilterDrift ? chip(`now ${filterMeta(token.currentFilter).label}`, "warn") : ""}
           ${phase && phase.label !== "Mid-range" ? chip(phase.label, phase.tone) : ""}
           ${chip(socialLabel(token.socialHeat, token.socialReason), token.socialHeat === "disabled" ? "warn" : "")}
           ${gmgnUrl ? `<a class="chip token-terminal-link" href="${esc(gmgnUrl)}" target="_blank" rel="noreferrer">GMGN</a>` : ""}
@@ -1477,10 +1495,14 @@ function renderEvidenceLine(token) {
 }
 
 function renderFilterLine(token) {
-  const filters = token.filterCategories.length ? token.filterCategories : ["legacy"];
-  const chips = filters.map((name) => chip(filterMeta(name).label)).join(" ");
+  const caught = token.caughtFilter || token.primaryFilter || "legacy";
+  const current = token.currentFilter || caught;
+  const chips = [
+    chip(`caught ${filterMeta(caught).label}`),
+    current !== caught ? chip(`now ${filterMeta(current).label}`, "warn") : "",
+  ].filter(Boolean).join(" ");
   const inferred = token.hasInferredFilters ? ` ${chip("inferred from snapshot", "warn")}` : "";
-  const primary = filterMeta(token.primaryFilter);
+  const primary = filterMeta(caught);
   return `${chips}${inferred} <span class="muted-inline">${esc(primary.criteria)}</span>`;
 }
 
@@ -1854,25 +1876,25 @@ function filterGroups(tokens) {
         group.tokenKeys.add(token.key);
         group.tierCounts[token.actionTier] = (group.tierCounts[token.actionTier] || 0) + 1;
       }
-      const laneAlerts = token.alerts.filter((alert) => (alert.filterLane || effectiveAlertLane(alert)) === name);
-      const laneEvents = uniqueAlertEvents(token.alerts, name);
-      group.alerts += laneAlerts.length;
-      group.rawEvents += rawEventCount(token.alerts, name);
-      group.uniqueEvents += laneEvents.length;
-      group.noticedWallets += sumAlertField(laneAlerts, "suspicious_wallets") || laneEvents.length;
-      group.totalSol += sumAlertField(laneAlerts, "suspicious_sol") || sumEventSol(laneEvents);
-      const laneMaxScore = laneAlerts.length ? Math.max(...laneAlerts.map((alert) => Number(alert.score || 0))) : 0;
+      const groupAlerts = token.alerts;
+      const groupEvents = uniqueAlertEvents(groupAlerts);
+      group.alerts += groupAlerts.length;
+      group.rawEvents += rawEventCount(groupAlerts);
+      group.uniqueEvents += groupEvents.length;
+      group.noticedWallets += sumAlertField(groupAlerts, "suspicious_wallets") || groupEvents.length;
+      group.totalSol += sumAlertField(groupAlerts, "suspicious_sol") || sumEventSol(groupEvents);
+      const laneMaxScore = groupAlerts.length ? Math.max(...groupAlerts.map((alert) => Number(alert.score || 0))) : 0;
       group.maxScore = Math.max(group.maxScore, laneMaxScore);
       if (token.profitPct !== null && (group.bestPnl === null || token.profitPct > group.bestPnl)) {
         group.bestPnl = token.profitPct;
         group.bestToken = token;
       }
-      laneAlerts.forEach((alert) => {
+      groupAlerts.forEach((alert) => {
         const signalAt = alert.window_start || alert.created_at;
         if (!group.firstSignalAt || new Date(signalAt) < new Date(group.firstSignalAt)) group.firstSignalAt = signalAt;
         if (!group.latestSignalAt || new Date(signalAt) > new Date(group.latestSignalAt)) group.latestSignalAt = signalAt;
       });
-      laneEvents.forEach((event) => {
+      groupEvents.forEach((event) => {
         const owner = eventOwner(event);
         if (owner) group.wallets.add(owner);
       });
@@ -1895,15 +1917,16 @@ function filterGroups(tokens) {
 
 function renderFilterTokenRows(group) {
   return group.tokens.map((token) => {
-    const flow = sumAlertField(token.alerts, "suspicious_sol", group.name) || sumEventSol(uniqueAlertEvents(token.alerts, group.name));
+    const flow = sumAlertField(token.alerts, "suspicious_sol") || sumEventSol(uniqueAlertEvents(token.alerts));
     const phase = marketPhase(token);
+    const driftLabel = token.hasFilterDrift ? `now ${filterMeta(token.currentFilter).label}` : "";
     const selected = token.key === state.selectedTokenKey ? " is-selected" : "";
     const hidden = token.hidden ? " is-hidden" : "";
     return `
       <button class="filter-token-row${selected}${hidden}" type="button" data-token-key="${esc(token.key)}">
         <span class="filter-token-name">
           <strong>${esc(token.symbol)}</strong>
-          <small>${esc([tierMeta(token.actionTier).label, token.name || token.narrative.primary, phase?.label, token.hidden ? "hidden" : ""].filter(Boolean).join(" / "))}</small>
+          <small>${esc([tierMeta(token.actionTier).label, token.name || token.narrative.primary, driftLabel, phase?.label, token.hidden ? "hidden" : ""].filter(Boolean).join(" / "))}</small>
         </span>
         <span class="filter-token-value">
           <strong>${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)}</strong>
