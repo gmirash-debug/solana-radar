@@ -3,6 +3,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
@@ -408,6 +410,95 @@ def solana_tracker_pool_from_item(item):
     )
 
 
+def gmgn_cli_command():
+    if shutil.which("gmgn-cli"):
+        return ["gmgn-cli"]
+    if shutil.which("npx"):
+        return ["npx", "-y", "gmgn-cli"]
+    return None
+
+
+def fetch_gmgn_trending_token_addresses(config):
+    if not config.get("gmgn_enabled", True):
+        return set()
+    if not os.environ.get("GMGN_API_KEY"):
+        return set()
+    command_prefix = gmgn_cli_command()
+    if not command_prefix:
+        print("warn: GMGN_API_KEY is set but gmgn-cli/npx is unavailable", file=sys.stderr)
+        return set()
+
+    addresses = set()
+    intervals = config.get("gmgn_trending_intervals") or ["1m", "5m", "1h"]
+    platforms = config.get("gmgn_platforms") or ["Pump.fun"]
+    filters = config.get("gmgn_filters") or []
+    limit = int(config.get("gmgn_trending_limit", 100))
+    order_by = config.get("gmgn_trending_order_by", "volume")
+    timeout_seconds = int(config.get("gmgn_timeout_seconds", 45))
+
+    for interval in intervals:
+        command = [
+            *command_prefix,
+            "market",
+            "trending",
+            "--chain",
+            "sol",
+            "--interval",
+            str(interval),
+            "--order-by",
+            str(order_by),
+            "--limit",
+            str(limit),
+            "--raw",
+        ]
+        for platform in platforms:
+            command.extend(["--platform", str(platform)])
+        for item in filters:
+            command.extend(["--filter", str(item)])
+
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except Exception as exc:
+            print(f"warn: gmgn trending {interval} failed: {exc}", file=sys.stderr)
+            continue
+
+        if completed.returncode != 0:
+            message = (completed.stderr or completed.stdout or "").strip().replace(os.environ.get("GMGN_API_KEY", ""), "***")
+            print(f"warn: gmgn trending {interval} failed: {message[:500]}", file=sys.stderr)
+            continue
+
+        try:
+            data = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            print(f"warn: gmgn trending {interval} returned invalid JSON: {exc}", file=sys.stderr)
+            continue
+
+        rank = data.get("data", {}).get("rank") if isinstance(data, dict) else None
+        if rank is None and isinstance(data, dict):
+            rank = data.get("rank")
+        if not isinstance(rank, list):
+            continue
+        for item in rank:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("chain") or "sol").lower() != "sol":
+                continue
+            address = clean_deleted_id(item.get("address"))
+            if address:
+                addresses.add(address)
+        time.sleep(float(config.get("gmgn_request_delay_seconds", 0.25)))
+
+    if addresses:
+        print(f"GMGN trending: {len(addresses)} Solana token candidates", flush=True)
+    return addresses
+
+
 def fetch_solana_tracker_universe(http, config):
     if not config.get("solana_tracker_enabled", True):
         return {}
@@ -545,6 +636,9 @@ def pool_dex_allowed(pool, config):
 
 def build_universe(http, config):
     pools = fetch_solana_tracker_universe(http, config)
+
+    gmgn_tokens = fetch_gmgn_trending_token_addresses(config)
+    pools.update(fetch_dex_pairs_for_tokens(http, gmgn_tokens, "gmgn_trending"))
 
     fallback_pools = fetch_gecko_universe(http, config)
     fallback_pools.update(pools)

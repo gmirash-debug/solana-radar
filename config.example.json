@@ -263,6 +263,20 @@
   "solana_tracker_enabled": true,
   "solana_tracker_limit": 500,
   "solana_tracker_pages": 1,
+  "gmgn_enabled": true,
+  "gmgn_trending_intervals": [
+    "1m",
+    "5m",
+    "1h"
+  ],
+  "gmgn_trending_limit": 100,
+  "gmgn_trending_order_by": "volume",
+  "gmgn_platforms": [
+    "Pump.fun"
+  ],
+  "gmgn_filters": [],
+  "gmgn_timeout_seconds": 45,
+  "gmgn_request_delay_seconds": 0.25,
   "gecko_pages": 5,
   "market_request_delay_seconds": 1.0,
   "max_new_signatures_per_pool": 20,

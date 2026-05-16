@@ -19,6 +19,7 @@ Create `.env` in the repository root or inside `solana-radar/`:
 ```bash
 HELIUS_API_KEY=...
 SOLANA_TRACKER_API_KEY=...
+GMGN_API_KEY=...
 BRIGHTDATA_API_KEY=...
 ```
 
@@ -101,9 +102,11 @@ Required GitHub Actions secrets:
 ```bash
 HELIUS_API_KEY
 SOLANA_TRACKER_API_KEY
+GMGN_API_KEY
 BRIGHTDATA_API_KEY
 ```
 
+`GMGN_API_KEY` is optional but recommended for Pump.fun trending discovery.
 `BRIGHTDATA_API_KEY` can be empty if social enrichment should be disabled.
 
 Lanes:
@@ -133,6 +136,11 @@ universe needs a market data API such as Solana Tracker Data API.
 When `SOLANA_TRACKER_API_KEY` is present, the scanner uses Solana Tracker
 `/search` as the primary universe source and keeps DexScreener/GeckoTerminal as
 fallback discovery.
+
+When `GMGN_API_KEY` is present, the scanner also pulls GMGN Solana trending
+tokens for Pump.fun over `1m`, `5m`, and `1h` windows, resolves them through
+DexScreener into pool addresses, and then applies the same local filters and
+Helius onchain analysis.
 
 Onchain buy extraction is Helius-first. The scanner uses
 `getTransactionsForAddress` in full/jsonParsed mode and keeps pagination state
