@@ -6,13 +6,22 @@
       "symbol": "Crack",
       "name": "Crack",
       "deleted_at": "2026-05-16T23:25:46.028Z"
+    },
+    "GFKNuUKCDP3kQtTAjaV5VVMJFtNvMGG62xKP3XGXpump": {
+      "token_address": "GFKNuUKCDP3kQtTAjaV5VVMJFtNvMGG62xKP3XGXpump",
+      "pool_address": "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
+      "symbol": "CTO",
+      "name": "CHINA TAKE OVER",
+      "deleted_at": "2026-05-16T23:25:46.868Z"
     }
   },
   "pools": [
-    "6TB1AwLDFQpT6dC4GdG9QiiT6BTDyxAdn2Dojm73gJrS"
+    "6TB1AwLDFQpT6dC4GdG9QiiT6BTDyxAdn2Dojm73gJrS",
+    "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ"
   ],
   "tokens": [
-    "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump"
+    "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
+    "GFKNuUKCDP3kQtTAjaV5VVMJFtNvMGG62xKP3XGXpump"
   ],
-  "updated_at": "2026-05-16T23:25:46.028Z"
+  "updated_at": "2026-05-16T23:25:46.868Z"
 }
