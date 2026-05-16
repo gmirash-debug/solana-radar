@@ -113,9 +113,12 @@ def selected_lanes(config, lane_name=None):
     return [selected]
 
 
-def save_json(path, value):
+def save_json(path, value, compact=False):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    if compact:
+        path.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n")
+    else:
+        path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
 def to_float(value, default=0.0):
@@ -2816,6 +2819,50 @@ def record_alert_observations(state, alerts):
         )
 
 
+def prune_wallet_cache(state, config):
+    wallet_cache = state.get("wallet_cache")
+    if not isinstance(wallet_cache, dict):
+        return None
+
+    normal_limit = int(config.get("wallet_cache_normal_limit", 20000))
+    if normal_limit < 0:
+        return None
+
+    keep_classes = set(config.get("wallet_cache_keep_classes") or ["fresh", "freshish", "dormant", "low_tx"])
+    normal_keys = [
+        key
+        for key, value in wallet_cache.items()
+        if isinstance(value, dict) and value.get("wallet_class") == "normal"
+    ]
+    keep_normal_keys = set(normal_keys[-normal_limit:]) if normal_limit else set()
+    before = len(wallet_cache)
+    pruned = {}
+    class_counts = Counter()
+
+    for key, value in wallet_cache.items():
+        wallet_class = value.get("wallet_class") if isinstance(value, dict) else None
+        if wallet_class == "normal" and key not in keep_normal_keys:
+            continue
+        if wallet_class != "normal" and wallet_class not in keep_classes:
+            # Unknown classes are kept; they are rare and can indicate a schema change.
+            pass
+        pruned[key] = value
+        class_counts[wallet_class or "unknown"] += 1
+
+    state["wallet_cache"] = pruned
+    stats = {
+        "pruned_at": utc_now().isoformat().replace("+00:00", "Z"),
+        "before_entries": before,
+        "after_entries": len(pruned),
+        "removed_entries": before - len(pruned),
+        "normal_limit": normal_limit,
+        "kept_classes": sorted(keep_classes),
+        "after_class_counts": dict(class_counts),
+    }
+    state.setdefault("maintenance", {})["wallet_cache_prune"] = stats
+    return stats
+
+
 def apply_market_meta(pool_dict, state):
     if not pool_dict:
         return pool_dict
@@ -3106,7 +3153,8 @@ def run_once(config, lane_name=None):
     record_market_observations(state, universe, generated_at)
     record_alert_observations(state, all_alerts)
     enrich_market_ath(http, state, universe, all_alerts, config, generated_at)
-    save_json(STATE_PATH, state)
+    prune_wallet_cache(state, config)
+    save_json(STATE_PATH, state, compact=bool(config.get("state_json_compact", True)))
     write_alerts(all_alerts)
     report_payload = build_report_payload(universe, summaries, all_alerts, rpc.calls, config, generated_at, state)
     report_payload["lane_stats"] = lane_stats

@@ -231,6 +231,14 @@
   "helius_probe_classify_top_buys_per_window": 5,
   "low_tx_support_only_alerts": false,
   "alert_event_export_limit": 80,
+  "state_json_compact": true,
+  "wallet_cache_keep_classes": [
+    "fresh",
+    "freshish",
+    "dormant",
+    "low_tx"
+  ],
+  "wallet_cache_normal_limit": 20000,
   "helius_deep_scan_enabled": true,
   "helius_deep_min_suspicious_wallets": 2,
   "helius_deep_min_suspicious_sol": 15,
