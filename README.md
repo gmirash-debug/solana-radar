@@ -94,6 +94,7 @@ new snapshot without forcing another scanner pass. The dashboard reads:
 - `data/latest_report.json`
 - `data/alerts.jsonl`
 - `data/state.json`
+- `data/deleted_tokens.json`
 
 Required GitHub Actions secrets:
 
@@ -121,6 +122,7 @@ in `config.example.json`.
 - `solana-radar/data/alerts.jsonl` - machine-readable alerts.
 - `solana-radar/data/latest_report.md` - human-readable latest scan.
 - `solana-radar/data/latest_report.json` - structured dashboard data.
+- `solana-radar/data/deleted_tokens.json` - scanner blacklist for false catches deleted from the dashboard.
 
 ## Notes
 

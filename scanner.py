@@ -21,6 +21,7 @@ STATE_PATH = DATA_DIR / "state.json"
 ALERTS_PATH = DATA_DIR / "alerts.jsonl"
 REPORT_PATH = DATA_DIR / "latest_report.md"
 REPORT_JSON_PATH = DATA_DIR / "latest_report.json"
+DELETED_TOKENS_PATH = DATA_DIR / "deleted_tokens.json"
 CONFIG_PATH = ROOT / "config.json"
 DEFAULT_CONFIG_PATH = ROOT / "config.example.json"
 
@@ -75,6 +76,73 @@ def load_json(path, fallback):
     if not path.exists():
         return fallback
     return json.loads(path.read_text())
+
+
+def clean_deleted_id(value):
+    text = str(value or "").strip()
+    return text if text else None
+
+
+def deleted_id_set(values, keys):
+    ids = set()
+    if isinstance(values, dict):
+        for value in values.values():
+            if isinstance(value, dict):
+                for item_key in keys:
+                    cleaned = clean_deleted_id(value.get(item_key))
+                    if cleaned:
+                        ids.add(cleaned)
+            else:
+                cleaned = clean_deleted_id(value)
+                if cleaned:
+                    ids.add(cleaned)
+        return ids
+    if not isinstance(values, list):
+        return ids
+    for value in values:
+        if isinstance(value, dict):
+            for key in keys:
+                cleaned = clean_deleted_id(value.get(key))
+                if cleaned:
+                    ids.add(cleaned)
+        else:
+            cleaned = clean_deleted_id(value)
+            if cleaned:
+                ids.add(cleaned)
+    return ids
+
+
+def load_deleted_tokens(path=DELETED_TOKENS_PATH):
+    if not path.exists():
+        return {"tokens": set(), "pools": set()}
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        print(f"warn: ignored invalid deleted token file {path}: {exc}", file=sys.stderr)
+        return {"tokens": set(), "pools": set()}
+    if isinstance(data, list):
+        return {"tokens": deleted_id_set(data, ("token_address", "token", "address", "id")), "pools": set()}
+    if not isinstance(data, dict):
+        return {"tokens": set(), "pools": set()}
+    token_ids = set()
+    pool_ids = set()
+    for field in ("tokens", "token_addresses"):
+        token_ids.update(deleted_id_set(data.get(field), ("token_address", "token", "address", "id")))
+    for field in ("pools", "pool_addresses"):
+        pool_ids.update(deleted_id_set(data.get(field), ("pool_address", "pool", "address", "id")))
+    entries = data.get("entries")
+    token_ids.update(deleted_id_set(entries, ("token_address", "token", "address", "id")))
+    pool_ids.update(deleted_id_set(entries, ("pool_address", "pool", "address", "id")))
+    return {"tokens": token_ids, "pools": pool_ids}
+
+
+def pool_is_deleted(pool, deleted):
+    token = clean_deleted_id(getattr(pool, "token_address", ""))
+    pool_address = clean_deleted_id(getattr(pool, "pool_address", ""))
+    return bool(
+        (token and token in deleted.get("tokens", set()))
+        or (pool_address and pool_address in deleted.get("pools", set()))
+    )
 
 
 def apply_mode(config, mode_name=None):
@@ -2926,6 +2994,7 @@ def apply_market_meta_to_alert(alert, state):
 def build_report_payload(universe, summaries, alerts, rpc_calls, config, generated_at, state):
     enriched_summaries = [apply_market_meta_to_summary(summary, state) for summary in summaries]
     enriched_alerts = [apply_market_meta_to_alert(alert, state) for alert in alerts]
+    deleted_tokens = load_deleted_tokens()
     active = [summary for summary in enriched_summaries if summary.get("classified_buys")]
     active.sort(key=lambda item: item.get("buy_sol", 0.0), reverse=True)
     return {
@@ -2949,6 +3018,10 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "scanned_pools": len(summaries),
             "alerts": len(alerts),
             "rpc_calls": dict(rpc_calls),
+            "deleted_tokens": {
+                "tokens": len(deleted_tokens["tokens"]),
+                "pools": len(deleted_tokens["pools"]),
+            },
         },
         "alerts": enriched_alerts,
         "active_pools": active[:100],
@@ -3069,6 +3142,7 @@ def scan_with_config(http, rpc, state, config):
     label = config.get("lane") or config.get("mode") or "scan"
     print(f"Building market universe for {label}...", flush=True)
     universe = build_universe(http, config)
+    deleted_tokens = load_deleted_tokens()
     observed_at = utc_now().isoformat().replace("+00:00", "Z")
     before_ath_filter = len(universe)
     universe = filter_reactivation_by_ath(http, state, universe, config, observed_at)
@@ -3079,6 +3153,12 @@ def scan_with_config(http, rpc, state, config):
             f"(max current/ATH {float(config['ath_max_current_ratio']) * 100:.0f}%)",
             flush=True,
         )
+    before_deleted_filter = len(universe)
+    universe = [pool for pool in universe if not pool_is_deleted(pool, deleted_tokens)]
+    deleted_skipped = before_deleted_filter - len(universe)
+    config["_deleted_tokens_skipped"] = deleted_skipped
+    if deleted_skipped:
+        print(f"{label}: skipped {deleted_skipped} deleted pools before on-chain scan", flush=True)
     scan_targets = universe[: int(config["active_pool_limit"])]
     print(f"{label}: universe {len(universe)} pools, scanning {len(scan_targets)}", flush=True)
     classification_budget = {
@@ -3147,6 +3227,7 @@ def run_once(config, lane_name=None):
             "ath_max_current_ratio": lane_config.get("ath_max_current_ratio"),
             "ath_require_trusted": lane_config.get("ath_require_trusted"),
             "ath_filter_stats": lane_config.get("_ath_filter_stats"),
+            "deleted_tokens_skipped": lane_config.get("_deleted_tokens_skipped", 0),
         }
 
     generated_at = utc_now().isoformat().replace("+00:00", "Z")

@@ -126,6 +126,23 @@ main {
   padding: 0 11px;
 }
 
+.status-action {
+  align-items: center;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--accent-strong);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 750;
+  min-height: 30px;
+  padding: 0 11px;
+}
+
+.status-action:hover {
+  border-color: var(--accent);
+}
+
 .status-pill.freshness-warn {
   background: #fff8eb;
   border-color: #f0c37a;

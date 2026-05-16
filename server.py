@@ -15,6 +15,7 @@ DATA_DIR = ROOT / "data"
 REPORT_JSON_PATH = DATA_DIR / "latest_report.json"
 ALERTS_PATH = DATA_DIR / "alerts.jsonl"
 STATE_PATH = DATA_DIR / "state.json"
+DELETED_TOKENS_PATH = DATA_DIR / "deleted_tokens.json"
 SCANNER_PATH = ROOT / "scanner.py"
 LANES = {"all", "incubation", "young", "breakout", "reactivation"}
 
@@ -66,6 +67,78 @@ def read_json(path, fallback):
         return json.loads(path.read_text())
     except json.JSONDecodeError:
         return fallback
+
+
+def default_deleted_tokens():
+    return {
+        "tokens": [],
+        "pools": [],
+        "entries": {},
+        "updated_at": None,
+    }
+
+
+def read_deleted_tokens():
+    data = read_json(DELETED_TOKENS_PATH, default_deleted_tokens())
+    if not isinstance(data, dict):
+        data = default_deleted_tokens()
+    data.setdefault("tokens", [])
+    data.setdefault("pools", [])
+    data.setdefault("entries", {})
+    data.setdefault("updated_at", None)
+    return data
+
+
+def normalize_id(value):
+    text = str(value or "").strip()
+    return text if text else None
+
+
+def unique_sorted(values):
+    return sorted({value for value in (normalize_id(item) for item in values) if value})
+
+
+def update_deleted_token(payload):
+    action = payload.get("action") or "delete"
+    token_address = normalize_id(payload.get("token_address") or payload.get("token_key"))
+    pool_address = normalize_id(payload.get("pool_address"))
+    if not token_address and not pool_address:
+        return False, {"error": "token_address_or_pool_address_required"}
+
+    data = read_deleted_tokens()
+    tokens = set(unique_sorted(data.get("tokens", [])))
+    pools = set(unique_sorted(data.get("pools", [])))
+    entries = data.get("entries") if isinstance(data.get("entries"), dict) else {}
+    entry_key = token_address or pool_address
+
+    if action == "restore":
+        if token_address:
+            tokens.discard(token_address)
+        if pool_address:
+            pools.discard(pool_address)
+        entries.pop(entry_key, None)
+    elif action == "delete":
+        if token_address:
+            tokens.add(token_address)
+        if pool_address:
+            pools.add(pool_address)
+        entries[entry_key] = {
+            "token_address": token_address,
+            "pool_address": pool_address,
+            "symbol": payload.get("symbol") or "",
+            "name": payload.get("name") or "",
+            "deleted_at": utc_stamp(),
+        }
+    else:
+        return False, {"error": "invalid_action", "actions": ["delete", "restore"]}
+
+    data["tokens"] = sorted(tokens)
+    data["pools"] = sorted(pools)
+    data["entries"] = entries
+    data["updated_at"] = utc_stamp()
+    DELETED_TOKENS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DELETED_TOKENS_PATH.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    return True, {"ok": True, "deleted_tokens": data}
 
 
 def read_recent_alerts(limit=100):
@@ -157,6 +230,7 @@ class RadarHandler(BaseHTTPRequestHandler):
                 "report": report,
                 "history": read_recent_alerts(),
                 "market": scanner_state.get("market", {}),
+                "deleted_tokens": read_deleted_tokens(),
                 "scan_status": dict(scan_status),
             }
             json_response(self, 200, payload)
@@ -168,6 +242,16 @@ class RadarHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/deleted-token":
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            except (ValueError, json.JSONDecodeError):
+                json_response(self, 400, {"error": "invalid_json"})
+                return
+            ok, response = update_deleted_token(payload)
+            json_response(self, 200 if ok else 400, response)
+            return
         if parsed.path != "/api/scan":
             json_response(self, 404, {"error": "not_found"})
             return

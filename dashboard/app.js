@@ -1,4 +1,6 @@
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
+const DELETE_SYNC_SECRET_KEY = "solana-radar:delete-sync-secret:v1";
+const DELETE_SYNC_ENDPOINT = "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/deleted-token";
 
 function loadHiddenTokenKeys() {
   try {
@@ -12,8 +14,44 @@ function saveHiddenTokenKeys(keys) {
   try {
     localStorage.setItem(HIDDEN_TOKENS_KEY, JSON.stringify([...keys]));
   } catch {
-    // Local hide state is an optional browser preference.
+    // Local delete state is an optional browser preference.
   }
+}
+
+function normalizeDeletedId(value) {
+  const text = String(value || "").trim();
+  return text || null;
+}
+
+function deletedIdSet(values, keys) {
+  const ids = new Set();
+  if (values && typeof values === "object" && !Array.isArray(values)) {
+    Object.values(values).forEach((entry) => {
+      if (entry && typeof entry === "object") {
+        keys.forEach((key) => {
+          const cleaned = normalizeDeletedId(entry[key]);
+          if (cleaned) ids.add(cleaned);
+        });
+      } else {
+        const cleaned = normalizeDeletedId(entry);
+        if (cleaned) ids.add(cleaned);
+      }
+    });
+    return ids;
+  }
+  if (!Array.isArray(values)) return ids;
+  values.forEach((entry) => {
+    if (entry && typeof entry === "object") {
+      keys.forEach((key) => {
+        const cleaned = normalizeDeletedId(entry[key]);
+        if (cleaned) ids.add(cleaned);
+      });
+    } else {
+      const cleaned = normalizeDeletedId(entry);
+      if (cleaned) ids.add(cleaned);
+    }
+  });
+  return ids;
 }
 
 const state = {
@@ -33,6 +71,8 @@ const state = {
   selectedAlertId: null,
   showHidden: false,
   hiddenTokenKeys: loadHiddenTokenKeys(),
+  serverDeletedTokenKeys: new Set(),
+  serverDeletedPoolKeys: new Set(),
   staticMode: false,
   staticExtrasLoadedFor: null,
   staticExtrasLoadingFor: null,
@@ -449,9 +489,36 @@ function tokenKey(value) {
   return typeof value === "string" ? value : value?.key || tokenKeyFromPool(value?.pool || value || {});
 }
 
+function tokenPoolAddress(value) {
+  if (!value || typeof value === "string") return "";
+  return value.pool_address || value.latestPool?.pool_address || value.pool?.pool_address || "";
+}
+
+function applyDeletedTokenList(data = {}) {
+  state.serverDeletedTokenKeys = new Set([
+    ...deletedIdSet(data.tokens, ["token_address", "token", "address", "id"]),
+    ...deletedIdSet(data.token_addresses, ["token_address", "token", "address", "id"]),
+    ...deletedIdSet(data.entries, ["token_address", "token", "address", "id"]),
+  ]);
+  state.serverDeletedPoolKeys = new Set([
+    ...deletedIdSet(data.pools, ["pool_address", "pool", "address", "id"]),
+    ...deletedIdSet(data.pool_addresses, ["pool_address", "pool", "address", "id"]),
+    ...deletedIdSet(data.entries, ["pool_address", "pool", "address", "id"]),
+  ]);
+}
+
+function isTokenServerDeleted(value) {
+  const key = tokenKey(value);
+  const poolAddress = tokenPoolAddress(value);
+  return Boolean(
+    (key && state.serverDeletedTokenKeys.has(key))
+    || (poolAddress && state.serverDeletedPoolKeys.has(poolAddress))
+  );
+}
+
 function isTokenHidden(value) {
   const key = tokenKey(value);
-  return Boolean(key && state.hiddenTokenKeys.has(key));
+  return Boolean((key && state.hiddenTokenKeys.has(key)) || isTokenServerDeleted(value));
 }
 
 function setTokenHidden(key, hidden) {
@@ -461,16 +528,69 @@ function setTokenHidden(key, hidden) {
   saveHiddenTokenKeys(state.hiddenTokenKeys);
 }
 
+function deleteSyncSecret() {
+  let secret = localStorage.getItem(DELETE_SYNC_SECRET_KEY) || "";
+  if (!secret) {
+    secret = window.prompt("Enter scanner delete sync secret") || "";
+    if (secret) localStorage.setItem(DELETE_SYNC_SECRET_KEY, secret);
+  }
+  return secret;
+}
+
+async function persistTokenDeletion(token, hidden, providedSecret = "") {
+  if (!token) return;
+  let endpoint = "/api/deleted-token";
+  const headers = { "content-type": "application/json" };
+  if (state.staticMode) {
+    endpoint = DELETE_SYNC_ENDPOINT;
+    const secret = providedSecret || deleteSyncSecret();
+    if (!secret) return;
+    headers["x-dispatch-secret"] = secret;
+  }
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      action: hidden ? "delete" : "restore",
+      token_address: token.token_address || "",
+      pool_address: token.pool_address || token.latestPool?.pool_address || "",
+      symbol: token.symbol || "",
+      name: token.name || "",
+    }),
+  });
+  const payload = await response.json();
+  if (!response.ok && response.status === 401 && state.staticMode) {
+    localStorage.removeItem(DELETE_SYNC_SECRET_KEY);
+  }
+  if (!response.ok) throw new Error(payload.error || "delete_failed");
+  applyDeletedTokenList(payload.deleted_tokens || {});
+}
+
+async function syncLocalDeletedTokens() {
+  if (!state.staticMode || !state.hiddenTokenKeys.size) return;
+  const secret = deleteSyncSecret();
+  if (!secret) return;
+  const tokens = buildTokenSignals().filter((token) => state.hiddenTokenKeys.has(token.key) && !isTokenServerDeleted(token));
+  for (const token of tokens) {
+    await persistTokenDeletion(token, true, secret);
+  }
+  render();
+}
+
 function renderHiddenAction(token, compact = false) {
   const hidden = isTokenHidden(token);
+  const serverDeleted = isTokenServerDeleted(token);
+  const disabled = serverDeleted && state.staticMode;
+  const label = hidden ? (disabled ? "Deleted" : "Restore") : "Delete";
   return `
     <button
       class="${compact ? "chip-action" : "secondary-action"} token-hide-toggle"
       type="button"
       data-token-key="${esc(token.key)}"
+      ${disabled ? "disabled" : ""}
       data-hidden="${hidden ? "true" : "false"}"
-      title="${hidden ? "Restore token to scanner lists" : "Delete this false catch from dashboard lists"}"
-    >${hidden ? "Restore" : "Delete"}</button>
+      title="${hidden ? (disabled ? "Deleted in scanner blacklist" : "Restore token to scanner lists") : "Delete this false catch from dashboard lists"}"
+    >${label}</button>
   `;
 }
 
@@ -1107,7 +1227,11 @@ function parseJsonl(text) {
 }
 
 async function loadStaticData() {
-  const report = await fetchJson("data/latest_report.json");
+  const [report, deletedTokens] = await Promise.all([
+    fetchJson("data/latest_report.json"),
+    fetchJson("data/deleted_tokens.json", true),
+  ]);
+  applyDeletedTokenList(deletedTokens || {});
   const extrasReady = state.staticExtrasLoadedFor === report.generated_at;
   return {
     report,
@@ -1169,6 +1293,7 @@ async function loadData() {
   }
   }
   state.report = payload.report || {};
+  applyDeletedTokenList(payload.deleted_tokens || {});
   if (state.staticMode) {
     if (state.staticExtrasLoadedFor !== state.report.generated_at) {
       state.history = payload.history || [];
@@ -1212,12 +1337,19 @@ function renderStatus() {
     `<span class="status-pill freshness-${freshness.tone}"><span class="dot ${freshness.tone === "good" ? "" : freshness.tone}"></span>${esc(freshness.label)}</span>`,
     `<span class="status-pill">lane ${esc(laneText)}</span>`,
     state.hiddenTokenKeys.size ? `<span class="status-pill">${esc(state.hiddenTokenKeys.size)} deleted locally</span>` : "",
+    state.serverDeletedTokenKeys.size || state.serverDeletedPoolKeys.size ? `<span class="status-pill">${esc(state.serverDeletedTokenKeys.size + state.serverDeletedPoolKeys.size)} scanner-deleted</span>` : "",
+    state.staticMode && state.hiddenTokenKeys.size ? `<button class="status-action" id="syncDeleted" type="button">Sync deleted</button>` : "",
     state.staticMode ? `<span class="status-pill">auto via Cloudflare + GitHub Actions</span>` : "",
     state.staticExtrasLoadingFor === report.generated_at ? `<span class="status-pill freshness-warn">loading history</span>` : "",
     state.staticExtrasLoadedFor === report.generated_at ? `<span class="status-pill"><span class="dot"></span>history loaded</span>` : "",
     status.next_scan_at ? `<span class="status-pill">next auto ${esc(dateLabel(status.next_scan_at))}</span>` : "",
     status.returncode === 0 ? `<span class="status-pill"><span class="dot"></span>last scan ok</span>` : "",
   ].filter(Boolean).join("");
+  document.querySelector("#syncDeleted")?.addEventListener("click", () => {
+    syncLocalDeletedTokens().catch((error) => {
+      els.statusRow.innerHTML += `<span class="status-pill freshness-bad">delete sync failed: ${esc(error.message)}</span>`;
+    });
+  });
 }
 
 function renderMetrics(tokens) {
@@ -1303,7 +1435,14 @@ function bindTokenHideActions() {
       event.preventDefault();
       event.stopPropagation();
       const key = button.dataset.tokenKey;
-      setTokenHidden(key, button.dataset.hidden !== "true");
+      const hidden = button.dataset.hidden !== "true";
+      const token = buildTokenSignals().find((item) => item.key === key);
+      setTokenHidden(key, hidden);
+      persistTokenDeletion(token, hidden)
+        .then(() => render())
+        .catch((error) => {
+          els.statusRow.innerHTML += `<span class="status-pill freshness-bad">delete sync failed: ${esc(error.message)}</span>`;
+        });
       render();
     });
   });

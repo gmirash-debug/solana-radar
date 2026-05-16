@@ -107,7 +107,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/latest_report.json data/latest_report.md data/alerts.jsonl data/state.json
+          git add data/latest_report.json data/latest_report.md data/alerts.jsonl data/state.json data/deleted_tokens.json
           if ! git diff --cached --quiet; then
             git commit -m "Update scanner data"
             git push
@@ -120,6 +120,11 @@ jobs:
           mkdir -p .pages/data
           cp dashboard/index.html dashboard/app.js dashboard/styles.css .pages/
           cp data/latest_report.json data/latest_report.md data/alerts.jsonl .pages/data/
+          if [ -f data/deleted_tokens.json ]; then
+            cp data/deleted_tokens.json .pages/data/
+          else
+            printf '{"tokens":[],"pools":[],"entries":{},"updated_at":null}\n' > .pages/data/deleted_tokens.json
+          fi
           python3 - <<'PY'
           import json
           from pathlib import Path
