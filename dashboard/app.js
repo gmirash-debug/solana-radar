@@ -469,8 +469,8 @@ function renderHiddenAction(token, compact = false) {
       type="button"
       data-token-key="${esc(token.key)}"
       data-hidden="${hidden ? "true" : "false"}"
-      title="${hidden ? "Return token to normal lists" : "Hide this token from dashboard lists"}"
-    >${hidden ? "Unhide" : "Hide"}</button>
+      title="${hidden ? "Restore token to scanner lists" : "Delete this false catch from dashboard lists"}"
+    >${hidden ? "Restore" : "Delete"}</button>
   `;
 }
 
@@ -1067,7 +1067,7 @@ function metric(label, value) {
 
 function emptyMessage(text) {
   const hiddenHint = !state.showHidden && state.hiddenTokenKeys.size
-    ? ` <span class="muted-inline">Enable Show hidden to review ${esc(state.hiddenTokenKeys.size)} locally hidden token${state.hiddenTokenKeys.size === 1 ? "" : "s"}.</span>`
+    ? ` <span class="muted-inline">Enable Show deleted to review ${esc(state.hiddenTokenKeys.size)} locally deleted token${state.hiddenTokenKeys.size === 1 ? "" : "s"}.</span>`
     : "";
   return `<div class="empty">${esc(text)}${hiddenHint}</div>`;
 }
@@ -1211,7 +1211,7 @@ function renderStatus() {
     `<span class="status-pill"><span class="dot ${running ? "warn" : ""}"></span>${running ? "scan running" : "idle"}</span>`,
     `<span class="status-pill freshness-${freshness.tone}"><span class="dot ${freshness.tone === "good" ? "" : freshness.tone}"></span>${esc(freshness.label)}</span>`,
     `<span class="status-pill">lane ${esc(laneText)}</span>`,
-    state.hiddenTokenKeys.size ? `<span class="status-pill">${esc(state.hiddenTokenKeys.size)} hidden locally</span>` : "",
+    state.hiddenTokenKeys.size ? `<span class="status-pill">${esc(state.hiddenTokenKeys.size)} deleted locally</span>` : "",
     state.staticMode ? `<span class="status-pill">auto via Cloudflare + GitHub Actions</span>` : "",
     state.staticExtrasLoadingFor === report.generated_at ? `<span class="status-pill freshness-warn">loading history</span>` : "",
     state.staticExtrasLoadedFor === report.generated_at ? `<span class="status-pill"><span class="dot"></span>history loaded</span>` : "",
@@ -1249,7 +1249,7 @@ function renderTokenRow(token) {
         <div class="symbol-line">
           <span class="symbol">${esc(token.symbol)}</span>
           <span class="muted">${esc(token.name)}</span>
-          ${token.hidden ? chip("hidden", "warn") : ""}
+          ${token.hidden ? chip("deleted", "warn") : ""}
         </div>
         <div class="meta">
           <span>first ${esc(dateLabel(token.firstSignalAt))}</span>
@@ -1680,7 +1680,7 @@ function renderTokenDetail(token) {
   return `
     <aside class="detail token-detail">
       <div class="detail-head">
-        <h2>${esc(token.symbol)} <span class="muted">${esc(token.name)}</span>${token.hidden ? ` ${chip("hidden", "warn")}` : ""}</h2>
+        <h2>${esc(token.symbol)} <span class="muted">${esc(token.name)}</span>${token.hidden ? ` ${chip("deleted", "warn")}` : ""}</h2>
         ${renderHiddenAction(token)}
       </div>
       <div class="detail-hero">
@@ -1808,7 +1808,7 @@ function renderNarrativeTokenRows(group) {
     <button class="narrative-token-row${token.hidden ? " is-hidden" : ""}" type="button" data-token-key="${esc(token.key)}">
       <span>
         <strong>${esc(token.symbol)}</strong>
-        <small>${esc([token.name || token.narrative.primary, token.hidden ? "hidden" : ""].filter(Boolean).join(" / "))}</small>
+        <small>${esc([token.name || token.narrative.primary, token.hidden ? "deleted" : ""].filter(Boolean).join(" / "))}</small>
       </span>
       <span class="${pClass(token.profitPct)}">${pct(token.profitPct)}</span>
       <span>${money(token.currentMcap)}</span>
@@ -1987,7 +1987,7 @@ function renderFilterTokenRows(group) {
       <button class="filter-token-row${selected}${hidden}" type="button" data-token-key="${esc(token.key)}">
         <span class="filter-token-name">
           <strong>${esc(token.symbol)}</strong>
-          <small>${esc([token.currentScanAlertCount ? `${token.currentScanAlertCount} latest scan` : "", tierMeta(token.actionTier).label, token.name || token.narrative.primary, driftLabel, phase?.label, token.hidden ? "hidden" : ""].filter(Boolean).join(" / "))}</small>
+          <small>${esc([token.currentScanAlertCount ? `${token.currentScanAlertCount} latest scan` : "", tierMeta(token.actionTier).label, token.name || token.narrative.primary, driftLabel, phase?.label, token.hidden ? "deleted" : ""].filter(Boolean).join(" / "))}</small>
         </span>
         <span class="filter-token-value">
           <strong>${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)}</strong>
