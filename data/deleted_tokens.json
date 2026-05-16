@@ -13,15 +13,24 @@
       "symbol": "CTO",
       "name": "CHINA TAKE OVER",
       "deleted_at": "2026-05-16T23:25:46.868Z"
+    },
+    "ADVAviLMaZXLVjxYDHNd3VcV68EE8HUbo9FowLPbpump": {
+      "token_address": "ADVAviLMaZXLVjxYDHNd3VcV68EE8HUbo9FowLPbpump",
+      "pool_address": "HCTAwVjrz9HJ8L3d1AQDXFFceYpmEFn9S3RMDGFCE9Tk",
+      "symbol": "POPTROLL",
+      "name": "Pop Troll",
+      "deleted_at": "2026-05-16T23:25:47.853Z"
     }
   },
   "pools": [
     "6TB1AwLDFQpT6dC4GdG9QiiT6BTDyxAdn2Dojm73gJrS",
-    "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ"
+    "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
+    "HCTAwVjrz9HJ8L3d1AQDXFFceYpmEFn9S3RMDGFCE9Tk"
   ],
   "tokens": [
     "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
+    "ADVAviLMaZXLVjxYDHNd3VcV68EE8HUbo9FowLPbpump",
     "GFKNuUKCDP3kQtTAjaV5VVMJFtNvMGG62xKP3XGXpump"
   ],
-  "updated_at": "2026-05-16T23:25:46.868Z"
+  "updated_at": "2026-05-16T23:25:47.853Z"
 }
