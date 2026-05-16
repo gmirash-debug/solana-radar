@@ -34,6 +34,8 @@ const state = {
   showHidden: false,
   hiddenTokenKeys: loadHiddenTokenKeys(),
   staticMode: false,
+  staticExtrasLoadedFor: null,
+  staticExtrasLoadingFor: null,
 };
 
 const els = {
@@ -1106,14 +1108,11 @@ function parseJsonl(text) {
 
 async function loadStaticData() {
   const report = await fetchJson("data/latest_report.json");
-  const [alertsText, scannerState] = await Promise.all([
-    fetchText("data/alerts.jsonl", true),
-    fetchJson("data/state.json", true),
-  ]);
+  const extrasReady = state.staticExtrasLoadedFor === report.generated_at;
   return {
     report,
-    history: parseJsonl(alertsText),
-    market: scannerState?.market || {},
+    history: extrasReady ? state.history : [],
+    market: extrasReady ? state.market : {},
     scan_status: {
       running: false,
       source: "github_actions",
@@ -1122,6 +1121,36 @@ async function loadStaticData() {
       returncode: 0,
     },
   };
+}
+
+async function loadStaticExtras(reportGeneratedAt) {
+  if (!reportGeneratedAt) return;
+  if (state.staticExtrasLoadedFor === reportGeneratedAt) return;
+  if (state.staticExtrasLoadingFor === reportGeneratedAt) return;
+  state.staticExtrasLoadingFor = reportGeneratedAt;
+  renderStatus();
+  try {
+    const [alertsText, scannerState] = await Promise.all([
+      fetchText("data/alerts.jsonl", true),
+      fetchJson("data/state.json", true),
+    ]);
+    if (state.report?.generated_at !== reportGeneratedAt) return;
+    state.history = parseJsonl(alertsText);
+    state.market = scannerState?.market || {};
+    state.staticExtrasLoadedFor = reportGeneratedAt;
+    const tokens = buildTokenSignals();
+    const visibleTokens = filteredTokens(tokens);
+    if (!state.selectedTokenKey && visibleTokens.length) state.selectedTokenKey = visibleTokens[0].key;
+    if (!state.showHidden && isTokenHidden(state.selectedTokenKey)) {
+      state.selectedTokenKey = visibleTokens[0]?.key || null;
+    }
+    render();
+  } finally {
+    if (state.staticExtrasLoadingFor === reportGeneratedAt) {
+      state.staticExtrasLoadingFor = null;
+      renderStatus();
+    }
+  }
 }
 
 async function loadData() {
@@ -1140,8 +1169,15 @@ async function loadData() {
   }
   }
   state.report = payload.report || {};
-  state.history = payload.history || [];
-  state.market = payload.market || {};
+  if (state.staticMode) {
+    if (state.staticExtrasLoadedFor !== state.report.generated_at) {
+      state.history = payload.history || [];
+      state.market = payload.market || {};
+    }
+  } else {
+    state.history = payload.history || [];
+    state.market = payload.market || {};
+  }
   state.scanStatus = payload.scan_status || {};
   const tokens = buildTokenSignals();
   const visibleTokens = filteredTokens(tokens);
@@ -1150,6 +1186,11 @@ async function loadData() {
     state.selectedTokenKey = visibleTokens[0]?.key || null;
   }
   render();
+  if (state.staticMode) {
+    loadStaticExtras(state.report.generated_at).catch((error) => {
+      els.statusRow.innerHTML += `<span class="status-pill freshness-bad">history load failed: ${esc(error.message)}</span>`;
+    });
+  }
 }
 
 function renderStatus() {
@@ -1172,6 +1213,8 @@ function renderStatus() {
     `<span class="status-pill">lane ${esc(laneText)}</span>`,
     state.hiddenTokenKeys.size ? `<span class="status-pill">${esc(state.hiddenTokenKeys.size)} hidden locally</span>` : "",
     state.staticMode ? `<span class="status-pill">auto via Cloudflare + GitHub Actions</span>` : "",
+    state.staticExtrasLoadingFor === report.generated_at ? `<span class="status-pill freshness-warn">loading history</span>` : "",
+    state.staticExtrasLoadedFor === report.generated_at ? `<span class="status-pill"><span class="dot"></span>history loaded</span>` : "",
     status.next_scan_at ? `<span class="status-pill">next auto ${esc(dateLabel(status.next_scan_at))}</span>` : "",
     status.returncode === 0 ? `<span class="status-pill"><span class="dot"></span>last scan ok</span>` : "",
   ].filter(Boolean).join("");
@@ -2159,4 +2202,4 @@ loadData().catch((error) => {
 
 setInterval(() => {
   loadData().catch(() => {});
-}, 15000);
+}, 60000);
