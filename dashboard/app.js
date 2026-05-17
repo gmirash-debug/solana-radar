@@ -1755,6 +1755,78 @@ function renderWalletSummary(token) {
   return `${esc(token.uniqueWallets)} unique wallets / median ${pct(token.medianWalletPnl)} / best ${pct(token.bestWalletPnl)}`;
 }
 
+function detailMetric(label, value, sub = "", valueClass = "", subClass = "") {
+  return `
+    <div class="detail-metric">
+      <span>${esc(label)}</span>
+      <strong class="${esc(valueClass)}">${esc(value)}</strong>
+      ${sub ? `<small class="${esc(subClass)}">${esc(sub)}</small>` : ""}
+    </div>
+  `;
+}
+
+function renderTopWalletPreview(token) {
+  if (!token.wallets.length) return `<div class="detail-empty-line">No noticed wallet events.</div>`;
+  return `
+    <div class="wallet-preview">
+      ${token.wallets.slice(0, 3).map((wallet) => `
+        <div class="wallet-preview-row">
+          <code>${esc(short(wallet.owner))}</code>
+          <span>${esc(wallet.class_label || "-")}</span>
+          <strong>${sol(wallet.sol_in)}</strong>
+          <strong class="${pClass(wallet.pnl_pct)}">${pct(wallet.pnl_pct)}</strong>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderScannerReason(token) {
+  const parts = [];
+  if (token.hardSignalCount || token.hardFlowSol) {
+    parts.push(`${token.hardSignalCount} hard wallets bought ${sol(token.hardFlowSol)}`);
+  }
+  if (token.supportSignalCount || token.supportFlowSol) {
+    parts.push(`${token.supportSignalCount} support wallets bought ${sol(token.supportFlowSol)}`);
+  }
+  const linkCount = token.commonFunders.length + token.commonRecipients.length + Number(token.routedBuyCount || 0);
+  if (linkCount) parts.push(`${linkCount} wallet-link flag${linkCount === 1 ? "" : "s"}`);
+  if (token.currentScanAlertCount) parts.push(`${token.currentScanAlertCount} update${token.currentScanAlertCount === 1 ? "" : "s"} in latest scan`);
+  if (!parts.length) return "Scanner caught this from score-based evidence, but hard wallet evidence is thin.";
+  return `${parts.join("; ")}.`;
+}
+
+function renderRiskFlags(token) {
+  const flags = [];
+  const phase = marketPhase(token);
+  if (token.actionTier === "late_chase") flags.push(chip("late/chase", "bad"));
+  if (token.actionTier === "noise") flags.push(chip("noise", "bad"));
+  if (phase && ["Upper range", "Near ATH"].includes(phase.label)) flags.push(chip(`${phase.label}: ${phase.detail}`, phase.tone));
+  if (!token.hardSignalCount) flags.push(chip("no hard wallets", "warn"));
+  if (!token.athMcapUsd) flags.push(chip(athStatusLabel(token.athStatus, token.athError), "warn"));
+  if (["disabled", "none", "unchecked"].includes(token.socialHeat)) flags.push(chip(socialLabel(token.socialHeat, token.socialReason), token.socialHeat === "disabled" ? "warn" : ""));
+  token.qualityPenalties.slice(0, 4).forEach((item) => {
+    flags.push(chip(item, item.includes("late") || item.includes("blowoff") || item.includes("only") ? "bad" : "warn"));
+  });
+  if (token.hasFilterDrift) flags.push(chip(`moved from ${filterMeta(token.caughtFilter).label}`, "warn"));
+  if (!flags.length) return chip("no major risk flags", "good");
+  const visible = flags.slice(0, 7).join(" ");
+  const hiddenCount = flags.length - 7;
+  return `${visible}${hiddenCount > 0 ? ` ${chip(`+${hiddenCount} more`, "warn")}` : ""}`;
+}
+
+function renderDetailSection(title, summary, body, open = false) {
+  return `
+    <details class="detail-section" ${open ? "open" : ""}>
+      <summary>
+        <span>${esc(title)}</span>
+        ${summary ? `<small>${esc(summary)}</small>` : ""}
+      </summary>
+      <div class="detail-section-body">${body}</div>
+    </details>
+  `;
+}
+
 function tokenAthRatio(token) {
   const currentMcap = Number(token.scanMcapUsd || token.currentMcap || 0);
   const athMcap = Number(token.athMcapUsd || 0);
@@ -1786,6 +1858,15 @@ function renderMarketPhase(token) {
   `;
 }
 
+function renderMarketPhaseLine(token) {
+  const phase = marketPhase(token);
+  if (!phase) return "-";
+  const reactivationHighRange = token.filterCategories.includes("reactivation")
+    && (phase.label === "Upper range" || phase.label === "Near ATH");
+  const caution = reactivationHighRange ? "not a clean low-volume reactivation setup" : "";
+  return `${chip(phase.label, phase.tone)} ${esc(phase.detail)}${caution ? ` <span class="muted-inline">${esc(caution)}</span>` : ""}`;
+}
+
 function gmgnTokenUrl(token) {
   return token.token_address ? `https://gmgn.ai/sol/token/${encodeURIComponent(token.token_address)}` : "";
 }
@@ -1815,55 +1896,86 @@ function renderLaunchContext(token) {
   `;
 }
 
+function renderTimeline(token) {
+  return `
+    <div class="timeline">
+      ${[...token.alerts].reverse().map((alert) => `
+        <div class="timeline-item">
+          <strong>${esc(dateLabel(alert.window_start))} ${tierChip(alertTier(alert))}${alert._scope_source === "current" ? ` ${chip("latest scan", "good")}` : ""}</strong>
+          <span>OBS ${moneyMaybe(alert.obs_mcap_usd || alert.pool?.mcap_usd)} / score ${esc(alert.score)} / hard ${sol(alert.hard_sol || 0)} / support ${sol(alert.support_sol || 0)} / ${esc(alert.filterLane || effectiveAlertLane(alert))}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
 function renderTokenDetail(token) {
   if (!token) return `<aside class="detail"><h2>No token selected</h2></aside>`;
   const gmgnUrl = gmgnTokenUrl(token);
+  const phase = marketPhase(token);
+  const athValue = token.athMcapUsd
+    ? `${token.athMcapAt ? `${esc(dateLabel(token.athMcapAt))} / ` : ""}${money(token.athMcapUsd)}`
+    : athStatusLabel(token.athStatus, token.athError);
+  const athSub = token.athMcapUsd
+    ? `${phase ? `${esc(phase.detail)} / ` : ""}${athSourceLabel(token.athSource)}`
+    : "Solana Tracker ATH not ready";
+  const marketNowSub = [
+    `${money(token.liquidityUsd)} liq`,
+    token.scanMcapAt ? dateLabel(token.scanMcapAt) : "",
+  ].filter(Boolean).join(" / ");
+  const sourceLinks = renderTokenSourceLinks(token);
   return `
     <aside class="detail token-detail">
       <div class="detail-head">
-        <h2>${esc(token.symbol)} <span class="muted">${esc(token.name)}</span>${token.hidden ? ` ${chip("deleted", "warn")}` : ""}</h2>
-        ${renderHiddenAction(token)}
-      </div>
-      <div class="detail-hero">
         <div>
-          <strong class="${pClass(token.profitPct)}">${pct(token.profitPct)}</strong>
-          <span>profit since caught</span>
-        </div>
-        <div>
-          <strong>${sol(token.totalSuspiciousSol)}</strong>
-          <span>unique noticed flow</span>
-        </div>
-      </div>
-      <div class="kv"><span>Token age</span><span>${esc(durationLabel(token.tokenAgeHours))}${token.tokenCreatedAt ? ` / launched ${esc(dateLabel(token.tokenCreatedAt))}` : ""}</span></div>
-      <div class="kv"><span>Caught</span><span>${esc(dateLabel(token.firstSignalAt))} / ${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)} mcap</span></div>
-      <div class="kv"><span>ATH mcap</span><span>${token.athMcapUsd ? `${token.athMcapAt ? `${esc(dateLabel(token.athMcapAt))} / ` : ""}${money(token.athMcapUsd)} mcap ${chip(athSourceLabel(token.athSource), "good")}` : `${chip(athStatusLabel(token.athStatus, token.athError), "warn")}`}</span></div>
-      <div class="kv"><span>Market now</span><span>${moneyMaybe(token.scanMcapUsd || token.currentMcap)} mcap / ${money(token.liquidityUsd)} liq${token.scanMcapAt ? ` / ${esc(dateLabel(token.scanMcapAt))}` : ""}</span></div>
-      ${renderMarketPhase(token)}
-      ${renderLaunchContext(token)}
-      <div class="kv"><span>Signal log</span><span>${esc(token.alertCount)} accumulated updates / latest ${esc(dateLabel(token.latestUpdateAt))}${token.currentScanAlertCount ? ` / ${esc(token.currentScanAlertCount)} in latest scan` : ""}</span></div>
-      <div class="kv"><span>Signal tier</span><span>${renderSignalTier(token)}</span></div>
-      <div class="kv"><span>Scanner filter</span><span>${renderFilterLine(token)}</span></div>
-      <div class="kv"><span>Signal quality</span><span>${renderSignalQuality(token)}</span></div>
-      <div class="kv"><span>Wallet cluster</span><span>${renderWalletCluster(token)}</span></div>
-      <div class="kv"><span>Wallet PnL</span><span>${renderWalletSummary(token)}</span></div>
-      <div class="kv"><span>Primary narrative</span><span>${renderNarrativeLine(token)}</span></div>
-      <div class="kv"><span>Lore thesis</span><span>${renderLoreProof(token)}</span></div>
-      <div class="kv"><span>Proof basis</span><span>${renderEvidenceLine(token)}</span></div>
-      <div class="kv"><span>Source links</span><span>${renderTokenSourceLinks(token)}</span></div>
-      <div class="kv"><span>Token / terminal</span><span><code>${esc(token.token_address)}</code> ${gmgnUrl ? `<a href="${esc(gmgnUrl)}" target="_blank" rel="noreferrer">Open GMGN</a>` : `<code>${esc(token.pool_address)}</code>`}</span></div>
-      <h2>Caller Network</h2>
-      ${renderCallerRows(token)}
-      <h2>Noticed Wallet PnL</h2>
-      ${renderWalletRows(token)}
-      <h2>Signal Timeline</h2>
-      <div class="timeline">
-        ${[...token.alerts].reverse().map((alert) => `
-          <div class="timeline-item">
-            <strong>${esc(dateLabel(alert.window_start))} ${tierChip(alertTier(alert))}${alert._scope_source === "current" ? ` ${chip("latest scan", "good")}` : ""}</strong>
-            <span>OBS ${moneyMaybe(alert.obs_mcap_usd || alert.pool?.mcap_usd)} / score ${esc(alert.score)} / hard ${sol(alert.hard_sol || 0)} / support ${sol(alert.support_sol || 0)} / ${esc(alert.filterLane || effectiveAlertLane(alert))}</span>
+          <h2>${esc(token.symbol)} <span class="muted">${esc(token.name)}</span>${token.hidden ? ` ${chip("deleted", "warn")}` : ""}</h2>
+          <div class="detail-head-chips">
+            ${tierChip(token.actionTier)}
+            ${chip(filterMeta(token.currentFilter).label)}
+            ${token.hasFilterDrift ? chip(`caught ${filterMeta(token.caughtFilter).label}`, "warn") : ""}
+            ${phase ? chip(phase.label, phase.tone) : ""}
           </div>
-        `).join("")}
+        </div>
+        <div class="detail-actions">
+          ${gmgnUrl ? `<a class="secondary-action detail-link" href="${esc(gmgnUrl)}" target="_blank" rel="noreferrer">GMGN</a>` : ""}
+          ${renderHiddenAction(token)}
+        </div>
       </div>
+      <div class="decision-grid">
+        ${detailMetric("Caught", `${esc(dateLabel(token.firstSignalAt))} / ${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)}`, `${pct(token.profitPct)} since caught`, "", pClass(token.profitPct))}
+        ${detailMetric("Now", `${moneyMaybe(token.scanMcapUsd || token.currentMcap)} mcap`, marketNowSub)}
+        ${detailMetric("ATH", athValue, athSub, token.athMcapUsd ? "" : "bad")}
+        ${detailMetric("Signal", sol(token.totalSuspiciousSol), `score ${esc(token.maxScore)} / ${esc(token.uniqueWallets)} wallets`)}
+      </div>
+      <section class="detail-block">
+        <div class="detail-block-title">Decision</div>
+        <div class="kv"><span>Why caught</span><span>${esc(renderScannerReason(token))}</span></div>
+        <div class="kv"><span>Risk flags</span><span>${renderRiskFlags(token)}</span></div>
+        <div class="kv"><span>Market phase</span><span>${renderMarketPhaseLine(token)}</span></div>
+        <div class="kv"><span>Token age</span><span>${esc(durationLabel(token.tokenAgeHours))}${token.tokenCreatedAt ? ` / launched ${esc(dateLabel(token.tokenCreatedAt))}` : ""}</span></div>
+      </section>
+      ${renderLaunchContext(token)}
+      <section class="detail-block">
+        <div class="detail-block-title">Evidence</div>
+        <div class="kv"><span>Signal tier</span><span>${renderSignalTier(token)}</span></div>
+        <div class="kv"><span>Wallet setup</span><span>${renderWalletCluster(token)}</span></div>
+        <div class="kv"><span>Wallet PnL</span><span>${renderWalletSummary(token)}</span></div>
+        ${renderTopWalletPreview(token)}
+      </section>
+      <section class="detail-block">
+        <div class="detail-block-title">Narrative</div>
+        <div class="kv"><span>Primary</span><span>${renderNarrativeLine(token)}</span></div>
+        <div class="kv"><span>Thesis</span><span>${renderLoreProof(token)}</span></div>
+        <div class="kv"><span>Proof basis</span><span>${renderEvidenceLine(token)}</span></div>
+      </section>
+      ${renderDetailSection("Caller Network", `${tokenCallerGraph(token).length} callers`, renderCallerRows(token))}
+      ${renderDetailSection("Wallet table", `${token.wallets.length} wallets`, renderWalletRows(token))}
+      ${renderDetailSection("Signal Timeline", `${token.alertCount} updates`, renderTimeline(token))}
+      ${renderDetailSection("Sources and terminal", token.token_address ? short(token.token_address) : "", `
+        <div class="kv"><span>Sources</span><span>${sourceLinks}</span></div>
+        <div class="kv"><span>Token</span><span><code>${esc(token.token_address)}</code></span></div>
+        <div class="kv"><span>Terminal</span><span>${gmgnUrl ? `<a href="${esc(gmgnUrl)}" target="_blank" rel="noreferrer">Open GMGN</a>` : `<code>${esc(token.pool_address)}</code>`}</span></div>
+      `)}
     </aside>
   `;
 }
