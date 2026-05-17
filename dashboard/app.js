@@ -714,7 +714,9 @@ function pClass(value) {
 
 function sourceAlerts() {
   const current = (state.report?.alerts || []).map((alert) => ({ ...alert, _scope_source: "current" }));
-  const history = (state.history || []).map((alert) => ({ ...alert, _scope_source: "history" }));
+  const history = (state.history || [])
+    .filter((alert) => ["actionable", "watch"].includes(alert.action_tier))
+    .map((alert) => ({ ...alert, _scope_source: "history" }));
   return [...history, ...current];
 }
 

@@ -39,7 +39,7 @@
       "big_buy_sol": 5,
       "alert_min_suspicious_wallets": 4,
       "alert_min_suspicious_sol": 25,
-      "active_pool_limit": 35,
+      "active_pool_limit": 25,
       "max_new_signatures_per_pool": 20,
       "initial_backfill_signatures": 10,
       "max_wallet_classifications_per_scan": 120
@@ -69,7 +69,7 @@
       "alert_window_minutes": 60,
       "alert_min_suspicious_wallets": 3,
       "alert_min_suspicious_sol": 25,
-      "active_pool_limit": 35,
+      "active_pool_limit": 25,
       "helius_recent_pages": 4,
       "helius_recent_medium_tx_pages": 10,
       "helius_recent_high_tx_pages": 24,
@@ -103,7 +103,7 @@
       "alert_window_minutes": 240,
       "alert_min_suspicious_wallets": 3,
       "alert_min_suspicious_sol": 30,
-      "active_pool_limit": 35,
+      "active_pool_limit": 25,
       "helius_recent_pages": 4,
       "helius_recent_medium_tx_pages": 8,
       "helius_recent_high_tx_pages": 18,
@@ -139,7 +139,7 @@
       "alert_window_minutes": 240,
       "alert_min_suspicious_wallets": 5,
       "alert_min_suspicious_sol": 75,
-      "active_pool_limit": 25,
+      "active_pool_limit": 15,
       "helius_recent_pages": 4,
       "helius_recent_medium_tx_pages": 8,
       "helius_recent_high_tx_pages": 16,
@@ -181,7 +181,7 @@
       "alert_window_minutes": 240,
       "alert_min_suspicious_wallets": 3,
       "alert_min_suspicious_sol": 20,
-      "active_pool_limit": 50,
+      "active_pool_limit": 25,
       "helius_recent_pages": 4,
       "helius_recent_medium_tx_pages": 8,
       "helius_recent_high_tx_pages": 16,
@@ -232,13 +232,31 @@
   "low_tx_support_only_alerts": false,
   "alert_event_export_limit": 80,
   "state_json_compact": true,
+  "alert_history_keep_tiers": [
+    "actionable",
+    "watch"
+  ],
+  "alert_history_keep_missing_tier": false,
+  "alert_history_retention_hours": 168,
+  "alert_history_max_tokens": 40,
+  "alert_history_max_alerts": 160,
+  "alert_history_max_alerts_per_token": 3,
+  "state_market_retention_hours": 96,
+  "state_pool_retention_hours": 168,
+  "state_enrichment_cache_retention_hours": 72,
   "wallet_cache_keep_classes": [
     "fresh",
     "freshish",
     "dormant",
     "low_tx"
   ],
-  "wallet_cache_normal_limit": 20000,
+  "wallet_cache_normal_limit": 5000,
+  "wallet_cache_class_limits": {
+    "dormant": 1500,
+    "fresh": 2000,
+    "freshish": 4000,
+    "low_tx": 5000
+  },
   "helius_deep_scan_enabled": true,
   "helius_deep_min_suspicious_wallets": 2,
   "helius_deep_min_suspicious_sol": 15,
@@ -327,10 +345,6 @@
   "social_watched_accounts": [
     "BigBlueBots"
   ],
-  "manual_tokens": [
-    "G3FoXHoQDuGkEG8ZqQd7riC9uB1N51bg7JuxJEPNpump"
-  ],
-  "manual_pools": [
-    "4XUUrG5a7vHpotaAhF5fm9YCPpBcWDnjSmmYU61Sh6qR"
-  ]
+  "manual_tokens": [],
+  "manual_pools": []
 }

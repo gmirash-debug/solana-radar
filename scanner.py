@@ -28,6 +28,7 @@ CONFIG_PATH = ROOT / "config.json"
 DEFAULT_CONFIG_PATH = ROOT / "config.example.json"
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
+SOLANA_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
 def utc_now():
@@ -83,6 +84,13 @@ def load_json(path, fallback):
 def clean_deleted_id(value):
     text = str(value or "").strip()
     return text if text else None
+
+
+def clean_solana_address(value):
+    text = clean_deleted_id(value)
+    if not text or not SOLANA_ADDRESS_RE.match(text):
+        return None
+    return text
 
 
 def deleted_id_set(values, keys):
@@ -489,7 +497,7 @@ def fetch_gmgn_trending_token_addresses(config):
                 continue
             if str(item.get("chain") or "sol").lower() != "sol":
                 continue
-            address = clean_deleted_id(item.get("address"))
+            address = clean_solana_address(item.get("address"))
             if address:
                 addresses.add(address)
         time.sleep(float(config.get("gmgn_request_delay_seconds", 0.25)))
@@ -586,15 +594,17 @@ def fetch_dex_token_addresses(http):
         if isinstance(data, dict):
             data = data.get("data", [])
         for item in data or []:
-            if item.get("chainId") == "solana" and item.get("tokenAddress"):
-                addresses.add(item["tokenAddress"])
+            address = clean_solana_address(item.get("tokenAddress"))
+            if item.get("chainId") == "solana" and address:
+                addresses.add(address)
         time.sleep(0.25)
     return addresses
 
 
 def fetch_dex_pairs_for_tokens(http, token_addresses, source):
     pools = {}
-    for group in chunked(sorted(set(token_addresses)), 30):
+    clean_addresses = {address for address in (clean_solana_address(item) for item in token_addresses) if address}
+    for group in chunked(sorted(clean_addresses), 30):
         if not group:
             continue
         try:
@@ -2714,12 +2724,137 @@ def scan_pool(rpc, pool, config, state, classification_budget):
     return scan_pool_signatures(rpc, pool, config, state, classification_budget)
 
 
-def write_alerts(alerts):
-    if not alerts:
-        return
+def alert_history_key(alert):
+    pool = alert.get("pool") or {}
+    return ":".join(
+        str(part)
+        for part in (
+            pool.get("pool_address") or pool.get("token_address") or "pool",
+            alert.get("window_start") or alert.get("created_at") or "",
+            alert.get("window_end") or "",
+        )
+    )
+
+
+def alert_history_token_key(alert):
+    pool = alert.get("pool") or {}
+    return clean_deleted_id(pool.get("token_address") or pool.get("pool_address"))
+
+
+def alert_history_timestamp(alert):
+    return max(
+        parse_timestamp(alert.get("created_at")),
+        parse_timestamp(alert.get("window_start")),
+        parse_timestamp(alert.get("obs_mcap_at")),
+    )
+
+
+def alert_history_sort_key(alert):
+    return (
+        alert_history_timestamp(alert),
+        int(alert.get("score") or 0),
+        float(alert.get("suspicious_sol") or 0),
+    )
+
+
+def load_alert_history(path=ALERTS_PATH):
+    if not path.exists():
+        return []
+    alerts = []
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            alert = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(alert, dict):
+            alerts.append(alert)
+    return alerts
+
+
+def alert_is_deleted(alert, deleted):
+    pool = alert.get("pool") or {}
+    token = clean_deleted_id(pool.get("token_address"))
+    pool_address = clean_deleted_id(pool.get("pool_address"))
+    return bool(
+        (token and token in deleted.get("tokens", set()))
+        or (pool_address and pool_address in deleted.get("pools", set()))
+    )
+
+
+def compact_alert_history(existing_alerts, new_alerts, config):
+    keep_tiers = set(config.get("alert_history_keep_tiers") or ["actionable", "watch"])
+    retention_hours = float(config.get("alert_history_retention_hours", 168))
+    max_tokens = int(config.get("alert_history_max_tokens", 40))
+    max_alerts = int(config.get("alert_history_max_alerts", 160))
+    max_per_token = int(config.get("alert_history_max_alerts_per_token", 3))
+    keep_missing_tier = bool(config.get("alert_history_keep_missing_tier", False))
+    cutoff = int(time.time() - retention_hours * 3600) if retention_hours > 0 else 0
+    deleted = load_deleted_tokens()
+    by_id = {}
+
+    for alert in [*(existing_alerts or []), *(new_alerts or [])]:
+        if not isinstance(alert, dict):
+            continue
+        if alert_is_deleted(alert, deleted):
+            continue
+        token = alert_history_token_key(alert)
+        if not token:
+            continue
+        timestamp = alert_history_timestamp(alert)
+        if cutoff and timestamp and timestamp < cutoff:
+            continue
+        tier = alert.get("action_tier")
+        if not tier and not keep_missing_tier:
+            continue
+        if tier and keep_tiers and tier not in keep_tiers:
+            continue
+        key = alert_history_key(alert)
+        existing = by_id.get(key)
+        if not existing or alert_history_sort_key(alert) >= alert_history_sort_key(existing):
+            by_id[key] = alert
+
+    by_token = defaultdict(list)
+    for alert in by_id.values():
+        by_token[alert_history_token_key(alert)].append(alert)
+
+    token_rank = []
+    for token, token_alerts in by_token.items():
+        ranked_alerts = sorted(token_alerts, key=alert_history_sort_key)
+        kept = []
+        if ranked_alerts:
+            kept.append(ranked_alerts[0])
+        for alert in reversed(ranked_alerts[1:]):
+            if len(kept) >= max_per_token:
+                break
+            if alert not in kept:
+                kept.append(alert)
+        by_token[token] = kept
+        token_rank.append(
+            (
+                token,
+                max(alert_history_sort_key(alert) for alert in kept),
+                max(int(alert.get("score") or 0) for alert in kept),
+            )
+        )
+
+    token_rank.sort(key=lambda item: (item[2], item[1]), reverse=True)
+    allowed_tokens = {token for token, _, _ in token_rank[:max_tokens]} if max_tokens > 0 else set(by_token)
+    compacted = []
+    for token in allowed_tokens:
+        compacted.extend(by_token.get(token, []))
+    compacted.sort(key=alert_history_sort_key)
+    if max_alerts > 0 and len(compacted) > max_alerts:
+        compacted = compacted[-max_alerts:]
+    return compacted
+
+
+def write_alerts(alerts, config):
     ALERTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with ALERTS_PATH.open("a") as handle:
-        for alert in alerts:
+    history = compact_alert_history(load_alert_history(), alerts, config)
+    with ALERTS_PATH.open("w") as handle:
+        for alert in history:
             handle.write(json.dumps(alert, separators=(",", ":")) + "\n")
 
 
@@ -2991,6 +3126,7 @@ def prune_wallet_cache(state, config):
         return None
 
     keep_classes = set(config.get("wallet_cache_keep_classes") or ["fresh", "freshish", "dormant", "low_tx"])
+    class_limits = config.get("wallet_cache_class_limits") or {}
     normal_keys = [
         key
         for key, value in wallet_cache.items()
@@ -3001,13 +3137,39 @@ def prune_wallet_cache(state, config):
     pruned = {}
     class_counts = Counter()
 
+    class_buckets = defaultdict(list)
+    for key, value in wallet_cache.items():
+        if not isinstance(value, dict):
+            continue
+        wallet_class = value.get("wallet_class") or "unknown"
+        class_buckets[wallet_class].append((key, value))
+
+    keep_class_keys = set()
+    for wallet_class, entries in class_buckets.items():
+        if wallet_class == "normal":
+            continue
+        limit = int(class_limits.get(wallet_class, 0) or 0)
+        if limit <= 0:
+            continue
+        entries.sort(
+            key=lambda item: max(
+                parse_timestamp(item[1].get("previous_time")),
+                parse_timestamp(item[1].get("funding_time")),
+            ),
+            reverse=True,
+        )
+        keep_class_keys.update(key for key, _ in entries[:limit])
+
     for key, value in wallet_cache.items():
         wallet_class = value.get("wallet_class") if isinstance(value, dict) else None
         if wallet_class == "normal" and key not in keep_normal_keys:
             continue
-        if wallet_class != "normal" and wallet_class not in keep_classes:
-            # Unknown classes are kept; they are rare and can indicate a schema change.
-            pass
+        if wallet_class != "normal":
+            if wallet_class not in keep_classes:
+                # Unknown classes are kept; they are rare and can indicate a schema change.
+                pass
+            elif wallet_class in class_limits and key not in keep_class_keys:
+                continue
         pruned[key] = value
         class_counts[wallet_class or "unknown"] += 1
 
@@ -3018,10 +3180,99 @@ def prune_wallet_cache(state, config):
         "after_entries": len(pruned),
         "removed_entries": before - len(pruned),
         "normal_limit": normal_limit,
+        "class_limits": class_limits,
         "kept_classes": sorted(keep_classes),
         "after_class_counts": dict(class_counts),
     }
     state.setdefault("maintenance", {})["wallet_cache_prune"] = stats
+    return stats
+
+
+def dict_item_timestamp(value, keys):
+    if not isinstance(value, dict):
+        return 0
+    return max(parse_timestamp(value.get(key)) for key in keys)
+
+
+def compact_state(state, pools, alerts, config, observed_at):
+    now = parse_timestamp(observed_at) or int(time.time())
+    token_keys = set()
+    pool_keys = set()
+    for pool in pools or []:
+        if pool.token_address:
+            token_keys.add(pool.token_address)
+        if pool.pool_address:
+            pool_keys.add(pool.pool_address)
+    for alert in alerts or []:
+        pool = alert.get("pool") or {}
+        token = pool.get("token_address")
+        pool_address = pool.get("pool_address")
+        if token:
+            token_keys.add(token)
+        if pool_address:
+            pool_keys.add(pool_address)
+
+    market_ttl = float(config.get("state_market_retention_hours", 96))
+    pool_ttl = float(config.get("state_pool_retention_hours", 168))
+    enrichment_ttl = float(config.get("state_enrichment_cache_retention_hours", 72))
+
+    maintenance = state.setdefault("maintenance", {})
+    stats = {"compacted_at": observed_at}
+
+    market = state.get("market")
+    if isinstance(market, dict):
+        before = len(market)
+        cutoff = now - int(market_ttl * 3600) if market_ttl > 0 else 0
+        pruned_market = {}
+        for key, value in market.items():
+            pool_address = value.get("pool_address") if isinstance(value, dict) else None
+            last_seen = dict_item_timestamp(
+                value,
+                (
+                    "latest_seen_at",
+                    "scan_mcap_at",
+                    "first_signal_at",
+                    "ath_latest_checked_at",
+                    "ath_filter_checked_at",
+                ),
+            )
+            if key in token_keys or pool_address in pool_keys or (cutoff and last_seen >= cutoff):
+                pruned_market[key] = value
+        state["market"] = pruned_market
+        stats["market_before"] = before
+        stats["market_after"] = len(pruned_market)
+
+    pools_state = state.get("pools")
+    if isinstance(pools_state, dict):
+        before = len(pools_state)
+        cutoff = now - int(pool_ttl * 3600) if pool_ttl > 0 else 0
+        pruned_pools = {}
+        for key, value in pools_state.items():
+            last_seen = dict_item_timestamp(
+                value,
+                ("helius_latest_time", "latest_time", "helius_deep_scanned_at"),
+            )
+            if key in pool_keys or (cutoff and last_seen >= cutoff):
+                pruned_pools[key] = value
+        state["pools"] = pruned_pools
+        stats["pools_before"] = before
+        stats["pools_after"] = len(pruned_pools)
+
+    cutoff = now - int(enrichment_ttl * 3600) if enrichment_ttl > 0 else 0
+    for section in ("social_cache", "token_intel_cache"):
+        cache = state.get(section)
+        if not isinstance(cache, dict):
+            continue
+        before = len(cache)
+        state[section] = {
+            key: value
+            for key, value in cache.items()
+            if key in token_keys or (cutoff and dict_item_timestamp(value, ("cached_at",)) >= cutoff)
+        }
+        stats[f"{section}_before"] = before
+        stats[f"{section}_after"] = len(state[section])
+
+    maintenance["state_compaction"] = stats
     return stats
 
 
@@ -3329,8 +3580,9 @@ def run_once(config, lane_name=None):
     record_alert_observations(state, all_alerts)
     enrich_market_ath(http, state, universe, all_alerts, config, generated_at)
     prune_wallet_cache(state, config)
+    compact_state(state, universe, all_alerts, config, generated_at)
     save_json(STATE_PATH, state, compact=bool(config.get("state_json_compact", True)))
-    write_alerts(all_alerts)
+    write_alerts(all_alerts, config)
     report_payload = build_report_payload(universe, summaries, all_alerts, rpc.calls, config, generated_at, state)
     report_payload["lane_stats"] = lane_stats
     report_payload["lanes_scanned"] = list(lane_stats)
