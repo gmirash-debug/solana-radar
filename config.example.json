@@ -171,6 +171,7 @@
       "ath_actionable_max_current_ratio": 0.25,
       "ath_watch_max_current_ratio": 0.4,
       "ath_require_trusted": true,
+      "ath_unknown_reactivation_scan_limit": 10,
       "volume_1h_to_mcap_max_actionable": 0.08,
       "volume_1h_to_mcap_max_watch": 0.18,
       "excess_flow_sol": 100,
@@ -281,6 +282,9 @@
   "solana_tracker_enabled": true,
   "solana_tracker_limit": 500,
   "solana_tracker_pages": 1,
+  "unified_discovery_enabled": true,
+  "unified_solana_tracker_pages": 2,
+  "unified_gecko_pages": 2,
   "gmgn_enabled": true,
   "gmgn_trending_intervals": [
     "1m",

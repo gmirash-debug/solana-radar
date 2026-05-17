@@ -644,7 +644,7 @@ def pool_dex_allowed(pool, config):
     return normalize_dex_name(pool.dex) in allowlist
 
 
-def build_universe(http, config):
+def discover_market_pools(http, config):
     pools = fetch_solana_tracker_universe(http, config)
 
     gmgn_tokens = fetch_gmgn_trending_token_addresses(config)
@@ -665,41 +665,51 @@ def build_universe(http, config):
         if pool:
             pools[pool.key()] = pool
 
+    return list(pools.values())
+
+
+def pool_matches_config(pool, config):
+    if not pool.pool_address:
+        return False
+    if not pool_dex_allowed(pool, config):
+        return False
+    is_manual = pool.source in ("manual_pool", "manual_token")
+    if is_manual:
+        return True
+    if pool.mcap_usd <= 0:
+        return False
+    if not (config["mcap_min_usd"] <= pool.mcap_usd <= config["mcap_max_usd"]):
+        return False
+    if pool.liquidity_usd < config["liquidity_min_usd"]:
+        return False
+    age_hours = pool.age_hours()
+    age_min = config.get("age_min_hours")
+    age_max = config.get("age_max_hours")
+    if age_min is not None or age_max is not None:
+        if age_hours is None:
+            return False
+        if age_min is not None and age_hours < float(age_min):
+            return False
+        if age_max is not None and age_hours > float(age_max):
+            return False
+    if pool.volume_1h_usd < config["volume_1h_min_usd"] and pool.source != "dexscreener_tokens":
+        return False
+    if config.get("volume_1h_max_usd") is not None and pool.volume_1h_usd > float(config["volume_1h_max_usd"]):
+        return False
+    if config.get("volume_1h_to_mcap_min") is not None:
+        if pool.mcap_usd <= 0 or (pool.volume_1h_usd / pool.mcap_usd) < float(config["volume_1h_to_mcap_min"]):
+            return False
+    if config.get("volume_1h_to_liquidity_min") is not None:
+        if pool.liquidity_usd <= 0 or (pool.volume_1h_usd / pool.liquidity_usd) < float(config["volume_1h_to_liquidity_min"]):
+            return False
+    return True
+
+
+def filter_universe_pools(pools, config):
     filtered = []
-    for pool in pools.values():
-        if not pool.pool_address:
-            continue
-        if not pool_dex_allowed(pool, config):
-            continue
-        is_manual = pool.source in ("manual_pool", "manual_token")
-        if not is_manual:
-            if pool.mcap_usd <= 0:
-                continue
-            if not (config["mcap_min_usd"] <= pool.mcap_usd <= config["mcap_max_usd"]):
-                continue
-            if pool.liquidity_usd < config["liquidity_min_usd"]:
-                continue
-            age_hours = pool.age_hours()
-            age_min = config.get("age_min_hours")
-            age_max = config.get("age_max_hours")
-            if age_min is not None or age_max is not None:
-                if age_hours is None:
-                    continue
-                if age_min is not None and age_hours < float(age_min):
-                    continue
-                if age_max is not None and age_hours > float(age_max):
-                    continue
-            if pool.volume_1h_usd < config["volume_1h_min_usd"] and pool.source != "dexscreener_tokens":
-                continue
-            if config.get("volume_1h_max_usd") is not None and pool.volume_1h_usd > float(config["volume_1h_max_usd"]):
-                continue
-            if config.get("volume_1h_to_mcap_min") is not None:
-                if pool.mcap_usd <= 0 or (pool.volume_1h_usd / pool.mcap_usd) < float(config["volume_1h_to_mcap_min"]):
-                    continue
-            if config.get("volume_1h_to_liquidity_min") is not None:
-                if pool.liquidity_usd <= 0 or (pool.volume_1h_usd / pool.liquidity_usd) < float(config["volume_1h_to_liquidity_min"]):
-                    continue
-        filtered.append(pool)
+    for pool in pools:
+        if pool_matches_config(pool, config):
+            filtered.append(pool)
 
     by_token = {}
     for pool in filtered:
@@ -714,6 +724,33 @@ def build_universe(http, config):
     filtered = list(by_token.values())
     filtered.sort(key=lambda pool: (pool.volume_1h_usd, pool.txns_1h, pool.liquidity_usd), reverse=True)
     return filtered[: int(config["light_pool_limit"])]
+
+
+def build_universe(http, config):
+    return filter_universe_pools(discover_market_pools(http, config), config)
+
+
+def discovery_config_for_lanes(config, lane_list):
+    lane_configs = [apply_lane(config, lane) if lane else config for lane in lane_list]
+    discovery = dict(config)
+    discovery["lane"] = "discovery"
+    discovery["mcap_min_usd"] = min(float(item["mcap_min_usd"]) for item in lane_configs)
+    discovery["mcap_max_usd"] = max(float(item["mcap_max_usd"]) for item in lane_configs)
+    discovery["liquidity_min_usd"] = min(float(item["liquidity_min_usd"]) for item in lane_configs)
+    discovery["volume_1h_min_usd"] = min(float(item.get("volume_1h_min_usd", 0) or 0) for item in lane_configs)
+    discovery["volume_1h_max_usd"] = None
+    discovery["age_min_hours"] = None
+    discovery["age_max_hours"] = None
+    discovery["volume_1h_to_mcap_min"] = None
+    discovery["volume_1h_to_liquidity_min"] = None
+    discovery["solana_tracker_pages"] = int(
+        config.get(
+            "unified_solana_tracker_pages",
+            max(int(item.get("solana_tracker_pages", config.get("solana_tracker_pages", 1))) for item in lane_configs),
+        )
+    )
+    discovery["gecko_pages"] = int(config.get("unified_gecko_pages", config.get("gecko_pages", 2)))
+    return discovery
 
 
 def bright_data_token():
@@ -2118,6 +2155,8 @@ def classify_alert_tier(pool, alert, evidence, config):
             penalties.append("too close to ATH")
         elif ath_ratio > action_ratio:
             penalties.append("mid-range, not deep correction")
+    elif lane == "reactivation":
+        penalties.append("ath unverified")
 
     hard_signal = hard_cluster or hard_flow or dormant or coordination
     if not hard_signal:
@@ -2125,7 +2164,7 @@ def classify_alert_tier(pool, alert, evidence, config):
     elif "late mcap" in penalties or "blowoff volume" in penalties or "excess flow after move" in penalties:
         tier = "late_chase"
     elif lane == "reactivation":
-        tier = "actionable" if coordination and (hard_cluster or hard_flow or dormant) and "mid-range, not deep correction" not in penalties and "too close to ATH" not in penalties else "watch"
+        tier = "actionable" if coordination and (hard_cluster or hard_flow or dormant) and "mid-range, not deep correction" not in penalties and "too close to ATH" not in penalties and "ath unverified" not in penalties else "watch"
     elif actionable_mcap and mcap > actionable_mcap:
         tier = "watch"
     elif "hot volume" in penalties and not coordination:
@@ -2926,6 +2965,7 @@ def filter_reactivation_by_ath(http, state, pools, config, observed_at):
     fetched = 0
     rate_limited = False
     kept = []
+    unverified = []
     stats = Counter()
 
     for pool in pools:
@@ -2968,6 +3008,11 @@ def filter_reactivation_by_ath(http, state, pools, config, observed_at):
         if not ath_mcap:
             if require_trusted:
                 stats["missing_ath"] += 1
+                if rate_limited or not api_key or fetched >= fetch_limit:
+                    entry["ath_status"] = "unverified"
+                    entry["ath_error"] = entry.get("ath_error") or "ath_unavailable_for_reactivation_filter"
+                    entry["ath_error_checked_at"] = now
+                    unverified.append(pool)
                 continue
             kept.append(pool)
             stats["kept_without_ath"] += 1
@@ -2984,6 +3029,13 @@ def filter_reactivation_by_ath(http, state, pools, config, observed_at):
             stats["kept_corrected"] += 1
         else:
             stats["too_close_to_ath"] += 1
+
+    unknown_limit = int(config.get("ath_unknown_reactivation_scan_limit", 0) or 0)
+    if unknown_limit and unverified:
+        unverified.sort(key=lambda item: (item.volume_1h_usd, item.liquidity_usd), reverse=True)
+        selected = unverified[:unknown_limit]
+        kept.extend(selected)
+        stats["kept_unverified_ath"] = len(selected)
 
     stats["input_pools"] = len(pools)
     stats["kept_pools"] = len(kept)
@@ -3483,10 +3535,14 @@ def render_report(payload):
     REPORT_PATH.write_text("\n".join(lines) + "\n")
 
 
-def scan_with_config(http, rpc, state, config):
+def scan_with_config(http, rpc, state, config, base_universe=None):
     label = config.get("lane") or config.get("mode") or "scan"
-    print(f"Building market universe for {label}...", flush=True)
-    universe = build_universe(http, config)
+    if base_universe is None:
+        print(f"Building market universe for {label}...", flush=True)
+        universe = build_universe(http, config)
+    else:
+        universe = filter_universe_pools(base_universe, config)
+        print(f"{label}: filtered {len(universe)} pools from shared discovery universe", flush=True)
     deleted_tokens = load_deleted_tokens()
     observed_at = utc_now().isoformat().replace("+00:00", "Z")
     before_ath_filter = len(universe)
@@ -3546,13 +3602,26 @@ def run_once(config, lane_name=None):
     lane_list = selected_lanes(config, lane_name) if config.get("lanes") else []
     if not lane_list:
         lane_list = [None]
+    shared_universe = None
+    if config.get("unified_discovery_enabled", True) and len(lane_list) > 1:
+        discovery_config = discovery_config_for_lanes(config, lane_list)
+        print("Building shared market discovery universe...", flush=True)
+        shared_universe = discover_market_pools(http, discovery_config)
+        shared_universe = filter_universe_pools(shared_universe, discovery_config)
+        print(f"shared discovery: {len(shared_universe)} candidate pools", flush=True)
     all_alerts = []
     summaries = []
     universe = []
     lane_stats = {}
     for lane in lane_list:
         lane_config = apply_lane(config, lane) if lane else config
-        lane_universe, lane_summaries, lane_alerts = scan_with_config(http, rpc, state, lane_config)
+        lane_universe, lane_summaries, lane_alerts = scan_with_config(
+            http,
+            rpc,
+            state,
+            lane_config,
+            base_universe=shared_universe,
+        )
         all_alerts.extend(lane_alerts)
         summaries.extend(lane_summaries)
         universe.extend(lane_universe)
