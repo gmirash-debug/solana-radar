@@ -1,80 +1,45 @@
 # Solana Radar Report
 
-- generated_at: 2026-05-18T14:11:56.078919Z
+- generated_at: 2026-05-18T15:11:07.895381Z
 - profile: all
 - lanes_scanned: incubation, young, breakout, reactivation
-- universe_pools: 133
+- universe_pools: 137
 - scanned_pools: 75
-- alerts: 2
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 409, 'getSignaturesForAddress': 737, 'getTransaction': 6}
+- alerts: 0
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 414, 'getSignaturesForAddress': 786, 'getTransaction': 8}
 
 ## Alerts
 
-### CLUTCH score 85
-- pool: D6xt7Zg2oSsDpfyzkhgQC8qvyeHssUEZJ6XWe5udUyPp
-- url: https://dexscreener.com/solana/d6xt7zg2ossdpfyzkhgqc8qvyehssuezj6xwe5uduypp
-- mcap_usd: 119711
-- liquidity_usd: 27567
-- window: 2026-05-18T10:14:10Z - 2026-05-18T11:14:10Z
-- suspicious_wallets: 18
-- suspicious_sol: 30.46
-- classes: {'dormant': 18}
-- narrative: Sports (medium tilt) score=4
-- secondary_flavor: ['Classic Meme']
-- social: heat=none score=0 x_posts=0 authors=0 cache=miss
-- top_events:
-  - 2026-05-18T10:21:02Z dormant 3.79 SOL signer=3D17f4kQL3tPAV12Br7LE8R4R9aDBMcwNDPvDEw2H23d recipient=3D17f4kQL3tPAV12Br7LE8R4R9aDBMcwNDPvDEw2H23d
-  - 2026-05-18T10:15:56Z dormant 3.58 SOL signer=D5bVCQZJSUBpH2pdJfuRynRC5j2gLxL6UAVXGTEMHeEz recipient=D5bVCQZJSUBpH2pdJfuRynRC5j2gLxL6UAVXGTEMHeEz
-  - 2026-05-18T10:18:07Z dormant 3.46 SOL signer=8DjZ2ipoTqDMNT8XkNqvgmD4qs6VqSRhx3K4FULzTDkN recipient=8DjZ2ipoTqDMNT8XkNqvgmD4qs6VqSRhx3K4FULzTDkN
-  - 2026-05-18T10:18:10Z dormant 3.30 SOL signer=ugFvLb7aFmN5SrLNrwWGhjemuAtosqwP8MBdJckMgXb recipient=ugFvLb7aFmN5SrLNrwWGhjemuAtosqwP8MBdJckMgXb
-  - 2026-05-18T10:21:08Z dormant 3.06 SOL signer=HjDAb2frJqJhSjyBGUBBDHhHvEudaAD5VUuPyD3CCLxe recipient=HjDAb2frJqJhSjyBGUBBDHhHvEudaAD5VUuPyD3CCLxe
-  - 2026-05-18T10:19:15Z dormant 2.41 SOL signer=3GTabn1NsJFWoqneRrXQGyTCbZc1JESYvmCRXfQXUtkc recipient=3GTabn1NsJFWoqneRrXQGyTCbZc1JESYvmCRXfQXUtkc
-  - 2026-05-18T10:18:56Z dormant 2.23 SOL signer=6ECNhT2s4jj1TcKYfjke62HQo4t77toHKwTfcsMVZaCz recipient=6ECNhT2s4jj1TcKYfjke62HQo4t77toHKwTfcsMVZaCz
-  - 2026-05-18T10:20:58Z dormant 1.15 SOL signer=8qvTkHjTqsfpnQ9RHzFvKp58TyNT6nJKzQpWYtZfHH7L recipient=8qvTkHjTqsfpnQ9RHzFvKp58TyNT6nJKzQpWYtZfHH7L
-
-### COPPERINU score 50
-- pool: 3iUT1oAAUSqKeHAjkumZJbptihy2yN7AwFij2CrsUZVC
-- url: https://www.solanatracker.io/tokens/61Wj56QgGyyB966T7YsMzEAKRLcMvJpDbPzjkrCZc4Bi
-- mcap_usd: 2919793
-- liquidity_usd: 272569
-- window: 2026-05-18T12:47:32Z - 2026-05-18T16:47:32Z
-- suspicious_wallets: 2
-- suspicious_sol: 27.64
-- classes: {'freshish': 2}
-- narrative: Unclear (weak tilt) score=1
-- social: heat=none score=0 x_posts=0 authors=0 cache=miss
-- top_events:
-  - 2026-05-18T12:47:49Z freshish 25.91 SOL signer=2uS43F1pfq2d5JfC2DtiLcemMTqGrWWDxZvWP5KNrP3J recipient=2uS43F1pfq2d5JfC2DtiLcemMTqGrWWDxZvWP5KNrP3J
-  - 2026-05-18T13:52:34Z freshish 1.73 SOL signer=6x7dXwTeHKwP42ucxPZD4qXvVxiHUUaqw6EeXrWAdb3N recipient=6x7dXwTeHKwP42ucxPZD4qXvVxiHUUaqw6EeXrWAdb3N
+No alerts in this scan.
 
 ## Active Pools
-- WENGU: 28 buys, 228.56 SOL, classes={'normal': 28}, mcap=$184440, pool=H6BuVwyfwWw3Kfj5C3QafD5YQiZE5hFAMsWLyBKfcnyp
-- CLUTCH: 64 buys, 172.79 SOL, classes={'normal': 45, 'dormant': 18, 'freshish': 1}, mcap=$119711, pool=D6xt7Zg2oSsDpfyzkhgQC8qvyeHssUEZJ6XWe5udUyPp
-- SPCX: 50 buys, 99.60 SOL, classes={'normal': 49, 'low_tx': 1}, mcap=$129872, pool=Dip8wP7YsUyw3Pcd8fKMsSu6CL6apsmaEn8cD8UZEz1b
-- GDOR: 14 buys, 94.91 SOL, classes={'normal': 14}, mcap=$164163, pool=5hr4LDGLxSQMKMBZ2dTBJAyinavx4FVx35bNtC4HPvy5
-- GDOR: 16 buys, 93.61 SOL, classes={'normal': 16}, mcap=$64911, pool=AXkban78hDJFi1zaMxwjmzhjHppxEbVi1p2obPvZJ9T4
-- SAOS: 15 buys, 91.10 SOL, classes={'normal': 15}, mcap=$93138, pool=FqFHVVt8rELGpSoCU9pLGYWJZBS93gyoMZD65eUCeCmY
-- OSOR: 13 buys, 87.01 SOL, classes={'normal': 13}, mcap=$266964, pool=FT4ap3VwDxZqQuoUH27ozECB1jKaJnhshrRHk6wJLnQk
-- RCSC: 16 buys, 86.19 SOL, classes={'normal': 16}, mcap=$113855, pool=HXjNCCsSYgbWDgYDWL1gq8Xgspr1Nm3ihkdf3eJHkndB
-- COAR: 20 buys, 81.95 SOL, classes={'normal': 20}, mcap=$235471, pool=5tHfnx15Zv482XGMXvfBK2zuWuqV7isSA3rfhmAj8pC4
-- UFO: 15 buys, 76.27 SOL, classes={'normal': 15}, mcap=$72949, pool=GTeajSwQzH84E4veioFVHED3ruhJ6CzfUAaTwYR4QVMK
-- FRANCE: 20 buys, 68.69 SOL, classes={'normal': 19, 'low_tx': 1}, mcap=$207921, pool=2ZqxoHpQtKL26mLoqqN8iedorX7M1QY9AHAo2yQNjiqf
-- GDOR: 15 buys, 61.81 SOL, classes={'normal': 15}, mcap=$148745, pool=28FXyjiiR9HezTMXaB7ZVcfV9pXnn4MSY3rNr2x4bxcD
-- COPPERINU: 14 buys, 60.91 SOL, classes={'normal': 12, 'freshish': 2}, mcap=$2919793, pool=3iUT1oAAUSqKeHAjkumZJbptihy2yN7AwFij2CrsUZVC
-- RKC: 18 buys, 60.45 SOL, classes={'normal': 17, 'low_tx': 1}, mcap=$3737780, pool=FzbYhPcoCuA2qSrV1s3j38RcQhP6c943p3KHYb6C5rCq
-- ELNINO: 12 buys, 59.98 SOL, classes={'normal': 12}, mcap=$64155, pool=HVdgMjCMpiz2S61c9bBhdjSQr3t5GJaJuWKZ3aDwEVTd
-- GDOR: 15 buys, 57.18 SOL, classes={'normal': 15}, mcap=$282032, pool=77HqY1nXRETiZbjcy7WapmFXWs2NE34wBsFWBDSmAr8o
-- stockcoin: 12 buys, 55.73 SOL, classes={'normal': 11, 'freshish': 1}, mcap=$175198, pool=BksVp6dfpbSMjhWHBqx7vmZLWUttQAPnSJdYMu4oU8o1
-- OBC: 14 buys, 52.89 SOL, classes={'normal': 14}, mcap=$94674, pool=FwmTkJsj6pYLBnuNM4NKTySW7UQRQXqiFBbFwddagNsE
-- TOLYBOT: 21 buys, 51.81 SOL, classes={'normal': 21}, mcap=$1058381, pool=EH5FYz1qcRhrs6VivDNfYjaxuN76HZc1oNWK6AHW43KL
-- Clawd: 7 buys, 51.77 SOL, classes={'normal': 7}, mcap=$230515, pool=C3ZvecR6rxGVFgarVi9u9kEokCozTxRp2L7TCTdx9AS8
-- Tokabu: 11 buys, 50.15 SOL, classes={'low_tx': 1, 'normal': 10}, mcap=$1929925, pool=Ekv9HdumWqnXZgq5G6ge6bk1ZRHKXYC2WnSFL94sQmLJ
-- WENGU: 17 buys, 47.00 SOL, classes={'normal': 12, 'low_tx': 4, 'freshish': 1}, mcap=$97416, pool=AUHVUAcYxHmzWNs7J25pg3mRL9Vci5nhQ2m21mRNRHBT
-- Aliens: 11 buys, 45.47 SOL, classes={'normal': 9, 'low_tx': 2}, mcap=$877354, pool=7nVP4qykvMpEuhobyrzCn1TQiz7K8PMK5UXQeeBrZyh
-- DEXTER: 6 buys, 44.97 SOL, classes={'low_tx': 1, 'normal': 4, 'freshish': 1}, mcap=$2129892, pool=Csqt5aXbzLcSd13DpY6AYLtRKcU5q1NztAPaM67eLxRo
-- COAR: 18 buys, 44.89 SOL, classes={'normal': 18}, mcap=$143901, pool=EAEmcDVkg2tsR1AsBtV4xePFF82DvaiLUyBtUXWJxdxy
-- MOLT: 15 buys, 39.51 SOL, classes={'normal': 15}, mcap=$724527, pool=GKb1LfJ1kwhdnQxzQtUvxTXBgqEU8qSkq5K5YAjpPhvv
-- BULLISH: 6 buys, 38.33 SOL, classes={'normal': 5, 'freshish': 1}, mcap=$1062758, pool=GC1uTsxrrLAuWby3uWSEMjUXhJMJhhv1SXJ9A1jHvyxp
-- IDLE: 10 buys, 38.09 SOL, classes={'normal': 10}, mcap=$650593, pool=DnAG61iCsCEfsqBeiR9Fcdkq92LayZMYewiSzw3ASWmN
-- BP: 1 buys, 37.81 SOL, classes={'normal': 1}, mcap=$4031325, pool=GYwaQP8Lb3vqG7q2c58ZGueVYfF8hYogg8BeSa1FNcpZ
-- KNIGHT: 15 buys, 36.12 SOL, classes={'normal': 13, 'freshish': 1, 'low_tx': 1}, mcap=$254830, pool=CjJ4aKLBYCgx4WrydnVXVXj2urMpwKKgSt6kcdmo3dvb
+- ATWO: 27 buys, 215.51 SOL, classes={'normal': 27}, mcap=$85851, pool=3dH9mYj3yY5nrwpqqnxmXDBCsNQBNA4vHxCNXFijyzL2
+- TOLYBOT: 70 buys, 195.83 SOL, classes={'normal': 64, 'low_tx': 3, 'dormant': 1, 'freshish': 2}, mcap=$982419, pool=EH5FYz1qcRhrs6VivDNfYjaxuN76HZc1oNWK6AHW43KL
+- GDOR: 18 buys, 130.72 SOL, classes={'normal': 18}, mcap=$276164, pool=77HqY1nXRETiZbjcy7WapmFXWs2NE34wBsFWBDSmAr8o
+- AISLOP: 42 buys, 123.49 SOL, classes={'normal': 40, 'low_tx': 1, 'freshish': 1}, mcap=$438001, pool=8LjfG2dAMgyTQmvKKT3VtwLgfxJc79RwkcLGuq19LSfC
+- USDC: 27 buys, 107.66 SOL, classes={'normal': 24, 'low_tx': 2, 'dormant': 1}, mcap=$283878, pool=3JUWkJY5JPDAw8uVWj2KN4PLrWJoNcqq5tQdN179Vonh
+- SPCX: 13 buys, 93.81 SOL, classes={'normal': 13}, mcap=$51119, pool=5ghPRP1Z3koJskxhj3vkAAWfV4HY8ChYzhbKGDegZrxf
+- SAOS: 14 buys, 88.47 SOL, classes={'normal': 14}, mcap=$93138, pool=FqFHVVt8rELGpSoCU9pLGYWJZBS93gyoMZD65eUCeCmY
+- TICK : 38 buys, 83.79 SOL, classes={'normal': 37, 'low_tx': 1}, mcap=$112374, pool=EDJ3KKGZr9paQidj32yGnsrHyCmoeDZ8ENdouoPHe3WB
+- ZEST: 14 buys, 80.89 SOL, classes={'normal': 14}, mcap=$106231, pool=97s7CpUFcWfy62TXee7QQjbes1ciJuTNzGjEuYFgUQM8
+- GDOR: 22 buys, 74.12 SOL, classes={'normal': 22}, mcap=$67335, pool=AXkban78hDJFi1zaMxwjmzhjHppxEbVi1p2obPvZJ9T4
+- COPPERINU: 4 buys, 73.43 SOL, classes={'normal': 4}, mcap=$3057104, pool=3iUT1oAAUSqKeHAjkumZJbptihy2yN7AwFij2CrsUZVC
+- PURPLECUP: 12 buys, 72.48 SOL, classes={'normal': 12}, mcap=$54152, pool=CubbSfCbhAqbjcGjnAt43Z64kJsyKEkTykPCejyJpNVz
+- OSOR: 12 buys, 71.59 SOL, classes={'normal': 12}, mcap=$351221, pool=FT4ap3VwDxZqQuoUH27ozECB1jKaJnhshrRHk6wJLnQk
+- UFO: 15 buys, 68.79 SOL, classes={'normal': 15}, mcap=$86191, pool=GTeajSwQzH84E4veioFVHED3ruhJ6CzfUAaTwYR4QVMK
+- Aliens: 18 buys, 65.91 SOL, classes={'normal': 16, 'freshish': 1, 'low_tx': 1}, mcap=$870990, pool=7nVP4qykvMpEuhobyrzCn1TQiz7K8PMK5UXQeeBrZyh
+- GDER: 13 buys, 65.90 SOL, classes={'normal': 13}, mcap=$145833, pool=22Xe83odXiyDTBLiYDbim4rtqKgmSCwsBW5E87robLYp
+- Tokabu: 10 buys, 64.51 SOL, classes={'normal': 9, 'low_tx': 1}, mcap=$1920600, pool=Ekv9HdumWqnXZgq5G6ge6bk1ZRHKXYC2WnSFL94sQmLJ
+- Embrace: 13 buys, 62.77 SOL, classes={'normal': 13}, mcap=$92879, pool=7fuA8gshQEBiN6wcgj4tWAoVoZRzMRb6iTksRiw7KxFT
+- 我的刀盾: 11 buys, 61.88 SOL, classes={'normal': 11}, mcap=$1176134, pool=9RpsV1vWy6itWjiHsBjrbpw2Z36AeiCnaiktyqTnXxcr
+- ELNINO: 15 buys, 61.15 SOL, classes={'normal': 15}, mcap=$78405, pool=HVdgMjCMpiz2S61c9bBhdjSQr3t5GJaJuWKZ3aDwEVTd
+- OSOR: 12 buys, 59.23 SOL, classes={'normal': 12}, mcap=$215701, pool=3ZXz7hN1z6bdcF7JYbsfsSNZYDLSySNPpTScs4zvn5FF
+- LOL: 8 buys, 57.99 SOL, classes={'normal': 8}, mcap=$1883463, pool=Dx5wFoszXvND6XYYAjAjUQrGLqDAUrTVH2JmHz6eJDNt
+- COAR: 17 buys, 56.32 SOL, classes={'normal': 17}, mcap=$231460, pool=5tHfnx15Zv482XGMXvfBK2zuWuqV7isSA3rfhmAj8pC4
+- Discomorphism: 20 buys, 55.41 SOL, classes={'normal': 20}, mcap=$57994, pool=GNLiLEKzg1Ho5LaANDnU63VNwnR56WZT1YQdi82CByQL
+- NOTHING: 8 buys, 53.74 SOL, classes={'normal': 8}, mcap=$1167226, pool=2pA1GMh9WbPtURmr6Rt5oxNs6RdpLzxJphSJQcdyaNFq
+- OBC: 13 buys, 48.36 SOL, classes={'normal': 13}, mcap=$95134, pool=FwmTkJsj6pYLBnuNM4NKTySW7UQRQXqiFBbFwddagNsE
+- 67: 8 buys, 47.61 SOL, classes={'low_tx': 1, 'normal': 7}, mcap=$3556087, pool=DMAFL613XTipuA3jFNYczavWT7XsiYf9cR3qmRMZQhB6
+- FAHHHH: 16 buys, 43.25 SOL, classes={'normal': 15, 'freshish': 1}, mcap=$390338, pool=HVKYijP8kjrqQtYmvB9FPMpVafVpxZ51oGEDyaYZJ4ub
+- RKC: 14 buys, 41.63 SOL, classes={'normal': 14}, mcap=$3697167, pool=FzbYhPcoCuA2qSrV1s3j38RcQhP6c943p3KHYb6C5rCq
+- COAR: 22 buys, 40.24 SOL, classes={'normal': 22}, mcap=$143887, pool=EAEmcDVkg2tsR1AsBtV4xePFF82DvaiLUyBtUXWJxdxy
