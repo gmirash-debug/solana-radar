@@ -167,6 +167,13 @@
       "symbol": "PIBBLE",
       "name": "pibblefluencer",
       "deleted_at": "2026-05-21T23:56:19.857Z"
+    },
+    "EnqCw742Nbk3dHn4aZhHiLjo6awAhpd5gSzrunb7pump": {
+      "token_address": "EnqCw742Nbk3dHn4aZhHiLjo6awAhpd5gSzrunb7pump",
+      "pool_address": "ELe7EtbX7m3aeBKKJYm4QYVXkwmJJwVcR6K4Nho27f4i",
+      "symbol": "Flork",
+      "name": "Flork",
+      "deleted_at": "2026-05-21T23:56:36.765Z"
     }
   },
   "pools": [
@@ -189,6 +196,7 @@
     "CgpMLFcTwr9uY4rv59y3k5HjUbco5wczZJrMQVSKtGTk",
     "D6xt7Zg2oSsDpfyzkhgQC8qvyeHssUEZJ6XWe5udUyPp",
     "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
+    "ELe7EtbX7m3aeBKKJYm4QYVXkwmJJwVcR6K4Nho27f4i",
     "FQarato6tWprAedipKT6VXu61amiR7qMTjE78vhCY5P9",
     "FzCrLNQ4SW3nXpKb68HUXbfb2tvFDBoLhdCVHmAuoPze",
     "G7oFoddfVNgjLiRHMoir4YG4N6RWeC9zpPiJQvrFd61W",
@@ -214,6 +222,7 @@
     "Bp4nAhfAUUGVoT8pCVndK9RbmcnjyGXmQtiQdAUppump",
     "D2bSDzYKpFCePrp98dfN4uuKH1SBnYiiWjwmpYBspump",
     "EPjDJ9DRqCSF78zPVYqM4ZGAvXBHuu1LJmJGUDmxpump",
+    "EnqCw742Nbk3dHn4aZhHiLjo6awAhpd5gSzrunb7pump",
     "FF6PSUPxbX6Rt4Etw9mefVA1JfEZfKtNpVdLTjWFKxXZ",
     "GFKNuUKCDP3kQtTAjaV5VVMJFtNvMGG62xKP3XGXpump",
     "HEiQtwFU4EW4EptXf3UnVzY4PVPzsgm3iW2MAxbxpump",
@@ -221,5 +230,5 @@
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:56:19.857Z"
+  "updated_at": "2026-05-21T23:56:36.765Z"
 }
