@@ -118,6 +118,13 @@
       "symbol": "Turkiye",
       "name": "Turkiye",
       "deleted_at": "2026-05-21T23:29:42.822Z"
+    },
+    "8NEh2L4PAVsweMTKJWyCn5WdQbKaB8FkHgJtkoK9pump": {
+      "token_address": "8NEh2L4PAVsweMTKJWyCn5WdQbKaB8FkHgJtkoK9pump",
+      "pool_address": "D6xt7Zg2oSsDpfyzkhgQC8qvyeHssUEZJ6XWe5udUyPp",
+      "symbol": "CLUTCH",
+      "name": "Clutch",
+      "deleted_at": "2026-05-21T23:29:50.451Z"
     }
   },
   "pools": [
@@ -134,6 +141,7 @@
     "AvEQy4vGHhgKZY6QR7rBbN8dupXz9HiCbar5taizetRN",
     "BzfQ3fGPA28xEo6sJU2XPGAog2aNrWbjXFzTXw1B1NTC",
     "CgpMLFcTwr9uY4rv59y3k5HjUbco5wczZJrMQVSKtGTk",
+    "D6xt7Zg2oSsDpfyzkhgQC8qvyeHssUEZJ6XWe5udUyPp",
     "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
     "FzCrLNQ4SW3nXpKb68HUXbfb2tvFDBoLhdCVHmAuoPze",
     "G7oFoddfVNgjLiRHMoir4YG4N6RWeC9zpPiJQvrFd61W",
@@ -144,6 +152,7 @@
     "2R7jYvkAQwLu3smTy6U4Am9u1F14djdF5wPKkQk5pump",
     "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
     "7ELpaNSqPQKWA1LS7HqMJzLLxLPpoJSa3fKiYoZpump",
+    "8NEh2L4PAVsweMTKJWyCn5WdQbKaB8FkHgJtkoK9pump",
     "A2LprEwUDVLQX3xVQqFAMwbzf7ZQdx9wJMJvkQBPpump",
     "ADVAviLMaZXLVjxYDHNd3VcV68EE8HUbo9FowLPbpump",
     "AJCAd7ixokqPegWtEa133BUyJydERvEWs8bDJFPWpump",
@@ -158,5 +167,5 @@
     "LAST7yfrXE3bXFYCdHhS1xGouTjaptnvQwBfWFoba7x",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:29:42.822Z"
+  "updated_at": "2026-05-21T23:29:50.451Z"
 }
