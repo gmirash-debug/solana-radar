@@ -146,10 +146,18 @@
       "symbol": "BABYSATOSHI",
       "name": "Baby Satoshi",
       "deleted_at": "2026-05-21T23:30:38.177Z"
+    },
+    "9gSFB9ZVvhd7iLiQpEHH1fg6BC4JAnmbzx36LXAbpump": {
+      "token_address": "9gSFB9ZVvhd7iLiQpEHH1fg6BC4JAnmbzx36LXAbpump",
+      "pool_address": "2gha1QK9tbewqypx1PJW59L2ND5x81QuqMWD7BSoH12q",
+      "symbol": "GDOR",
+      "name": "Global Digital Oil Reserve ",
+      "deleted_at": "2026-05-21T23:55:23.766Z"
     }
   },
   "pools": [
     "2J6LTZkLMp4bfcqPMA3CqFMNk1dYcX4T55e9ySrxw48U",
+    "2gha1QK9tbewqypx1PJW59L2ND5x81QuqMWD7BSoH12q",
     "321v9PmCX3jrm5JxqdL83XMrR7jKQxzejVk76fc5yVwn",
     "52VFGEzYirC8GYVjs7B6YTqLoL5oKSVQbCPpwKqZTKqp",
     "5PL5ShfKKzY2ytKEU8hxFUU67r5CJhUFAZf2W4pu5jVd",
@@ -179,6 +187,7 @@
     "7ELpaNSqPQKWA1LS7HqMJzLLxLPpoJSa3fKiYoZpump",
     "89BSehAkaAESxZNrMpNLbduDumr7TLYS9eVf2btupump",
     "8NEh2L4PAVsweMTKJWyCn5WdQbKaB8FkHgJtkoK9pump",
+    "9gSFB9ZVvhd7iLiQpEHH1fg6BC4JAnmbzx36LXAbpump",
     "A2LprEwUDVLQX3xVQqFAMwbzf7ZQdx9wJMJvkQBPpump",
     "ADVAviLMaZXLVjxYDHNd3VcV68EE8HUbo9FowLPbpump",
     "AJCAd7ixokqPegWtEa133BUyJydERvEWs8bDJFPWpump",
@@ -194,5 +203,5 @@
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:30:38.177Z"
+  "updated_at": "2026-05-21T23:55:23.766Z"
 }
