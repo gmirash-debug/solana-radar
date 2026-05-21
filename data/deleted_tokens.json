@@ -153,6 +153,13 @@
       "symbol": "GDOR",
       "name": "Global Digital Oil Reserve ",
       "deleted_at": "2026-05-21T23:55:23.766Z"
+    },
+    "D2bSDzYKpFCePrp98dfN4uuKH1SBnYiiWjwmpYBspump": {
+      "token_address": "D2bSDzYKpFCePrp98dfN4uuKH1SBnYiiWjwmpYBspump",
+      "pool_address": "FQarato6tWprAedipKT6VXu61amiR7qMTjE78vhCY5P9",
+      "symbol": "SPAIN",
+      "name": "Spain",
+      "deleted_at": "2026-05-21T23:55:47.347Z"
     }
   },
   "pools": [
@@ -175,6 +182,7 @@
     "CgpMLFcTwr9uY4rv59y3k5HjUbco5wczZJrMQVSKtGTk",
     "D6xt7Zg2oSsDpfyzkhgQC8qvyeHssUEZJ6XWe5udUyPp",
     "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
+    "FQarato6tWprAedipKT6VXu61amiR7qMTjE78vhCY5P9",
     "FzCrLNQ4SW3nXpKb68HUXbfb2tvFDBoLhdCVHmAuoPze",
     "G7oFoddfVNgjLiRHMoir4YG4N6RWeC9zpPiJQvrFd61W",
     "HCTAwVjrz9HJ8L3d1AQDXFFceYpmEFn9S3RMDGFCE9Tk"
@@ -195,6 +203,7 @@
     "B5xwCQUKfx8BJZsgvuBvW6XgrxtkqLTrDEAYjpLJpump",
     "BiywH8Eq2CbGhwMHKwCnfTiccWJwN7r1Q4Qn9hsypump",
     "Bp4nAhfAUUGVoT8pCVndK9RbmcnjyGXmQtiQdAUppump",
+    "D2bSDzYKpFCePrp98dfN4uuKH1SBnYiiWjwmpYBspump",
     "EPjDJ9DRqCSF78zPVYqM4ZGAvXBHuu1LJmJGUDmxpump",
     "FF6PSUPxbX6Rt4Etw9mefVA1JfEZfKtNpVdLTjWFKxXZ",
     "GFKNuUKCDP3kQtTAjaV5VVMJFtNvMGG62xKP3XGXpump",
@@ -203,5 +212,5 @@
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:55:23.766Z"
+  "updated_at": "2026-05-21T23:55:47.347Z"
 }
