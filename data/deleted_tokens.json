@@ -62,11 +62,19 @@
       "symbol": "GALAXYCUP",
       "name": "Galaxy Cup",
       "deleted_at": "2026-05-21T23:25:20.491Z"
+    },
+    "EPjDJ9DRqCSF78zPVYqM4ZGAvXBHuu1LJmJGUDmxpump": {
+      "token_address": "EPjDJ9DRqCSF78zPVYqM4ZGAvXBHuu1LJmJGUDmxpump",
+      "pool_address": "5PL5ShfKKzY2ytKEU8hxFUU67r5CJhUFAZf2W4pu5jVd",
+      "symbol": "NPC",
+      "name": "No Profit Club",
+      "deleted_at": "2026-05-21T23:25:30.528Z"
     }
   },
   "pools": [
     "2J6LTZkLMp4bfcqPMA3CqFMNk1dYcX4T55e9ySrxw48U",
     "52VFGEzYirC8GYVjs7B6YTqLoL5oKSVQbCPpwKqZTKqp",
+    "5PL5ShfKKzY2ytKEU8hxFUU67r5CJhUFAZf2W4pu5jVd",
     "6TB1AwLDFQpT6dC4GdG9QiiT6BTDyxAdn2Dojm73gJrS",
     "8PX97NP5WY871SmsZwHqYL9z97k3vzHGjvKFvAT7cARz",
     "8oi82teTrCKgJDfc37hyTqgnAY3KbxKMySY9wBy86Mfo",
@@ -82,9 +90,10 @@
     "ApGBE2QkB2wPqyJnga6ukNSYK2oiM3kWjeAjDM2Epump",
     "B5xwCQUKfx8BJZsgvuBvW6XgrxtkqLTrDEAYjpLJpump",
     "BiywH8Eq2CbGhwMHKwCnfTiccWJwN7r1Q4Qn9hsypump",
+    "EPjDJ9DRqCSF78zPVYqM4ZGAvXBHuu1LJmJGUDmxpump",
     "FF6PSUPxbX6Rt4Etw9mefVA1JfEZfKtNpVdLTjWFKxXZ",
     "GFKNuUKCDP3kQtTAjaV5VVMJFtNvMGG62xKP3XGXpump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:25:20.491Z"
+  "updated_at": "2026-05-21T23:25:30.528Z"
 }
