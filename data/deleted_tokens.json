@@ -139,6 +139,13 @@
       "symbol": "WCSS",
       "name": "World Cup SuperStars",
       "deleted_at": "2026-05-21T23:30:34.342Z"
+    },
+    "75Hgi9UwP7QMUcyYiJc9PbmVyeAJguREXAZhj2G1pump": {
+      "token_address": "75Hgi9UwP7QMUcyYiJc9PbmVyeAJguREXAZhj2G1pump",
+      "pool_address": "6KzFXBzfwU57QBibuBnRVbxnB1KMxyWUGXUDaRaHmHZL",
+      "symbol": "BABYSATOSHI",
+      "name": "Baby Satoshi",
+      "deleted_at": "2026-05-21T23:30:38.177Z"
     }
   },
   "pools": [
@@ -146,6 +153,7 @@
     "321v9PmCX3jrm5JxqdL83XMrR7jKQxzejVk76fc5yVwn",
     "52VFGEzYirC8GYVjs7B6YTqLoL5oKSVQbCPpwKqZTKqp",
     "5PL5ShfKKzY2ytKEU8hxFUU67r5CJhUFAZf2W4pu5jVd",
+    "6KzFXBzfwU57QBibuBnRVbxnB1KMxyWUGXUDaRaHmHZL",
     "6TB1AwLDFQpT6dC4GdG9QiiT6BTDyxAdn2Dojm73gJrS",
     "89fG8Pi8azVnu76UfynJv7TJBvggDNjv8GoNX24nosCQ",
     "8PX97NP5WY871SmsZwHqYL9z97k3vzHGjvKFvAT7cARz",
@@ -167,6 +175,7 @@
     "2DK6WxzW9UT5mDr3rivN8oeiUmWVkGucaXgAKc4Wpump",
     "2R7jYvkAQwLu3smTy6U4Am9u1F14djdF5wPKkQk5pump",
     "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
+    "75Hgi9UwP7QMUcyYiJc9PbmVyeAJguREXAZhj2G1pump",
     "7ELpaNSqPQKWA1LS7HqMJzLLxLPpoJSa3fKiYoZpump",
     "89BSehAkaAESxZNrMpNLbduDumr7TLYS9eVf2btupump",
     "8NEh2L4PAVsweMTKJWyCn5WdQbKaB8FkHgJtkoK9pump",
@@ -185,5 +194,5 @@
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:30:34.342Z"
+  "updated_at": "2026-05-21T23:30:38.177Z"
 }
