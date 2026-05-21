@@ -125,6 +125,13 @@
       "symbol": "CLUTCH",
       "name": "Clutch",
       "deleted_at": "2026-05-21T23:29:50.451Z"
+    },
+    "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump": {
+      "token_address": "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
+      "pool_address": "A9JnmJzue6BvCgQmgHR7fzgMwmMAEnPd4yusVNnRRNAF",
+      "symbol": "BIPOLAR",
+      "name": "BIPOLAR",
+      "deleted_at": "2026-05-21T23:30:07.967Z"
     }
   },
   "pools": [
@@ -136,6 +143,7 @@
     "8PX97NP5WY871SmsZwHqYL9z97k3vzHGjvKFvAT7cARz",
     "8oi82teTrCKgJDfc37hyTqgnAY3KbxKMySY9wBy86Mfo",
     "9VcuAV17Rw2MmKxgwrNsH95bnHatQGkzgczVANhoKiZq",
+    "A9JnmJzue6BvCgQmgHR7fzgMwmMAEnPd4yusVNnRRNAF",
     "AeSWE9gN3bPQuaD9qKTFgnp8ugLf8W17w9Fam6PhuC5W",
     "Atx6zyC1WkbBpCwhZG8UZ2n51184Ps78zTQMzsMV2uDy",
     "AvEQy4vGHhgKZY6QR7rBbN8dupXz9HiCbar5taizetRN",
@@ -165,7 +173,8 @@
     "GFKNuUKCDP3kQtTAjaV5VVMJFtNvMGG62xKP3XGXpump",
     "HEiQtwFU4EW4EptXf3UnVzY4PVPzsgm3iW2MAxbxpump",
     "LAST7yfrXE3bXFYCdHhS1xGouTjaptnvQwBfWFoba7x",
+    "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:29:50.451Z"
+  "updated_at": "2026-05-21T23:30:07.967Z"
 }
