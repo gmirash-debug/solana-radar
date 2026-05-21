@@ -132,10 +132,18 @@
       "symbol": "BIPOLAR",
       "name": "BIPOLAR",
       "deleted_at": "2026-05-21T23:30:07.967Z"
+    },
+    "89BSehAkaAESxZNrMpNLbduDumr7TLYS9eVf2btupump": {
+      "token_address": "89BSehAkaAESxZNrMpNLbduDumr7TLYS9eVf2btupump",
+      "pool_address": "321v9PmCX3jrm5JxqdL83XMrR7jKQxzejVk76fc5yVwn",
+      "symbol": "WCSS",
+      "name": "World Cup SuperStars",
+      "deleted_at": "2026-05-21T23:30:34.342Z"
     }
   },
   "pools": [
     "2J6LTZkLMp4bfcqPMA3CqFMNk1dYcX4T55e9ySrxw48U",
+    "321v9PmCX3jrm5JxqdL83XMrR7jKQxzejVk76fc5yVwn",
     "52VFGEzYirC8GYVjs7B6YTqLoL5oKSVQbCPpwKqZTKqp",
     "5PL5ShfKKzY2ytKEU8hxFUU67r5CJhUFAZf2W4pu5jVd",
     "6TB1AwLDFQpT6dC4GdG9QiiT6BTDyxAdn2Dojm73gJrS",
@@ -160,6 +168,7 @@
     "2R7jYvkAQwLu3smTy6U4Am9u1F14djdF5wPKkQk5pump",
     "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
     "7ELpaNSqPQKWA1LS7HqMJzLLxLPpoJSa3fKiYoZpump",
+    "89BSehAkaAESxZNrMpNLbduDumr7TLYS9eVf2btupump",
     "8NEh2L4PAVsweMTKJWyCn5WdQbKaB8FkHgJtkoK9pump",
     "A2LprEwUDVLQX3xVQqFAMwbzf7ZQdx9wJMJvkQBPpump",
     "ADVAviLMaZXLVjxYDHNd3VcV68EE8HUbo9FowLPbpump",
@@ -176,5 +185,5 @@
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:30:07.967Z"
+  "updated_at": "2026-05-21T23:30:34.342Z"
 }
