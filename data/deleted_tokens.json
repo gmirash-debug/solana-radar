@@ -104,6 +104,13 @@
       "symbol": "REVERSAL",
       "name": "The Last Dip",
       "deleted_at": "2026-05-21T23:26:33.212Z"
+    },
+    "2R7jYvkAQwLu3smTy6U4Am9u1F14djdF5wPKkQk5pump": {
+      "token_address": "2R7jYvkAQwLu3smTy6U4Am9u1F14djdF5wPKkQk5pump",
+      "pool_address": "AvEQy4vGHhgKZY6QR7rBbN8dupXz9HiCbar5taizetRN",
+      "symbol": "TROLBEY",
+      "name": "Trolbey Maguire",
+      "deleted_at": "2026-05-21T23:29:37.213Z"
     }
   },
   "pools": [
@@ -117,6 +124,7 @@
     "9VcuAV17Rw2MmKxgwrNsH95bnHatQGkzgczVANhoKiZq",
     "AeSWE9gN3bPQuaD9qKTFgnp8ugLf8W17w9Fam6PhuC5W",
     "Atx6zyC1WkbBpCwhZG8UZ2n51184Ps78zTQMzsMV2uDy",
+    "AvEQy4vGHhgKZY6QR7rBbN8dupXz9HiCbar5taizetRN",
     "BzfQ3fGPA28xEo6sJU2XPGAog2aNrWbjXFzTXw1B1NTC",
     "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
     "FzCrLNQ4SW3nXpKb68HUXbfb2tvFDBoLhdCVHmAuoPze",
@@ -125,6 +133,7 @@
   ],
   "tokens": [
     "2DK6WxzW9UT5mDr3rivN8oeiUmWVkGucaXgAKc4Wpump",
+    "2R7jYvkAQwLu3smTy6U4Am9u1F14djdF5wPKkQk5pump",
     "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
     "7ELpaNSqPQKWA1LS7HqMJzLLxLPpoJSa3fKiYoZpump",
     "A2LprEwUDVLQX3xVQqFAMwbzf7ZQdx9wJMJvkQBPpump",
@@ -140,5 +149,5 @@
     "LAST7yfrXE3bXFYCdHhS1xGouTjaptnvQwBfWFoba7x",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:26:33.212Z"
+  "updated_at": "2026-05-21T23:29:37.213Z"
 }
