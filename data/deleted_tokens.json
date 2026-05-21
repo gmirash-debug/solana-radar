@@ -76,6 +76,13 @@
       "symbol": "PEDUCK",
       "name": "PEDUCK",
       "deleted_at": "2026-05-21T23:25:45.816Z"
+    },
+    "HEiQtwFU4EW4EptXf3UnVzY4PVPzsgm3iW2MAxbxpump": {
+      "token_address": "HEiQtwFU4EW4EptXf3UnVzY4PVPzsgm3iW2MAxbxpump",
+      "pool_address": "FzCrLNQ4SW3nXpKb68HUXbfb2tvFDBoLhdCVHmAuoPze",
+      "symbol": "TIME",
+      "name": "Epoch Jumping",
+      "deleted_at": "2026-05-21T23:26:09.791Z"
     }
   },
   "pools": [
@@ -89,6 +96,7 @@
     "Atx6zyC1WkbBpCwhZG8UZ2n51184Ps78zTQMzsMV2uDy",
     "BzfQ3fGPA28xEo6sJU2XPGAog2aNrWbjXFzTXw1B1NTC",
     "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
+    "FzCrLNQ4SW3nXpKb68HUXbfb2tvFDBoLhdCVHmAuoPze",
     "HCTAwVjrz9HJ8L3d1AQDXFFceYpmEFn9S3RMDGFCE9Tk"
   ],
   "tokens": [
@@ -102,7 +110,8 @@
     "EPjDJ9DRqCSF78zPVYqM4ZGAvXBHuu1LJmJGUDmxpump",
     "FF6PSUPxbX6Rt4Etw9mefVA1JfEZfKtNpVdLTjWFKxXZ",
     "GFKNuUKCDP3kQtTAjaV5VVMJFtNvMGG62xKP3XGXpump",
+    "HEiQtwFU4EW4EptXf3UnVzY4PVPzsgm3iW2MAxbxpump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:25:45.816Z"
+  "updated_at": "2026-05-21T23:26:09.791Z"
 }
