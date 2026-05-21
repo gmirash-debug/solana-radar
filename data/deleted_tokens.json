@@ -90,6 +90,13 @@
       "symbol": "TRENCHCOIN",
       "name": "TRENCHCOIN",
       "deleted_at": "2026-05-21T23:26:16.432Z"
+    },
+    "2DK6WxzW9UT5mDr3rivN8oeiUmWVkGucaXgAKc4Wpump": {
+      "token_address": "2DK6WxzW9UT5mDr3rivN8oeiUmWVkGucaXgAKc4Wpump",
+      "pool_address": "G7oFoddfVNgjLiRHMoir4YG4N6RWeC9zpPiJQvrFd61W",
+      "symbol": "WR26",
+      "name": "We Are 26",
+      "deleted_at": "2026-05-21T23:26:24.777Z"
     }
   },
   "pools": [
@@ -105,9 +112,11 @@
     "BzfQ3fGPA28xEo6sJU2XPGAog2aNrWbjXFzTXw1B1NTC",
     "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
     "FzCrLNQ4SW3nXpKb68HUXbfb2tvFDBoLhdCVHmAuoPze",
+    "G7oFoddfVNgjLiRHMoir4YG4N6RWeC9zpPiJQvrFd61W",
     "HCTAwVjrz9HJ8L3d1AQDXFFceYpmEFn9S3RMDGFCE9Tk"
   ],
   "tokens": [
+    "2DK6WxzW9UT5mDr3rivN8oeiUmWVkGucaXgAKc4Wpump",
     "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
     "7ELpaNSqPQKWA1LS7HqMJzLLxLPpoJSa3fKiYoZpump",
     "A2LprEwUDVLQX3xVQqFAMwbzf7ZQdx9wJMJvkQBPpump",
@@ -122,5 +131,5 @@
     "HEiQtwFU4EW4EptXf3UnVzY4PVPzsgm3iW2MAxbxpump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:26:16.432Z"
+  "updated_at": "2026-05-21T23:26:24.777Z"
 }
