@@ -111,6 +111,13 @@
       "symbol": "TROLBEY",
       "name": "Trolbey Maguire",
       "deleted_at": "2026-05-21T23:29:37.213Z"
+    },
+    "AJCAd7ixokqPegWtEa133BUyJydERvEWs8bDJFPWpump": {
+      "token_address": "AJCAd7ixokqPegWtEa133BUyJydERvEWs8bDJFPWpump",
+      "pool_address": "CgpMLFcTwr9uY4rv59y3k5HjUbco5wczZJrMQVSKtGTk",
+      "symbol": "Turkiye",
+      "name": "Turkiye",
+      "deleted_at": "2026-05-21T23:29:42.822Z"
     }
   },
   "pools": [
@@ -126,6 +133,7 @@
     "Atx6zyC1WkbBpCwhZG8UZ2n51184Ps78zTQMzsMV2uDy",
     "AvEQy4vGHhgKZY6QR7rBbN8dupXz9HiCbar5taizetRN",
     "BzfQ3fGPA28xEo6sJU2XPGAog2aNrWbjXFzTXw1B1NTC",
+    "CgpMLFcTwr9uY4rv59y3k5HjUbco5wczZJrMQVSKtGTk",
     "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
     "FzCrLNQ4SW3nXpKb68HUXbfb2tvFDBoLhdCVHmAuoPze",
     "G7oFoddfVNgjLiRHMoir4YG4N6RWeC9zpPiJQvrFd61W",
@@ -138,6 +146,7 @@
     "7ELpaNSqPQKWA1LS7HqMJzLLxLPpoJSa3fKiYoZpump",
     "A2LprEwUDVLQX3xVQqFAMwbzf7ZQdx9wJMJvkQBPpump",
     "ADVAviLMaZXLVjxYDHNd3VcV68EE8HUbo9FowLPbpump",
+    "AJCAd7ixokqPegWtEa133BUyJydERvEWs8bDJFPWpump",
     "ApGBE2QkB2wPqyJnga6ukNSYK2oiM3kWjeAjDM2Epump",
     "B5xwCQUKfx8BJZsgvuBvW6XgrxtkqLTrDEAYjpLJpump",
     "BiywH8Eq2CbGhwMHKwCnfTiccWJwN7r1Q4Qn9hsypump",
@@ -149,5 +158,5 @@
     "LAST7yfrXE3bXFYCdHhS1xGouTjaptnvQwBfWFoba7x",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:29:37.213Z"
+  "updated_at": "2026-05-21T23:29:42.822Z"
 }
