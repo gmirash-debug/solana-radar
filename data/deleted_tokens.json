@@ -48,6 +48,13 @@
       "symbol": "VIRL",
       "name": "Virl.fun",
       "deleted_at": "2026-05-16T23:54:35.360Z"
+    },
+    "A2LprEwUDVLQX3xVQqFAMwbzf7ZQdx9wJMJvkQBPpump": {
+      "token_address": "A2LprEwUDVLQX3xVQqFAMwbzf7ZQdx9wJMJvkQBPpump",
+      "pool_address": "9VcuAV17Rw2MmKxgwrNsH95bnHatQGkzgczVANhoKiZq",
+      "symbol": "NYAN",
+      "name": "Nyan Cat",
+      "deleted_at": "2026-05-21T23:25:09.211Z"
     }
   },
   "pools": [
@@ -55,12 +62,14 @@
     "52VFGEzYirC8GYVjs7B6YTqLoL5oKSVQbCPpwKqZTKqp",
     "6TB1AwLDFQpT6dC4GdG9QiiT6BTDyxAdn2Dojm73gJrS",
     "8PX97NP5WY871SmsZwHqYL9z97k3vzHGjvKFvAT7cARz",
+    "9VcuAV17Rw2MmKxgwrNsH95bnHatQGkzgczVANhoKiZq",
     "Atx6zyC1WkbBpCwhZG8UZ2n51184Ps78zTQMzsMV2uDy",
     "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
     "HCTAwVjrz9HJ8L3d1AQDXFFceYpmEFn9S3RMDGFCE9Tk"
   ],
   "tokens": [
     "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
+    "A2LprEwUDVLQX3xVQqFAMwbzf7ZQdx9wJMJvkQBPpump",
     "ADVAviLMaZXLVjxYDHNd3VcV68EE8HUbo9FowLPbpump",
     "B5xwCQUKfx8BJZsgvuBvW6XgrxtkqLTrDEAYjpLJpump",
     "BiywH8Eq2CbGhwMHKwCnfTiccWJwN7r1Q4Qn9hsypump",
@@ -68,5 +77,5 @@
     "GFKNuUKCDP3kQtTAjaV5VVMJFtNvMGG62xKP3XGXpump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-16T23:54:35.360Z"
+  "updated_at": "2026-05-21T23:25:09.211Z"
 }
