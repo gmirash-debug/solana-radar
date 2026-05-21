@@ -181,6 +181,13 @@
       "symbol": "PORTUGAL",
       "name": "Portugal",
       "deleted_at": "2026-05-21T23:56:44.685Z"
+    },
+    "5vicJEyYTDBqMsKe74vWQeDVMe5cmeA3vr1AT8RXb9t1": {
+      "token_address": "5vicJEyYTDBqMsKe74vWQeDVMe5cmeA3vr1AT8RXb9t1",
+      "pool_address": "Dt1carJXP7PZwHmABAYPvpgw1NkM76vZwHjBBjdPkPQC",
+      "symbol": "Ebola",
+      "name": "EbolaVirus",
+      "deleted_at": "2026-05-21T23:56:53.992Z"
     }
   },
   "pools": [
@@ -202,6 +209,7 @@
     "BzfQ3fGPA28xEo6sJU2XPGAog2aNrWbjXFzTXw1B1NTC",
     "CgpMLFcTwr9uY4rv59y3k5HjUbco5wczZJrMQVSKtGTk",
     "D6xt7Zg2oSsDpfyzkhgQC8qvyeHssUEZJ6XWe5udUyPp",
+    "Dt1carJXP7PZwHmABAYPvpgw1NkM76vZwHjBBjdPkPQC",
     "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
     "ELe7EtbX7m3aeBKKJYm4QYVXkwmJJwVcR6K4Nho27f4i",
     "ErNoCjdj5Vt9vvrzTeCsQn3MVKev6UqVpPnYcWyh6L6r",
@@ -215,6 +223,7 @@
     "2DK6WxzW9UT5mDr3rivN8oeiUmWVkGucaXgAKc4Wpump",
     "2R7jYvkAQwLu3smTy6U4Am9u1F14djdF5wPKkQk5pump",
     "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
+    "5vicJEyYTDBqMsKe74vWQeDVMe5cmeA3vr1AT8RXb9t1",
     "6jRnXJ6PnhpAEaSZVtwysNkvBXAGo4fhp5swat8Qpump",
     "75Hgi9UwP7QMUcyYiJc9PbmVyeAJguREXAZhj2G1pump",
     "7ELpaNSqPQKWA1LS7HqMJzLLxLPpoJSa3fKiYoZpump",
@@ -239,5 +248,5 @@
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:56:44.685Z"
+  "updated_at": "2026-05-21T23:56:53.992Z"
 }
