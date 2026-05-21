@@ -188,6 +188,13 @@
       "symbol": "Ebola",
       "name": "EbolaVirus",
       "deleted_at": "2026-05-21T23:56:53.992Z"
+    },
+    "4vgRfUycdhxNTpyUcLAmdBLKkhzvPiTztySknjAtpump": {
+      "token_address": "4vgRfUycdhxNTpyUcLAmdBLKkhzvPiTztySknjAtpump",
+      "pool_address": "FvcH2m6H5KaWGkaFd3uvsNT8kNR56VcaDLJgxQM8Mgdk",
+      "symbol": "GDOR",
+      "name": "Global Digital Oil Reserve",
+      "deleted_at": "2026-05-21T23:56:56.553Z"
     }
   },
   "pools": [
@@ -214,6 +221,7 @@
     "ELe7EtbX7m3aeBKKJYm4QYVXkwmJJwVcR6K4Nho27f4i",
     "ErNoCjdj5Vt9vvrzTeCsQn3MVKev6UqVpPnYcWyh6L6r",
     "FQarato6tWprAedipKT6VXu61amiR7qMTjE78vhCY5P9",
+    "FvcH2m6H5KaWGkaFd3uvsNT8kNR56VcaDLJgxQM8Mgdk",
     "FzCrLNQ4SW3nXpKb68HUXbfb2tvFDBoLhdCVHmAuoPze",
     "G7oFoddfVNgjLiRHMoir4YG4N6RWeC9zpPiJQvrFd61W",
     "HCTAwVjrz9HJ8L3d1AQDXFFceYpmEFn9S3RMDGFCE9Tk",
@@ -223,6 +231,7 @@
     "2DK6WxzW9UT5mDr3rivN8oeiUmWVkGucaXgAKc4Wpump",
     "2R7jYvkAQwLu3smTy6U4Am9u1F14djdF5wPKkQk5pump",
     "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
+    "4vgRfUycdhxNTpyUcLAmdBLKkhzvPiTztySknjAtpump",
     "5vicJEyYTDBqMsKe74vWQeDVMe5cmeA3vr1AT8RXb9t1",
     "6jRnXJ6PnhpAEaSZVtwysNkvBXAGo4fhp5swat8Qpump",
     "75Hgi9UwP7QMUcyYiJc9PbmVyeAJguREXAZhj2G1pump",
@@ -248,5 +257,5 @@
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:56:53.992Z"
+  "updated_at": "2026-05-21T23:56:56.553Z"
 }
