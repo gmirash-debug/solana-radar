@@ -174,6 +174,13 @@
       "symbol": "Flork",
       "name": "Flork",
       "deleted_at": "2026-05-21T23:56:36.765Z"
+    },
+    "Se2HT3A2WTqdpAeBy6wwuYMtoqmodGC7eLxrBFUpump": {
+      "token_address": "Se2HT3A2WTqdpAeBy6wwuYMtoqmodGC7eLxrBFUpump",
+      "pool_address": "ErNoCjdj5Vt9vvrzTeCsQn3MVKev6UqVpPnYcWyh6L6r",
+      "symbol": "PORTUGAL",
+      "name": "Portugal",
+      "deleted_at": "2026-05-21T23:56:44.685Z"
     }
   },
   "pools": [
@@ -197,6 +204,7 @@
     "D6xt7Zg2oSsDpfyzkhgQC8qvyeHssUEZJ6XWe5udUyPp",
     "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
     "ELe7EtbX7m3aeBKKJYm4QYVXkwmJJwVcR6K4Nho27f4i",
+    "ErNoCjdj5Vt9vvrzTeCsQn3MVKev6UqVpPnYcWyh6L6r",
     "FQarato6tWprAedipKT6VXu61amiR7qMTjE78vhCY5P9",
     "FzCrLNQ4SW3nXpKb68HUXbfb2tvFDBoLhdCVHmAuoPze",
     "G7oFoddfVNgjLiRHMoir4YG4N6RWeC9zpPiJQvrFd61W",
@@ -227,8 +235,9 @@
     "GFKNuUKCDP3kQtTAjaV5VVMJFtNvMGG62xKP3XGXpump",
     "HEiQtwFU4EW4EptXf3UnVzY4PVPzsgm3iW2MAxbxpump",
     "LAST7yfrXE3bXFYCdHhS1xGouTjaptnvQwBfWFoba7x",
+    "Se2HT3A2WTqdpAeBy6wwuYMtoqmodGC7eLxrBFUpump",
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:56:36.765Z"
+  "updated_at": "2026-05-21T23:56:44.685Z"
 }
