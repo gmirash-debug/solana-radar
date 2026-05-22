@@ -98,12 +98,12 @@ const els = {
 const FILTER_META = {
   incubation: {
     label: "Incubation",
-    criteria: "3h-72h / universe $50k-$1.5m / actionable <=$150k / watch <=$300k / liq >= $3k",
-    thesis: "early post-launch accumulation before the market fully reprices the token.",
+    criteria: "3h-30d / universe $10k-$50k / actionable <=$30k / watch <=$50k / liq >= $3k",
+    thesis: "cheap pre-breakout accumulation before the market reprices the token.",
   },
   young: {
     label: "Young",
-    criteria: "3d-30d / universe $100k-$5m / actionable <=$750k / watch <=$1.5m / liq >= $10k",
+    criteria: "3h-30d / universe $50k-$5m / actionable <=$750k / watch <=$1.5m / liq >= $10k",
     thesis: "post-launch accumulation while the token is still below breakout size.",
   },
   breakout: {
@@ -288,16 +288,16 @@ const INFERRABLE_FILTERS = ["incubation", "young", "breakout", "reactivation"];
 const FILTER_RULES = {
   incubation: {
     ageMin: 3,
-    ageMax: 72,
-    mcapMin: 50_000,
-    mcapMax: 1_500_000,
+    ageMax: 720,
+    mcapMin: 10_000,
+    mcapMax: 50_000,
     liquidityMin: 3_000,
-    volumeMin: 1_000,
+    volumeMin: 250,
   },
   young: {
-    ageMin: 72,
+    ageMin: 3,
     ageMax: 720,
-    mcapMin: 100_000,
+    mcapMin: 50_000,
     mcapMax: 5_000_000,
     liquidityMin: 10_000,
     volumeMin: 1_000,
@@ -663,8 +663,8 @@ function deriveAlertTier(alert = {}) {
   if (!hardSignal) return Number(alert.score || 0) >= 60 ? "watch" : "noise";
   if (volumeToMcap !== null && volumeToMcap > 1.5 && evidence.commonLinks === 0) return "late_chase";
   if (lane === "incubation") {
-    if (mcap > 300_000) return "late_chase";
-    return mcap <= 150_000 ? "actionable" : "watch";
+    if (mcap > 50_000) return "late_chase";
+    return mcap <= 30_000 ? "actionable" : "watch";
   }
   if (lane === "young") {
     if (mcap > 1_500_000) return "late_chase";

@@ -68,7 +68,9 @@ python3 solana-radar/server.py --port 8765 --auto-lane all --auto-interval-secon
 Open `http://127.0.0.1:8765`.
 
 The dashboard reads `data/latest_report.json`, shows recent alert history, and
-auto-runs the lane scanner. The scan button is only a force-refresh.
+auto-runs the lane scanner. The scan button is only a force-refresh. Each scan
+also refreshes current market snapshots for already caught tokens when their
+dashboard market data is older than about one hour.
 
 Narrative assignment follows [`NARRATIVE_PROTOCOL.md`](NARRATIVE_PROTOCOL.md):
 one primary narrative per caught token, optional secondary flavor, source-ranked
@@ -111,8 +113,8 @@ BRIGHTDATA_API_KEY
 
 Lanes:
 
-- `incubation`: `3h-72h`, `50k-1.5m mcap`, `liq >=3k`, HANTA-style early accumulation.
-- `young`: `3d-30d`, `100k-5m mcap`, `liq >=10k`, post-launch accumulation.
+- `incubation`: `3h-30d`, `10k-50k mcap`, `liq >=3k`, cheap pre-breakout accumulation before the market reprices the token.
+- `young`: `3h-30d`, `50k-5m mcap`, `liq >=10k`, post-launch accumulation after the token clears the cheap pre-breakout band.
 - `breakout`: `3d-30d`, `5m-25m mcap`, `liq >=50k`, `1h vol >=100k`, momentum/anomaly expansion.
 - `reactivation`: `30d+`, `100k-5m mcap`, `liq >=10k`, current mcap `<=40%` of Solana Tracker ATH, low-volume old-token reactivation.
 
@@ -150,6 +152,10 @@ only when the probe sees suspicious wallet classes, linked wallets, material
 flow, an alert-level score, or a scheduled deep-audit slot. This keeps API usage
 lower without abandoning slow backfills. If this Helius path fails, it can fall
 back to the older pool-signature scan.
+
+Already caught tokens get a separate hourly market refresh through DexScreener.
+That pass updates dashboard `Market now` fields without re-running expensive
+Helius wallet analysis for every historical catch.
 
 When a Bright Data key is present (`BRIGHTDATA_API_KEY`, `BRIGHT_DATA_API_KEY`,
 or `BRIGHT_DATA_API_TOKEN`), only triggered alerts are enriched with X search

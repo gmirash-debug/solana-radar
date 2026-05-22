@@ -2914,6 +2914,45 @@ def recent_alert_token_addresses(limit=250):
     return tokens
 
 
+def caught_market_token_addresses(state, alerts=None, limit=80):
+    deleted = load_deleted_tokens()
+    candidates = []
+
+    def add(token, timestamp):
+        token = clean_solana_address(token)
+        if not token or token in deleted.get("tokens", set()):
+            return
+        candidates.append((parse_timestamp(timestamp), token))
+
+    for alert in load_alert_history():
+        pool = alert.get("pool") or {}
+        if pool.get("pool_address") in deleted.get("pools", set()):
+            continue
+        add(pool.get("token_address"), alert_history_timestamp(alert))
+
+    for alert in alerts or []:
+        pool = alert.get("pool") or {}
+        if pool.get("pool_address") in deleted.get("pools", set()):
+            continue
+        add(pool.get("token_address"), alert_history_timestamp(alert))
+
+    for token, entry in (state.get("market") or {}).items():
+        if not isinstance(entry, dict) or not entry.get("first_signal_at"):
+            continue
+        add(entry.get("token_address") or token, entry.get("first_signal_at"))
+
+    ordered = []
+    seen = set()
+    for _, token in sorted(candidates, reverse=True):
+        if token in seen:
+            continue
+        seen.add(token)
+        ordered.append(token)
+        if limit > 0 and len(ordered) >= limit:
+            break
+    return ordered
+
+
 def fetch_solana_tracker_ath(http, token_address):
     api_key = os.environ.get("SOLANA_TRACKER_API_KEY")
     if not api_key:
@@ -3139,6 +3178,68 @@ def record_market_observations(state, pools, observed_at):
         ):
             entry["pair_created_at"] = pool.pair_created_at
             entry["pair_created_at_iso"] = iso(pool.pair_created_at)
+
+
+def best_pool_per_token(pools, config):
+    by_token = {}
+    for pool in pools or []:
+        token = pool.token_address
+        if not token or not pool_dex_allowed(pool, config):
+            continue
+        current = by_token.get(token)
+        if not current or (pool.liquidity_usd, pool.volume_1h_usd, pool.mcap_usd) > (
+            current.liquidity_usd,
+            current.volume_1h_usd,
+            current.mcap_usd,
+        ):
+            by_token[token] = pool
+    return list(by_token.values())
+
+
+def refresh_caught_market_observations(http, state, alerts, config, observed_at):
+    if not config.get("caught_market_refresh_enabled", True):
+        return []
+
+    limit = int(config.get("caught_market_refresh_max_tokens", 80))
+    ttl_seconds = int(config.get("caught_market_refresh_ttl_minutes", 50)) * 60
+    now = parse_timestamp(observed_at) or int(time.time())
+    tokens = caught_market_token_addresses(state, alerts, limit=limit)
+    market = state.setdefault("market", {})
+    due_tokens = []
+    for token in tokens:
+        entry = market.get(token) or {}
+        latest_seen = parse_timestamp(entry.get("latest_seen_at"))
+        if ttl_seconds > 0 and latest_seen and now - latest_seen < ttl_seconds:
+            continue
+        due_tokens.append(token)
+
+    stats = {
+        "checked_at": observed_at,
+        "candidate_tokens": len(tokens),
+        "due_tokens": len(due_tokens),
+        "refreshed_tokens": 0,
+        "source": "dexscreener_caught_market_refresh",
+    }
+    if not due_tokens:
+        state.setdefault("maintenance", {})["caught_market_refresh"] = stats
+        return []
+
+    pools = fetch_dex_pairs_for_tokens(http, due_tokens, "caught_market_refresh")
+    refreshed = best_pool_per_token(pools.values(), config)
+    for pool in refreshed:
+        existing = market.setdefault(pool.token_address or pool.pool_address, {})
+        if existing.get("first_obs_mcap_usd") and not existing.get("caught_obs_mcap_usd"):
+            existing["caught_obs_mcap_usd"] = existing.get("first_obs_mcap_usd")
+            existing["caught_obs_price_usd"] = existing.get("first_obs_price_usd")
+            existing["caught_obs_liquidity_usd"] = existing.get("first_obs_liquidity_usd")
+            existing["caught_obs_mcap_at"] = existing.get("first_obs_mcap_at")
+    record_market_observations(state, refreshed, observed_at)
+    stats["refreshed_tokens"] = len(refreshed)
+    stats["missing_tokens"] = len(due_tokens) - len(refreshed)
+    state.setdefault("maintenance", {})["caught_market_refresh"] = stats
+    if refreshed:
+        print(f"caught market refresh: {len(refreshed)}/{len(due_tokens)} tokens", flush=True)
+    return refreshed
 
 
 def record_alert_observations(state, alerts):
@@ -3409,12 +3510,16 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "alert_event_export_limit": config.get("alert_event_export_limit", 80),
             "actionable_mcap_max_usd": config.get("actionable_mcap_max_usd"),
             "watch_mcap_max_usd": config.get("watch_mcap_max_usd"),
+            "caught_market_refresh_enabled": config.get("caught_market_refresh_enabled", True),
+            "caught_market_refresh_ttl_minutes": config.get("caught_market_refresh_ttl_minutes", 50),
+            "caught_market_refresh_max_tokens": config.get("caught_market_refresh_max_tokens", 80),
         },
         "stats": {
             "universe_pools": len(universe),
             "scanned_pools": len(summaries),
             "alerts": len(alerts),
             "rpc_calls": dict(rpc_calls),
+            "caught_market_refresh": (state.get("maintenance") or {}).get("caught_market_refresh", {}),
             "deleted_tokens": {
                 "tokens": len(deleted_tokens["tokens"]),
                 "pools": len(deleted_tokens["pools"]),
@@ -3647,7 +3752,8 @@ def run_once(config, lane_name=None):
     generated_at = utc_now().isoformat().replace("+00:00", "Z")
     record_market_observations(state, universe, generated_at)
     record_alert_observations(state, all_alerts)
-    enrich_market_ath(http, state, universe, all_alerts, config, generated_at)
+    refreshed_caught_pools = refresh_caught_market_observations(http, state, all_alerts, config, generated_at)
+    enrich_market_ath(http, state, [*universe, *refreshed_caught_pools], all_alerts, config, generated_at)
     prune_wallet_cache(state, config)
     compact_state(state, universe, all_alerts, config, generated_at)
     save_json(STATE_PATH, state, compact=bool(config.get("state_json_compact", True)))
