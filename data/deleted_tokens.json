@@ -209,6 +209,13 @@
       "symbol": "Plakoro",
       "name": "Pokémon Plakoro",
       "deleted_at": "2026-05-22T00:58:25.373Z"
+    },
+    "34q2KmCvapecJgR6ZrtbCTrzZVtkt3a5mHEA3TuEsWYb": {
+      "token_address": "34q2KmCvapecJgR6ZrtbCTrzZVtkt3a5mHEA3TuEsWYb",
+      "pool_address": "Dx5wFoszXvND6XYYAjAjUQrGLqDAUrTVH2JmHz6eJDNt",
+      "symbol": "LOL",
+      "name": "LOL",
+      "deleted_at": "2026-05-22T00:58:56.040Z"
     }
   },
   "pools": [
@@ -233,6 +240,7 @@
     "CgpMLFcTwr9uY4rv59y3k5HjUbco5wczZJrMQVSKtGTk",
     "D6xt7Zg2oSsDpfyzkhgQC8qvyeHssUEZJ6XWe5udUyPp",
     "Dt1carJXP7PZwHmABAYPvpgw1NkM76vZwHjBBjdPkPQC",
+    "Dx5wFoszXvND6XYYAjAjUQrGLqDAUrTVH2JmHz6eJDNt",
     "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
     "ELe7EtbX7m3aeBKKJYm4QYVXkwmJJwVcR6K4Nho27f4i",
     "ErNoCjdj5Vt9vvrzTeCsQn3MVKev6UqVpPnYcWyh6L6r",
@@ -246,6 +254,7 @@
   "tokens": [
     "2DK6WxzW9UT5mDr3rivN8oeiUmWVkGucaXgAKc4Wpump",
     "2R7jYvkAQwLu3smTy6U4Am9u1F14djdF5wPKkQk5pump",
+    "34q2KmCvapecJgR6ZrtbCTrzZVtkt3a5mHEA3TuEsWYb",
     "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
     "4vgRfUycdhxNTpyUcLAmdBLKkhzvPiTztySknjAtpump",
     "5vicJEyYTDBqMsKe74vWQeDVMe5cmeA3vr1AT8RXb9t1",
@@ -275,5 +284,5 @@
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-22T00:58:25.373Z"
+  "updated_at": "2026-05-22T00:58:56.040Z"
 }
