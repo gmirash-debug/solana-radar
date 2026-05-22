@@ -202,6 +202,13 @@
       "symbol": "CHAD",
       "name": "chad",
       "deleted_at": "2026-05-21T23:57:05.077Z"
+    },
+    "817TC4ut67iRqDA9wAifpf7BD8c4zAeakQCWy7Bwpump": {
+      "token_address": "817TC4ut67iRqDA9wAifpf7BD8c4zAeakQCWy7Bwpump",
+      "pool_address": "6fEcPBxipDVkvL5uv6wkPciaQn7bn1CBd6NDevUML2jc",
+      "symbol": "Plakoro",
+      "name": "Pokémon Plakoro",
+      "deleted_at": "2026-05-22T00:58:25.373Z"
     }
   },
   "pools": [
@@ -213,6 +220,7 @@
     "5PL5ShfKKzY2ytKEU8hxFUU67r5CJhUFAZf2W4pu5jVd",
     "6KzFXBzfwU57QBibuBnRVbxnB1KMxyWUGXUDaRaHmHZL",
     "6TB1AwLDFQpT6dC4GdG9QiiT6BTDyxAdn2Dojm73gJrS",
+    "6fEcPBxipDVkvL5uv6wkPciaQn7bn1CBd6NDevUML2jc",
     "89fG8Pi8azVnu76UfynJv7TJBvggDNjv8GoNX24nosCQ",
     "8PX97NP5WY871SmsZwHqYL9z97k3vzHGjvKFvAT7cARz",
     "8oi82teTrCKgJDfc37hyTqgnAY3KbxKMySY9wBy86Mfo",
@@ -244,6 +252,7 @@
     "6jRnXJ6PnhpAEaSZVtwysNkvBXAGo4fhp5swat8Qpump",
     "75Hgi9UwP7QMUcyYiJc9PbmVyeAJguREXAZhj2G1pump",
     "7ELpaNSqPQKWA1LS7HqMJzLLxLPpoJSa3fKiYoZpump",
+    "817TC4ut67iRqDA9wAifpf7BD8c4zAeakQCWy7Bwpump",
     "89BSehAkaAESxZNrMpNLbduDumr7TLYS9eVf2btupump",
     "8NEh2L4PAVsweMTKJWyCn5WdQbKaB8FkHgJtkoK9pump",
     "9gSFB9ZVvhd7iLiQpEHH1fg6BC4JAnmbzx36LXAbpump",
@@ -266,5 +275,5 @@
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-21T23:57:05.077Z"
+  "updated_at": "2026-05-22T00:58:25.373Z"
 }
