@@ -216,6 +216,13 @@
       "symbol": "LOL",
       "name": "LOL",
       "deleted_at": "2026-05-22T00:58:56.040Z"
+    },
+    "E5uyXBUcJztmtoWGFrheBww5q7CL4JhqPtnDV4rQpump": {
+      "token_address": "E5uyXBUcJztmtoWGFrheBww5q7CL4JhqPtnDV4rQpump",
+      "pool_address": "8r4R3e4obQVFLbGFQZ78d1hEpY65ySvEZGu2BVzjEg7w",
+      "symbol": "FAME",
+      "name": "Hall of Fame",
+      "deleted_at": "2026-05-22T18:22:24.810Z"
     }
   },
   "pools": [
@@ -231,6 +238,7 @@
     "89fG8Pi8azVnu76UfynJv7TJBvggDNjv8GoNX24nosCQ",
     "8PX97NP5WY871SmsZwHqYL9z97k3vzHGjvKFvAT7cARz",
     "8oi82teTrCKgJDfc37hyTqgnAY3KbxKMySY9wBy86Mfo",
+    "8r4R3e4obQVFLbGFQZ78d1hEpY65ySvEZGu2BVzjEg7w",
     "9VcuAV17Rw2MmKxgwrNsH95bnHatQGkzgczVANhoKiZq",
     "A9JnmJzue6BvCgQmgHR7fzgMwmMAEnPd4yusVNnRRNAF",
     "AeSWE9gN3bPQuaD9qKTFgnp8ugLf8W17w9Fam6PhuC5W",
@@ -273,6 +281,7 @@
     "BiywH8Eq2CbGhwMHKwCnfTiccWJwN7r1Q4Qn9hsypump",
     "Bp4nAhfAUUGVoT8pCVndK9RbmcnjyGXmQtiQdAUppump",
     "D2bSDzYKpFCePrp98dfN4uuKH1SBnYiiWjwmpYBspump",
+    "E5uyXBUcJztmtoWGFrheBww5q7CL4JhqPtnDV4rQpump",
     "EPjDJ9DRqCSF78zPVYqM4ZGAvXBHuu1LJmJGUDmxpump",
     "EnqCw742Nbk3dHn4aZhHiLjo6awAhpd5gSzrunb7pump",
     "FF6PSUPxbX6Rt4Etw9mefVA1JfEZfKtNpVdLTjWFKxXZ",
@@ -284,5 +293,5 @@
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-22T00:58:56.040Z"
+  "updated_at": "2026-05-22T18:22:24.810Z"
 }
