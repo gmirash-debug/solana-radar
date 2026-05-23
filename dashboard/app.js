@@ -124,7 +124,7 @@ const FILTER_META = {
 };
 
 const FILTER_ORDER = ["incubation", "young", "breakout", "reactivation", "legacy"];
-const PUMPFUN_DEX_ALLOWLIST = new Set(["pumpfun-amm", "pumpswap", "pumpfun"]);
+const MIGRATED_PUMPFUN_DEX_ALLOWLIST = new Set(["pumpfun-amm", "pumpswap"]);
 const HARD_WALLET_CLASSES = new Set(["fresh", "freshish", "dormant"]);
 const SUPPORT_WALLET_CLASSES = new Set(["low_tx"]);
 const TIER_META = {
@@ -598,8 +598,16 @@ function normalizeDex(value) {
   return String(value || "").trim().toLowerCase().replaceAll("_", "-");
 }
 
+function activeDexAllowlist() {
+  const configured = state.report?.config?.dex_allowlist;
+  const values = Array.isArray(configured) && configured.length
+    ? configured
+    : [...MIGRATED_PUMPFUN_DEX_ALLOWLIST];
+  return new Set(values.map(normalizeDex).filter(Boolean));
+}
+
 function isPumpfunPool(pool = {}) {
-  return PUMPFUN_DEX_ALLOWLIST.has(normalizeDex(pool.dex));
+  return activeDexAllowlist().has(normalizeDex(pool.dex));
 }
 
 function narrativeTone(narrative) {

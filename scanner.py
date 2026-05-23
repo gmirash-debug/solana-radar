@@ -3510,6 +3510,7 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "alert_event_export_limit": config.get("alert_event_export_limit", 80),
             "actionable_mcap_max_usd": config.get("actionable_mcap_max_usd"),
             "watch_mcap_max_usd": config.get("watch_mcap_max_usd"),
+            "dex_allowlist": config.get("dex_allowlist", []),
             "caught_market_refresh_enabled": config.get("caught_market_refresh_enabled", True),
             "caught_market_refresh_ttl_minutes": config.get("caught_market_refresh_ttl_minutes", 50),
             "caught_market_refresh_max_tokens": config.get("caught_market_refresh_max_tokens", 80),

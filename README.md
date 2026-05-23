@@ -5,7 +5,7 @@ Local BBB-lite scanner for Solana meme pools.
 It uses free DEX data for market discovery and Helius only for onchain work:
 
 - find pools across lane-based filters: incubation, young, breakout, reactivation;
-- keep only pump.fun ecosystem pools by default: `pumpfun-amm`, `pumpswap`, `pumpfun`;
+- keep only migrated pump.fun ecosystem pools by default: `pumpfun-amm`, `pumpswap`;
 - fetch parsed Helius transactions with pagination instead of relying on raw pool signatures;
 - parse swaps;
 - classify buy wallets as fresh, freshish, low-tx, normal, or dormant;
@@ -118,8 +118,9 @@ Lanes:
 - `breakout`: `3d-30d`, `5m-25m mcap`, `liq >=50k`, `1h vol >=100k`, momentum/anomaly expansion.
 - `reactivation`: `30d+`, `100k-5m mcap`, `liq >=10k`, current mcap `<=40%` of Solana Tracker ATH, low-volume old-token reactivation.
 
-By default, all lanes scan only pump.fun ecosystem pools through `dex_allowlist`
-in `config.example.json`.
+By default, all lanes scan only migrated pump.fun ecosystem pools through
+`dex_allowlist` in `config.example.json`. Pre-migration `pumpfun` bonding-curve
+pools are excluded before Helius onchain analysis.
 
 ## Outputs
 

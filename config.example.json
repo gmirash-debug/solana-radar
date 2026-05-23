@@ -207,8 +207,7 @@
   "active_pool_limit": 40,
   "dex_allowlist": [
     "pumpfun-amm",
-    "pumpswap",
-    "pumpfun"
+    "pumpswap"
   ],
   "helius_transactions_enabled": true,
   "helius_transactions_fallback_signatures": true,
