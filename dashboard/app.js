@@ -113,8 +113,8 @@ const FILTER_META = {
   },
   reactivation: {
     label: "Reactivation",
-    criteria: "30d+ / $100k-$5m / <=40% ATH / actionable <=25% ATH / low-volume setup",
-    thesis: "older tokens that are materially corrected from ATH and show low-volume accumulation or dormant-wallet activity.",
+    criteria: "30d+ / $100k-$5m / <=40% ATH / suspicious accumulation or sticky buy-wave",
+    thesis: "older corrected tokens with either linked suspicious-wallet accumulation or broad net buying that remains sticky on buyer wallets.",
   },
   legacy: {
     label: "Legacy",
@@ -127,6 +127,10 @@ const FILTER_ORDER = ["incubation", "young", "breakout", "reactivation", "legacy
 const MIGRATED_PUMPFUN_DEX_ALLOWLIST = new Set(["pumpfun-amm", "pumpswap"]);
 const HARD_WALLET_CLASSES = new Set(["fresh", "freshish", "dormant"]);
 const SUPPORT_WALLET_CLASSES = new Set(["low_tx"]);
+const CLASS_LABELS = {
+  market_wave: "market wave",
+  wave_buyer: "wave buyer",
+};
 const TIER_META = {
   actionable: {
     label: "Actionable",
@@ -616,7 +620,7 @@ function narrativeTone(narrative) {
 
 function classChips(classes = {}) {
   return Object.entries(classes)
-    .map(([name, count]) => chip(`${name} ${count}`))
+    .map(([name, count]) => chip(`${CLASS_LABELS[name] || name} ${count}`))
     .join("");
 }
 
@@ -631,6 +635,7 @@ function tierChip(tier) {
 
 function alertEvidence(alert = {}) {
   const classes = alert.classes || {};
+  const wave = alert.wave || {};
   const hardWallets = finiteNumber(alert.hard_wallets)
     ?? Object.entries(classes)
       .filter(([name]) => HARD_WALLET_CLASSES.has(name))
@@ -656,6 +661,9 @@ function alertEvidence(alert = {}) {
     hardSol: Number(hardSol || 0),
     supportSol: Number(supportSol || 0),
     commonLinks,
+    waveNetSol: Number(wave.net_buy_sol || 0),
+    waveStickySupplyPct: Number(wave.sticky_supply_pct || 0),
+    waveStickyWallets: Number(wave.sticky_wallets || 0),
   };
 }
 
@@ -665,7 +673,8 @@ function deriveAlertTier(alert = {}) {
   const mcap = Number(snapshot.mcapUsd || alert.obs_mcap_usd || alert.pool?.mcap_usd || 0);
   const volumeToMcap = snapshot.volume1hUsd && mcap ? snapshot.volume1hUsd / mcap : null;
   const evidence = alertEvidence(alert);
-  const hardSignal = evidence.hardWallets >= 2 || evidence.hardSol >= 15 || evidence.commonLinks > 0;
+  const waveSignal = evidence.waveNetSol >= 25 && evidence.waveStickySupplyPct >= 3;
+  const hardSignal = evidence.hardWallets >= 2 || evidence.hardSol >= 15 || evidence.commonLinks > 0 || waveSignal;
   const supportOnly = evidence.supportWallets > 0 && !evidence.hardWallets && !evidence.commonLinks;
   if (supportOnly) return "noise";
   if (!hardSignal) return Number(alert.score || 0) >= 60 ? "watch" : "noise";
@@ -681,6 +690,7 @@ function deriveAlertTier(alert = {}) {
   if (lane === "reactivation") {
     const ratio = snapshot.athMcapUsd && mcap ? mcap / snapshot.athMcapUsd : null;
     if (ratio !== null && ratio > 0.4) return "late_chase";
+    if (ratio !== null && ratio <= 0.25 && evidence.waveStickySupplyPct >= 5) return "actionable";
     if (ratio !== null && ratio <= 0.25 && evidence.commonLinks && evidence.hardWallets >= 2) return "actionable";
     return "watch";
   }
@@ -900,7 +910,7 @@ function eventClassCounts(events = []) {
 
 function sortedClassChips(classes = {}) {
   const entries = Object.entries(classes).sort((a, b) => b[1] - a[1]);
-  return entries.length ? entries.map(([name, count]) => chip(`${name} ${count}`)).join(" ") : "-";
+  return entries.length ? entries.map(([name, count]) => chip(`${CLASS_LABELS[name] || name} ${count}`)).join(" ") : "-";
 }
 
 function aggregateAlertClasses(alerts = [], laneName = null) {
@@ -920,6 +930,16 @@ function sumAlertField(alerts = [], field, laneName = null) {
     if (laneName && lane !== laneName) return sum;
     return sum + Number(alert[field] || 0);
   }, 0);
+}
+
+function bestWaveAlert(alerts = []) {
+  return alerts
+    .filter((alert) => alert.wave)
+    .sort((a, b) => {
+      const scoreDiff = Number(b.score || 0) - Number(a.score || 0);
+      if (scoreDiff) return scoreDiff;
+      return new Date(b.window_start || b.created_at || 0) - new Date(a.window_start || a.created_at || 0);
+    })[0] || null;
 }
 
 function aggregateCommonEntries(alerts = [], field, keyNames = [], countName = "wallets") {
@@ -1033,7 +1053,7 @@ function buildTokenSignals() {
       row.pnl_pct = currentNative && row.avg_entry_native ? ((currentNative / row.avg_entry_native) - 1) * 100 : null;
       row.current_value_sol = currentNative && row.tokens ? currentNative * row.tokens : null;
       row.pnl_sol = row.current_value_sol !== null ? row.current_value_sol - row.sol_in : null;
-      row.class_label = Object.entries(row.classes).sort((a, b) => b[1] - a[1]).map(([name, count]) => `${name} ${count}`).join(", ");
+      row.class_label = Object.entries(row.classes).sort((a, b) => b[1] - a[1]).map(([name, count]) => `${CLASS_LABELS[name] || name} ${count}`).join(", ");
       row.signer_count = row.signer_examples.size;
       return row;
     }).sort((a, b) => Number(b.sol_in || 0) - Number(a.sol_in || 0));
@@ -1089,6 +1109,9 @@ function buildTokenSignals() {
     token.totalSuspiciousSol = sumAlertField(token.alerts, "suspicious_sol") || sumEventSol(uniqueEvents);
     token.hardFlowSol = sumAlertField(token.alerts, "hard_sol") || sumEventSol(token.hardEvents);
     token.supportFlowSol = sumAlertField(token.alerts, "support_sol") || sumEventSol(token.supportEvents);
+    token.bestWaveAlert = bestWaveAlert(token.alerts);
+    token.bestWave = token.bestWaveAlert?.wave || null;
+    token.hasWaveSignal = Boolean(token.bestWave);
     token.hardSignalCount = sumAlertField(token.alerts, "hard_wallets") || token.hardEvents.length;
     token.supportSignalCount = sumAlertField(token.alerts, "support_wallets") || token.supportEvents.length;
     token.walletClassCounts = Object.keys(aggregateAlertClasses(token.alerts)).length ? aggregateAlertClasses(token.alerts) : eventClassCounts(uniqueEvents);
@@ -1727,6 +1750,14 @@ function renderSignalQuality(token) {
   const duplicateChip = token.duplicateEventCount
     ? ` ${chip(`${token.duplicateEventCount} duplicate rows collapsed`, "warn")}`
     : "";
+  if (token.bestWave) {
+    return [
+      `max score ${esc(token.maxScore)}`,
+      `wave net ${sol(token.bestWave.net_buy_sol)}`,
+      `${esc(token.bestWave.unique_buyers || 0)} buyers`,
+      `${(Number(token.bestWave.sticky_supply_pct || 0)).toFixed(1)}% sticky supply`,
+    ].join(" / ") + duplicateChip;
+  }
   return [
     `max score ${esc(token.maxScore)}`,
     `${esc(token.hardSignalCount)} hard wallets / ${sol(token.hardFlowSol)}`,
@@ -1791,6 +1822,11 @@ function renderTopWalletPreview(token) {
 
 function renderScannerReason(token) {
   const parts = [];
+  if (token.bestWave) {
+    parts.push(
+      `market-wide wave: ${sol(token.bestWave.buy_sol)} buys vs ${sol(token.bestWave.sell_sol)} sells, ${sol(token.bestWave.net_buy_sol)} net, ${Number(token.bestWave.sticky_supply_pct || 0).toFixed(1)}% supply still on checked buyers`
+    );
+  }
   if (token.hardSignalCount || token.hardFlowSol) {
     parts.push(`${token.hardSignalCount} hard wallets bought ${sol(token.hardFlowSol)}`);
   }
@@ -1810,7 +1846,7 @@ function renderRiskFlags(token) {
   if (token.actionTier === "late_chase") flags.push(chip("late/chase", "bad"));
   if (token.actionTier === "noise") flags.push(chip("noise", "bad"));
   if (phase && ["Upper range", "Near ATH"].includes(phase.label)) flags.push(chip(`${phase.label}: ${phase.detail}`, phase.tone));
-  if (!token.hardSignalCount) flags.push(chip("no hard wallets", "warn"));
+  if (!token.hardSignalCount && !token.hasWaveSignal) flags.push(chip("no hard wallets", "warn"));
   if (!token.athMcapUsd) flags.push(chip(athStatusLabel(token.athStatus, token.athError), "warn"));
   if (["disabled", "none", "unchecked"].includes(token.socialHeat)) flags.push(chip(socialLabel(token.socialHeat, token.socialReason), token.socialHeat === "disabled" ? "warn" : ""));
   token.qualityPenalties.slice(0, 4).forEach((item) => {
@@ -1856,7 +1892,7 @@ function renderMarketPhase(token) {
   const reactivationHighRange = token.filterCategories.includes("reactivation")
     && (phase.label === "Upper range" || phase.label === "Near ATH");
   const caution = reactivationHighRange
-    ? "not a clean low-volume reactivation setup"
+    ? "above preferred reactivation zone"
     : "";
   return `
     <div class="kv">
@@ -1871,8 +1907,23 @@ function renderMarketPhaseLine(token) {
   if (!phase) return "-";
   const reactivationHighRange = token.filterCategories.includes("reactivation")
     && (phase.label === "Upper range" || phase.label === "Near ATH");
-  const caution = reactivationHighRange ? "not a clean low-volume reactivation setup" : "";
+  const caution = reactivationHighRange ? "above preferred reactivation zone" : "";
   return `${chip(phase.label, phase.tone)} ${esc(phase.detail)}${caution ? ` <span class="muted-inline">${esc(caution)}</span>` : ""}`;
+}
+
+function renderWaveLine(token) {
+  const wave = token.bestWave;
+  if (!wave) return "";
+  return `
+    <div class="kv">
+      <span>Buy wave</span>
+      <span>
+        ${sol(wave.buy_sol)} buys / ${sol(wave.sell_sol)} sells / ${sol(wave.net_buy_sol)} net;
+        ${esc(wave.unique_buyers || 0)} buyers, ${esc(wave.large_buyers || 0)} large;
+        ${Number(wave.sticky_supply_pct || 0).toFixed(1)}% supply sticky
+      </span>
+    </div>
+  `;
 }
 
 function gmgnTokenUrl(token) {
@@ -1958,6 +2009,7 @@ function renderTokenDetail(token) {
       <section class="detail-block">
         <div class="detail-block-title">Decision</div>
         <div class="kv"><span>Why caught</span><span>${esc(renderScannerReason(token))}</span></div>
+        ${renderWaveLine(token)}
         <div class="kv"><span>Risk flags</span><span>${renderRiskFlags(token)}</span></div>
         <div class="kv"><span>Market phase</span><span>${renderMarketPhaseLine(token)}</span></div>
         <div class="kv"><span>Token age</span><span>${esc(durationLabel(token.tokenAgeHours))}${token.tokenCreatedAt ? ` / launched ${esc(dateLabel(token.tokenCreatedAt))}` : ""}</span></div>

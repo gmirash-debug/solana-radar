@@ -213,6 +213,18 @@ def chunked(items, size):
         yield items[index : index + size]
 
 
+def rpc_token_amount(amount_info):
+    amount_info = amount_info or {}
+    amount = amount_info.get("amount")
+    decimals = int(amount_info.get("decimals") or 0)
+    if amount is not None:
+        try:
+            return int(amount) / (10**decimals)
+        except (TypeError, ValueError):
+            pass
+    return to_float(amount_info.get("uiAmount"))
+
+
 @dataclass
 class Pool:
     pool_address: str
@@ -338,6 +350,26 @@ class HeliusRpc:
         if pagination_token:
             opts["paginationToken"] = pagination_token
         return self.call("getTransactionsForAddress", [address, opts], timeout=self.transactions_timeout_seconds) or {}
+
+    def token_supply(self, mint):
+        result = self.call("getTokenSupply", [mint]) or {}
+        return rpc_token_amount(result.get("value"))
+
+    def token_balance(self, owner, mint):
+        result = self.call(
+            "getTokenAccountsByOwner",
+            [owner, {"mint": mint}, {"encoding": "jsonParsed"}],
+        ) or {}
+        total = 0.0
+        for item in result.get("value") or []:
+            info = (
+                item.get("account", {})
+                .get("data", {})
+                .get("parsed", {})
+                .get("info", {})
+            )
+            total += rpc_token_amount(info.get("tokenAmount"))
+        return total
 
 
 def gecko_pool_from_item(item, source):
@@ -2021,6 +2053,23 @@ def sol_sum(events):
     return sum(event.get("sol_amount", 0.0) for event in events)
 
 
+def dedupe_pool_alerts(alerts, limit=5):
+    deduped = {}
+    for alert in alerts:
+        key = alert["pool"]["pool_address"]
+        existing = deduped.get(key)
+        if not existing:
+            deduped[key] = alert
+            continue
+        if (alert["score"], alert["suspicious_sol"], alert["suspicious_wallets"]) > (
+            existing["score"],
+            existing["suspicious_sol"],
+            existing["suspicious_wallets"],
+        ):
+            deduped[key] = alert
+    return sorted(deduped.values(), key=lambda alert: alert["score"], reverse=True)[:limit]
+
+
 def score_events(events, config):
     hard_events = [event for event in events if event.get("wallet_class") in HARD_WALLET_CLASSES]
     support_events = [event for event in events if event.get("wallet_class") in SUPPORT_WALLET_CLASSES]
@@ -2117,6 +2166,11 @@ def classify_alert_tier(pool, alert, evidence, config):
     hard_flow = hard_sol >= min_sol
     dormant = bool(hard_classes.get("dormant"))
     support_only = bool(evidence.get("support_only"))
+    wave = alert.get("wave") or {}
+    wave_signal = bool(alert.get("signal_family") == "reactivation_wave" or wave)
+    sticky_supply_pct = float(wave.get("sticky_supply_pct") or 0)
+    sticky_bought_pct = float(wave.get("sticky_bought_pct") or 0)
+    net_retention_pct = float(wave.get("net_token_retention_pct") or 0)
 
     if hard_cluster:
         reasons.append("hard wallet cluster")
@@ -2128,6 +2182,10 @@ def classify_alert_tier(pool, alert, evidence, config):
         reasons.append("linked wallets")
     if support_wallets:
         reasons.append("low_tx support")
+    if wave_signal:
+        reasons.append("market-wide buying wave")
+        if sticky_supply_pct:
+            reasons.append("sticky buyers")
 
     if support_only:
         penalties.append("low_tx only")
@@ -2158,13 +2216,27 @@ def classify_alert_tier(pool, alert, evidence, config):
     elif lane == "reactivation":
         penalties.append("ath unverified")
 
-    hard_signal = hard_cluster or hard_flow or dormant or coordination
+    wave_actionable = (
+        wave_signal
+        and sticky_supply_pct >= float(config.get("reactivation_wave_actionable_sticky_supply_pct", 5.0))
+        and (
+            sticky_bought_pct >= float(config.get("reactivation_wave_actionable_sticky_bought_pct", 50.0))
+            or net_retention_pct >= float(config.get("reactivation_wave_actionable_net_token_retention_pct", 75.0))
+        )
+    )
+    hard_signal = hard_cluster or hard_flow or dormant or coordination or wave_signal
     if not hard_signal:
         tier = "noise" if support_only else "watch"
     elif "late mcap" in penalties or "blowoff volume" in penalties or "excess flow after move" in penalties:
         tier = "late_chase"
     elif lane == "reactivation":
-        tier = "actionable" if coordination and (hard_cluster or hard_flow or dormant) and "mid-range, not deep correction" not in penalties and "too close to ATH" not in penalties and "ath unverified" not in penalties else "watch"
+        clean_ath = (
+            "mid-range, not deep correction" not in penalties
+            and "too close to ATH" not in penalties
+            and "ath unverified" not in penalties
+        )
+        classic_actionable = coordination and (hard_cluster or hard_flow or dormant)
+        tier = "actionable" if clean_ath and (classic_actionable or wave_actionable) else "watch"
     elif actionable_mcap and mcap > actionable_mcap:
         tier = "watch"
     elif "hot volume" in penalties and not coordination:
@@ -2244,20 +2316,368 @@ def build_alerts(pool, events, config):
             }
         )
         alerts.append(alert)
-    deduped = {}
-    for alert in alerts:
-        key = alert["pool"]["pool_address"]
-        existing = deduped.get(key)
-        if not existing:
-            deduped[key] = alert
+    return dedupe_pool_alerts(alerts)
+
+
+WAVE_SWAP_FIELDS = (
+    "signature",
+    "block_time",
+    "time",
+    "pool_address",
+    "token_address",
+    "symbol",
+    "kind",
+    "signer",
+    "token_recipient",
+    "token_recipient_amount",
+    "token_sender",
+    "token_sender_amount",
+    "recipient_share",
+    "routed",
+    "sol_amount",
+    "token_amount",
+    "price_native",
+)
+
+
+def reactivation_wave_enabled(config):
+    return (
+        (config.get("lane") or config.get("mode")) == "reactivation"
+        and bool(config.get("reactivation_wave_enabled", False))
+    )
+
+
+def compact_wave_swap(swap):
+    return {key: swap.get(key) for key in WAVE_SWAP_FIELDS if swap.get(key) not in (None, "")}
+
+
+def merge_reactivation_wave_swaps(pool_state, swaps, config):
+    if not reactivation_wave_enabled(config):
+        return swaps
+    buffer_seconds = int(config.get("reactivation_wave_buffer_minutes", config["alert_window_minutes"])) * 60
+    max_swaps = int(config.get("reactivation_wave_buffer_max_swaps", 800))
+    recent_swaps = [compact_wave_swap(swap) for swap in swaps if swap.get("kind") in ("buy", "sell")]
+    existing_swaps = [
+        item
+        for item in pool_state.get("reactivation_wave_swaps", [])
+        if isinstance(item, dict) and item.get("kind") in ("buy", "sell")
+    ]
+    newest = max(
+        [int(time.time())]
+        + [int(item.get("block_time") or 0) for item in [*existing_swaps, *recent_swaps] if item.get("block_time")]
+    )
+    cutoff = newest - buffer_seconds if buffer_seconds > 0 else 0
+    by_signature = {}
+    fallback_index = 0
+    for item in [*existing_swaps, *recent_swaps]:
+        block_time = int(item.get("block_time") or 0)
+        if cutoff and block_time and block_time < cutoff:
             continue
-        if (alert["score"], alert["suspicious_sol"], alert["suspicious_wallets"]) > (
-            existing["score"],
-            existing["suspicious_sol"],
-            existing["suspicious_wallets"],
+        signature = item.get("signature") or f"fallback:{fallback_index}"
+        fallback_index += 1
+        by_signature[signature] = item
+    merged = sorted(by_signature.values(), key=lambda item: (item.get("block_time") or 0, item.get("signature") or ""))
+    if max_swaps > 0 and len(merged) > max_swaps:
+        merged = merged[-max_swaps:]
+    pool_state["reactivation_wave_swaps"] = merged
+    return merged
+
+
+def wave_buy_owner(swap):
+    return swap.get("token_recipient") or swap.get("signer") or ""
+
+
+def wave_sell_owner(swap):
+    return swap.get("token_sender") or swap.get("signer") or ""
+
+
+def reactivation_wave_window_metrics(window_swaps, config, relaxed=False):
+    min_trade_sol = float(config.get("reactivation_wave_min_trade_sol", 0.25))
+    buy_swaps = [
+        swap
+        for swap in window_swaps
+        if swap.get("kind") == "buy" and float(swap.get("sol_amount") or 0) >= min_trade_sol
+    ]
+    sell_swaps = [
+        swap
+        for swap in window_swaps
+        if swap.get("kind") == "sell" and float(swap.get("sol_amount") or 0) >= min_trade_sol
+    ]
+    buy_sol = sum(float(swap.get("sol_amount") or 0) for swap in buy_swaps)
+    sell_sol = sum(float(swap.get("sol_amount") or 0) for swap in sell_swaps)
+    net_buy_sol = buy_sol - sell_sol
+    if buy_sol <= 0 or net_buy_sol <= 0:
+        return None
+
+    buyer_rows = {}
+    for swap in buy_swaps:
+        owner = wave_buy_owner(swap)
+        if not owner:
+            continue
+        row = buyer_rows.setdefault(
+            owner,
+            {
+                "owner": owner,
+                "buy_sol": 0.0,
+                "sell_sol": 0.0,
+                "token_bought": 0.0,
+                "token_sold": 0.0,
+                "buy_count": 0,
+                "sell_count": 0,
+                "first_buy_time": swap.get("time") or iso(swap.get("block_time")),
+                "top_buy": swap,
+            },
+        )
+        sol_amount = float(swap.get("sol_amount") or 0)
+        token_amount_value = float(swap.get("token_amount") or swap.get("token_recipient_amount") or 0)
+        row["buy_sol"] += sol_amount
+        row["token_bought"] += token_amount_value
+        row["buy_count"] += 1
+        if sol_amount > float(row["top_buy"].get("sol_amount") or 0):
+            row["top_buy"] = swap
+        if parse_timestamp(swap.get("time")) and parse_timestamp(swap.get("time")) < parse_timestamp(row["first_buy_time"]):
+            row["first_buy_time"] = swap.get("time")
+
+    for swap in sell_swaps:
+        owner = wave_sell_owner(swap)
+        if not owner or owner not in buyer_rows:
+            continue
+        row = buyer_rows[owner]
+        row["sell_sol"] += float(swap.get("sol_amount") or 0)
+        row["token_sold"] += float(swap.get("token_amount") or swap.get("token_sender_amount") or 0)
+        row["sell_count"] += 1
+
+    buyers = [row for row in buyer_rows.values() if row["buy_sol"] > 0]
+    large_buy_min_sol = float(config.get("reactivation_wave_large_buy_min_sol", 1.0))
+    unique_buyers = len(buyers)
+    large_buyers = sum(1 for row in buyers if row["buy_sol"] >= large_buy_min_sol)
+    net_buy_ratio = net_buy_sol / buy_sol if buy_sol else 0.0
+
+    scale = 0.6 if relaxed else 1.0
+
+    def scaled_float(key, default):
+        return float(config.get(key, default)) * scale
+
+    def scaled_int(key, default):
+        return max(1, int(float(config.get(key, default)) * scale))
+
+    if buy_sol < scaled_float("reactivation_wave_min_buy_sol", 75):
+        return None
+    if net_buy_sol < scaled_float("reactivation_wave_min_net_buy_sol", 25):
+        return None
+    if net_buy_ratio < float(config.get("reactivation_wave_min_net_buy_ratio", 0.20)):
+        return None
+    if unique_buyers < scaled_int("reactivation_wave_min_unique_buyers", 20):
+        return None
+    if large_buyers < scaled_int("reactivation_wave_min_large_buyers", 8):
+        return None
+
+    return {
+        "buy_sol": buy_sol,
+        "sell_sol": sell_sol,
+        "net_buy_sol": net_buy_sol,
+        "net_buy_ratio": net_buy_ratio,
+        "unique_buyers": unique_buyers,
+        "large_buyers": large_buyers,
+        "buyers": sorted(buyers, key=lambda row: row["buy_sol"], reverse=True),
+        "buy_count": len(buy_swaps),
+        "sell_count": len(sell_swaps),
+    }
+
+
+def reactivation_wave_window_candidates(swaps, config, relaxed=False):
+    if not reactivation_wave_enabled(config) or not swaps:
+        return []
+    window_seconds = int(config["alert_window_minutes"]) * 60
+    ordered = sorted(
+        [swap for swap in swaps if swap.get("kind") in ("buy", "sell") and swap.get("block_time")],
+        key=lambda swap: swap.get("block_time") or 0,
+    )
+    candidates = []
+    for index, swap in enumerate(ordered):
+        if swap.get("kind") != "buy":
+            continue
+        start = int(swap.get("block_time") or 0)
+        end = start + window_seconds
+        window = [item for item in ordered[index:] if int(item.get("block_time") or 0) <= end]
+        metrics = reactivation_wave_window_metrics(window, config, relaxed=relaxed)
+        if not metrics:
+            continue
+        candidates.append({"start": start, "end": end, "window": window, "metrics": metrics})
+    candidates.sort(
+        key=lambda item: (
+            item["metrics"]["net_buy_sol"],
+            item["metrics"]["buy_sol"],
+            item["metrics"]["unique_buyers"],
+        ),
+        reverse=True,
+    )
+    return candidates
+
+
+def reactivation_wave_precheck(swaps, config):
+    return bool(reactivation_wave_window_candidates(swaps, config, relaxed=True))
+
+
+def build_reactivation_wave_alerts(pool, swaps, config, rpc):
+    if not reactivation_wave_enabled(config) or not pool.token_address:
+        return []
+    candidates = reactivation_wave_window_candidates(swaps, config, relaxed=False)
+    if not candidates:
+        return []
+    max_candidates = int(config.get("reactivation_wave_candidate_windows", 3))
+    balance_limit = int(config.get("reactivation_wave_balance_wallet_limit", 50))
+    min_sticky_supply_pct = float(config.get("reactivation_wave_min_sticky_supply_pct", 3.0))
+    min_sticky_bought_pct = float(config.get("reactivation_wave_min_sticky_bought_pct", 40.0))
+    min_net_retention_pct = float(config.get("reactivation_wave_min_net_token_retention_pct", 60.0))
+    try:
+        supply = rpc.token_supply(pool.token_address)
+    except Exception:
+        return []
+    if not supply:
+        return []
+
+    alerts = []
+    created_at = utc_now().isoformat().replace("+00:00", "Z")
+    for candidate in candidates[:max_candidates]:
+        metrics = candidate["metrics"]
+        buyers = metrics["buyers"][:balance_limit]
+        checked = []
+        sticky_tokens = 0.0
+        sticky_wallets = 0
+        checked_bought_tokens = 0.0
+        checked_net_tokens = 0.0
+        for row in buyers:
+            owner = row.get("owner")
+            if not owner:
+                continue
+            try:
+                balance = rpc.token_balance(owner, pool.token_address)
+            except Exception:
+                balance = 0.0
+            bought_tokens = float(row.get("token_bought") or 0)
+            sold_tokens = float(row.get("token_sold") or 0)
+            net_tokens = max(0.0, bought_tokens - sold_tokens)
+            checked_bought_tokens += bought_tokens
+            checked_net_tokens += net_tokens
+            sticky_tokens += balance
+            if balance > 0:
+                sticky_wallets += 1
+            checked.append(
+                {
+                    "owner": owner,
+                    "buy_sol": row["buy_sol"],
+                    "sell_sol": row["sell_sol"],
+                    "net_sol": row["buy_sol"] - row["sell_sol"],
+                    "token_bought": bought_tokens,
+                    "token_sold": sold_tokens,
+                    "current_balance": balance,
+                    "current_supply_pct": (balance / supply * 100) if supply else 0.0,
+                    "buy_count": row["buy_count"],
+                    "sell_count": row["sell_count"],
+                    "first_buy_time": row["first_buy_time"],
+                }
+            )
+
+        sticky_supply_pct = sticky_tokens / supply * 100 if supply else 0.0
+        sticky_bought_pct = sticky_tokens / checked_bought_tokens * 100 if checked_bought_tokens else 0.0
+        net_retention_pct = sticky_tokens / checked_net_tokens * 100 if checked_net_tokens else 0.0
+        if sticky_supply_pct < min_sticky_supply_pct:
+            continue
+        if sticky_bought_pct < min_sticky_bought_pct and net_retention_pct < min_net_retention_pct:
+            continue
+
+        score = 50
+        score += min(15, int(metrics["net_buy_sol"] / max(1.0, float(config.get("reactivation_wave_min_net_buy_sol", 25))) * 5))
+        score += min(10, int(metrics["unique_buyers"] / max(1, int(config.get("reactivation_wave_min_unique_buyers", 20))) * 5))
+        if sticky_supply_pct >= float(config.get("reactivation_wave_actionable_sticky_supply_pct", 5.0)):
+            score += 15
+        if (
+            sticky_bought_pct >= float(config.get("reactivation_wave_actionable_sticky_bought_pct", 50.0))
+            or net_retention_pct >= float(config.get("reactivation_wave_actionable_net_token_retention_pct", 75.0))
         ):
-            deduped[key] = alert
-    return sorted(deduped.values(), key=lambda alert: alert["score"], reverse=True)[:5]
+            score += 10
+        score = min(score, 95)
+
+        events = []
+        for row in metrics["buyers"][: int(config.get("alert_event_export_limit", 80))]:
+            event = dict(row["top_buy"])
+            event["wallet_class"] = "wave_buyer"
+            event["token_recipient"] = row["owner"]
+            event["wave_buy_sol"] = row["buy_sol"]
+            event["wave_sell_sol"] = row["sell_sol"]
+            event["wave_buy_count"] = row["buy_count"]
+            event["wave_sell_count"] = row["sell_count"]
+            events.append(event)
+
+        alert = {
+            "created_at": created_at,
+            "score": score,
+            "lane": "reactivation",
+            "signal_family": "reactivation_wave",
+            "pool": pool.as_dict(),
+            "obs_mcap_usd": pool.mcap_usd,
+            "obs_price_usd": pool.price_usd,
+            "obs_liquidity_usd": pool.liquidity_usd,
+            "obs_mcap_at": created_at,
+            "window_start": iso(candidate["start"]),
+            "window_end": iso(candidate["end"]),
+            "suspicious_wallets": sticky_wallets,
+            "suspicious_sol": metrics["net_buy_sol"],
+            "hard_wallets": 0,
+            "support_wallets": 0,
+            "hard_sol": 0.0,
+            "support_sol": 0.0,
+            "classes": {"market_wave": sticky_wallets},
+            "hard_classes": {},
+            "support_classes": {},
+            "common_funders": [],
+            "common_recipients": [],
+            "routed_buys": sum(1 for item in events if item.get("routed")),
+            "wave": {
+                "buy_sol": metrics["buy_sol"],
+                "sell_sol": metrics["sell_sol"],
+                "net_buy_sol": metrics["net_buy_sol"],
+                "net_buy_ratio": metrics["net_buy_ratio"],
+                "buy_count": metrics["buy_count"],
+                "sell_count": metrics["sell_count"],
+                "unique_buyers": metrics["unique_buyers"],
+                "large_buyers": metrics["large_buyers"],
+                "checked_wallets": len(checked),
+                "sticky_wallets": sticky_wallets,
+                "sticky_tokens": sticky_tokens,
+                "sticky_supply_pct": sticky_supply_pct,
+                "sticky_bought_pct": sticky_bought_pct,
+                "net_token_retention_pct": net_retention_pct,
+                "supply": supply,
+                "top_buyers": checked[: min(20, len(checked))],
+            },
+            "events": events,
+        }
+        tier, reasons, penalties, quality_metrics = classify_alert_tier(
+            pool,
+            alert,
+            {
+                "hard_wallets": 0,
+                "support_wallets": 0,
+                "hard_sol": 0.0,
+                "support_sol": 0.0,
+                "hard_classes": {},
+                "support_classes": {},
+                "support_only": False,
+            },
+            config,
+        )
+        alert.update(
+            {
+                "action_tier": tier,
+                "quality_reasons": reasons,
+                "quality_penalties": penalties,
+                "quality_metrics": quality_metrics,
+            }
+        )
+        alerts.append(alert)
+    return dedupe_pool_alerts(alerts)
 
 
 def helius_page_budget(pool, config, kind, phase=None):
@@ -2563,7 +2983,7 @@ def probe_classification_config(config):
     return probe_config
 
 
-def should_deep_scan(pool, config, pool_state, events, candidate_buys, alerts, classification_budget):
+def should_deep_scan(pool, config, pool_state, events, candidate_buys, alerts, classification_budget, swaps=None):
     if not config.get("helius_deep_scan_enabled", True):
         return False, "deep_disabled"
     if not config.get("helius_probe_enabled", True):
@@ -2598,6 +3018,8 @@ def should_deep_scan(pool, config, pool_state, events, candidate_buys, alerts, c
         and score > 0
     ):
         return True, "flow_probe"
+    if reactivation_wave_precheck(swaps or [], config):
+        return True, "reactivation_wave_probe"
 
     audit_interval = float(config.get("helius_deep_audit_interval_hours", 0))
     audits_remaining = int(classification_budget.get("deep_audits_remaining", 0))
@@ -2654,6 +3076,7 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
                 probe_candidate_buys,
                 probe_alerts,
                 classification_budget,
+                swaps=probe_swaps,
             )
             if deepen:
                 deep_txs, deep_fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="deep")
@@ -2684,7 +3107,10 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
         swaps, parse_errors = parse_helius_swaps(txs, pool)
         classified_events, candidate_buys = classify_buy_swaps(rpc, swaps, config, state, classification_budget)
         events = merge_events(seed_events, classified_events)
-    alerts = build_alerts(pool, events, config)
+    wave_swaps = merge_reactivation_wave_swaps(pool_state, swaps, config)
+    classic_alerts = build_alerts(pool, events, config)
+    wave_alerts = build_reactivation_wave_alerts(pool, wave_swaps, config, rpc)
+    alerts = dedupe_pool_alerts([*classic_alerts, *wave_alerts])
     return alerts, {
         "pool": pool.as_dict(),
         "lane": config.get("lane") or config.get("mode"),
@@ -2696,6 +3122,11 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
         "classified_buys": len(events),
         "classes": dict(Counter(event.get("wallet_class") for event in events)),
         "buy_sol": sum(event.get("sol_amount", 0.0) for event in events),
+        "wave_alerts": len(wave_alerts),
+        "wave_net_buy_sol": sum((alert.get("wave") or {}).get("net_buy_sol", 0.0) for alert in wave_alerts),
+        "wave_sticky_supply_pct": max(
+            [(alert.get("wave") or {}).get("sticky_supply_pct", 0.0) for alert in wave_alerts] or [0.0]
+        ),
         "parse_errors": parse_errors,
         "trade_fetch": fetch_stats,
     }
@@ -3514,6 +3945,11 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "caught_market_refresh_enabled": config.get("caught_market_refresh_enabled", True),
             "caught_market_refresh_ttl_minutes": config.get("caught_market_refresh_ttl_minutes", 50),
             "caught_market_refresh_max_tokens": config.get("caught_market_refresh_max_tokens", 80),
+            "reactivation_wave_enabled": config.get("reactivation_wave_enabled", False),
+            "reactivation_wave_min_buy_sol": config.get("reactivation_wave_min_buy_sol"),
+            "reactivation_wave_min_net_buy_sol": config.get("reactivation_wave_min_net_buy_sol"),
+            "reactivation_wave_min_unique_buyers": config.get("reactivation_wave_min_unique_buyers"),
+            "reactivation_wave_min_sticky_supply_pct": config.get("reactivation_wave_min_sticky_supply_pct"),
         },
         "stats": {
             "universe_pools": len(universe),
@@ -3576,6 +4012,16 @@ def render_report(payload):
             lines.append(f"- suspicious_wallets: {alert['suspicious_wallets']}")
             lines.append(f"- suspicious_sol: {alert['suspicious_sol']:.2f}")
             lines.append(f"- classes: {alert['classes']}")
+            wave = alert.get("wave") or {}
+            if wave:
+                lines.append(
+                    "- reactivation_wave: "
+                    f"buy={wave.get('buy_sol', 0):.2f} SOL "
+                    f"sell={wave.get('sell_sol', 0):.2f} SOL "
+                    f"net={wave.get('net_buy_sol', 0):.2f} SOL "
+                    f"buyers={wave.get('unique_buyers', 0)} "
+                    f"sticky_supply={wave.get('sticky_supply_pct', 0):.2f}%"
+                )
             if alert["common_funders"]:
                 lines.append(f"- common_funders: {alert['common_funders']}")
             if alert.get("common_recipients"):
