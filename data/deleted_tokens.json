@@ -230,6 +230,13 @@
       "symbol": "Azrael",
       "name": "The Angel of Death",
       "deleted_at": "2026-05-27T23:23:19.739Z"
+    },
+    "DsFkoBQJHhgTo54WBJfYbPz6vcybL7CRmTX9QGTEpump": {
+      "token_address": "DsFkoBQJHhgTo54WBJfYbPz6vcybL7CRmTX9QGTEpump",
+      "pool_address": "Hn1UwCy93T9L2dXBbNVms3Mf3dN7Pn9b1dS8Pe4vVN5x",
+      "symbol": "EJAK",
+      "name": "EJAK INU",
+      "deleted_at": "2026-05-27T23:23:23.853Z"
     }
   },
   "pools": [
@@ -265,7 +272,8 @@
     "FzCrLNQ4SW3nXpKb68HUXbfb2tvFDBoLhdCVHmAuoPze",
     "G7oFoddfVNgjLiRHMoir4YG4N6RWeC9zpPiJQvrFd61W",
     "HCTAwVjrz9HJ8L3d1AQDXFFceYpmEFn9S3RMDGFCE9Tk",
-    "HRf1bWBDtd7DxBryr7UwYTLMgSXrdHWZ3hbDaDHswieb"
+    "HRf1bWBDtd7DxBryr7UwYTLMgSXrdHWZ3hbDaDHswieb",
+    "Hn1UwCy93T9L2dXBbNVms3Mf3dN7Pn9b1dS8Pe4vVN5x"
   ],
   "tokens": [
     "2DK6WxzW9UT5mDr3rivN8oeiUmWVkGucaXgAKc4Wpump",
@@ -290,6 +298,7 @@
     "Bp4nAhfAUUGVoT8pCVndK9RbmcnjyGXmQtiQdAUppump",
     "CiFz2Y6QZ3pgzwvLEwT1hgjp2CBwmEDpFaQTRhVnpump",
     "D2bSDzYKpFCePrp98dfN4uuKH1SBnYiiWjwmpYBspump",
+    "DsFkoBQJHhgTo54WBJfYbPz6vcybL7CRmTX9QGTEpump",
     "E5uyXBUcJztmtoWGFrheBww5q7CL4JhqPtnDV4rQpump",
     "EPjDJ9DRqCSF78zPVYqM4ZGAvXBHuu1LJmJGUDmxpump",
     "EnqCw742Nbk3dHn4aZhHiLjo6awAhpd5gSzrunb7pump",
@@ -302,5 +311,5 @@
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-27T23:23:19.739Z"
+  "updated_at": "2026-05-27T23:23:23.853Z"
 }
