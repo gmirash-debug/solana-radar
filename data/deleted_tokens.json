@@ -237,6 +237,13 @@
       "symbol": "EJAK",
       "name": "EJAK INU",
       "deleted_at": "2026-05-27T23:23:23.853Z"
+    },
+    "4MhKUVWwjHHU9FwrBi85mDSSSxqwCgXDuExvpzkRpump": {
+      "token_address": "4MhKUVWwjHHU9FwrBi85mDSSSxqwCgXDuExvpzkRpump",
+      "pool_address": "EWXiHuBM1MqTuARqMwXJsHkpBUzUQHN7RFe4aS1Fjjmm",
+      "symbol": "RICHGUY",
+      "name": "Just a Rich Guy",
+      "deleted_at": "2026-05-27T23:23:38.625Z"
     }
   },
   "pools": [
@@ -266,6 +273,7 @@
     "Dx5wFoszXvND6XYYAjAjUQrGLqDAUrTVH2JmHz6eJDNt",
     "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
     "ELe7EtbX7m3aeBKKJYm4QYVXkwmJJwVcR6K4Nho27f4i",
+    "EWXiHuBM1MqTuARqMwXJsHkpBUzUQHN7RFe4aS1Fjjmm",
     "ErNoCjdj5Vt9vvrzTeCsQn3MVKev6UqVpPnYcWyh6L6r",
     "FQarato6tWprAedipKT6VXu61amiR7qMTjE78vhCY5P9",
     "FvcH2m6H5KaWGkaFd3uvsNT8kNR56VcaDLJgxQM8Mgdk",
@@ -280,6 +288,7 @@
     "2R7jYvkAQwLu3smTy6U4Am9u1F14djdF5wPKkQk5pump",
     "34q2KmCvapecJgR6ZrtbCTrzZVtkt3a5mHEA3TuEsWYb",
     "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
+    "4MhKUVWwjHHU9FwrBi85mDSSSxqwCgXDuExvpzkRpump",
     "4vgRfUycdhxNTpyUcLAmdBLKkhzvPiTztySknjAtpump",
     "5vicJEyYTDBqMsKe74vWQeDVMe5cmeA3vr1AT8RXb9t1",
     "6jRnXJ6PnhpAEaSZVtwysNkvBXAGo4fhp5swat8Qpump",
@@ -311,5 +320,5 @@
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-27T23:23:23.853Z"
+  "updated_at": "2026-05-27T23:23:38.625Z"
 }
