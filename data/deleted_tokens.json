@@ -223,6 +223,13 @@
       "symbol": "FAME",
       "name": "Hall of Fame",
       "deleted_at": "2026-05-22T18:22:24.810Z"
+    },
+    "CiFz2Y6QZ3pgzwvLEwT1hgjp2CBwmEDpFaQTRhVnpump": {
+      "token_address": "CiFz2Y6QZ3pgzwvLEwT1hgjp2CBwmEDpFaQTRhVnpump",
+      "pool_address": "D7jJHYQVCAd3CK8QEBRWfeSoYvynejhCT6jMvxrH4rHc",
+      "symbol": "Azrael",
+      "name": "The Angel of Death",
+      "deleted_at": "2026-05-27T23:23:19.739Z"
     }
   },
   "pools": [
@@ -247,6 +254,7 @@
     "BzfQ3fGPA28xEo6sJU2XPGAog2aNrWbjXFzTXw1B1NTC",
     "CgpMLFcTwr9uY4rv59y3k5HjUbco5wczZJrMQVSKtGTk",
     "D6xt7Zg2oSsDpfyzkhgQC8qvyeHssUEZJ6XWe5udUyPp",
+    "D7jJHYQVCAd3CK8QEBRWfeSoYvynejhCT6jMvxrH4rHc",
     "Dt1carJXP7PZwHmABAYPvpgw1NkM76vZwHjBBjdPkPQC",
     "Dx5wFoszXvND6XYYAjAjUQrGLqDAUrTVH2JmHz6eJDNt",
     "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
@@ -280,6 +288,7 @@
     "B5xwCQUKfx8BJZsgvuBvW6XgrxtkqLTrDEAYjpLJpump",
     "BiywH8Eq2CbGhwMHKwCnfTiccWJwN7r1Q4Qn9hsypump",
     "Bp4nAhfAUUGVoT8pCVndK9RbmcnjyGXmQtiQdAUppump",
+    "CiFz2Y6QZ3pgzwvLEwT1hgjp2CBwmEDpFaQTRhVnpump",
     "D2bSDzYKpFCePrp98dfN4uuKH1SBnYiiWjwmpYBspump",
     "E5uyXBUcJztmtoWGFrheBww5q7CL4JhqPtnDV4rQpump",
     "EPjDJ9DRqCSF78zPVYqM4ZGAvXBHuu1LJmJGUDmxpump",
@@ -293,5 +302,5 @@
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-22T18:22:24.810Z"
+  "updated_at": "2026-05-27T23:23:19.739Z"
 }
