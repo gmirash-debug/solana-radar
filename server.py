@@ -17,7 +17,7 @@ ALERTS_PATH = DATA_DIR / "alerts.jsonl"
 STATE_PATH = DATA_DIR / "state.json"
 DELETED_TOKENS_PATH = DATA_DIR / "deleted_tokens.json"
 SCANNER_PATH = ROOT / "scanner.py"
-LANES = {"all", "incubation", "young", "breakout", "reactivation"}
+LANES = {"all", "micro_sticky", "cheap_sticky", "breakout", "reactivation"}
 
 scan_lock = threading.Lock()
 scan_status = {

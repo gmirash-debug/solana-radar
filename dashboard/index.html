@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Solana Radar</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="styles.css?v=20260523-filter-cache">
+    <link rel="stylesheet" href="styles.css?v=20260527-sticky-lanes">
   </head>
   <body>
     <header class="topbar">
@@ -16,8 +16,8 @@
       <div class="actions">
         <select id="modeSelect" aria-label="Scan lane">
           <option value="all">all lanes</option>
-          <option value="incubation">incubation</option>
-          <option value="young">young</option>
+          <option value="micro_sticky">micro sticky</option>
+          <option value="cheap_sticky">cheap sticky</option>
           <option value="breakout">breakout</option>
           <option value="reactivation">reactivation</option>
         </select>
@@ -59,8 +59,8 @@
           </select>
           <select id="laneFilter" aria-label="Lane">
             <option value="all">all lanes</option>
-            <option value="incubation">incubation</option>
-            <option value="young">young</option>
+            <option value="micro_sticky">micro sticky</option>
+            <option value="cheap_sticky">cheap sticky</option>
             <option value="breakout">breakout</option>
             <option value="reactivation">reactivation</option>
           </select>
@@ -78,6 +78,6 @@
       <section id="content" class="content"></section>
     </main>
 
-    <script src="app.js?v=20260523-filter-cache"></script>
+    <script src="app.js?v=20260527-sticky-lanes"></script>
   </body>
 </html>

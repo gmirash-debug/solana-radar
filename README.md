@@ -2,9 +2,11 @@
 
 Local BBB-lite scanner for Solana meme pools.
 
+Boundary: this project is a market/onchain alert scanner, not the primary narrative-discovery workflow. It may start from DEX/Helius/GMGN because it is looking for caught tokens. For any open-ended narrative scan, start from the top-level universal source-first router before using Solana Radar outputs.
+
 It uses free DEX data for market discovery and Helius only for onchain work:
 
-- find pools across lane-based filters: incubation, young, breakout, reactivation;
+- find pools across active lane-based filters: micro sticky, cheap sticky, breakout, and reactivation;
 - keep only migrated pump.fun ecosystem pools by default: `pumpfun-amm`, `pumpswap`;
 - fetch parsed Helius transactions with pagination instead of relying on raw pool signatures;
 - parse swaps;
@@ -53,8 +55,8 @@ python3 solana-radar/scanner.py --once --lane all
 Run one lane:
 
 ```bash
-python3 solana-radar/scanner.py --once --lane incubation
-python3 solana-radar/scanner.py --once --lane young
+python3 solana-radar/scanner.py --once --lane micro_sticky
+python3 solana-radar/scanner.py --once --lane cheap_sticky
 python3 solana-radar/scanner.py --once --lane breakout
 python3 solana-radar/scanner.py --once --lane reactivation
 ```
@@ -113,10 +115,12 @@ BRIGHTDATA_API_KEY
 
 Lanes:
 
-- `incubation`: `3h-30d`, `10k-50k mcap`, `liq >=3k`, cheap pre-breakout accumulation before the market reprices the token.
-- `young`: `3h-30d`, `50k-5m mcap`, `liq >=10k`, post-launch accumulation after the token clears the cheap pre-breakout band.
+- `micro_sticky`: `3h-7d`, `$10k-$80k mcap`, `liq >=3k`, low-cap migrated pump.fun tokens with sticky buyer supply. This is the TinyWorld-before-$50k catch lane.
+- `cheap_sticky`: `12h-10d`, `$50k-$250k mcap`, `liq >=10k`, cheap migrated pump.fun tokens with sticky buyer supply before repricing.
 - `breakout`: `3d-30d`, `5m-25m mcap`, `liq >=50k`, `1h vol >=100k`, momentum/anomaly expansion.
 - `reactivation`: `30d+`, `100k-5m mcap`, `liq >=10k`, current mcap `<=40%` of Solana Tracker ATH, low-volume old-token reactivation.
+
+Retired filters: `incubation` and `young` are no longer scanned or shown as active dashboard filters because they produced too much noise relative to useful catches. The new sticky lanes replace them with a narrower market prefilter plus a balance-retention check: low_tx/freshish buyers only become a dashboard signal when current buyer balances still hold meaningful supply.
 
 By default, all lanes scan only migrated pump.fun ecosystem pools through
 `dex_allowlist` in `config.example.json`. Pre-migration `pumpfun` bonding-curve

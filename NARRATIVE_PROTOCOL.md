@@ -2,6 +2,8 @@
 
 This protocol defines how Solana Radar fills token information, chooses one primary narrative, and explains the context shown in the dashboard.
 
+Important boundary: this is a caught-token enrichment protocol, not a narrative discovery protocol. It is allowed to start from market/onchain data only because Solana Radar first catches tokens through scanner alerts. Do not use this file for open-ended narrative research. For narrative scans, use the top-level universal source-first router first.
+
 ## Goal
 
 Every caught token must have one clear primary narrative. Secondary themes can be shown as flavor, but they must not create duplicate narrative buckets for the same token.
@@ -20,14 +22,21 @@ Narratives are assigned only to tokens with scanner alerts. The universe list is
 
 ## Lane Scope
 
-The `young` lane is the main post-launch accumulation lane:
+The `micro_sticky` lane is the very early cheap sticky-accumulation lane:
 
-- age: `3d-30d`;
-- market cap: `$100k-$5m`;
+- age: `3h-7d`;
+- market cap: `$10k-$80k`;
+- liquidity: `>= $3k`;
+- alert requirement: sticky buyer supply, not just raw low_tx/freshish activity.
+
+The `cheap_sticky` lane is the TinyWorld-style cheap sticky-accumulation lane:
+
+- age: `12h-10d`;
+- market cap: `$50k-$250k`;
 - liquidity: `>= $10k`;
-- 1h volume: `>= $1k`.
+- alert requirement: sticky buyer supply before the market fully reprices the token.
 
-The `breakout` lane is the momentum/anomaly lane after young-lane size:
+The `breakout` lane is the momentum/anomaly lane:
 
 - age: `3d-30d`;
 - market cap: `$5m-$25m`;
@@ -37,6 +46,8 @@ The `breakout` lane is the momentum/anomaly lane after young-lane size:
 - 1h volume / liquidity: `>= 0.35x`.
 
 Tokens above `$25m` need a separate higher-cap momentum lane; they should not silently expand `breakout` unless the scanner budget is also increased.
+
+Retired scanner filters: `incubation` and `young` are no longer active lanes. Historical catches from those lanes should be shown under an active current filter if they now match one, otherwise under `Legacy`; do not keep retired filters as first-class dashboard groups. New cheap-token coverage should come from `micro_sticky` and `cheap_sticky`, because those require current holder retention before surfacing low-cap noise.
 
 ## Scanner Filter Categorizer
 
@@ -49,7 +60,7 @@ Every caught token should expose:
 - filter criteria shown in the dashboard;
 - filter grouping in the `Filters` tab.
 
-Filter categories should be based on alert lane or, for old untagged alerts, inferred from the alert's market snapshot using the current filter rules. Never infer a filter from token name or narrative. `Legacy` is only allowed when the old alert lacks enough age, market cap, liquidity, or volume data to map it into Launch, Incubation, Young, Breakout, or Reactivation.
+Filter categories should be based on alert lane or, for old untagged alerts, inferred from the alert's market snapshot using the current filter rules. Never infer a filter from token name or narrative. `Legacy` is allowed when the old alert lacks enough age, market cap, liquidity, volume, ATH, or sticky-accumulation data to map it into the active Micro Sticky, Cheap Sticky, Breakout, or Reactivation filters, or when it came from a retired filter and no longer fits an active filter.
 
 ## Enrichment Timing
 
@@ -60,6 +71,11 @@ The dashboard should read the backend `token_intel.narrative` as the source of t
 ## Source Priority
 
 Use the strongest available source first. Lower-priority sources can support a claim, but should not override higher-priority evidence.
+
+Split source priority into two different jobs:
+
+- Factual token fields can start from market/onchain data: CA, pair, age, liquidity, volume, ATH, wallet flow.
+- Narrative thesis should prefer official project sources, source posts, public context, and matched social evidence over ticker/name/market metadata. Market data can show that a token is active; it cannot prove what narrative is spreading.
 
 1. Direct market/onchain data:
    - Solana Tracker token, ATH, and chart endpoints;

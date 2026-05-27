@@ -96,20 +96,20 @@ const els = {
 };
 
 const FILTER_META = {
-  incubation: {
-    label: "Incubation",
-    criteria: "3h-30d / universe $10k-$50k / actionable <=$30k / watch <=$50k / liq >= $3k",
-    thesis: "cheap pre-breakout accumulation before the market reprices the token.",
+  micro_sticky: {
+    label: "Micro Sticky",
+    criteria: "3h-7d / $10k-$80k mcap / liq >= $3k / sticky buyers >=3% supply",
+    thesis: "very early cheap migrated pump.fun tokens where early buyers still hold meaningful supply after a net-buy window.",
   },
-  young: {
-    label: "Young",
-    criteria: "3h-30d / universe $50k-$5m / actionable <=$750k / watch <=$1.5m / liq >= $10k",
-    thesis: "post-launch accumulation while the token is still below breakout size.",
+  cheap_sticky: {
+    label: "Cheap Sticky",
+    criteria: "12h-10d / $50k-$250k mcap / liq >= $10k / sticky buyers >=3% supply",
+    thesis: "TinyWorld-style cheap accumulation: early low-cap tokens with sticky buyer supply before the market reprices them.",
   },
   breakout: {
     label: "Breakout",
     criteria: "3d-30d / $5m-$25m mcap / liq >= $50k / 1h volume >= $100k",
-    thesis: "momentum expansion after young-lane size, filtered for volume velocity and suspicious onchain flow.",
+    thesis: "momentum expansion filtered for volume velocity and suspicious onchain flow.",
   },
   reactivation: {
     label: "Reactivation",
@@ -123,13 +123,14 @@ const FILTER_META = {
   },
 };
 
-const FILTER_ORDER = ["incubation", "young", "breakout", "reactivation", "legacy"];
+const FILTER_ORDER = ["micro_sticky", "cheap_sticky", "breakout", "reactivation", "legacy"];
 const MIGRATED_PUMPFUN_DEX_ALLOWLIST = new Set(["pumpfun-amm", "pumpswap"]);
 const HARD_WALLET_CLASSES = new Set(["fresh", "freshish", "dormant"]);
 const SUPPORT_WALLET_CLASSES = new Set(["low_tx"]);
 const CLASS_LABELS = {
   market_wave: "market wave",
   wave_buyer: "wave buyer",
+  sticky_buyer: "sticky buyer",
 };
 const TIER_META = {
   actionable: {
@@ -287,24 +288,27 @@ function rawTimestampDate(value) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-const INFERRABLE_FILTERS = ["incubation", "young", "breakout", "reactivation"];
+const EXPLICIT_FILTERS = ["micro_sticky", "cheap_sticky", "breakout", "reactivation"];
+const INFERRABLE_FILTERS = ["breakout", "reactivation"];
 
 const FILTER_RULES = {
-  incubation: {
+  micro_sticky: {
     ageMin: 3,
-    ageMax: 720,
+    ageMax: 168,
     mcapMin: 10_000,
-    mcapMax: 50_000,
+    mcapMax: 80_000,
     liquidityMin: 3_000,
     volumeMin: 250,
+    volumeMax: 25_000,
   },
-  young: {
-    ageMin: 3,
-    ageMax: 720,
+  cheap_sticky: {
+    ageMin: 12,
+    ageMax: 240,
     mcapMin: 50_000,
-    mcapMax: 5_000_000,
+    mcapMax: 250_000,
     liquidityMin: 10_000,
-    volumeMin: 1_000,
+    volumeMin: 2_000,
+    volumeMax: 40_000,
   },
   breakout: {
     ageMin: 72,
@@ -404,7 +408,7 @@ function inferAlertFilter(alert = {}) {
 }
 
 function baseAlertLane(alert = {}) {
-  if (INFERRABLE_FILTERS.includes(alert.lane)) return alert.lane;
+  if (EXPLICIT_FILTERS.includes(alert.lane)) return alert.lane;
   return inferAlertFilter(alert);
 }
 
@@ -679,13 +683,10 @@ function deriveAlertTier(alert = {}) {
   if (supportOnly) return "noise";
   if (!hardSignal) return Number(alert.score || 0) >= 60 ? "watch" : "noise";
   if (volumeToMcap !== null && volumeToMcap > 1.5 && evidence.commonLinks === 0) return "late_chase";
-  if (lane === "incubation") {
-    if (mcap > 50_000) return "late_chase";
-    return mcap <= 30_000 ? "actionable" : "watch";
-  }
-  if (lane === "young") {
-    if (mcap > 1_500_000) return "late_chase";
-    return mcap <= 750_000 ? "actionable" : "watch";
+  if (lane === "micro_sticky" || lane === "cheap_sticky") {
+    if (evidence.waveStickySupplyPct >= 5) return "actionable";
+    if (evidence.waveStickySupplyPct >= 3) return "watch";
+    return evidence.commonLinks || evidence.hardWallets >= 2 ? "watch" : "noise";
   }
   if (lane === "reactivation") {
     const ratio = snapshot.athMcapUsd && mcap ? mcap / snapshot.athMcapUsd : null;
@@ -2224,6 +2225,32 @@ function selectedFilterToken(group) {
   return group.tokens.find((token) => token.key === state.selectedTokenKey) || group.tokens[0];
 }
 
+function compactTierSummary(group) {
+  const parts = [];
+  if (group.tierCounts.actionable) parts.push(chip(`${group.tierCounts.actionable} actionable`, "good"));
+  if (group.tierCounts.watch) parts.push(chip(`${group.tierCounts.watch} watch`, "warn"));
+  const parked = Number(group.tierCounts.late_chase || 0) + Number(group.tierCounts.noise || 0);
+  if (parked) parts.push(chip(`${parked} parked`, "bad"));
+  return parts.join("");
+}
+
+function tokenFilterSubtitle(token) {
+  const parts = [];
+  if (token.currentScanAlertCount) parts.push(`${token.currentScanAlertCount} latest`);
+  if (token.bestWave) {
+    parts.push(`${Number(token.bestWave.sticky_supply_pct || 0).toFixed(1)}% sticky`);
+  } else if (token.hardSignalCount) {
+    parts.push(`${token.hardSignalCount} hard`);
+  } else if (token.supportSignalCount) {
+    parts.push(`${token.supportSignalCount} support`);
+  }
+  const phase = marketPhase(token);
+  if (phase?.label) parts.push(phase.label);
+  if (token.hasFilterDrift) parts.push(`caught ${filterMeta(token.caughtFilter).label}`);
+  if (token.hidden) parts.push("deleted");
+  return parts.join(" / ");
+}
+
 function filterGroups(tokens) {
   const groups = new Map();
   tokens.forEach((token) => {
@@ -2292,15 +2319,16 @@ function filterGroups(tokens) {
 function renderFilterTokenRows(group) {
   return group.tokens.map((token) => {
     const flow = sumAlertField(token.alerts, "suspicious_sol") || sumEventSol(uniqueAlertEvents(token.alerts));
-    const phase = marketPhase(token);
-    const driftLabel = token.hasFilterDrift ? `caught ${filterMeta(token.caughtFilter).label}` : "";
     const selected = token.key === state.selectedTokenKey ? " is-selected" : "";
     const hidden = token.hidden ? " is-hidden" : "";
     return `
       <button class="filter-token-row${selected}${hidden}" type="button" data-token-key="${esc(token.key)}">
         <span class="filter-token-name">
-          <strong>${esc(token.symbol)}</strong>
-          <small>${esc([token.currentScanAlertCount ? `${token.currentScanAlertCount} latest scan` : "", tierMeta(token.actionTier).label, token.name || token.narrative.primary, driftLabel, phase?.label, token.hidden ? "deleted" : ""].filter(Boolean).join(" / "))}</small>
+          <span class="filter-token-title">
+            <strong>${esc(token.symbol)}</strong>
+            ${tierChip(token.actionTier)}
+          </span>
+          <small>${esc(tokenFilterSubtitle(token) || token.name || token.narrative.primary || "-")}</small>
         </span>
         <span class="filter-token-value">
           <strong>${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)}</strong>
@@ -2328,18 +2356,16 @@ function renderFilterTokenPanel(group) {
           <h2>${esc(group.meta.label)}</h2>
           <p>${esc(group.meta.criteria)}</p>
         </div>
-        <div class="filter-panel-metrics">
-          <span><strong>${esc(group.tokens.length)}</strong> tokens</span>
-          <span><strong>${esc(group.noticedWallets)}</strong> wallets</span>
-          <span><strong>${sol(group.totalSol)}</strong></span>
+        <div class="filter-panel-kpis">
+          <span><strong>${esc(group.tokens.length)}</strong><small>tokens</small></span>
+          <span><strong>${esc(group.alerts)}</strong><small>signals</small></span>
+          <span><strong>${esc(group.noticedWallets)}</strong><small>wallets</small></span>
+          <span><strong>${sol(group.totalSol)}</strong><small>flow</small></span>
         </div>
       </div>
-      <div class="filter-thesis">${esc(group.meta.thesis)}</div>
-      <div class="filter-quick-stats">
-        <span>${esc(group.alerts)} signals</span>
-        <span>max score ${esc(group.maxScore)}</span>
-        <span>${esc(group.noticedWallets)} wallets</span>
-        <span>${esc(dateLabel(group.firstSignalAt))} -> ${esc(dateLabel(group.latestSignalAt))}</span>
+      <div class="filter-panel-note">
+        <span>${esc(group.meta.thesis)}</span>
+        <small>${esc(dateLabel(group.firstSignalAt))} -> ${esc(dateLabel(group.latestSignalAt))} / max score ${esc(group.maxScore)}</small>
       </div>
       <div class="filter-token-head">
         <span>Token</span>
@@ -2372,17 +2398,18 @@ function renderFilters() {
         <div class="workspace-title">Scanner Filters</div>
         <div class="filter-rail">
           ${groups.map((item) => `
-          <article class="narrative-card filter-card${item.name === group.name ? " is-selected" : ""}" data-filter="${esc(item.name)}">
-            <div class="symbol-line">
-              <span class="symbol">${esc(item.meta.label)}</span>
-              <span class="muted">${item.tokens.length}</span>
+          <article class="filter-card${item.name === group.name ? " is-selected" : ""}" data-filter="${esc(item.name)}">
+            <div class="filter-card-head">
+              <strong>${esc(item.meta.label)}</strong>
+              <span>${esc(item.tokens.length)}</span>
             </div>
-            <div class="meta">
+            <div class="filter-card-stats">
               <span>${esc(item.alerts)} sig</span>
+              <span>${esc(item.noticedWallets)} wallets</span>
               <span>${sol(item.totalSol)}</span>
               <span class="${pClass(item.bestPnl)}">${pct(item.bestPnl)}</span>
             </div>
-            <div class="chips">${item.tierCounts.actionable ? chip(`${item.tierCounts.actionable} actionable`, "good") : ""}${item.tierCounts.watch ? chip(`${item.tierCounts.watch} watch`, "warn") : ""}${item.tierCounts.late_chase || item.tierCounts.noise ? chip(`${Number(item.tierCounts.late_chase || 0) + Number(item.tierCounts.noise || 0)} parked`, "bad") : ""}</div>
+            <div class="filter-card-tiers">${compactTierSummary(item)}</div>
           </article>
         `).join("")}
         </div>
