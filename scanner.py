@@ -2171,6 +2171,7 @@ def classify_alert_tier(pool, alert, evidence, config):
     sticky_supply_pct = float(wave.get("sticky_supply_pct") or 0)
     sticky_bought_pct = float(wave.get("sticky_bought_pct") or 0)
     net_retention_pct = float(wave.get("net_token_retention_pct") or 0)
+    sticky_net_sol = float(wave.get("sticky_net_sol") or 0)
 
     if hard_cluster:
         reasons.append("hard wallet cluster")
@@ -2244,6 +2245,7 @@ def classify_alert_tier(pool, alert, evidence, config):
         sticky_actionable = (
             wave_signal
             and sticky_supply_pct >= float(config.get("sticky_accumulation_actionable_sticky_supply_pct", 5.0))
+            and sticky_net_sol >= float(config.get("sticky_accumulation_min_sticky_net_sol", 0.0))
             and (
                 sticky_bought_pct >= float(config.get("sticky_accumulation_actionable_sticky_bought_pct", 50.0))
                 or net_retention_pct >= float(config.get("sticky_accumulation_actionable_net_token_retention_pct", 70.0))
@@ -2866,6 +2868,8 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
         return []
     max_candidates = int(config.get("sticky_accumulation_candidate_windows", 3))
     balance_limit = int(config.get("sticky_accumulation_balance_wallet_limit", 35))
+    min_sticky_wallets = int(config.get("sticky_accumulation_min_sticky_wallets", 0))
+    min_sticky_net_sol = float(config.get("sticky_accumulation_min_sticky_net_sol", 0.0))
     min_sticky_supply_pct = float(config.get("sticky_accumulation_min_sticky_supply_pct", 3.0))
     min_sticky_bought_pct = float(config.get("sticky_accumulation_min_sticky_bought_pct", 40.0))
     min_net_retention_pct = float(config.get("sticky_accumulation_min_net_token_retention_pct", 55.0))
@@ -2887,6 +2891,7 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
         sticky_wallets = 0
         checked_bought_tokens = 0.0
         checked_net_tokens = 0.0
+        sticky_net_sol = 0.0
         for row in buyers:
             owner = row.get("owner")
             if not owner:
@@ -2903,6 +2908,7 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
             sticky_tokens += balance
             if balance > 0:
                 sticky_wallets += 1
+                sticky_net_sol += max(0.0, float(row["buy_sol"]) - float(row["sell_sol"]))
             checked.append(
                 {
                     "owner": owner,
@@ -2922,6 +2928,10 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
         sticky_supply_pct = sticky_tokens / supply * 100 if supply else 0.0
         sticky_bought_pct = sticky_tokens / checked_bought_tokens * 100 if checked_bought_tokens else 0.0
         net_retention_pct = sticky_tokens / checked_net_tokens * 100 if checked_net_tokens else 0.0
+        if sticky_wallets < min_sticky_wallets:
+            continue
+        if sticky_net_sol < min_sticky_net_sol:
+            continue
         if sticky_supply_pct < min_sticky_supply_pct:
             continue
         if sticky_bought_pct < min_sticky_bought_pct and net_retention_pct < min_net_retention_pct:
@@ -2985,6 +2995,7 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
                 "large_buyers": metrics["large_buyers"],
                 "checked_wallets": len(checked),
                 "sticky_wallets": sticky_wallets,
+                "sticky_net_sol": sticky_net_sol,
                 "sticky_tokens": sticky_tokens,
                 "sticky_supply_pct": sticky_supply_pct,
                 "sticky_bought_pct": sticky_bought_pct,
@@ -3451,7 +3462,7 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
         events = merge_events(seed_events, classified_events)
     wave_swaps = merge_reactivation_wave_swaps(pool_state, swaps, config)
     sticky_swaps = merge_sticky_accumulation_swaps(pool_state, swaps, config)
-    classic_alerts = build_alerts(pool, events, config)
+    classic_alerts = build_alerts(pool, events, config) if config.get("classic_alerts_enabled", True) else []
     wave_alerts = build_reactivation_wave_alerts(pool, wave_swaps, config, rpc)
     sticky_alerts = build_sticky_accumulation_alerts(pool, sticky_swaps, config, rpc)
     alerts = dedupe_pool_alerts([*classic_alerts, *wave_alerts, *sticky_alerts])
@@ -3517,7 +3528,7 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
         swap.update(wallet_info)
         events.append(swap)
 
-    alerts = build_alerts(pool, events, config)
+    alerts = build_alerts(pool, events, config) if config.get("classic_alerts_enabled", True) else []
     summary = {
         "pool": pool.as_dict(),
         "lane": config.get("lane") or config.get("mode"),

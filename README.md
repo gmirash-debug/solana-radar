@@ -115,8 +115,8 @@ BRIGHTDATA_API_KEY
 
 Lanes:
 
-- `micro_sticky`: `3h-7d`, `$10k-$80k mcap`, `liq >=3k`, low-cap migrated pump.fun tokens with sticky buyer supply. This is the TinyWorld-before-$50k catch lane.
-- `cheap_sticky`: `12h-10d`, `$50k-$250k mcap`, `liq >=10k`, cheap migrated pump.fun tokens with sticky buyer supply before repricing.
+- `micro_sticky`: `3h-7d`, `$10k-$50k mcap`, `liq >=3k`, low-cap migrated pump.fun tokens with strict sticky buyer supply and net-buy retention. This is the TinyWorld-before-$50k catch lane.
+- `cheap_sticky`: `12h-10d`, `$50k-$250k mcap`, `liq >=10k`, cheap migrated pump.fun tokens with stronger sticky buyer supply before repricing.
 - `breakout`: `3d-30d`, `5m-25m mcap`, `liq >=50k`, `1h vol >=100k`, momentum/anomaly expansion.
 - `reactivation`: `30d+`, `100k-5m mcap`, `liq >=10k`, current mcap `<=40%` of Solana Tracker ATH, low-volume old-token reactivation.
 

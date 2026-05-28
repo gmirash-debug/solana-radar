@@ -98,13 +98,13 @@ const els = {
 const FILTER_META = {
   micro_sticky: {
     label: "Micro Sticky",
-    criteria: "3h-7d / $10k-$80k mcap / liq >= $3k / sticky buyers >=3% supply",
-    thesis: "very early cheap migrated pump.fun tokens where early buyers still hold meaningful supply after a net-buy window.",
+    criteria: "3h-7d / $10k-$50k mcap / liq >= $3k / sticky buyers >=6% supply",
+    thesis: "strict early cheap migrated pump.fun tokens where multiple buyers still hold meaningful supply after a strong net-buy window.",
   },
   cheap_sticky: {
     label: "Cheap Sticky",
-    criteria: "12h-10d / $50k-$250k mcap / liq >= $10k / sticky buyers >=3% supply",
-    thesis: "TinyWorld-style cheap accumulation: early low-cap tokens with sticky buyer supply before the market reprices them.",
+    criteria: "12h-10d / $50k-$250k mcap / liq >= $10k / sticky buyers >=6% supply",
+    thesis: "TinyWorld-style cheap accumulation with stronger net-buy, holder retention, and sticky buyer supply before repricing.",
   },
   breakout: {
     label: "Breakout",
@@ -296,7 +296,7 @@ const FILTER_RULES = {
     ageMin: 3,
     ageMax: 168,
     mcapMin: 10_000,
-    mcapMax: 80_000,
+    mcapMax: 50_000,
     liquidityMin: 3_000,
     volumeMin: 250,
     volumeMax: 25_000,

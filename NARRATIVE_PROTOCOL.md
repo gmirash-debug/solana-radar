@@ -25,16 +25,16 @@ Narratives are assigned only to tokens with scanner alerts. The universe list is
 The `micro_sticky` lane is the very early cheap sticky-accumulation lane:
 
 - age: `3h-7d`;
-- market cap: `$10k-$80k`;
+- market cap: `$10k-$50k`;
 - liquidity: `>= $3k`;
-- alert requirement: sticky buyer supply, not just raw low_tx/freshish activity.
+- alert requirement: strict sticky buyer supply, multi-wallet retention, and net-buy flow, not raw low_tx/freshish activity.
 
 The `cheap_sticky` lane is the TinyWorld-style cheap sticky-accumulation lane:
 
 - age: `12h-10d`;
 - market cap: `$50k-$250k`;
 - liquidity: `>= $10k`;
-- alert requirement: sticky buyer supply before the market fully reprices the token.
+- alert requirement: stronger sticky buyer supply and net-buy retention before the market fully reprices the token.
 
 The `breakout` lane is the momentum/anomaly lane:
 
