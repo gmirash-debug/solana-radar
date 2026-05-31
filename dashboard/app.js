@@ -473,7 +473,12 @@ function athSourceLabel(source) {
 function athStatusLabel(status, error = "") {
   if (status === "ready") return "ready";
   if (status === "missing_api_key") return "missing API key";
-  if (status === "error") return error ? `retry pending: ${error}` : "retry pending";
+  if (status === "error") {
+    if (String(error).includes("403")) return "Solana Tracker 403";
+    if (String(error).includes("429")) return "Solana Tracker rate limited";
+    return "ATH retry pending";
+  }
+  if (status === "unverified") return "ATH unverified";
   return "pending";
 }
 
@@ -757,6 +762,43 @@ function normalizeMarketPool(pool = {}) {
   };
 }
 
+function marketMetaForToken(key) {
+  if (!key) return null;
+  return (state.market || {})[key] || null;
+}
+
+function mergeMarketMeta(pool = {}, meta = null) {
+  if (!meta) return pool || {};
+  const enriched = { ...(pool || {}) };
+  [
+    "ath_mcap_usd",
+    "ath_mcap_at",
+    "ath_price_usd",
+    "ath_pool_address",
+    "ath_source",
+    "ath_status",
+    "ath_error",
+    "ath_error_checked_at",
+    "ath_current_ratio",
+    "ath_drawdown_pct",
+    "ath_filter_checked_at",
+    "latest_mcap_usd",
+    "latest_price_usd",
+    "latest_liquidity_usd",
+    "latest_seen_at",
+    "scan_mcap_usd",
+    "scan_price_usd",
+    "scan_liquidity_usd",
+    "scan_mcap_at",
+  ].forEach((key) => {
+    if (meta[key] !== undefined && meta[key] !== null && meta[key] !== "") enriched[key] = meta[key];
+  });
+  if (!enriched.mcap_usd && meta.latest_mcap_usd) enriched.mcap_usd = meta.latest_mcap_usd;
+  if (!enriched.price_usd && meta.latest_price_usd) enriched.price_usd = meta.latest_price_usd;
+  if (!enriched.liquidity_usd && meta.latest_liquidity_usd) enriched.liquidity_usd = meta.latest_liquidity_usd;
+  return enriched;
+}
+
 function currentPoolsByToken() {
   const map = new Map();
   const put = (pool, observedAt) => {
@@ -1000,7 +1042,8 @@ function buildTokenSignals() {
     });
     const first = token.alerts[0];
     const last = token.alerts[token.alerts.length - 1];
-    const latestPool = currentPools.get(token.key) || last.pool || first.pool || {};
+    const marketMeta = marketMetaForToken(token.key);
+    const latestPool = mergeMarketMeta(currentPools.get(token.key) || last.pool || first.pool || {}, marketMeta);
     token.tokenIntel = [...token.alerts].reverse().find((alert) => alert.token_intel)?.token_intel || null;
     const observations = observationsByToken.get(token.key) || [];
     const latestObservation = observations.reduce((best, item) => {
