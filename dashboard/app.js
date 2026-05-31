@@ -1127,8 +1127,10 @@ function buildTokenSignals() {
     const fitsReactivationNow = tokenFitsReactivationBucket(token);
     token.alerts.forEach((alert) => {
       const baseLane = alert.baseFilterLane || baseAlertLane(alert);
-      if (baseLane === "reactivation" || (baseLane === "legacy" && fitsReactivationNow)) {
-        alert.filterLane = fitsReactivationNow ? "reactivation" : "legacy";
+      if (baseLane === "reactivation") {
+        alert.filterLane = "reactivation";
+      } else if (baseLane === "legacy" && fitsReactivationNow) {
+        alert.filterLane = "reactivation";
       } else {
         alert.filterLane = baseLane;
       }
