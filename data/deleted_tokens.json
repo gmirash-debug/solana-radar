@@ -265,6 +265,13 @@
       "symbol": "SPURS",
       "name": "San Antonio Spurs",
       "deleted_at": "2026-06-01T19:49:39.221Z"
+    },
+    "5s7tf6ih2CEZf7ZPNkJAtcknAq9DL5GsWHMMT3Jdpump": {
+      "token_address": "5s7tf6ih2CEZf7ZPNkJAtcknAq9DL5GsWHMMT3Jdpump",
+      "pool_address": "EyUhvULaCx9N1a3mj4LZTs6ju7Ejk49sFmtjNe65MPNv",
+      "symbol": "Stake",
+      "name": "Staked Bank",
+      "deleted_at": "2026-06-01T19:49:45.662Z"
     }
   },
   "pools": [
@@ -298,6 +305,7 @@
     "EWXiHuBM1MqTuARqMwXJsHkpBUzUQHN7RFe4aS1Fjjmm",
     "Ec9rK1GQmN4d7tJp2efx6m1on1rmXxr5gh4PKswJqSkx",
     "ErNoCjdj5Vt9vvrzTeCsQn3MVKev6UqVpPnYcWyh6L6r",
+    "EyUhvULaCx9N1a3mj4LZTs6ju7Ejk49sFmtjNe65MPNv",
     "FQarato6tWprAedipKT6VXu61amiR7qMTjE78vhCY5P9",
     "FvcH2m6H5KaWGkaFd3uvsNT8kNR56VcaDLJgxQM8Mgdk",
     "FzCrLNQ4SW3nXpKb68HUXbfb2tvFDBoLhdCVHmAuoPze",
@@ -315,6 +323,7 @@
     "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
     "4MhKUVWwjHHU9FwrBi85mDSSSxqwCgXDuExvpzkRpump",
     "4vgRfUycdhxNTpyUcLAmdBLKkhzvPiTztySknjAtpump",
+    "5s7tf6ih2CEZf7ZPNkJAtcknAq9DL5GsWHMMT3Jdpump",
     "5vicJEyYTDBqMsKe74vWQeDVMe5cmeA3vr1AT8RXb9t1",
     "6jRnXJ6PnhpAEaSZVtwysNkvBXAGo4fhp5swat8Qpump",
     "75Hgi9UwP7QMUcyYiJc9PbmVyeAJguREXAZhj2G1pump",
@@ -347,5 +356,5 @@
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump",
     "ttgtaonT9ncgPqgsgJxmLe4Ls1VuVaqJyDyvJJfpump"
   ],
-  "updated_at": "2026-06-01T19:49:39.221Z"
+  "updated_at": "2026-06-01T19:49:45.662Z"
 }
