@@ -251,6 +251,13 @@
       "symbol": "SON",
       "name": "Are Ya Winning, Son?",
       "deleted_at": "2026-06-01T19:49:33.871Z"
+    },
+    "ttgtaonT9ncgPqgsgJxmLe4Ls1VuVaqJyDyvJJfpump": {
+      "token_address": "ttgtaonT9ncgPqgsgJxmLe4Ls1VuVaqJyDyvJJfpump",
+      "pool_address": "9KAbUY3tMYkQnYaSX2EmuVRDk9ceCq96iX7uH8BuSukH",
+      "symbol": "OBX",
+      "name": "Obscra",
+      "deleted_at": "2026-06-01T19:49:36.925Z"
     }
   },
   "pools": [
@@ -267,6 +274,7 @@
     "8PX97NP5WY871SmsZwHqYL9z97k3vzHGjvKFvAT7cARz",
     "8oi82teTrCKgJDfc37hyTqgnAY3KbxKMySY9wBy86Mfo",
     "8r4R3e4obQVFLbGFQZ78d1hEpY65ySvEZGu2BVzjEg7w",
+    "9KAbUY3tMYkQnYaSX2EmuVRDk9ceCq96iX7uH8BuSukH",
     "9VcuAV17Rw2MmKxgwrNsH95bnHatQGkzgczVANhoKiZq",
     "A9JnmJzue6BvCgQmgHR7fzgMwmMAEnPd4yusVNnRRNAF",
     "AeSWE9gN3bPQuaD9qKTFgnp8ugLf8W17w9Fam6PhuC5W",
@@ -327,7 +335,8 @@
     "PZUbFxtuydyLP2JEwCmvWc1p1NHxWsqBYuEoVbcnQA3",
     "Se2HT3A2WTqdpAeBy6wwuYMtoqmodGC7eLxrBFUpump",
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
-    "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
+    "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump",
+    "ttgtaonT9ncgPqgsgJxmLe4Ls1VuVaqJyDyvJJfpump"
   ],
-  "updated_at": "2026-06-01T19:49:33.871Z"
+  "updated_at": "2026-06-01T19:49:36.925Z"
 }
