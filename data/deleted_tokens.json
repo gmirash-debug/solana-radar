@@ -244,6 +244,13 @@
       "symbol": "RICHGUY",
       "name": "Just a Rich Guy",
       "deleted_at": "2026-05-27T23:23:38.625Z"
+    },
+    "ACpzkGJV3DDU8HXy8yjab7RL9qNmDGym2GwLkzNppump": {
+      "token_address": "ACpzkGJV3DDU8HXy8yjab7RL9qNmDGym2GwLkzNppump",
+      "pool_address": "Ec9rK1GQmN4d7tJp2efx6m1on1rmXxr5gh4PKswJqSkx",
+      "symbol": "SON",
+      "name": "Are Ya Winning, Son?",
+      "deleted_at": "2026-06-01T19:49:33.871Z"
     }
   },
   "pools": [
@@ -274,6 +281,7 @@
     "EALmcrS9wc3qCJ8FvcgyfiwgsPYQ8ahWyCGtEuu3FaFZ",
     "ELe7EtbX7m3aeBKKJYm4QYVXkwmJJwVcR6K4Nho27f4i",
     "EWXiHuBM1MqTuARqMwXJsHkpBUzUQHN7RFe4aS1Fjjmm",
+    "Ec9rK1GQmN4d7tJp2efx6m1on1rmXxr5gh4PKswJqSkx",
     "ErNoCjdj5Vt9vvrzTeCsQn3MVKev6UqVpPnYcWyh6L6r",
     "FQarato6tWprAedipKT6VXu61amiR7qMTjE78vhCY5P9",
     "FvcH2m6H5KaWGkaFd3uvsNT8kNR56VcaDLJgxQM8Mgdk",
@@ -299,6 +307,7 @@
     "8NEh2L4PAVsweMTKJWyCn5WdQbKaB8FkHgJtkoK9pump",
     "9gSFB9ZVvhd7iLiQpEHH1fg6BC4JAnmbzx36LXAbpump",
     "A2LprEwUDVLQX3xVQqFAMwbzf7ZQdx9wJMJvkQBPpump",
+    "ACpzkGJV3DDU8HXy8yjab7RL9qNmDGym2GwLkzNppump",
     "ADVAviLMaZXLVjxYDHNd3VcV68EE8HUbo9FowLPbpump",
     "AJCAd7ixokqPegWtEa133BUyJydERvEWs8bDJFPWpump",
     "ApGBE2QkB2wPqyJnga6ukNSYK2oiM3kWjeAjDM2Epump",
@@ -320,5 +329,5 @@
     "ijz345R9TGPuN7Pck5TFFgNb3ZpXmZnwBZodYnupump",
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump"
   ],
-  "updated_at": "2026-05-27T23:23:38.625Z"
+  "updated_at": "2026-06-01T19:49:33.871Z"
 }
