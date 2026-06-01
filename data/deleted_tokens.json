@@ -258,6 +258,13 @@
       "symbol": "OBX",
       "name": "Obscra",
       "deleted_at": "2026-06-01T19:49:36.925Z"
+    },
+    "4GRGUgHSCYdUhT4MajV67og8SfquYq5GsThMppHCpump": {
+      "token_address": "4GRGUgHSCYdUhT4MajV67og8SfquYq5GsThMppHCpump",
+      "pool_address": "GqY5ntdsrqkDq2UBcMtx4mAWCRLjUfpJHAjBRDaqXbmj",
+      "symbol": "SPURS",
+      "name": "San Antonio Spurs",
+      "deleted_at": "2026-06-01T19:49:39.221Z"
     }
   },
   "pools": [
@@ -295,6 +302,7 @@
     "FvcH2m6H5KaWGkaFd3uvsNT8kNR56VcaDLJgxQM8Mgdk",
     "FzCrLNQ4SW3nXpKb68HUXbfb2tvFDBoLhdCVHmAuoPze",
     "G7oFoddfVNgjLiRHMoir4YG4N6RWeC9zpPiJQvrFd61W",
+    "GqY5ntdsrqkDq2UBcMtx4mAWCRLjUfpJHAjBRDaqXbmj",
     "HCTAwVjrz9HJ8L3d1AQDXFFceYpmEFn9S3RMDGFCE9Tk",
     "HRf1bWBDtd7DxBryr7UwYTLMgSXrdHWZ3hbDaDHswieb",
     "Hn1UwCy93T9L2dXBbNVms3Mf3dN7Pn9b1dS8Pe4vVN5x"
@@ -303,6 +311,7 @@
     "2DK6WxzW9UT5mDr3rivN8oeiUmWVkGucaXgAKc4Wpump",
     "2R7jYvkAQwLu3smTy6U4Am9u1F14djdF5wPKkQk5pump",
     "34q2KmCvapecJgR6ZrtbCTrzZVtkt3a5mHEA3TuEsWYb",
+    "4GRGUgHSCYdUhT4MajV67og8SfquYq5GsThMppHCpump",
     "4Hb72Taq51useqerBqCoazizGfShEcSxAaQmUL1zpump",
     "4MhKUVWwjHHU9FwrBi85mDSSSxqwCgXDuExvpzkRpump",
     "4vgRfUycdhxNTpyUcLAmdBLKkhzvPiTztySknjAtpump",
@@ -338,5 +347,5 @@
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump",
     "ttgtaonT9ncgPqgsgJxmLe4Ls1VuVaqJyDyvJJfpump"
   ],
-  "updated_at": "2026-06-01T19:49:36.925Z"
+  "updated_at": "2026-06-01T19:49:39.221Z"
 }
