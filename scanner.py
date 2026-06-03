@@ -63,7 +63,7 @@ def parse_timestamp(value):
 
 
 def load_env():
-    env_paths = [ROOT / ".env", REPO_ROOT / ".env"]
+    env_paths = [ROOT / ".env.local", ROOT / ".env", REPO_ROOT / ".env.local", REPO_ROOT / ".env"]
     for env_path in env_paths:
         if not env_path.exists():
             continue
@@ -197,6 +197,69 @@ def save_json(path, value, compact=False):
         path.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n")
     else:
         path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def convex_url_from_env():
+    for key in ("CONVEX_URL", "NEXT_PUBLIC_CONVEX_URL", "VITE_CONVEX_URL"):
+        value = os.environ.get(key)
+        if value:
+            return value.rstrip("/")
+    return None
+
+
+def convex_sync_required(config):
+    raw = os.environ.get("CONVEX_SYNC_REQUIRED")
+    if raw is None:
+        raw = config.get("convex_sync_required", False)
+    return str(raw).strip().lower() in {"1", "true", "yes", "required"}
+
+
+def sync_convex_snapshot(report_payload, state, config):
+    convex_url = convex_url_from_env()
+    if not convex_url:
+        return
+    secret = os.environ.get("CONVEX_INGEST_SECRET")
+    if not secret:
+        message = "Convex sync skipped: CONVEX_INGEST_SECRET is missing"
+        if convex_sync_required(config):
+            raise RuntimeError(message)
+        print(message, file=sys.stderr)
+        return
+
+    history_limit = int(os.environ.get("CONVEX_SYNC_ALERT_HISTORY_LIMIT") or config.get("convex_sync_alert_history_limit", 250))
+    history = load_alert_history()[-history_limit:]
+    deleted_tokens = load_json(
+        DELETED_TOKENS_PATH,
+        {"tokens": [], "pools": [], "entries": {}, "updated_at": None},
+    )
+    body = {
+        "path": "radar:ingestSnapshot",
+        "args": {
+            "secret": secret,
+            "report": report_payload,
+            "history": history,
+            "market": state.get("market", {}),
+            "deletedTokens": deleted_tokens,
+        },
+        "format": "json",
+    }
+    try:
+        response = requests.post(
+            f"{convex_url}/api/mutation",
+            headers={"Content-Type": "application/json", "accept": "application/json"},
+            json=body,
+            timeout=int(config.get("convex_sync_timeout_seconds", 25)),
+        )
+        response.raise_for_status()
+        result = response.json()
+        if result.get("status") != "success":
+            raise RuntimeError(result.get("errorMessage") or f"unexpected Convex response: {result}")
+        value = result.get("value") or {}
+        print(f"Convex sync: {value.get('alertsSynced', len(history))} alerts, generated_at={value.get('generatedAt')}")
+    except Exception as exc:
+        if convex_sync_required(config):
+            raise
+        print(f"Convex sync failed: {exc}", file=sys.stderr)
 
 
 def to_float(value, default=0.0):
@@ -4565,6 +4628,7 @@ def run_once(config, lane_name=None):
     report_payload["lanes_scanned"] = list(lane_stats)
     write_report_json(report_payload)
     render_report(report_payload)
+    sync_convex_snapshot(report_payload, state, config)
 
     print(f"Helius: {health}")
     print(f"Universe pools: {len(universe)}")

@@ -113,6 +113,33 @@ BRIGHTDATA_API_KEY
 `GMGN_API_KEY` is optional but recommended for Pump.fun trending discovery.
 `BRIGHTDATA_API_KEY` can be empty if social enrichment should be disabled.
 
+Optional Convex backend:
+
+```bash
+# GitHub Actions variable, public client/backend URL
+CONVEX_URL=https://your-deployment.convex.cloud
+
+# GitHub Actions secrets
+CONVEX_DEPLOY_KEY=...
+CONVEX_INGEST_SECRET=...
+```
+
+When `CONVEX_URL` and `CONVEX_INGEST_SECRET` are present, each scan syncs the
+latest dashboard snapshot, alert history, market snapshot, and deleted-token
+list to Convex. GitHub Pages then prefers Convex data and falls back to the
+static `data/` files if Convex is unavailable. `CONVEX_DEPLOY_KEY` lets the
+workflow deploy `convex/` backend functions automatically. The workflow also
+sets the Convex `CONVEX_INGEST_SECRET` environment variable from the GitHub
+secret before deploying.
+
+For the Cloudflare delete worker, also set these worker vars/secrets if the
+dashboard should sync Delete/Restore actions to Convex immediately:
+
+```bash
+CONVEX_URL=https://your-deployment.convex.cloud
+CONVEX_INGEST_SECRET=...
+```
+
 Lanes:
 
 - `micro_sticky`: `3h-7d`, `$10k-$50k mcap`, `liq >=3k`, low-cap migrated pump.fun tokens with strict sticky buyer supply and net-buy retention. This is the TinyWorld-before-$50k catch lane.

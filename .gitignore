@@ -3,6 +3,7 @@
 .env.*
 __pycache__/
 *.pyc
+node_modules/
 .pages/
 data/server.log
 data/server.pid

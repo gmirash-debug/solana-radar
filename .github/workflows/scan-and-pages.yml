@@ -15,6 +15,9 @@ on:
     paths:
       - ".github/workflows/scan-and-pages.yml"
       - "scanner.py"
+      - "package.json"
+      - "package-lock.json"
+      - "convex/**"
       - "config.example.json"
       - "config.json"
       - "requirements.txt"
@@ -95,10 +98,26 @@ jobs:
           echo "Skipping scanner because latest report is still fresh: ${{ steps.freshness.outputs.reason }}"
 
       - name: Install dependencies
-        if: steps.freshness.outputs.should_scan == 'true'
+        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
         run: |
           python -m pip install -r requirements.txt
+          npm ci
           npm install -g gmgn-cli
+
+      - name: Deploy Convex backend
+        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
+        env:
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+          CONVEX_INGEST_SECRET: ${{ secrets.CONVEX_INGEST_SECRET }}
+        run: |
+          if [ -n "$CONVEX_DEPLOY_KEY" ]; then
+            if [ -n "$CONVEX_INGEST_SECRET" ]; then
+              npx convex env set CONVEX_INGEST_SECRET "$CONVEX_INGEST_SECRET"
+            fi
+            npx convex deploy
+          else
+            echo "Skipping Convex deploy because CONVEX_DEPLOY_KEY is not set"
+          fi
 
       - name: Run scanner
         if: steps.freshness.outputs.should_scan == 'true'
@@ -107,6 +126,8 @@ jobs:
           SOLANA_TRACKER_API_KEY: ${{ secrets.SOLANA_TRACKER_API_KEY }}
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
           BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
+          CONVEX_URL: ${{ vars.CONVEX_URL }}
+          CONVEX_INGEST_SECRET: ${{ secrets.CONVEX_INGEST_SECRET }}
         run: python scanner.py --once --lane all
 
       - name: Commit scanner data
@@ -122,10 +143,24 @@ jobs:
 
       - name: Build Pages artifact
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
+        env:
+          CONVEX_URL: ${{ vars.CONVEX_URL }}
         run: |
           rm -rf .pages
           mkdir -p .pages/data
-          cp dashboard/index.html dashboard/app.js dashboard/styles.css .pages/
+          cp dashboard/index.html dashboard/app.js dashboard/styles.css dashboard/config.js .pages/
+          if [ -n "$CONVEX_URL" ]; then
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          url = os.environ.get("CONVEX_URL", "")
+          Path(".pages/config.js").write_text(
+              f"window.SOLANA_RADAR_CONVEX_URL = {json.dumps(url)};\n"
+          )
+          PY
+          fi
           cp data/latest_report.json data/latest_report.md data/alerts.jsonl .pages/data/
           if [ -f data/deleted_tokens.json ]; then
             cp data/deleted_tokens.json .pages/data/

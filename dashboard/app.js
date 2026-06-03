@@ -1280,6 +1280,31 @@ async function fetchJson(path, optional = false) {
   return response.json();
 }
 
+function convexUrl() {
+  const raw = String(window.SOLANA_RADAR_CONVEX_URL || "").trim();
+  return raw.replace(/\/+$/, "");
+}
+
+async function fetchConvexQuery(path, args = {}) {
+  const baseUrl = convexUrl();
+  if (!baseUrl) return null;
+  const response = await fetch(`${baseUrl}/api/query`, {
+    method: "POST",
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json",
+      "accept": "application/json",
+    },
+    body: JSON.stringify({ path, args, format: "json" }),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || payload?.status !== "success") {
+    const message = payload?.errorMessage || `${path} ${response.status}`;
+    throw new Error(message);
+  }
+  return payload.value || {};
+}
+
 async function fetchText(path, optional = false) {
   const response = await fetch(path, { cache: "no-store" });
   if (!response.ok) {
@@ -1326,6 +1351,12 @@ async function loadStaticData() {
   };
 }
 
+async function loadConvexData() {
+  const payload = await fetchConvexQuery("radar:dashboardData", { historyLimit: 120 });
+  if (!payload) return null;
+  return payload;
+}
+
 async function loadStaticExtras(reportGeneratedAt) {
   if (!reportGeneratedAt) return;
   if (state.staticExtrasLoadedFor === reportGeneratedAt) return;
@@ -1360,16 +1391,25 @@ async function loadData() {
   let payload;
   state.staticMode = false;
   const staticHost = window.location.hostname.endsWith("github.io") || window.location.protocol === "file:";
-  if (staticHost) {
-    payload = await loadStaticData();
-    state.staticMode = true;
-  } else {
-  try {
-    payload = await fetchJson("/api/report");
-  } catch {
-    payload = await loadStaticData();
-    state.staticMode = true;
+  if (convexUrl()) {
+    try {
+      payload = await loadConvexData();
+      state.staticMode = false;
+    } catch (error) {
+      console.warn("Convex load failed, falling back to static data", error);
+      payload = null;
+    }
   }
+  if (!payload && staticHost) {
+    payload = await loadStaticData();
+    state.staticMode = true;
+  } else if (!payload) {
+    try {
+      payload = await fetchJson("/api/report");
+    } catch {
+      payload = await loadStaticData();
+      state.staticMode = true;
+    }
   }
   state.report = payload.report || {};
   applyDeletedTokenList(payload.deleted_tokens || {});

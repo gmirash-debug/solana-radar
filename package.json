@@ -1,0 +1,17 @@
+{
+  "name": "solana-radar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "convex:dev": "CONVEX_AGENT_MODE=anonymous convex dev",
+    "convex:deploy": "convex deploy",
+    "convex:codegen": "convex codegen"
+  },
+  "dependencies": {
+    "convex": "^1.29.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

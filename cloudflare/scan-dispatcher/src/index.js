@@ -133,6 +133,42 @@ async function writeDeletedTokensToGitHub(env, data, sha, message) {
   return result.body;
 }
 
+async function syncDeletedTokensToConvex(env, data) {
+  const convexUrl = normalizeId(env.CONVEX_URL)?.replace(/\/+$/, "");
+  const secret = env.CONVEX_INGEST_SECRET;
+  if (!convexUrl || !secret) {
+    return { enabled: false };
+  }
+  const response = await fetch(`${convexUrl}/api/mutation`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({
+      path: "radar:syncDeletedTokens",
+      args: {
+        secret,
+        deletedTokens: data,
+      },
+      format: "json",
+    }),
+  });
+  const result = await response.json().catch(() => null);
+  if (!response.ok || result?.status !== "success") {
+    return {
+      enabled: true,
+      ok: false,
+      error: result?.errorMessage || `Convex sync failed: ${response.status}`,
+    };
+  }
+  return {
+    enabled: true,
+    ok: true,
+    value: result.value || null,
+  };
+}
+
 async function updateDeletedToken(env, payload) {
   const action = payload.action || "delete";
   const tokenAddress = normalizeId(payload.token_address || payload.token_key);
@@ -173,11 +209,17 @@ async function updateDeletedToken(env, payload) {
     sha,
     `${action === "delete" ? "Delete" : "Restore"} scanner token ${payload.symbol || tokenAddress || poolAddress}`,
   );
+  const convexSync = await syncDeletedTokensToConvex(env, data).catch((error) => ({
+    enabled: true,
+    ok: false,
+    error: error.message,
+  }));
   return {
     ok: true,
     action,
     deleted_tokens: data,
     commit_sha: commit?.commit?.sha || null,
+    convex_sync: convexSync,
   };
 }
 
