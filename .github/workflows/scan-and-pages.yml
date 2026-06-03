@@ -138,7 +138,16 @@ jobs:
           git add data/latest_report.json data/latest_report.md data/alerts.jsonl data/state.json data/deleted_tokens.json
           if ! git diff --cached --quiet; then
             git commit -m "Update scanner data"
-            git push
+            for attempt in 1 2 3; do
+              if git pull --rebase origin main && git push; then
+                break
+              fi
+              if [ "$attempt" = "3" ]; then
+                exit 1
+              fi
+              git rebase --abort || true
+              sleep 5
+            done
           fi
 
       - name: Build Pages artifact
