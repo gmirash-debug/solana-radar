@@ -1,28 +1,24 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-12T11:29:51.279477Z
+- generated_at: 2026-06-12T21:20:21.257644Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 182
+- universe_pools: 163
 - scanned_pools: 65
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 65, 'getSignaturesForAddress': 90, 'getTransaction': 399}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 65, 'getSignaturesForAddress': 85, 'getTransaction': 374}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- SpuceX: 10 buys, 9.88 SOL, classes={'normal': 9, 'freshish': 1}, mcap=$26357, pool=4MYRtuLXnM1eo1kc6FyShpvacs1JkwotGZVc64hsAnes
-- KUMAR: 1 buys, 5.00 SOL, classes={'normal': 1}, mcap=$131072, pool=3sCWyQhTSx7LuFXDwyR9mPMaJuv8Nx8nVLvjTtLE37is
-- WORLDCUP: 2 buys, 3.57 SOL, classes={'normal': 2}, mcap=$4491032, pool=ETMhxtENfkMK85TAcveEbZdBv9htziWzDSddmShRP2wB
-- ZOO: 1 buys, 2.49 SOL, classes={'normal': 1}, mcap=$157917, pool=3gmr8edXkYN7undyCV7L3J9u33QPfFCoR2eDHseF494y
-- Folkcat: 2 buys, 2.04 SOL, classes={'low_tx': 1, 'normal': 1}, mcap=$36054, pool=BzX1rpsBsdS7YytNwsEvMTPiVmaLzxUGvdyXSeHoYNq
-- BULL: 1 buys, 1.91 SOL, classes={'normal': 1}, mcap=$1813213, pool=HNGjLLZkWx2mNwhWdKFYcMowz8FTh2bXxdpJ1vBVkjNB
-- GO: 1 buys, 1.48 SOL, classes={'normal': 1}, mcap=$62760, pool=9GQQWEY1iAhCaTLKApgSZZUoSF5ev6FKFi39B4yfDStL
-- BURNIE: 1 buys, 1.07 SOL, classes={'normal': 1}, mcap=$2960075, pool=5tYFviFWQRKV9BJSTHGitbdqEYC1BGUgRUDnSADUXqJP
-- Worlds: 1 buys, 0.99 SOL, classes={'normal': 1}, mcap=$188860, pool=EEJmcENMRpurbJdGgTebiYuN6H9akrkscEf8Pg5dcdpW
-- xmaxxing: 1 buys, 0.66 SOL, classes={'freshish': 1}, mcap=$27089, pool=4xXV9iG98ABoA8nzr4fLLQrpefipwArT64E9fGr6tYow
-- MOON: 2 buys, 0.39 SOL, classes={'normal': 2}, mcap=$29655, pool=6XrnEzG8CewcBVJvDnSpJ2xbBUsBAueZB1i9i4ELnMro
-- BIBI: 1 buys, 0.33 SOL, classes={'freshish': 1}, mcap=$21497, pool=E6oLTppHWxBFuNNowsecZZAXobfKmit8kZTSi2uH2ZFV
-- Tagoh: 1 buys, 0.25 SOL, classes={'normal': 1}, mcap=$26404, pool=HFV2Nn1kysS8VkdRKeqxKjEKhjUuVM56tofd1x4wSdoH
+- SPCX: 2 buys, 9.89 SOL, classes={'normal': 2}, mcap=$1863949, pool=DZxWcyPpTyr2NTfmEN2xAUSCb77t1ZLpkg63PbpbKmbC
+- MOON: 10 buys, 2.75 SOL, classes={'freshish': 3, 'normal': 7}, mcap=$16387, pool=DQZhqSfWiY3AaJgK8ue5wVxVhpMQuLLokp1Pwts26WUB
+- KUMAR: 1 buys, 0.98 SOL, classes={'normal': 1}, mcap=$148891, pool=3sCWyQhTSx7LuFXDwyR9mPMaJuv8Nx8nVLvjTtLE37is
+- Fraude: 1 buys, 0.98 SOL, classes={'normal': 1}, mcap=$12741, pool=GrVqAVRrSksYXfmDvZqiQeokWiphNWQMD1RooxgDNzpx
+- DISCLOSURE: 1 buys, 0.74 SOL, classes={'normal': 1}, mcap=$297808, pool=97j7ju8ros5RCP7uE9k3zVAruQXDkGAK8EqVwf9AYkjf
+- Tourists: 1 buys, 0.70 SOL, classes={'normal': 1}, mcap=$18295, pool=DmkLS9KVhc4qpcQ2si6pHeY72s2pZhZL1MuC1sFvtLS2
+- WORLDCUP: 1 buys, 0.50 SOL, classes={'normal': 1}, mcap=$33876, pool=A3YTXEHUdq3QpaXnKDyiLhBuFLkZ5BCVQL4X98CG8QfK
+- WCBADDIES: 2 buys, 0.31 SOL, classes={'normal': 2}, mcap=$29898, pool=5RaMricugwsWa4n41yDCEYvQVRRB7VtPpd9HPRLD3QHL
+- Pnut: 1 buys, 0.31 SOL, classes={'normal': 1}, mcap=$162443, pool=Eevnp3nVim5vTwpViAsK1jZjmhtewxhG897dKWCR5fhK
