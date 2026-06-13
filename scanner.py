@@ -3340,6 +3340,7 @@ def classify_buy_swaps(rpc, swaps, config, state, classification_budget):
     budget_limit = min(classification_budget["remaining"], per_pool_limit)
     selected = select_buy_swaps_for_classification(candidates, config, budget_limit)
     events = []
+    classification_errors = 0
     for swap in selected:
         cache_key = wallet_cache_key(swap["signer"], swap["signature"])
         cache_hit = cache_key in state.setdefault("wallet_cache", {})
@@ -3347,10 +3348,19 @@ def classify_buy_swaps(rpc, swaps, config, state, classification_budget):
             break
         if not cache_hit:
             classification_budget["remaining"] -= 1
-        wallet_info = classify_wallet(rpc, swap["signer"], swap["signature"], swap["block_time"], config, state)
+        try:
+            wallet_info = classify_wallet(rpc, swap["signer"], swap["signature"], swap["block_time"], config, state)
+        except Exception as exc:
+            classification_errors += 1
+            print(
+                f"warn: wallet classification failed for {swap.get('signer')} "
+                f"on {swap.get('signature')}: {exc}",
+                file=sys.stderr,
+            )
+            continue
         swap.update(wallet_info)
         events.append(swap)
-    return events, len(candidates)
+    return events, len(candidates), classification_errors
 
 
 def parse_helius_swaps(txs, pool):
@@ -3470,13 +3480,14 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
     events = []
     seed_events = []
     candidate_buys = 0
+    classification_errors = 0
     try:
         if config.get("helius_probe_enabled", True):
             probe_txs, probe_fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="probe")
             update_pool_transaction_state(pool_state, pool, probe_txs)
             probe_swaps, probe_parse_errors = parse_helius_swaps(probe_txs, pool)
             probe_config = probe_classification_config(config)
-            probe_events, probe_candidate_buys = classify_buy_swaps(
+            probe_events, probe_candidate_buys, probe_classification_errors = classify_buy_swaps(
                 rpc,
                 probe_swaps,
                 probe_config,
@@ -3510,6 +3521,7 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
                 parse_errors = probe_parse_errors
                 events = probe_events
                 candidate_buys = probe_candidate_buys
+                classification_errors = probe_classification_errors
                 preclassified = True
         else:
             txs, fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="deep")
@@ -3521,7 +3533,13 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
     update_pool_transaction_state(pool_state, pool, txs)
     if not preclassified:
         swaps, parse_errors = parse_helius_swaps(txs, pool)
-        classified_events, candidate_buys = classify_buy_swaps(rpc, swaps, config, state, classification_budget)
+        classified_events, candidate_buys, classification_errors = classify_buy_swaps(
+            rpc,
+            swaps,
+            config,
+            state,
+            classification_budget,
+        )
         events = merge_events(seed_events, classified_events)
     wave_swaps = merge_reactivation_wave_swaps(pool_state, swaps, config)
     sticky_swaps = merge_sticky_accumulation_swaps(pool_state, swaps, config)
@@ -3546,6 +3564,7 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
             [(alert.get("wave") or {}).get("sticky_supply_pct", 0.0) for alert in [*wave_alerts, *sticky_alerts]] or [0.0]
         ),
         "parse_errors": parse_errors,
+        "classification_errors": classification_errors,
         "trade_fetch": fetch_stats,
     }
 
@@ -3574,6 +3593,7 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
         new_signatures.append(item["signature"])
 
     events = []
+    classification_errors = 0
     for signature in reversed(new_signatures):
         try:
             tx = rpc.transaction(signature)
@@ -3587,7 +3607,16 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
         if classification_budget["remaining"] <= 0:
             continue
         classification_budget["remaining"] -= 1
-        wallet_info = classify_wallet(rpc, swap["signer"], swap["signature"], swap["block_time"], config, state)
+        try:
+            wallet_info = classify_wallet(rpc, swap["signer"], swap["signature"], swap["block_time"], config, state)
+        except Exception as exc:
+            classification_errors += 1
+            print(
+                f"warn: wallet classification failed for {swap.get('signer')} "
+                f"on {swap.get('signature')}: {exc}",
+                file=sys.stderr,
+            )
+            continue
         swap.update(wallet_info)
         events.append(swap)
 
@@ -3600,6 +3629,7 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
         "classified_buys": len(events),
         "classes": dict(Counter(event.get("wallet_class") for event in events)),
         "buy_sol": sum(event.get("sol_amount", 0.0) for event in events),
+        "classification_errors": classification_errors,
     }
     if fallback_error:
         summary["fallback_error"] = fallback_error
@@ -4541,7 +4571,27 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
     summaries = []
     for index, pool in enumerate(scan_targets, start=1):
         print(f"{label}: scanning {index}/{len(scan_targets)} {pool.symbol}", flush=True)
-        alerts, summary = scan_pool(rpc, pool, config, state, classification_budget)
+        try:
+            alerts, summary = scan_pool(rpc, pool, config, state, classification_budget)
+        except Exception as exc:
+            print(
+                f"warn: {label}: pool scan failed for {pool.symbol} "
+                f"{pool.pool_address}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            alerts = []
+            summary = {
+                "pool": pool.as_dict(),
+                "lane": label,
+                "trade_source": "scan_pool",
+                "scan_failed": True,
+                "error": str(exc),
+                "new_signatures": 0,
+                "classified_buys": 0,
+                "classes": {},
+                "buy_sol": 0.0,
+            }
         summaries.append(summary)
         all_alerts.extend(alerts)
         if index % 25 == 0:
