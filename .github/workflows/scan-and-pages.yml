@@ -120,6 +120,7 @@ jobs:
           fi
 
       - name: Run scanner
+        id: run_scanner
         if: steps.freshness.outputs.should_scan == 'true'
         env:
           HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
@@ -128,10 +129,21 @@ jobs:
           BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
           CONVEX_URL: ${{ vars.CONVEX_URL }}
           CONVEX_INGEST_SECRET: ${{ secrets.CONVEX_INGEST_SECRET }}
-        run: python scanner.py --once --lane all
+        run: |
+          set +e
+          python scanner.py --once --lane all
+          status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          if [ "$status" -ne 0 ]; then
+            echo "::warning title=Scanner failed::scanner.py exited with $status; keeping the previous dashboard snapshot"
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+              exit "$status"
+            fi
+          fi
+          exit 0
 
       - name: Commit scanner data
-        if: steps.freshness.outputs.should_scan == 'true'
+        if: steps.freshness.outputs.should_scan == 'true' && steps.run_scanner.outputs.exit_code == '0'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
