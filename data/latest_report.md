@@ -1,24 +1,25 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-14T12:09:09.112804Z
+- generated_at: 2026-06-14T13:09:14.245892Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 178
+- universe_pools: 188
 - scanned_pools: 65
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 65, 'getSignaturesForAddress': 89, 'getTransaction': 383}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 65, 'getSignaturesForAddress': 86, 'getTransaction': 640}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- LIEN: 6 buys, 9.12 SOL, classes={'low_tx': 1, 'normal': 4, 'freshish': 1}, mcap=$37107, pool=6uDds5VfWx4f29isjjc3n2E2FPaEHnek74Npp48rHJad
-- uAPE: 2 buys, 3.98 SOL, classes={'freshish': 1, 'normal': 1}, mcap=$109862, pool=9b9fTcWjUUTdSf9Zd79qysB9apriNfiUJ4BsbGGbWrYe
-- PENGUIN: 1 buys, 3.09 SOL, classes={'normal': 1}, mcap=$2309756, pool=DRAf8QxQY86h7yeHdo9GytXAF6GoTTT8oZjknwXV6dCS
-- KINSBANK: 4 buys, 1.59 SOL, classes={'normal': 4}, mcap=$31938, pool=F6QfDNbM5YbgqGTVSRL2eyQtd57cSWkY9QmYdAyBXPs5
-- WORLDCUP: 1 buys, 1.31 SOL, classes={'normal': 1}, mcap=$3554092, pool=ETMhxtENfkMK85TAcveEbZdBv9htziWzDSddmShRP2wB
-- COZY: 1 buys, 1.09 SOL, classes={'normal': 1}, mcap=$160815, pool=GgfSiHFJ6wcHKvUSgJN9Z5Mo4ArdG5nht3Qg7r59vBhw
-- B4GTA6: 2 buys, 0.99 SOL, classes={'normal': 2}, mcap=$192801, pool=2mUye7DytySeq33NB5DPZbMPpxSrhRoUWTbGaFWecGV9
-- XPLOIT: 1 buys, 0.98 SOL, classes={'normal': 1}, mcap=$19390, pool=6Z2BfDRXFoApBt52pT553aLtq6zsbVwLxirJKSso6ZFC
-- USBC: 1 buys, 0.53 SOL, classes={'low_tx': 1}, mcap=$233951, pool=E98EyyBMtmBKXWYCNRDbCDKj6hFAS3hzxG2Lkdq1Htd
+- Lobstar: 1 buys, 14.80 SOL, classes={'normal': 1}, mcap=$498758, pool=AADJrfmWoHVXZhF1UkbHvNC5tqrBpkGdSaxtMYteDm2x
+- Worldcraft: 5 buys, 2.77 SOL, classes={'normal': 5}, mcap=$49068, pool=DdDZYbKnPCoT7wDqSq37BX4HxwvyHJj78wLTX1jXNGwX
+- Pearl: 1 buys, 1.40 SOL, classes={'normal': 1}, mcap=$21276, pool=9kG7udaXaF9cJpFdBiz1Toq2aczw7DhXK6upJGKSeAS5
+- PUMPI: 1 buys, 1.00 SOL, classes={'normal': 1}, mcap=$90138, pool=5L9bQY93nNdU13NKEDXzUYc2BAESJ1MMzWWtDXjHAkTQ
+- PDV: 1 buys, 0.94 SOL, classes={'normal': 1}, mcap=$31037, pool=5pkbf3ggyxKLjtEgDNeQsKVMrzv1G2B8w6MyaNmmiqGc
+- DISCLOSURE: 1 buys, 0.93 SOL, classes={'normal': 1}, mcap=$211233, pool=97j7ju8ros5RCP7uE9k3zVAruQXDkGAK8EqVwf9AYkjf
+- SOCCER: 2 buys, 0.72 SOL, classes={'normal': 2}, mcap=$45867, pool=D9SuU2K7jyoHXUNSEUUUiagk1ZRWE1ZsnWm1fBE2KEq8
+- Brötchen: 1 buys, 0.61 SOL, classes={'normal': 1}, mcap=$133925, pool=74hJkM2dqyvJ9koQtW4Jbs1ujK7uzKhxYTJMBxKfcjLk
+- KINSBANK: 1 buys, 0.52 SOL, classes={'normal': 1}, mcap=$31145, pool=F6QfDNbM5YbgqGTVSRL2eyQtd57cSWkY9QmYdAyBXPs5
+- SWALL: 1 buys, 0.49 SOL, classes={'normal': 1}, mcap=$10789, pool=AZK2NDMoJG2cd4xppVkTLMSE3w53MCdBkCteVKQfeCt8
