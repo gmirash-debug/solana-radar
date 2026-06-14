@@ -1,22 +1,24 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-14T18:09:15.247874Z
+- generated_at: 2026-06-14T19:09:03.808399Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 176
+- universe_pools: 172
 - scanned_pools: 66
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 66, 'getSignaturesForAddress': 85, 'getTransaction': 354}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 66, 'getSignaturesForAddress': 92, 'getTransaction': 488}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- MARIA: 6 buys, 8.68 SOL, classes={'normal': 6}, mcap=$47985, pool=4RFdAFKvVeXiDxAmmcG2TGwVJ5rRtfYZ2RTKu1V8GHd5
-- VERITY: 3 buys, 4.11 SOL, classes={'normal': 3}, mcap=$24667, pool=2Hg7xqFU6jHuKbQU3cEKShATdqP9rxdTjHFMNiRY9SRZ
-- LOOP: 2 buys, 3.36 SOL, classes={'normal': 2}, mcap=$11423, pool=ESVyey8bHMwAs2bgqN79ifMqnWBU3SfJEtyaDP5vNf3c
-- BLX: 2 buys, 2.12 SOL, classes={'normal': 2}, mcap=$168435, pool=FwWudhys4PtVc9ZjSHHu3eMbofnRA6tFBG2cY7gZy3LW
-- HARUKA: 1 buys, 1.09 SOL, classes={'normal': 1}, mcap=$143109, pool=EhKh7Nwj2UNJrdKSkpZzq6WcbkNrapSxKeHwbcL8zbr9
-- KINSBANK: 2 buys, 0.20 SOL, classes={'normal': 2}, mcap=$32427, pool=F6QfDNbM5YbgqGTVSRL2eyQtd57cSWkY9QmYdAyBXPs5
-- LP: 1 buys, 0.20 SOL, classes={'normal': 1}, mcap=$14327, pool=EZ1UGwUsL3hjizuUBCcQHHkDuNjwxi7bcQSYsNhnsGUq
+- TOMMY: 4 buys, 6.24 SOL, classes={'normal': 4}, mcap=$34020, pool=5EuhsYkeeiACDxiGDfrLfUZbEeeg8NWxNDWtxZaTit5V
+- ADA: 1 buys, 5.13 SOL, classes={'normal': 1}, mcap=$270859, pool=rSyt64cs33cvfqXQ2KvnY13A7isRkkE3DBMUc8T9PL8
+- Udi: 5 buys, 3.10 SOL, classes={'normal': 5}, mcap=$19974, pool=2mk3pwdnFJwKGNkxyvH6AdHemt67ic4Zabr8znTR67jm
+- RKC: 1 buys, 2.49 SOL, classes={'normal': 1}, mcap=$1585186, pool=FzbYhPcoCuA2qSrV1s3j38RcQhP6c943p3KHYb6C5rCq
+- scar: 2 buys, 2.16 SOL, classes={'normal': 2}, mcap=$59303, pool=85cdqC5qjrxsXyEo3J9sAfAPXjLALWcU5fgircK89tDE
+- SPC: 2 buys, 2.02 SOL, classes={'normal': 2}, mcap=$19121, pool=FMwjCYNWh61RjHd8yQXrCxPatNmXx7BaVHM5Uz385bXp
+- SQUIRE: 1 buys, 1.56 SOL, classes={'normal': 1}, mcap=$3587884, pool=4CPVihvjKUUsXq3HFrS8wniUKffbpDqz2h6jHKjeXoYD
+- LOOP: 2 buys, 0.32 SOL, classes={'normal': 2}, mcap=$16230, pool=ESVyey8bHMwAs2bgqN79ifMqnWBU3SfJEtyaDP5vNf3c
+- Pearl: 1 buys, 0.10 SOL, classes={'normal': 1}, mcap=$14809, pool=9kG7udaXaF9cJpFdBiz1Toq2aczw7DhXK6upJGKSeAS5
