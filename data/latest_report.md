@@ -1,23 +1,23 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-15T16:09:53.333903Z
+- generated_at: 2026-06-15T17:09:55.292962Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 189
+- universe_pools: 187
 - scanned_pools: 65
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 65, 'getSignaturesForAddress': 92, 'getTransaction': 407}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 65, 'getSignaturesForAddress': 85, 'getTransaction': 497}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- Prince: 8 buys, 5.21 SOL, classes={'normal': 8}, mcap=$24110, pool=2rzU66xUTjnWzNXy4x9vGqUptfH727vfmrmujgnojkqX
-- Stare: 5 buys, 4.36 SOL, classes={'normal': 5}, mcap=$19702, pool=8btSrs9cYpdsbc6RYKooLNnjjrhoZGc2D7s5Zn16eFnn
-- BULL: 1 buys, 1.31 SOL, classes={'normal': 1}, mcap=$1762537, pool=HNGjLLZkWx2mNwhWdKFYcMowz8FTh2bXxdpJ1vBVkjNB
-- RESERVE: 2 buys, 0.90 SOL, classes={'normal': 2}, mcap=$85310, pool=BRxzL284LXL4LUA3nLhUuRnq45KwHEUGAMXEB32hCp8o
-- OTWN: 2 buys, 0.50 SOL, classes={'normal': 2}, mcap=$32988, pool=D6x17etvWW77wyaXnhALDoAs74BWnDkAht6egLEUdi99
-- #fairs: 2 buys, 0.43 SOL, classes={'normal': 2}, mcap=$34220, pool=FYAeQCWkeev3amY6xYWEfnUwWdrpnz6zoLwrheaTHKLv
-- GUARDIAN: 1 buys, 0.30 SOL, classes={'normal': 1}, mcap=$145252, pool=G3NJ1JdJQHSb4ExHCFSpxTxYNNBKKZakHsm5zDSK6TNw
-- Worlds: 1 buys, 0.30 SOL, classes={'normal': 1}, mcap=$119034, pool=EEJmcENMRpurbJdGgTebiYuN6H9akrkscEf8Pg5dcdpW
+- Minimi: 9 buys, 4.48 SOL, classes={'normal': 9}, mcap=$26774, pool=EMD8geyVgBi3XpLDynRtVzjnVwZTptjH1dtrYQmj43RW
+- RESERVE: 2 buys, 2.61 SOL, classes={'normal': 1, 'freshish': 1}, mcap=$89760, pool=BRxzL284LXL4LUA3nLhUuRnq45KwHEUGAMXEB32hCp8o
+- maxxing: 1 buys, 0.88 SOL, classes={'normal': 1}, mcap=$1354876, pool=DMnTidVC8dMxRxUzFyZ4StQkbS4R8ACwxhNsEyi6u3Lx
+- WYNN: 1 buys, 0.63 SOL, classes={'normal': 1}, mcap=$250153, pool=5gP2NMgddgx48QJsRJ54mhLLjvxxkmK5gYvdyQH2DAe2
+- COZY: 1 buys, 0.50 SOL, classes={'normal': 1}, mcap=$147074, pool=GgfSiHFJ6wcHKvUSgJN9Z5Mo4ArdG5nht3Qg7r59vBhw
+- STEAK: 1 buys, 0.20 SOL, classes={'normal': 1}, mcap=$32299, pool=EBfMhvf4fLPxyEz4fwdE1uiwb2EFQfJ1G8qW51t5zxvk
+- ARX: 1 buys, 0.13 SOL, classes={'normal': 1}, mcap=$33458, pool=2kMts11Ajowtrqe2tez3GSGNX4GCU1p9jh8C2DTcuF1d
+- Stare: 1 buys, 0.10 SOL, classes={'normal': 1}, mcap=$29872, pool=8btSrs9cYpdsbc6RYKooLNnjjrhoZGc2D7s5Zn16eFnn
