@@ -1,23 +1,22 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-15T21:10:05.454529Z
+- generated_at: 2026-06-15T22:04:25.044185Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 177
-- scanned_pools: 66
+- universe_pools: 180
+- scanned_pools: 65
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 66, 'getSignaturesForAddress': 86, 'getTransaction': 567}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 65, 'getSignaturesForAddress': 80, 'getTransaction': 470}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- Minimi: 7 buys, 6.21 SOL, classes={'normal': 7}, mcap=$15864, pool=EMD8geyVgBi3XpLDynRtVzjnVwZTptjH1dtrYQmj43RW
-- COZY: 2 buys, 2.11 SOL, classes={'normal': 2}, mcap=$83413, pool=GgfSiHFJ6wcHKvUSgJN9Z5Mo4ArdG5nht3Qg7r59vBhw
-- GAMER: 2 buys, 1.35 SOL, classes={'normal': 2}, mcap=$28646, pool=5Vye83DSEtchCoG1r7omz9vrnpBUbKgkhKtmGqTx4UAL
-- SIEGE: 1 buys, 0.98 SOL, classes={'normal': 1}, mcap=$15446, pool=9XzSapC13yDKrLn6vVYDvDjYEHruVRzDZcDSaWurTwSn
-- IDIOT: 1 buys, 0.69 SOL, classes={'normal': 1}, mcap=$16051, pool=D1GGX2c4GKGmGfzfgVY6cyUGpo199ezfVKY4moa51hYu
-- DJI6930: 1 buys, 0.68 SOL, classes={'normal': 1}, mcap=$2784462, pool=6M7Jf1h22ZgSeCSSk3YLJKeAkWRfy6LJv1HFfUPqa3PS
-- Jameson : 1 buys, 0.29 SOL, classes={'normal': 1}, mcap=$30281, pool=xbsKwgyFXNV5AL3q4huCC9Hvys6GdnTwDdLFGxGdCbm
-- Trilly: 1 buys, 0.10 SOL, classes={'normal': 1}, mcap=$34961, pool=9GKDw2rwfhdb1cc7PkU58Ye6yfhTbd6ETvp9Xyeds6kB
+- SPCX: 1 buys, 3.04 SOL, classes={'normal': 1}, mcap=$160894, pool=4zBjVLjGqjt8PKzJdPhsET2C2rvNZ1Ws76tBc4kVAXwT
+- nuts: 4 buys, 1.38 SOL, classes={'normal': 4}, mcap=$21052, pool=BGpxFsBVdDEJadgUeiDL32PakgxVwdtniAohfgLUB5eW
+- JITO: 2 buys, 0.99 SOL, classes={'normal': 2}, mcap=$13343, pool=665F9j7eC9TKVsJjeXJwVUyfUNZx9oFj74GWJtySBZcn
+- Goblin: 1 buys, 0.79 SOL, classes={'normal': 1}, mcap=$2964200, pool=BJt1j9BqcGGHLmFMmCwYvD5aapSEut1MvFCR64xmrAYV
+- Bella: 2 buys, 0.37 SOL, classes={'normal': 2}, mcap=$44855, pool=5RuxVw4GD1ufAiAeDUAdZz1FaFbv6sujMyaZbpFT7NF4
+- Gus: 1 buys, 0.19 SOL, classes={'normal': 1}, mcap=$46597, pool=84w3sRYuVm9hB6nBPVVEoTEXCknv67JLmeT4d87LboKi
+- Manlets: 1 buys, 0.13 SOL, classes={'normal': 1}, mcap=$28451, pool=C2TGi75xtPToAxnHWP7k8mk2DRQ3xgSLpjy5y5wNabLN
