@@ -1,24 +1,26 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-16T04:09:49.735188Z
+- generated_at: 2026-06-16T05:09:59.242567Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 170
+- universe_pools: 165
 - scanned_pools: 65
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 65, 'getSignaturesForAddress': 89, 'getTransaction': 466}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 65, 'getSignaturesForAddress': 100, 'getTransaction': 463}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- XERIS: 1 buys, 11.34 SOL, classes={'normal': 1}, mcap=$2644535, pool=2Ff7ABu3yFcJBRZcoBMydyKnEDGmqEz76CmkWq2BdTFq
-- vibecat: 8 buys, 6.13 SOL, classes={'normal': 8}, mcap=$47815, pool=DTDVKr2UZa79qJ9JqkTX9D4rS4oamU2PZNeRnudxQbr7
-- MANGOS: 2 buys, 1.51 SOL, classes={'normal': 2}, mcap=$17588, pool=DLmFeXtQfCSaM5r8tBRjGjADN9gPm5CL2YbFT6AWeYva
-- CUMROCKET: 3 buys, 1.45 SOL, classes={'normal': 3}, mcap=$18595, pool=E41H7kunGZY9hhsAYKP1jurW8HLwYHKEn9jURQUudFXY
-- RKC: 1 buys, 0.98 SOL, classes={'normal': 1}, mcap=$1840213, pool=FzbYhPcoCuA2qSrV1s3j38RcQhP6c943p3KHYb6C5rCq
-- Chaton: 2 buys, 0.94 SOL, classes={'normal': 2}, mcap=$60812, pool=3t1yZ52QvVWjNofVK3VU52qmt1kV1Xup4UCegciWhjFV
-- ISPCX: 2 buys, 0.61 SOL, classes={'normal': 2}, mcap=$18859, pool=5KzNAEMdcRRJhCuTH9Jxekw6kfY5DjR3jLG1hNsPhgCC
-- WELLTH: 1 buys, 0.50 SOL, classes={'normal': 1}, mcap=$45314, pool=6BvnhqgEz87v6uwWC7J1zpj15SKbWkPC7rY5vWuUdw2i
-- STEAK: 1 buys, 0.41 SOL, classes={'normal': 1}, mcap=$25751, pool=EBfMhvf4fLPxyEz4fwdE1uiwb2EFQfJ1G8qW51t5zxvk
+- SCAN: 1 buys, 9.45 SOL, classes={'normal': 1}, mcap=$303764, pool=ADJqyCe1VgQrmqyszeuiHCPi4HJb6WFajCftYYgrimYe
+- nuts: 6 buys, 7.69 SOL, classes={'normal': 6}, mcap=$12150, pool=BGpxFsBVdDEJadgUeiDL32PakgxVwdtniAohfgLUB5eW
+- BRIM: 1 buys, 6.71 SOL, classes={'normal': 1}, mcap=$174780, pool=9hXD8sti6UmCzAcYw1DjcyhsuHtry5MW8GPrx7rMMyJ7
+- Pork: 1 buys, 4.45 SOL, classes={'normal': 1}, mcap=$184342, pool=9rPogiERgqQPCYJ5hbXu7LsUjXA5G9DcA3d9pX1bvUox
+- VORTX: 1 buys, 4.05 SOL, classes={'normal': 1}, mcap=$40729, pool=3wZefMsQTfAMe7uDBv4V1ys96RtJHzTLKTGq7UY7qmLh
+- Bella: 11 buys, 3.12 SOL, classes={'normal': 11}, mcap=$41468, pool=5RuxVw4GD1ufAiAeDUAdZz1FaFbv6sujMyaZbpFT7NF4
+- scar: 3 buys, 2.72 SOL, classes={'normal': 3}, mcap=$35177, pool=85cdqC5qjrxsXyEo3J9sAfAPXjLALWcU5fgircK89tDE
+- STARGRACE: 1 buys, 2.00 SOL, classes={'normal': 1}, mcap=$120619, pool=Du2DbfKC4hh23vT9NV8EFrumsD3B7odxfdThSFtKdnZh
+- BULL: 1 buys, 1.49 SOL, classes={'normal': 1}, mcap=$1694245, pool=HNGjLLZkWx2mNwhWdKFYcMowz8FTh2bXxdpJ1vBVkjNB
+- MARIA: 4 buys, 1.34 SOL, classes={'normal': 4}, mcap=$16503, pool=4RFdAFKvVeXiDxAmmcG2TGwVJ5rRtfYZ2RTKu1V8GHd5
+- IDLE: 1 buys, 1.30 SOL, classes={'normal': 1}, mcap=$390818, pool=DnAG61iCsCEfsqBeiR9Fcdkq92LayZMYewiSzw3ASWmN
