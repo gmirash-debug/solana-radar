@@ -1,22 +1,22 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-17T01:09:35.098744Z
+- generated_at: 2026-06-17T02:09:46.843867Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 33
-- scanned_pools: 33
+- universe_pools: 36
+- scanned_pools: 36
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 33, 'getSignaturesForAddress': 50, 'getTransaction': 379}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 36, 'getSignaturesForAddress': 60, 'getTransaction': 349}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- BREAD: 8 buys, 10.78 SOL, classes={'normal': 8}, mcap=$34855, pool=Gx4JNvGcJvZ2SB6DzWCq5Z2JfyLxp9NZ3qHR8yRebtku
-- GUARDIAN: 2 buys, 3.08 SOL, classes={'normal': 2}, mcap=$140925, pool=G3NJ1JdJQHSb4ExHCFSpxTxYNNBKKZakHsm5zDSK6TNw
-- 01: 1 buys, 2.68 SOL, classes={'normal': 1}, mcap=$180737, pool=E2VYktFBSk3jM8MPaaNvHJThqVgSQZxSFh6nKsLuXqbh
-- Chaton: 2 buys, 2.53 SOL, classes={'normal': 2}, mcap=$102687, pool=AVvqxwtgZDH2SENoTDBeY9S2q1Cs6fFcrT2cy47Pzfmb
-- pnutbutter: 1 buys, 0.69 SOL, classes={'normal': 1}, mcap=$19310, pool=GR82sCNv94j3kTJuQAACs7ioFeEBcWmQXZvFm1kE3NB7
-- HIM: 1 buys, 0.40 SOL, classes={'normal': 1}, mcap=$40608, pool=8aSVeHLnk3JK7ik4maPGzjVZRsq4Z2TZMgrbkPA7A4Xi
-- Vozinha: 1 buys, 0.29 SOL, classes={'normal': 1}, mcap=$160589, pool=5TDFRhM1a83SDTSNpbkFgoz8qprxpT1NAoHzfbs8eSYr
+- FREDDY: 3 buys, 25.71 SOL, classes={'normal': 3}, mcap=$143513, pool=CEjhfwmqkRMaQzqN2ARTp1GpNjHqKe88ePrvDemrHfAs
+- CHONKY: 7 buys, 4.41 SOL, classes={'normal': 7}, mcap=$24680, pool=29w2RMTozdvuoqCckr1wPu7Yy3KBB8NZafF5xZzCMGe7
+- HIM: 1 buys, 2.16 SOL, classes={'normal': 1}, mcap=$50046, pool=8aSVeHLnk3JK7ik4maPGzjVZRsq4Z2TZMgrbkPA7A4Xi
+- REALM: 2 buys, 1.63 SOL, classes={'normal': 2}, mcap=$208812, pool=6YMUkExWvpchH3J5FD3uDHoK2fb3Pfyqdg3SEJ2iDYQy
+- GutGenug: 1 buys, 1.15 SOL, classes={'normal': 1}, mcap=$159498, pool=9vW19msR7Trj9s1Yid19yoXVjCNgxdRE9JhZgJ6ruBhU
+- OGSHIB: 6 buys, 0.93 SOL, classes={'normal': 6}, mcap=$14759, pool=HrhfSUZJav6DBQ3nMpX4yJP8bVSFNTmWjxsxAPH3xWDf
+- PUMPVILLE: 1 buys, 0.54 SOL, classes={'normal': 1}, mcap=$105466, pool=9mDRoWdHmJ7Q4Fj8zMhzKuVfdXgYTckABwGRWxhuyvg5
