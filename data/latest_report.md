@@ -1,19 +1,18 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-18T07:09:24.462666Z
+- generated_at: 2026-06-18T08:09:34.974339Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 34
-- scanned_pools: 31
+- universe_pools: 30
+- scanned_pools: 30
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 31, 'getSignaturesForAddress': 48, 'getTransaction': 193}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 30, 'getSignaturesForAddress': 49, 'getTransaction': 196}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- CookingTrump: 10 buys, 7.11 SOL, classes={'freshish': 2, 'low_tx': 8}, mcap=$36451, pool=C7f5AwRWx6K9MfHJeABtXkzoiEnLTJqAfXM5WME55WnL
-- SPETTRO: 1 buys, 6.76 SOL, classes={'normal': 1}, mcap=$205971, pool=CDQAkPCbP6TykEz1UwwEpQtBcEXo6mZZH652JRiPwW6r
-- RUMBLE: 3 buys, 3.09 SOL, classes={'normal': 3}, mcap=$80410, pool=GFmQbyfZpaAqhRwaExmgW6VPVGPCbxq34WxcFv8BTWmk
-- ANSEM: 1 buys, 0.79 SOL, classes={'normal': 1}, mcap=$176107, pool=FnzKY6x7entQ1eR3D225dQyT7ybfka4PskBMQhb8L3CC
+- TRUMPBOSS: 14 buys, 2.62 SOL, classes={'low_tx': 12, 'freshish': 2}, mcap=$25308, pool=2JMPnaQr9YbVdnurzbaxXcBMHDTUG7WzAzcsKH1VHLtj
+- EMC: 2 buys, 1.71 SOL, classes={'normal': 2}, mcap=$92376, pool=AdPiJB4Xibt4JhiwqyWp96REYUcKr27yTLJxPRiUfAg6
+- Pekachu: 2 buys, 1.14 SOL, classes={'low_tx': 1, 'normal': 1}, mcap=$73445, pool=8TLLzjqNRVc8NCjhuxVGgR3zDPgiGNRnWaWfyehtnKGz
