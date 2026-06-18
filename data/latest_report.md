@@ -1,20 +1,19 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-18T13:09:38.675289Z
+- generated_at: 2026-06-18T14:09:31.931860Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 38
-- scanned_pools: 36
+- universe_pools: 31
+- scanned_pools: 31
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 36, 'getSignaturesForAddress': 50, 'getTransaction': 272}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 31, 'getSignaturesForAddress': 39, 'getTransaction': 149}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- CLAW: 2 buys, 3.08 SOL, classes={'normal': 2}, mcap=$95694, pool=4rQPGjSgLzBuBo2VNB2qZNoArzSuJJ9SGqUhK6gMVNxW
-- WELLTH: 2 buys, 2.95 SOL, classes={'normal': 2}, mcap=$57508, pool=6BvnhqgEz87v6uwWC7J1zpj15SKbWkPC7rY5vWuUdw2i
-- WESLEY: 2 buys, 1.77 SOL, classes={'normal': 2}, mcap=$37924, pool=ATEQxBQYrxV4ruiV3CZgR28Pu6qPmzqbBCBzkxPs2yBj
-- WORLDCUP: 1 buys, 1.71 SOL, classes={'normal': 1}, mcap=$1278373, pool=ETMhxtENfkMK85TAcveEbZdBv9htziWzDSddmShRP2wB
-- Pekachu: 4 buys, 1.47 SOL, classes={'normal': 3, 'freshish': 1}, mcap=$26922, pool=8TLLzjqNRVc8NCjhuxVGgR3zDPgiGNRnWaWfyehtnKGz
+- WESLEY: 3 buys, 1.51 SOL, classes={'normal': 3}, mcap=$40347, pool=ATEQxBQYrxV4ruiV3CZgR28Pu6qPmzqbBCBzkxPs2yBj
+- petin: 1 buys, 1.11 SOL, classes={'normal': 1}, mcap=$114601, pool=23Qj9qLkLcKGPjmdnTV1oNWiJUNrtjYpLePLu7616yUa
+- Brötchen: 2 buys, 1.00 SOL, classes={'normal': 2}, mcap=$152749, pool=74hJkM2dqyvJ9koQtW4Jbs1ujK7uzKhxYTJMBxKfcjLk
+- Pekachu: 2 buys, 0.27 SOL, classes={'normal': 2}, mcap=$28024, pool=8TLLzjqNRVc8NCjhuxVGgR3zDPgiGNRnWaWfyehtnKGz
