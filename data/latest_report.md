@@ -1,25 +1,20 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-19T20:10:11.151979Z
+- generated_at: 2026-06-19T21:09:44.937726Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 32
-- scanned_pools: 32
+- universe_pools: 42
+- scanned_pools: 41
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 32, 'getSignaturesForAddress': 67, 'getTransaction': 451}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 41, 'getSignaturesForAddress': 50, 'getTransaction': 324}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- ICPX: 2 buys, 17.76 SOL, classes={'normal': 2}, mcap=$180018, pool=2fbNjGAR8dmWLVVBiGoZk5RVCN1A95C2JtiAB8DTrL3o
-- SKI: 13 buys, 9.50 SOL, classes={'normal': 13}, mcap=$33542, pool=9gwrTXtAS5HDesaAM7GGMY3MxAgpRbcwoGGNxf6sJ2GW
-- SQUIRE: 2 buys, 5.70 SOL, classes={'normal': 2}, mcap=$3202041, pool=4CPVihvjKUUsXq3HFrS8wniUKffbpDqz2h6jHKjeXoYD
-- MEDUSA: 1 buys, 4.24 SOL, classes={'normal': 1}, mcap=$100842, pool=7FsdwunrbXHpGcB2j8sjjfaYbLJ2yQ8nLhmxpPHuNFgd
-- SPDR: 3 buys, 2.01 SOL, classes={'normal': 3}, mcap=$67516, pool=BcTU1ghfmsgPfVGzeFwLutzcjX7C5e6EHsDNKczhtf6c
-- gary: 4 buys, 1.77 SOL, classes={'normal': 4}, mcap=$18788, pool=FKn5QtDTzu4agjzLEHe6BPr6SovvaLes3oDrVjTnnUjg
-- WORLDCUP: 1 buys, 1.62 SOL, classes={'normal': 1}, mcap=$1410237, pool=ETMhxtENfkMK85TAcveEbZdBv9htziWzDSddmShRP2wB
-- chic: 2 buys, 0.99 SOL, classes={'normal': 2}, mcap=$48674, pool=4bFxMfBtXho6QzPiBF93PdRAuRbnauAmwQ5cKFLtuRqj
-- TURTLE: 2 buys, 0.85 SOL, classes={'normal': 2}, mcap=$135138, pool=Gpmo9o1me6Se9nRooGSRv9odpjkVUrctiBPp33H6sf3v
-- 滑る猫: 2 buys, 0.83 SOL, classes={'normal': 2}, mcap=$206647, pool=2ZSxtiKPkD9Ei2iN3WpUGgn2Ue1NiBMsFxsLSQVQ4PZW
+- PACT: 1 buys, 4.57 SOL, classes={'normal': 1}, mcap=$186098, pool=EwSeESTYZVX35cyYgMm38jaym6QmkbPptmkzp9KvPN43
+- elun: 3 buys, 1.60 SOL, classes={'normal': 3}, mcap=$23358, pool=2efJ94mg1BgxJ6xzuQ3oavE2ZF9sX69iaMAPXRjisQie
+- CHIKI: 3 buys, 1.10 SOL, classes={'normal': 3}, mcap=$42091, pool=ACvdA6HU6ZCqDu7RaBhU5T8vhH5HWUfjGH6rxyA8wGq
+- WOJAK: 1 buys, 0.57 SOL, classes={'normal': 1}, mcap=$3861390, pool=FDrY5i5kuadZ1ik8gPS26qjj9Rw9mpufXMegGC2HNSP7
+- STRETCHGPT: 1 buys, 0.12 SOL, classes={'normal': 1}, mcap=$28176, pool=EM7kuSJyrd5TmsUHGPTYQCsuK4sNjbXJd6CQhMPzr2Yq
