@@ -1,21 +1,19 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-19T02:09:29.939972Z
+- generated_at: 2026-06-19T03:09:26.065849Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 32
-- scanned_pools: 32
+- universe_pools: 31
+- scanned_pools: 31
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 32, 'getSignaturesForAddress': 48, 'getTransaction': 206}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 31, 'getSignaturesForAddress': 48, 'getTransaction': 166}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- AGAIN: 3 buys, 2.83 SOL, classes={'normal': 3}, mcap=$15792, pool=H2Nch7jjdhb6Mzw3irXpWneNfB3Js16UEB8Z38NqLGmi
-- TURTLE: 1 buys, 1.43 SOL, classes={'normal': 1}, mcap=$180223, pool=Gpmo9o1me6Se9nRooGSRv9odpjkVUrctiBPp33H6sf3v
-- WORLDCUP: 1 buys, 1.42 SOL, classes={'normal': 1}, mcap=$1229391, pool=ETMhxtENfkMK85TAcveEbZdBv9htziWzDSddmShRP2wB
-- JOE: 2 buys, 1.42 SOL, classes={'normal': 2}, mcap=$212304, pool=8b6CMNMDfJzMn5cSoCU8VGajtuCNeQtuQKAdQ6Z3ZziJ
-- xtra: 1 buys, 1.31 SOL, classes={'normal': 1}, mcap=$304622, pool=G4rWRz43ktymso25FYu1aRQfAjLSniYo4a5obYu7T8k1
-- OTWN: 5 buys, 1.22 SOL, classes={'normal': 4, 'low_tx': 1}, mcap=$43362, pool=D6x17etvWW77wyaXnhALDoAs74BWnDkAht6egLEUdi99
+- GRIND: 13 buys, 13.03 SOL, classes={'normal': 13}, mcap=$18093, pool=6Wdi4thnPQT7GAddA5119343YDPnHKjYBvZiMmh4UTWL
+- youngin: 2 buys, 1.98 SOL, classes={'normal': 2}, mcap=$70095, pool=ARj9PskkTNp6HJKDR5mtvYUhhAUJmezNC6zbDTARDqs7
+- WOJAK: 1 buys, 1.00 SOL, classes={'normal': 1}, mcap=$4118710, pool=FDrY5i5kuadZ1ik8gPS26qjj9Rw9mpufXMegGC2HNSP7
+- JOE: 1 buys, 0.61 SOL, classes={'low_tx': 1}, mcap=$198751, pool=8b6CMNMDfJzMn5cSoCU8VGajtuCNeQtuQKAdQ6Z3ZziJ
