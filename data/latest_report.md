@@ -1,25 +1,24 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-19T11:09:55.378290Z
+- generated_at: 2026-06-19T12:09:32.493318Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 31
-- scanned_pools: 31
+- universe_pools: 32
+- scanned_pools: 32
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 31, 'getSignaturesForAddress': 59, 'getTransaction': 434}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 32, 'getSignaturesForAddress': 53, 'getTransaction': 368}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- SKI: 12 buys, 10.95 SOL, classes={'normal': 12}, mcap=$39404, pool=9gwrTXtAS5HDesaAM7GGMY3MxAgpRbcwoGGNxf6sJ2GW
-- HARVY: 1 buys, 3.20 SOL, classes={'normal': 1}, mcap=$160024, pool=7mqEN4vCDLfgs8nnZGgHWkFX4Dx8c61wn6cSDiaZEvUi
-- youngin: 2 buys, 2.77 SOL, classes={'normal': 2}, mcap=$90612, pool=ARj9PskkTNp6HJKDR5mtvYUhhAUJmezNC6zbDTARDqs7
-- GOTCHI: 3 buys, 2.57 SOL, classes={'normal': 3}, mcap=$38031, pool=H23dQnJqRgB3fwcXNjEn8No8ytGXJSoi7VCj1qCV9DtJ
-- RUMBLE: 2 buys, 2.14 SOL, classes={'normal': 2}, mcap=$162659, pool=GFmQbyfZpaAqhRwaExmgW6VPVGPCbxq34WxcFv8BTWmk
-- SQUIRE: 1 buys, 1.49 SOL, classes={'normal': 1}, mcap=$3344958, pool=4CPVihvjKUUsXq3HFrS8wniUKffbpDqz2h6jHKjeXoYD
-- SPDR: 1 buys, 1.16 SOL, classes={'normal': 1}, mcap=$103347, pool=BcTU1ghfmsgPfVGzeFwLutzcjX7C5e6EHsDNKczhtf6c
-- 滑る猫: 1 buys, 0.99 SOL, classes={'normal': 1}, mcap=$152674, pool=2ZSxtiKPkD9Ei2iN3WpUGgn2Ue1NiBMsFxsLSQVQ4PZW
-- Kelsey: 2 buys, 0.91 SOL, classes={'normal': 2}, mcap=$41547, pool=2c9xv1pSoQz7qb31uhqsUZdTBLnQUXWRpEeCtZ9LvoaY
-- RIV: 1 buys, 0.21 SOL, classes={'normal': 1}, mcap=$28052, pool=97AFiMzDusoRe6L9E4dRqbwJ2TQeUi5xfUUokWyxkqHv
+- WOJAK: 1 buys, 8.70 SOL, classes={'normal': 1}, mcap=$3979842, pool=FDrY5i5kuadZ1ik8gPS26qjj9Rw9mpufXMegGC2HNSP7
+- Mutsuki: 7 buys, 5.54 SOL, classes={'normal': 7}, mcap=$19578, pool=F3tJ84Za7ge19emmkiVcJMecvf5cFMiRBbdzN7M8rG26
+- BLX: 3 buys, 3.07 SOL, classes={'normal': 3}, mcap=$123284, pool=FwWudhys4PtVc9ZjSHHu3eMbofnRA6tFBG2cY7gZy3LW
+- JAMESON: 2 buys, 2.41 SOL, classes={'normal': 2}, mcap=$185275, pool=HFSywti5xPHqKNUW4xYsGiyPqLrTB2nbxgBy4Go1x7cK
+- RIV: 1 buys, 1.79 SOL, classes={'normal': 1}, mcap=$25616, pool=97AFiMzDusoRe6L9E4dRqbwJ2TQeUi5xfUUokWyxkqHv
+- HeavyPulp: 2 buys, 1.52 SOL, classes={'normal': 2}, mcap=$843907, pool=3LHYwhm61rVwPxHJwnkV7zB7tmknAoa6scHXX4nCZfQY
+- 2he: 1 buys, 0.77 SOL, classes={'normal': 1}, mcap=$113499, pool=tr86UtGqssLx5asFzbLt3kUUJxLDRLBjkgGdXCVJjAN
+- GUARDIAN: 1 buys, 0.49 SOL, classes={'normal': 1}, mcap=$187330, pool=G3NJ1JdJQHSb4ExHCFSpxTxYNNBKKZakHsm5zDSK6TNw
+- MESSENGER: 1 buys, 0.44 SOL, classes={'normal': 1}, mcap=$18601, pool=3txXGBca9PQzfn5Xf9DK6tuTiEDHwxeWc4sVf8xD7xrf
