@@ -1,21 +1,20 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-19T18:09:28.964863Z
+- generated_at: 2026-06-19T19:09:36.582791Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 34
-- scanned_pools: 34
+- universe_pools: 29
+- scanned_pools: 29
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 34, 'getSignaturesForAddress': 52, 'getTransaction': 233}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 29, 'getSignaturesForAddress': 45, 'getTransaction': 274}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- petin: 11 buys, 3.98 SOL, classes={'normal': 11}, mcap=$18206, pool=23Qj9qLkLcKGPjmdnTV1oNWiJUNrtjYpLePLu7616yUa
-- Vozinha: 2 buys, 2.14 SOL, classes={'normal': 2}, mcap=$97706, pool=5TDFRhM1a83SDTSNpbkFgoz8qprxpT1NAoHzfbs8eSYr
-- youngin: 2 buys, 1.96 SOL, classes={'normal': 2}, mcap=$97486, pool=ARj9PskkTNp6HJKDR5mtvYUhhAUJmezNC6zbDTARDqs7
-- DSCRIBE: 1 buys, 0.64 SOL, classes={'normal': 1}, mcap=$130182, pool=DJRREEBS5gRBchuNhDmFzBibUGDsPjYJWJrzb2FfRno
-- BLX: 1 buys, 0.39 SOL, classes={'normal': 1}, mcap=$127110, pool=FwWudhys4PtVc9ZjSHHu3eMbofnRA6tFBG2cY7gZy3LW
-- RIV: 1 buys, 0.14 SOL, classes={'normal': 1}, mcap=$18605, pool=97AFiMzDusoRe6L9E4dRqbwJ2TQeUi5xfUUokWyxkqHv
+- DSCRIBE: 1 buys, 8.90 SOL, classes={'normal': 1}, mcap=$149690, pool=DJRREEBS5gRBchuNhDmFzBibUGDsPjYJWJrzb2FfRno
+- CZ: 6 buys, 6.90 SOL, classes={'normal': 6}, mcap=$22036, pool=HngFWyfT7YrTvfnRpCLhnKgbR5U5BBJvhdmN4gQuks8r
+- PMKT: 5 buys, 3.59 SOL, classes={'normal': 5}, mcap=$44151, pool=DZs8scZhUPUqZNKXHMHndj1vBsnYBETS43ye7dLPZcBN
+- SOCCER: 1 buys, 1.43 SOL, classes={'normal': 1}, mcap=$211963, pool=D9SuU2K7jyoHXUNSEUUUiagk1ZRWE1ZsnWm1fBE2KEq8
+- TIT: 1 buys, 0.60 SOL, classes={'normal': 1}, mcap=$100213, pool=2isfa17UL319NJ9bSyHMHZsqeSzTSYoPVaxFQ1xxu2Jw
