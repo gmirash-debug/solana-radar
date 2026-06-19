@@ -1,19 +1,22 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-19T03:09:26.065849Z
+- generated_at: 2026-06-19T04:09:42.813595Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
 - universe_pools: 31
 - scanned_pools: 31
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 31, 'getSignaturesForAddress': 48, 'getTransaction': 166}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 31, 'getSignaturesForAddress': 53, 'getTransaction': 271}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- GRIND: 13 buys, 13.03 SOL, classes={'normal': 13}, mcap=$18093, pool=6Wdi4thnPQT7GAddA5119343YDPnHKjYBvZiMmh4UTWL
-- youngin: 2 buys, 1.98 SOL, classes={'normal': 2}, mcap=$70095, pool=ARj9PskkTNp6HJKDR5mtvYUhhAUJmezNC6zbDTARDqs7
-- WOJAK: 1 buys, 1.00 SOL, classes={'normal': 1}, mcap=$4118710, pool=FDrY5i5kuadZ1ik8gPS26qjj9Rw9mpufXMegGC2HNSP7
-- JOE: 1 buys, 0.61 SOL, classes={'low_tx': 1}, mcap=$198751, pool=8b6CMNMDfJzMn5cSoCU8VGajtuCNeQtuQKAdQ6Z3ZziJ
+- XP: 8 buys, 2.34 SOL, classes={'normal': 8}, mcap=$38648, pool=6QsLU1hfNa915yE8pXnM1hgouVNfgYSLWC7amE6SeHAK
+- BREAD: 2 buys, 1.69 SOL, classes={'normal': 2}, mcap=$144281, pool=Gx4JNvGcJvZ2SB6DzWCq5Z2JfyLxp9NZ3qHR8yRebtku
+- SKI: 6 buys, 1.17 SOL, classes={'normal': 6}, mcap=$31465, pool=9gwrTXtAS5HDesaAM7GGMY3MxAgpRbcwoGGNxf6sJ2GW
+- maxxing: 1 buys, 1.00 SOL, classes={'normal': 1}, mcap=$977158, pool=DMnTidVC8dMxRxUzFyZ4StQkbS4R8ACwxhNsEyi6u3Lx
+- PUMPVERSE: 1 buys, 0.55 SOL, classes={'normal': 1}, mcap=$66918, pool=J3jjqd8FZLPa2Yr76GgLUnynDbMr3QiriKfru8KuiECg
+- ALGOPUB: 1 buys, 0.50 SOL, classes={'normal': 1}, mcap=$74222, pool=BF5XygkLmJngpWp2ttbozpzbiS2Ua2PGZ5ptsVCHaga3
+- RIV: 1 buys, 0.12 SOL, classes={'normal': 1}, mcap=$42602, pool=97AFiMzDusoRe6L9E4dRqbwJ2TQeUi5xfUUokWyxkqHv
