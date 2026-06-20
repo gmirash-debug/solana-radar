@@ -1,19 +1,20 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-20T07:09:33.883458Z
+- generated_at: 2026-06-20T08:09:31.559397Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 27
-- scanned_pools: 27
+- universe_pools: 37
+- scanned_pools: 37
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 27, 'getSignaturesForAddress': 46, 'getTransaction': 198}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 37, 'getSignaturesForAddress': 58, 'getTransaction': 268}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- Totebag: 9 buys, 13.12 SOL, classes={'normal': 9}, mcap=$32192, pool=8YCjBu4LFkHrNmtGkoKcemHP4eP7opDwztBJcmwTGoY3
-- maxxing: 1 buys, 2.01 SOL, classes={'normal': 1}, mcap=$1132725, pool=DMnTidVC8dMxRxUzFyZ4StQkbS4R8ACwxhNsEyi6u3Lx
-- BABYDADDY: 1 buys, 1.06 SOL, classes={'normal': 1}, mcap=$78762, pool=26X9BXjW8Qy9N27n9rEwEwGu2dFpLN98F2jLihrwKbug
-- RUMBLE: 2 buys, 0.69 SOL, classes={'normal': 2}, mcap=$226367, pool=GFmQbyfZpaAqhRwaExmgW6VPVGPCbxq34WxcFv8BTWmk
+- Totebag: 8 buys, 5.33 SOL, classes={'normal': 8}, mcap=$22178, pool=8YCjBu4LFkHrNmtGkoKcemHP4eP7opDwztBJcmwTGoY3
+- ZERO: 1 buys, 4.25 SOL, classes={'normal': 1}, mcap=$5930462, pool=GN9whJWrkgU8jBRpM5oa4iwSzYw1LivjB397DSyvbVG
+- Vozinha: 1 buys, 1.88 SOL, classes={'normal': 1}, mcap=$107645, pool=5TDFRhM1a83SDTSNpbkFgoz8qprxpT1NAoHzfbs8eSYr
+- BRAIN: 2 buys, 0.66 SOL, classes={'normal': 2}, mcap=$40373, pool=46twLjonFPq7yKLoFMsudDCN2Pdmh5XrGvyDnZ7Ctoc3
+- BABYDADDY: 2 buys, 0.54 SOL, classes={'low_tx': 2}, mcap=$80463, pool=26X9BXjW8Qy9N27n9rEwEwGu2dFpLN98F2jLihrwKbug
