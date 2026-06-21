@@ -1,20 +1,19 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-21T06:09:33.995181Z
+- generated_at: 2026-06-21T07:09:29.071453Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 30
-- scanned_pools: 30
+- universe_pools: 28
+- scanned_pools: 28
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 30, 'getSignaturesForAddress': 49, 'getTransaction': 377}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 28, 'getSignaturesForAddress': 47, 'getTransaction': 219}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- pouroutabeer: 10 buys, 6.88 SOL, classes={'normal': 8, 'low_tx': 1, 'dormant': 1}, mcap=$19793, pool=5qkX89L9dq63ao8WXhZkHX9vjJdvgzDTpdyHs6uAh1wM
-- SPEEDYCAT: 2 buys, 3.96 SOL, classes={'normal': 2}, mcap=$87060, pool=8bhT6mBtSrY1KpUHLX4MVkNMfbJ9xDgKVheb7cYn6Cku
-- AUTO: 2 buys, 1.16 SOL, classes={'normal': 2}, mcap=$140532, pool=2WPJpB8WwgmkdDJ7XbFidYnUPTCNBRDrC4bSX9LFHN51
-- Chameleon: 1 buys, 0.67 SOL, classes={'normal': 1}, mcap=$96927, pool=145oMsfrPcfPv3BR6HYfvbCB8jwn3z6Fo4LSprRho71W
-- LIGMA: 1 buys, 0.64 SOL, classes={'normal': 1}, mcap=$57794, pool=3nKaszEszUoUzYf2TQ7xHgKPKu2W4fv63Qy4Ap895PxN
+- testicle: 3 buys, 4.96 SOL, classes={'normal': 3}, mcap=$4512040, pool=E616WShkSjxnyToCExYLhNWxyYraFqs1RTQz1gZ9ZDUk
+- BRAIN: 3 buys, 4.64 SOL, classes={'normal': 3}, mcap=$157672, pool=46twLjonFPq7yKLoFMsudDCN2Pdmh5XrGvyDnZ7Ctoc3
+- pouroutabeer: 9 buys, 2.37 SOL, classes={'normal': 9}, mcap=$19371, pool=5qkX89L9dq63ao8WXhZkHX9vjJdvgzDTpdyHs6uAh1wM
+- PEVOLUTION: 1 buys, 0.10 SOL, classes={'normal': 1}, mcap=$14910, pool=7esegm141uMj63jhcBWoJwWdWYYtREA16nscdgDttx6C
