@@ -1,23 +1,22 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-21T22:09:10.082006Z
+- generated_at: 2026-06-21T23:09:06.080791Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 32
-- scanned_pools: 32
+- universe_pools: 35
+- scanned_pools: 35
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 32, 'getSignaturesForAddress': 49, 'getTransaction': 417}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 35, 'getSignaturesForAddress': 53, 'getTransaction': 321}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- BURNIE: 1 buys, 3.39 SOL, classes={'normal': 1}, mcap=$3684301, pool=5tYFviFWQRKV9BJSTHGitbdqEYC1BGUgRUDnSADUXqJP
-- Solvengers: 5 buys, 3.06 SOL, classes={'normal': 5}, mcap=$25524, pool=3nwNTRe2Gv7HuqTb5Goi7NNoFNoXdBETKQy1DJUJxeDR
-- WOJAK: 1 buys, 2.82 SOL, classes={'normal': 1}, mcap=$3556001, pool=FDrY5i5kuadZ1ik8gPS26qjj9Rw9mpufXMegGC2HNSP7
-- Gaejook: 2 buys, 1.60 SOL, classes={'normal': 2}, mcap=$27186, pool=9stZdFca5fCTJE9X1DNaZssdTUKA1HRWZcdEeeVHjepV
-- JINS: 2 buys, 1.37 SOL, classes={'normal': 2}, mcap=$39063, pool=4Efoxqe3avhLeZWV7ucKzFLHN8rzqx22RWkha7sAzzB4
-- traindog: 1 buys, 0.99 SOL, classes={'normal': 1}, mcap=$120855, pool=rG3bs2yMYgptgyvfnmvBdLBjwizY9HCDDVQGpxuyoUx
-- VELIQ: 2 buys, 0.69 SOL, classes={'normal': 2}, mcap=$20734, pool=3kex4dH1JNsPxac7R5ybB3of3iBJM2PJeurcjwRfs6ZV
-- HARVY: 1 buys, 0.56 SOL, classes={'normal': 1}, mcap=$104130, pool=7mqEN4vCDLfgs8nnZGgHWkFX4Dx8c61wn6cSDiaZEvUi
+- ROOM: 7 buys, 6.70 SOL, classes={'normal': 6, 'dormant': 1}, mcap=$41837, pool=6u83sHrfAe1VvmpTzsBfJdioUtV7dR3LfA4xzkFWuKhj
+- SPDR: 2 buys, 2.10 SOL, classes={'normal': 2}, mcap=$31849, pool=BcTU1ghfmsgPfVGzeFwLutzcjX7C5e6EHsDNKczhtf6c
+- LADA: 1 buys, 1.96 SOL, classes={'normal': 1}, mcap=$327099, pool=2mBCQgyFpZwjTC7FHzpCP8vdZbMqTDUgpQwFveSemtno
+- RUMBLE: 1 buys, 1.67 SOL, classes={'normal': 1}, mcap=$158564, pool=GFmQbyfZpaAqhRwaExmgW6VPVGPCbxq34WxcFv8BTWmk
+- 🐳🐳: 1 buys, 0.99 SOL, classes={'normal': 1}, mcap=$43718, pool=BEhdoZfma7hWpcCodMyUXiHCBA9wrfFhafRWiXRFHVj1
+- VELIQ: 2 buys, 0.71 SOL, classes={'normal': 2}, mcap=$24254, pool=3kex4dH1JNsPxac7R5ybB3of3iBJM2PJeurcjwRfs6ZV
+- POOL: 2 buys, 0.54 SOL, classes={'normal': 2}, mcap=$12801, pool=G8QD4y9KaqAt5wjHC5McTmNZfGyGTpGWoBwoquCwGxZg
