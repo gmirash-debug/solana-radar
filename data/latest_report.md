@@ -1,19 +1,20 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-21T04:09:30.968603Z
+- generated_at: 2026-06-21T05:09:25.922835Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 30
-- scanned_pools: 30
+- universe_pools: 31
+- scanned_pools: 31
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 30, 'getSignaturesForAddress': 39, 'getTransaction': 254}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 31, 'getSignaturesForAddress': 42, 'getTransaction': 194}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- RAGE: 1 buys, 5.39 SOL, classes={'normal': 1}, mcap=$230364, pool=4XUUrG5a7vHpotaAhF5fm9YCPpBcWDnjSmmYU61Sh6qR
-- greg: 2 buys, 3.36 SOL, classes={'normal': 2}, mcap=$34063, pool=43FraAvpHEcGfqMS9qw3aqCN2aMR3Yff318VGZTHaL5f
-- Vozinha: 4 buys, 2.77 SOL, classes={'normal': 4}, mcap=$92275, pool=5TDFRhM1a83SDTSNpbkFgoz8qprxpT1NAoHzfbs8eSYr
-- WOJAK: 1 buys, 0.80 SOL, classes={'normal': 1}, mcap=$3451565, pool=FDrY5i5kuadZ1ik8gPS26qjj9Rw9mpufXMegGC2HNSP7
+- IDLE: 2 buys, 2.02 SOL, classes={'normal': 1, 'low_tx': 1}, mcap=$598704, pool=DnAG61iCsCEfsqBeiR9Fcdkq92LayZMYewiSzw3ASWmN
+- WORLDCUP: 1 buys, 1.90 SOL, classes={'normal': 1}, mcap=$1251245, pool=ETMhxtENfkMK85TAcveEbZdBv9htziWzDSddmShRP2wB
+- LIGMA: 2 buys, 1.27 SOL, classes={'normal': 2}, mcap=$51596, pool=3nKaszEszUoUzYf2TQ7xHgKPKu2W4fv63Qy4Ap895PxN
+- SPCX6900: 1 buys, 0.67 SOL, classes={'normal': 1}, mcap=$85342, pool=4a72ivLyzjUPSbik3UdCqDoFXqwY9aqq3zYw73vNA9Cw
+- DADCOIN: 2 buys, 0.25 SOL, classes={'normal': 2}, mcap=$16145, pool=FZe1KEH1834QfoiZ1h2CM8Q2bGsfYMBUR5CUvdqY1B2y
