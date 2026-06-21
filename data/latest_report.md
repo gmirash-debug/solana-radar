@@ -1,18 +1,19 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-21T14:08:58.100610Z
+- generated_at: 2026-06-21T15:09:05.074433Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
 - universe_pools: 32
 - scanned_pools: 32
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 32, 'getSignaturesForAddress': 46, 'getTransaction': 208}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 32, 'getSignaturesForAddress': 49, 'getTransaction': 273}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- Hatchly: 2 buys, 2.45 SOL, classes={'normal': 2}, mcap=$43498, pool=ES89J9APbQyhwYCTbmTgTbM4abKLkLJfQidMDKPjhNL1
-- pouroutabeer: 3 buys, 1.78 SOL, classes={'normal': 3}, mcap=$23856, pool=5qkX89L9dq63ao8WXhZkHX9vjJdvgzDTpdyHs6uAh1wM
-- RTM: 7 buys, 1.74 SOL, classes={'normal': 6, 'low_tx': 1}, mcap=$12606, pool=J2S6E4cnhKzgfh59ZYY7m81p2w7FXLSCHwnAcQT9TaXk
+- SORIO: 10 buys, 3.91 SOL, classes={'normal': 10}, mcap=$24675, pool=2gpYo2ABGBWyvT4VBjBRbu4gufpGngA5eovrBFkzNWLE
+- Dad: 2 buys, 2.46 SOL, classes={'normal': 2}, mcap=$10274, pool=E1Ef4P4FsAwPToRemxHtP9BDQ7rUnuFzzzNVLuyT6mBm
+- LIGMA: 2 buys, 0.93 SOL, classes={'low_tx': 1, 'normal': 1}, mcap=$33620, pool=3nKaszEszUoUzYf2TQ7xHgKPKu2W4fv63Qy4Ap895PxN
+- DAD: 1 buys, 0.45 SOL, classes={'normal': 1}, mcap=$51964, pool=9peWWcJhizkQyCdVu97DTWFzhwXeLJNEqBaYPWtcACXp
