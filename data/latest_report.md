@@ -1,20 +1,20 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-23T18:29:10.784304Z
+- generated_at: 2026-06-23T19:09:10.972693Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 18
-- scanned_pools: 18
+- universe_pools: 22
+- scanned_pools: 22
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 18, 'getSignaturesForAddress': 53, 'getTransaction': 154}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 22, 'getSignaturesForAddress': 45, 'getTransaction': 261}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- PourOut: 12 buys, 11.09 SOL, classes={'normal': 11, 'low_tx': 1}, mcap=$28772, pool=HxmTQ9bCU5SHcacxinvnmtiEiMZxpVTNSA2TvZeAwEiu
-- Osiris: 5 buys, 9.19 SOL, classes={'normal': 3, 'dormant': 2}, mcap=$181724, pool=G3rchnZ2WLsBDZSrVME4fTyzFP57F3yvvqWMxAy2b4ce
-- AGI: 4 buys, 7.40 SOL, classes={'normal': 4}, mcap=$84492, pool=EFn9Cr9YoBmRKCqeagwrEqe3yk6FvmStRTNUDGqay1VL
-- unc: 5 buys, 7.26 SOL, classes={'normal': 5}, mcap=$2750538, pool=BWFZkx1pMpvwxammwTrizvoWzZZGiFEYUYW6Ee51SHLy
-- Joy: 8 buys, 6.06 SOL, classes={'normal': 8}, mcap=$28001, pool=7Ddy4MJMJYhYRW7jB8vDjtQvM4hcR3Qm4tdxvHJ6dK1y
+- ACAT: 2 buys, 10.40 SOL, classes={'normal': 2}, mcap=$134968, pool=7YhRkEk8qSKyzEry9RWLBY5KbxxjHQJYKXh92pxVHAK8
+- RO: 9 buys, 5.51 SOL, classes={'normal': 9}, mcap=$38939, pool=AoZkSCWFC4Tzh3diyn6xFiPsrHi6rFWanmSJaaXHCdN8
+- PourOut: 6 buys, 2.70 SOL, classes={'normal': 6}, mcap=$30800, pool=HxmTQ9bCU5SHcacxinvnmtiEiMZxpVTNSA2TvZeAwEiu
+- CASHBACK: 1 buys, 0.51 SOL, classes={'normal': 1}, mcap=$120857, pool=92xphy2aJyosodbwsTtDp64KoT5AXMQr1CLUVXkSkLEq
+- GOAT: 1 buys, 0.32 SOL, classes={'normal': 1}, mcap=$47890, pool=3kSqqP9eCUBxF7VmeUTu1SZEYgs8pkPdpDBggsjroymR
