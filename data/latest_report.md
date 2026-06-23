@@ -1,20 +1,18 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-23T07:09:00.247669Z
+- generated_at: 2026-06-23T08:09:03.302076Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 39
-- scanned_pools: 39
+- universe_pools: 41
+- scanned_pools: 41
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 39, 'getSignaturesForAddress': 59, 'getTransaction': 302}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 41, 'getSignaturesForAddress': 52, 'getTransaction': 356}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- ALTSZN: 2 buys, 12.45 SOL, classes={'low_tx': 1, 'normal': 1}, mcap=$3643176, pool=89XnvgGVKvtx5trrLtkrPZ6G2tD2TrSgPHXEWQPs5iN9
-- DAISY: 12 buys, 8.85 SOL, classes={'normal': 12}, mcap=$34177, pool=734cXh3z55ZPPCremJMYk6wDqDBJT4EQ5rHmq9w7v5jt
-- #fairs: 1 buys, 4.95 SOL, classes={'normal': 1}, mcap=$164866, pool=FyrKjDf1gbNH8WaqRepvxTDfx8gr1eirazKAq2J5xARc
-- Sakana: 2 buys, 3.59 SOL, classes={'normal': 2}, mcap=$37403, pool=AG2KPRmEP7AajDecGR691DSaaPVVBw25jaM5TfXR3KA
-- FREEDOM: 2 buys, 0.59 SOL, classes={'low_tx': 2}, mcap=$89308, pool=EXyqW1Ad3Uvf1mmxCPnqFt45k8i3nt6n7u2SX327RhkT
+- TrumpLoner: 9 buys, 4.29 SOL, classes={'freshish': 2, 'low_tx': 7}, mcap=$27661, pool=7ogYLiLjzUqrqojYrLFRZV8oBDGdpuXZYdktS61cdFKp
+- testicle: 1 buys, 0.86 SOL, classes={'normal': 1}, mcap=$4470896, pool=E616WShkSjxnyToCExYLhNWxyYraFqs1RTQz1gZ9ZDUk
+- Fugu: 1 buys, 0.42 SOL, classes={'low_tx': 1}, mcap=$49300, pool=Htf9Bp4uTP5usnEoQgTVoxQksTard6kvXbh4PbPW2P63
