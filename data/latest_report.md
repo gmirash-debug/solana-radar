@@ -1,23 +1,20 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-24T09:09:22.022355Z
+- generated_at: 2026-06-24T10:01:22.964825Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 26
-- scanned_pools: 26
+- universe_pools: 28
+- scanned_pools: 28
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 26, 'getSignaturesForAddress': 47, 'getTransaction': 367}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 28, 'getSignaturesForAddress': 44, 'getTransaction': 160}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- ALTSZN: 3 buys, 12.50 SOL, classes={'normal': 3}, mcap=$3213170, pool=89XnvgGVKvtx5trrLtkrPZ6G2tD2TrSgPHXEWQPs5iN9
-- SOB: 7 buys, 2.57 SOL, classes={'normal': 7}, mcap=$19081, pool=Huh3krb1dSu1XQxWLeXhrD3EDGMbB1BQLBfdKKtUH5mA
-- QUEST: 2 buys, 2.40 SOL, classes={'normal': 2}, mcap=$119681, pool=8qifgHNXegzE5T6qGQdmAs9dHCBWGeQMwzT2jRtx7gia
-- Osiris: 1 buys, 2.16 SOL, classes={'low_tx': 1}, mcap=$162964, pool=G3rchnZ2WLsBDZSrVME4fTyzFP57F3yvvqWMxAy2b4ce
-- Percolator: 1 buys, 1.79 SOL, classes={'normal': 1}, mcap=$2325196, pool=Ebs3mXAzqZfzHfsdinTNw7gPy4uNyEAywcCiJxzLRrBW
-- RKC: 2 buys, 1.50 SOL, classes={'normal': 2}, mcap=$32027, pool=6H3397ySYZwGzWXiAMpxUQY8QcDgK8t8q4i2DdgwQNfA
-- CS: 2 buys, 1.22 SOL, classes={'normal': 2}, mcap=$41284, pool=EgE4YJnu6BqPQ8z8hgJ7t5PHgW6NexSZpbS5Cs1gCeB8
-- $CWIF: 1 buys, 0.49 SOL, classes={'normal': 1}, mcap=$11439, pool=491SB2aMqW16gwfZk4CvysXHLft45wsnmWLNF4Nzcnif
+- USCON: 3 buys, 10.09 SOL, classes={'normal': 3}, mcap=$17927, pool=CkaACH9M52tQmTUrFbcsK2chf72uXL27LgYeJV8RhXXa
+- SPEEDYCAT: 3 buys, 6.41 SOL, classes={'normal': 3}, mcap=$105995, pool=8bhT6mBtSrY1KpUHLX4MVkNMfbJ9xDgKVheb7cYn6Cku
+- CPU: 3 buys, 2.30 SOL, classes={'normal': 3}, mcap=$146048, pool=DTH6E1yogK2f8mWogC1NJBzaT2K4GFzPsauiMoKeresV
+- RKC: 3 buys, 0.81 SOL, classes={'normal': 3}, mcap=$32502, pool=6H3397ySYZwGzWXiAMpxUQY8QcDgK8t8q4i2DdgwQNfA
+- three: 1 buys, 0.59 SOL, classes={'normal': 1}, mcap=$4673027, pool=5ByL7MZoLABYnwMPZKPKjf4MGkZ7FeBzrAnos19Pre2z
