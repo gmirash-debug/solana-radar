@@ -1,23 +1,23 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-24T07:09:12.939692Z
+- generated_at: 2026-06-24T08:09:09.040779Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 29
-- scanned_pools: 29
+- universe_pools: 39
+- scanned_pools: 39
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 29, 'getSignaturesForAddress': 51, 'getTransaction': 415}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 39, 'getSignaturesForAddress': 60, 'getTransaction': 415}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- unc: 2 buys, 16.31 SOL, classes={'normal': 2}, mcap=$2526935, pool=BWFZkx1pMpvwxammwTrizvoWzZZGiFEYUYW6Ee51SHLy
-- WEN: 7 buys, 5.40 SOL, classes={'normal': 7}, mcap=$19275, pool=AXCLc5EQK66BnZJ2df4xrH9dz5MMRVzrGWc7tHZ2mpMT
-- RIGBY: 3 buys, 1.26 SOL, classes={'freshish': 1, 'normal': 2}, mcap=$25567, pool=3J8DUtDf6jACxD1ksPwpzi6FkaHUBXPEtD3zqUzrh5fR
-- Jonah: 3 buys, 1.19 SOL, classes={'normal': 3}, mcap=$46397, pool=6Mza4abSbSnMMrAy7H4jub6FEcAvES6M9fKg4Zpwjnms
-- USAGIRL: 2 buys, 0.68 SOL, classes={'normal': 2}, mcap=$120498, pool=869eyE6ocrjAuXRPqgBzLJDGMWFbaaBd1o6Zc2GjS5X5
-- Ascend: 1 buys, 0.59 SOL, classes={'normal': 1}, mcap=$145442, pool=4AnzroZzG2BJFK4UqBiC7z9mNPycqCuqtpPCx1PP5Adn
-- QUEST: 1 buys, 0.57 SOL, classes={'normal': 1}, mcap=$162576, pool=8qifgHNXegzE5T6qGQdmAs9dHCBWGeQMwzT2jRtx7gia
-- SPEEDYCAT: 1 buys, 0.50 SOL, classes={'normal': 1}, mcap=$67857, pool=8bhT6mBtSrY1KpUHLX4MVkNMfbJ9xDgKVheb7cYn6Cku
+- maxxing: 2 buys, 4.66 SOL, classes={'normal': 2}, mcap=$1227371, pool=DMnTidVC8dMxRxUzFyZ4StQkbS4R8ACwxhNsEyi6u3Lx
+- WORLDCUP: 1 buys, 4.23 SOL, classes={'normal': 1}, mcap=$803603, pool=ETMhxtENfkMK85TAcveEbZdBv9htziWzDSddmShRP2wB
+- RKC: 6 buys, 2.79 SOL, classes={'normal': 6}, mcap=$22563, pool=6H3397ySYZwGzWXiAMpxUQY8QcDgK8t8q4i2DdgwQNfA
+- CS: 4 buys, 2.20 SOL, classes={'normal': 4}, mcap=$30891, pool=EgE4YJnu6BqPQ8z8hgJ7t5PHgW6NexSZpbS5Cs1gCeB8
+- Miu: 1 buys, 1.22 SOL, classes={'normal': 1}, mcap=$92384, pool=HQVzP7hXhCoVjysnp6foFy5adCFiGj1cdwt8gppAPNBV
+- Ascend: 1 buys, 0.99 SOL, classes={'normal': 1}, mcap=$110651, pool=4AnzroZzG2BJFK4UqBiC7z9mNPycqCuqtpPCx1PP5Adn
+- Jonah: 1 buys, 0.56 SOL, classes={'normal': 1}, mcap=$49108, pool=6Mza4abSbSnMMrAy7H4jub6FEcAvES6M9fKg4Zpwjnms
+- airdays: 1 buys, 0.32 SOL, classes={'normal': 1}, mcap=$16901, pool=5kPK6atXcvtapkSQtVg3d3CmZAM4wunrrUziQYgeM7KY
