@@ -1,17 +1,20 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-24T01:08:53.074229Z
+- generated_at: 2026-06-24T02:09:00.847947Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 24
-- scanned_pools: 24
+- universe_pools: 26
+- scanned_pools: 26
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 24, 'getSignaturesForAddress': 38, 'getTransaction': 128}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 26, 'getSignaturesForAddress': 39, 'getTransaction': 383}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- poopboob: 11 buys, 11.59 SOL, classes={'normal': 10, 'low_tx': 1}, mcap=$27101, pool=8SebUoWcffqG5w4Cm555bc281mcnP3aFXvUyFnTbwM2S
-- AGI: 1 buys, 1.56 SOL, classes={'normal': 1}, mcap=$103591, pool=EFn9Cr9YoBmRKCqeagwrEqe3yk6FvmStRTNUDGqay1VL
+- Chameleon: 2 buys, 5.40 SOL, classes={'normal': 2}, mcap=$104287, pool=145oMsfrPcfPv3BR6HYfvbCB8jwn3z6Fo4LSprRho71W
+- airdays: 1 buys, 3.21 SOL, classes={'normal': 1}, mcap=$39639, pool=5kPK6atXcvtapkSQtVg3d3CmZAM4wunrrUziQYgeM7KY
+- SPCX: 2 buys, 2.48 SOL, classes={'low_tx': 1, 'normal': 1}, mcap=$1063981, pool=DZxWcyPpTyr2NTfmEN2xAUSCb77t1ZLpkg63PbpbKmbC
+- LUMUMBA: 3 buys, 1.53 SOL, classes={'normal': 3}, mcap=$39148, pool=2KcrPUsCjevJSm4JxFeRKgnZTobyWifMAce7PnLaKwMQ
+- GOAT: 1 buys, 1.39 SOL, classes={'normal': 1}, mcap=$54832, pool=3kSqqP9eCUBxF7VmeUTu1SZEYgs8pkPdpDBggsjroymR
