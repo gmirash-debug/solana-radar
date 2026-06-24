@@ -1,23 +1,21 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-24T17:09:11.896087Z
+- generated_at: 2026-06-24T18:09:04.037676Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 32
-- scanned_pools: 32
+- universe_pools: 23
+- scanned_pools: 23
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 32, 'getSignaturesForAddress': 51, 'getTransaction': 332}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 23, 'getSignaturesForAddress': 42, 'getTransaction': 269}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- LAZARUS: 8 buys, 6.70 SOL, classes={'normal': 8}, mcap=$35030, pool=AWNqzmoEX9YGbF5fxMpNsxjJRjfmhrZHhxCvCKaoyAiX
-- CAPOS: 1 buys, 3.92 SOL, classes={'normal': 1}, mcap=$137397, pool=D2dyRM5dARdk8KFc4SgtdmKFtHfqKFbSzVvtgQWX4sDq
-- EC43: 4 buys, 3.12 SOL, classes={'normal': 4}, mcap=$35846, pool=C7BTHvuJL17MSo9eXHbjoLxgNyeECkp4cCeFnmLUKSCj
-- YARIRAFY: 1 buys, 2.54 SOL, classes={'normal': 1}, mcap=$24162, pool=pnvXwZA4UBbTLaraEnUkZ6pFbXdbHSka4dvJCwiTibD
-- PIP: 2 buys, 1.24 SOL, classes={'normal': 2}, mcap=$22320, pool=7Jk3i21eQvAbfbqGYK6MuMF5D6NDiffyCWVBtNvR55aY
-- BREAD: 1 buys, 1.01 SOL, classes={'normal': 1}, mcap=$100670, pool=Gx4JNvGcJvZ2SB6DzWCq5Z2JfyLxp9NZ3qHR8yRebtku
-- EYED: 1 buys, 0.78 SOL, classes={'normal': 1}, mcap=$931878, pool=6y5EhAxcdjJtW6wADfZC8nZ35j7e2tupigKZBEtD7ZEv
-- Ascend: 1 buys, 0.30 SOL, classes={'normal': 1}, mcap=$135031, pool=4AnzroZzG2BJFK4UqBiC7z9mNPycqCuqtpPCx1PP5Adn
+- world: 12 buys, 8.36 SOL, classes={'normal': 12}, mcap=$18000, pool=2VK6chCS16xmxVRh88hAXj1SnBHaXQnwAU7zPP7QPf1f
+- POKÉFIGHT: 2 buys, 3.74 SOL, classes={'normal': 2}, mcap=$93614, pool=7AeowDHefqotCDwRydN8bxjUsNdvLCaG3Xmc6nczsVBm
+- CONDOR: 1 buys, 2.23 SOL, classes={'normal': 1}, mcap=$57572, pool=E9tbv5w2iquEsyVaoSjiivMdFuSRJmw8zYFjEyX1nR3N
+- CPU: 2 buys, 0.93 SOL, classes={'normal': 2}, mcap=$177793, pool=DTH6E1yogK2f8mWogC1NJBzaT2K4GFzPsauiMoKeresV
+- EC43: 1 buys, 0.49 SOL, classes={'normal': 1}, mcap=$34172, pool=C7BTHvuJL17MSo9eXHbjoLxgNyeECkp4cCeFnmLUKSCj
+- SWIF: 1 buys, 0.20 SOL, classes={'normal': 1}, mcap=$48042, pool=5sHvebMBVBG2sGHsEKoMeY4qk2tsZUmx9wa2tZhfx5zF
