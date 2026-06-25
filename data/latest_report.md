@@ -1,18 +1,18 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-25T03:08:57.735503Z
+- generated_at: 2026-06-25T04:08:51.046853Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 27
-- scanned_pools: 27
+- universe_pools: 26
+- scanned_pools: 26
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 27, 'getSignaturesForAddress': 42, 'getTransaction': 164}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 26, 'getSignaturesForAddress': 44, 'getTransaction': 200}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- MITHRIL: 12 buys, 8.44 SOL, classes={'normal': 11, 'low_tx': 1}, mcap=$44841, pool=8yHAycx2E4uKwD9Rb3kVi73FyxXxWBMR2HLwwQAD9R22
-- WEN: 1 buys, 1.45 SOL, classes={'normal': 1}, mcap=$53957, pool=AAWfsorcywroE5k28Ah3f5onzz5cbydWqM97BaQdzSoh
-- HYRE: 1 buys, 0.78 SOL, classes={'normal': 1}, mcap=$225058, pool=ERokNZdfXB3R6STLeQseXPmNaNKXJiYsGnog5xgZPs5t
+- EC43: 13 buys, 6.35 SOL, classes={'normal': 13}, mcap=$14660, pool=C7BTHvuJL17MSo9eXHbjoLxgNyeECkp4cCeFnmLUKSCj
+- DERPY: 2 buys, 0.83 SOL, classes={'normal': 2}, mcap=$38135, pool=GoBBPAS7UzZLgbwFQerxZ3N4335o2qGuZTVSKZtPcdoX
+- JOE: 1 buys, 0.79 SOL, classes={'normal': 1}, mcap=$157384, pool=8b6CMNMDfJzMn5cSoCU8VGajtuCNeQtuQKAdQ6Z3ZziJ
