@@ -1,20 +1,19 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-25T01:09:08.841221Z
+- generated_at: 2026-06-25T02:08:53.845737Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 29
-- scanned_pools: 29
+- universe_pools: 28
+- scanned_pools: 28
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 29, 'getSignaturesForAddress': 49, 'getTransaction': 279}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 28, 'getSignaturesForAddress': 45, 'getTransaction': 152}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- Miu: 7 buys, 10.55 SOL, classes={'normal': 6, 'low_tx': 1}, mcap=$35190, pool=HQVzP7hXhCoVjysnp6foFy5adCFiGj1cdwt8gppAPNBV
-- GROYPER: 2 buys, 6.26 SOL, classes={'normal': 1, 'freshish': 1}, mcap=$187031, pool=BEgrtDs3yxHPxegpjVdzJS3d9UermeoWah5rYB2B3YMJ
-- GLUE: 7 buys, 4.76 SOL, classes={'normal': 6, 'freshish': 1}, mcap=$28158, pool=6JJGvo9PrGqihrLKpTpiowPfsHEA3i5CLPrMzVXyYwVH
-- VANT: 2 buys, 0.99 SOL, classes={'normal': 2}, mcap=$28187, pool=3AXgfHxqtNh8W8aNP7nkkkbwGU9mZoCN4w7ex8789iFM
-- bullieve: 1 buys, 0.53 SOL, classes={'normal': 1}, mcap=$29921, pool=FYJRvzEEhvG29K31bdFAq9rgNN6DCfZxtM514Azhpges
+- MITHRIL: 8 buys, 14.05 SOL, classes={'normal': 8}, mcap=$42406, pool=8yHAycx2E4uKwD9Rb3kVi73FyxXxWBMR2HLwwQAD9R22
+- JOE: 4 buys, 4.25 SOL, classes={'normal': 4}, mcap=$139435, pool=8b6CMNMDfJzMn5cSoCU8VGajtuCNeQtuQKAdQ6Z3ZziJ
+- testicle: 3 buys, 1.96 SOL, classes={'normal': 3}, mcap=$4148906, pool=E616WShkSjxnyToCExYLhNWxyYraFqs1RTQz1gZ9ZDUk
+- Miu: 1 buys, 0.40 SOL, classes={'normal': 1}, mcap=$25300, pool=HQVzP7hXhCoVjysnp6foFy5adCFiGj1cdwt8gppAPNBV
