@@ -1,22 +1,21 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-25T14:08:57.140188Z
+- generated_at: 2026-06-25T15:08:58.705885Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 31
-- scanned_pools: 31
+- universe_pools: 28
+- scanned_pools: 28
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 31, 'getSignaturesForAddress': 50, 'getTransaction': 226}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 28, 'getSignaturesForAddress': 49, 'getTransaction': 269}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- PROV: 2 buys, 12.85 SOL, classes={'normal': 2}, mcap=$196050, pool=7eKxPDPJaQqBLt4fvi54s3A5qafy7Bgs9kP6UUkTewJa
-- Ascend: 10 buys, 6.76 SOL, classes={'normal': 10}, mcap=$47504, pool=4AnzroZzG2BJFK4UqBiC7z9mNPycqCuqtpPCx1PP5Adn
-- unc: 1 buys, 3.37 SOL, classes={'normal': 1}, mcap=$2126712, pool=BWFZkx1pMpvwxammwTrizvoWzZZGiFEYUYW6Ee51SHLy
-- SOB: 1 buys, 2.36 SOL, classes={'normal': 1}, mcap=$47975, pool=Huh3krb1dSu1XQxWLeXhrD3EDGMbB1BQLBfdKKtUH5mA
-- PIP: 2 buys, 2.30 SOL, classes={'normal': 2}, mcap=$22600, pool=7Jk3i21eQvAbfbqGYK6MuMF5D6NDiffyCWVBtNvR55aY
-- Pokéshock: 1 buys, 1.96 SOL, classes={'normal': 1}, mcap=$116564, pool=DH7i8KHLjXnyPEuvksZrtsseF8xoFZisG37CJstzWRmF
-- WIREBUS: 2 buys, 1.29 SOL, classes={'normal': 2}, mcap=$122223, pool=A6Efev6CdgzRMKmVbybzSpo54Q9uk5TCmfL5ZGAffkeZ
+- Passinho: 9 buys, 7.69 SOL, classes={'normal': 9}, mcap=$27090, pool=D1jVGJGRefFiREspna5X5jeHs2V7gdBHibhPruLVUct7
+- wCAT: 1 buys, 3.92 SOL, classes={'normal': 1}, mcap=$96274, pool=7URgeVpRjPMwbA25wXKPfdnDADVQbnAzd1vP6f32gdNV
+- three: 2 buys, 3.73 SOL, classes={'normal': 2}, mcap=$3678796, pool=5ByL7MZoLABYnwMPZKPKjf4MGkZ7FeBzrAnos19Pre2z
+- RKC: 3 buys, 2.74 SOL, classes={'normal': 3}, mcap=$40220, pool=6H3397ySYZwGzWXiAMpxUQY8QcDgK8t8q4i2DdgwQNfA
+- Ascend: 1 buys, 1.41 SOL, classes={'normal': 1}, mcap=$56515, pool=4AnzroZzG2BJFK4UqBiC7z9mNPycqCuqtpPCx1PP5Adn
+- Pork: 1 buys, 0.99 SOL, classes={'low_tx': 1}, mcap=$143731, pool=9rPogiERgqQPCYJ5hbXu7LsUjXA5G9DcA3d9pX1bvUox
