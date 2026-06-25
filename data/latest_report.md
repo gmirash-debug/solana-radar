@@ -1,22 +1,21 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-25T17:09:07.760185Z
+- generated_at: 2026-06-25T18:09:21.087921Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 20
-- scanned_pools: 20
+- universe_pools: 26
+- scanned_pools: 26
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 20, 'getSignaturesForAddress': 38, 'getTransaction': 244}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 26, 'getSignaturesForAddress': 52, 'getTransaction': 217}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- WEN: 6 buys, 6.74 SOL, classes={'low_tx': 1, 'normal': 5}, mcap=$37213, pool=8E7Ex5DcvFB5KRsforwbh231Zx5q4pqwt3sGHRbeqyPL
-- CASHBACK: 1 buys, 5.01 SOL, classes={'normal': 1}, mcap=$184040, pool=92xphy2aJyosodbwsTtDp64KoT5AXMQr1CLUVXkSkLEq
-- Meep: 6 buys, 4.91 SOL, classes={'normal': 5, 'low_tx': 1}, mcap=$49003, pool=Ac5snsr7QawrsDkxpUgBe3ohY9zU9Dr2cjUxar3nts7y
-- three: 1 buys, 2.25 SOL, classes={'normal': 1}, mcap=$3564794, pool=5ByL7MZoLABYnwMPZKPKjf4MGkZ7FeBzrAnos19Pre2z
-- wCAT: 1 buys, 0.98 SOL, classes={'normal': 1}, mcap=$64261, pool=7URgeVpRjPMwbA25wXKPfdnDADVQbnAzd1vP6f32gdNV
-- LOA: 1 buys, 0.54 SOL, classes={'normal': 1}, mcap=$2141167, pool=EnYMBPWxnVJ7EBaV3D9sTtiCmiDtM658LorfqVLwvSCF
-- CHILLCAT: 1 buys, 0.49 SOL, classes={'normal': 1}, mcap=$71035, pool=EkR86hwmu5PKWgarm6wMqynnD6hTEXmDaczfHbSRr6Gy
+- PROV: 4 buys, 17.09 SOL, classes={'normal': 4}, mcap=$235554, pool=7eKxPDPJaQqBLt4fvi54s3A5qafy7Bgs9kP6UUkTewJa
+- Ascend: 10 buys, 13.41 SOL, classes={'normal': 10}, mcap=$42293, pool=4AnzroZzG2BJFK4UqBiC7z9mNPycqCuqtpPCx1PP5Adn
+- SPEEDYCAT: 2 buys, 5.02 SOL, classes={'normal': 2}, mcap=$58707, pool=8bhT6mBtSrY1KpUHLX4MVkNMfbJ9xDgKVheb7cYn6Cku
+- infinity: 3 buys, 2.88 SOL, classes={'normal': 3}, mcap=$38632, pool=6MJ7VWpkXc4BveqooPUhvrZprge14GKJ5rhRuGdQ9vAs
+- WEN: 4 buys, 2.39 SOL, classes={'normal': 4}, mcap=$10710, pool=AAWfsorcywroE5k28Ah3f5onzz5cbydWqM97BaQdzSoh
+- three: 2 buys, 1.29 SOL, classes={'normal': 2}, mcap=$3756597, pool=5ByL7MZoLABYnwMPZKPKjf4MGkZ7FeBzrAnos19Pre2z
