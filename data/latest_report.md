@@ -1,22 +1,19 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-25T07:09:12.812182Z
+- generated_at: 2026-06-25T08:09:00.888099Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 23
-- scanned_pools: 23
+- universe_pools: 27
+- scanned_pools: 27
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 23, 'getSignaturesForAddress': 38, 'getTransaction': 280}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 27, 'getSignaturesForAddress': 42, 'getTransaction': 241}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- QUEST: 1 buys, 2.85 SOL, classes={'normal': 1}, mcap=$94991, pool=8qifgHNXegzE5T6qGQdmAs9dHCBWGeQMwzT2jRtx7gia
-- SOB: 5 buys, 2.30 SOL, classes={'normal': 5}, mcap=$47275, pool=Huh3krb1dSu1XQxWLeXhrD3EDGMbB1BQLBfdKKtUH5mA
-- unc: 1 buys, 0.99 SOL, classes={'normal': 1}, mcap=$2350588, pool=BWFZkx1pMpvwxammwTrizvoWzZZGiFEYUYW6Ee51SHLy
-- EAGLE250: 2 buys, 0.81 SOL, classes={'low_tx': 2}, mcap=$72306, pool=3Qhv2Z6n5aknNzx56A2n4qvqUZ4CvbCkUh24KcK9T9qY
-- WIREBUS: 1 buys, 0.50 SOL, classes={'normal': 1}, mcap=$139207, pool=A6Efev6CdgzRMKmVbybzSpo54Q9uk5TCmfL5ZGAffkeZ
-- Pokéshock: 1 buys, 0.38 SOL, classes={'normal': 1}, mcap=$93606, pool=DH7i8KHLjXnyPEuvksZrtsseF8xoFZisG37CJstzWRmF
-- VENEZUELA: 1 buys, 0.30 SOL, classes={'normal': 1}, mcap=$38824, pool=8896ybL1Z2YeB3ksMx3XEkzGXwPckapjf56pmZsZNTeM
+- WEN: 11 buys, 5.27 SOL, classes={'normal': 11}, mcap=$35869, pool=AAWfsorcywroE5k28Ah3f5onzz5cbydWqM97BaQdzSoh
+- PLUSH: 2 buys, 4.26 SOL, classes={'normal': 2}, mcap=$22912, pool=5ZaUadqEHvagvDrjvwTW1VNE8T2P8wdGnuWU5aUvPZ6G
+- EAGLE250: 1 buys, 1.37 SOL, classes={'freshish': 1}, mcap=$120202, pool=3Qhv2Z6n5aknNzx56A2n4qvqUZ4CvbCkUh24KcK9T9qY
+- SWIF: 1 buys, 0.42 SOL, classes={'normal': 1}, mcap=$32927, pool=5sHvebMBVBG2sGHsEKoMeY4qk2tsZUmx9wa2tZhfx5zF
