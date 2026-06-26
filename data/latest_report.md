@@ -1,19 +1,17 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-26T16:09:03.793344Z
+- generated_at: 2026-06-26T17:08:50.035643Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 25
-- scanned_pools: 25
+- universe_pools: 17
+- scanned_pools: 17
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 25, 'getSignaturesForAddress': 37, 'getTransaction': 255}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 17, 'getSignaturesForAddress': 23, 'getTransaction': 130}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- BURNIE: 1 buys, 4.34 SOL, classes={'normal': 1}, mcap=$3523653, pool=5tYFviFWQRKV9BJSTHGitbdqEYC1BGUgRUDnSADUXqJP
-- DANGEROUS: 9 buys, 3.76 SOL, classes={'normal': 8, 'freshish': 1}, mcap=$30781, pool=CAQv9uxGeqKS72WT8Qxg7FRYaFrKPNiTtcySR4mecuer
-- LAZARUS: 1 buys, 2.46 SOL, classes={'normal': 1}, mcap=$176500, pool=AWNqzmoEX9YGbF5fxMpNsxjJRjfmhrZHhxCvCKaoyAiX
-- MANIFEST: 1 buys, 0.18 SOL, classes={'normal': 1}, mcap=$32961, pool=GCoV6k4Zw7UeBbV9XvHEoBzGcuxpAEAkFXDg6UBkfkCp
+- DANGEROUS: 5 buys, 2.30 SOL, classes={'normal': 5}, mcap=$27062, pool=CAQv9uxGeqKS72WT8Qxg7FRYaFrKPNiTtcySR4mecuer
+- EC43: 1 buys, 0.35 SOL, classes={'normal': 1}, mcap=$15396, pool=C7BTHvuJL17MSo9eXHbjoLxgNyeECkp4cCeFnmLUKSCj
