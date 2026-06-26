@@ -1,24 +1,20 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-26T01:09:22.892701Z
+- generated_at: 2026-06-26T02:09:05.844087Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 30
-- scanned_pools: 30
+- universe_pools: 27
+- scanned_pools: 27
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 30, 'getSignaturesForAddress': 57, 'getTransaction': 331}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 27, 'getSignaturesForAddress': 40, 'getTransaction': 222}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- HEISTED: 2 buys, 10.65 SOL, classes={'normal': 2}, mcap=$108977, pool=EnVpF8LAMZSwv22pkJAMWYkMw4kRX2BkArPwYAdir7CF
-- PokeFiFA: 4 buys, 3.48 SOL, classes={'low_tx': 1, 'normal': 3}, mcap=$12044, pool=AfSBE99UJD3kMYSNprnbqo15WdQvQ3cJhHpPw4vkmNqp
-- WEN: 5 buys, 2.54 SOL, classes={'normal': 5}, mcap=$34348, pool=8E7Ex5DcvFB5KRsforwbh231Zx5q4pqwt3sGHRbeqyPL
-- KELL: 6 buys, 2.07 SOL, classes={'normal': 6}, mcap=$40859, pool=6Qngmi8emTuWsPwRvKY5hE3LJVarKhkkanfUREpz7mFX
-- Tokabu: 2 buys, 1.97 SOL, classes={'normal': 2}, mcap=$2531827, pool=Ekv9HdumWqnXZgq5G6ge6bk1ZRHKXYC2WnSFL94sQmLJ
-- ANSEM: 1 buys, 1.47 SOL, classes={'normal': 1}, mcap=$173346, pool=FnzKY6x7entQ1eR3D225dQyT7ybfka4PskBMQhb8L3CC
-- CPU: 1 buys, 1.02 SOL, classes={'normal': 1}, mcap=$131662, pool=DTH6E1yogK2f8mWogC1NJBzaT2K4GFzPsauiMoKeresV
-- Ride: 2 buys, 1.01 SOL, classes={'normal': 2}, mcap=$125878, pool=54VDkikJAvYdjWSfphnemptXAFsG9KC3RM6CCAYKy4fw
-- LOA: 1 buys, 0.74 SOL, classes={'normal': 1}, mcap=$2017099, pool=EnYMBPWxnVJ7EBaV3D9sTtiCmiDtM658LorfqVLwvSCF
+- LAND: 7 buys, 10.51 SOL, classes={'normal': 7}, mcap=$10267, pool=FfCEUQ9ifXsh2Vout3HdgTxf6XRerRcUgi25gyyPJche
+- ASSDAQ: 1 buys, 6.35 SOL, classes={'normal': 1}, mcap=$122049, pool=8r2FgpMpJiLiHBV6tzM21TqoHgWny4vkvuaN6Rv2So2H
+- PAPCAT: 3 buys, 0.79 SOL, classes={'normal': 3}, mcap=$13844, pool=G2x1ALo7wZm7q6UqmqZeKoFq5qaSGyjoEP1Mm38S1dxj
+- Tokabu: 1 buys, 0.78 SOL, classes={'normal': 1}, mcap=$2301142, pool=Ekv9HdumWqnXZgq5G6ge6bk1ZRHKXYC2WnSFL94sQmLJ
+- RAGEGUY: 1 buys, 0.55 SOL, classes={'normal': 1}, mcap=$1183487, pool=6gTQBJBV7DUQUGfsQoxzqi8Kgpa5ymF5riquo1k9sXoe
