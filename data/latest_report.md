@@ -1,20 +1,20 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-26T21:08:56.995685Z
+- generated_at: 2026-06-26T22:08:54.885209Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 32
-- scanned_pools: 32
+- universe_pools: 33
+- scanned_pools: 33
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 32, 'getSignaturesForAddress': 49, 'getTransaction': 361}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 33, 'getSignaturesForAddress': 47, 'getTransaction': 240}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- memecoin: 1 buys, 9.58 SOL, classes={'normal': 1}, mcap=$3403071, pool=EbpUDz8ekE1TavcRAsMAaeGZk3wJveESRxMiDmxUYXAY
-- REX: 1 buys, 4.56 SOL, classes={'normal': 1}, mcap=$186889, pool=8XzxTTCfQ49N5awdmtLAoK7MKmZ65AAaTpqryD9M1jL7
-- Goose: 11 buys, 3.95 SOL, classes={'normal': 11}, mcap=$12344, pool=3ChszdUHemDSHd1KTuJmQai8Kj2KjFUUXaNH8nCtMoWC
-- HEISTED: 1 buys, 2.11 SOL, classes={'normal': 1}, mcap=$123024, pool=EnVpF8LAMZSwv22pkJAMWYkMw4kRX2BkArPwYAdir7CF
-- 𝕏Money: 1 buys, 1.98 SOL, classes={'normal': 1}, mcap=$154329, pool=EFNDannBFANGABPEjUNZ9H6LjhNa3cTgVVQ8P23iWZYv
+- RICH: 1 buys, 6.81 SOL, classes={'normal': 1}, mcap=$196641, pool=3hCWyGJyuvjxrgLvu6QQgrTeDWYfUvvdPNk6SHXiP1Hj
+- HEISTED: 1 buys, 4.80 SOL, classes={'normal': 1}, mcap=$143571, pool=EnVpF8LAMZSwv22pkJAMWYkMw4kRX2BkArPwYAdir7CF
+- Turtle: 7 buys, 4.51 SOL, classes={'normal': 7}, mcap=$46016, pool=9GHh1eherWhC877btK2UrLsGUums9ieQmUctLP2cWhnQ
+- SOL: 1 buys, 0.49 SOL, classes={'normal': 1}, mcap=$17570, pool=CNjhgsu8vYTxnYo4aqg6fNguEMMbXCsa1JGofyJCaPd3
+- FITNESS: 1 buys, 0.14 SOL, classes={'normal': 1}, mcap=$33213, pool=rTopeZGR592HepW8WfC4ZAak5EZHgrYxRoXZsvShU2Y
