@@ -1,17 +1,17 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-26T12:08:51.846530Z
+- generated_at: 2026-06-26T13:09:04.692654Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 26
-- scanned_pools: 26
+- universe_pools: 35
+- scanned_pools: 35
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 26, 'getSignaturesForAddress': 36, 'getTransaction': 104}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 35, 'getSignaturesForAddress': 46, 'getTransaction': 256}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- Heisted: 8 buys, 3.90 SOL, classes={'normal': 8}, mcap=$43956, pool=eZkFS5J4Rd1sX54dbmia1tfFt4krWBMtdNbcKXX5Nwy
-- ANSEM: 1 buys, 0.87 SOL, classes={'normal': 1}, mcap=$231860, pool=FnzKY6x7entQ1eR3D225dQyT7ybfka4PskBMQhb8L3CC
+- CATerpillar: 10 buys, 16.21 SOL, classes={'normal': 10}, mcap=$47593, pool=9fdFYnW6pBCE6b9CjnJwdp6RJG3cEfRuf8rcJcP5nyUR
+- FITNESS: 1 buys, 1.16 SOL, classes={'normal': 1}, mcap=$28718, pool=rTopeZGR592HepW8WfC4ZAak5EZHgrYxRoXZsvShU2Y
