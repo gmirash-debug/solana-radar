@@ -1,23 +1,22 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-27T06:09:23.102022Z
+- generated_at: 2026-06-27T07:08:57.410400Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 28
-- scanned_pools: 28
+- universe_pools: 32
+- scanned_pools: 32
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 28, 'getSignaturesForAddress': 60, 'getTransaction': 333}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 32, 'getSignaturesForAddress': 46, 'getTransaction': 310}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- Genie: 10 buys, 5.46 SOL, classes={'low_tx': 2, 'normal': 8}, mcap=$35399, pool=G1jJgj331EAmELHLCpzJdpXwMFy6ehPL9jZRmMgSzSXd
-- GLUE: 1 buys, 4.96 SOL, classes={'normal': 1}, mcap=$226147, pool=6JJGvo9PrGqihrLKpTpiowPfsHEA3i5CLPrMzVXyYwVH
-- GTA: 2 buys, 3.45 SOL, classes={'normal': 1, 'freshish': 1}, mcap=$32278, pool=J7AKAAUZiwDP7Rbt27Myr3YwapnFdogkrLYwpPBv9s7b
-- ACRE: 4 buys, 2.37 SOL, classes={'low_tx': 2, 'normal': 2}, mcap=$43638, pool=4762yZ6zikST5Xtb89FtuVsbCcSEBePo2U384EZMgkua
-- LOA: 2 buys, 1.85 SOL, classes={'normal': 2}, mcap=$1925776, pool=EnYMBPWxnVJ7EBaV3D9sTtiCmiDtM658LorfqVLwvSCF
-- SimpleX: 5 buys, 0.98 SOL, classes={'normal': 5}, mcap=$26879, pool=AfsQDcCJcMdn1KwYtrtkVtiSvU1tZrEAmfEwgjSXGxuc
-- GRAVEN: 2 buys, 0.64 SOL, classes={'normal': 2}, mcap=$12450, pool=BAJZyGrMFG6cKdECAdZojCrMhY5Da34yPago8jbndbTh
-- unc: 1 buys, 0.61 SOL, classes={'normal': 1}, mcap=$2883348, pool=BWFZkx1pMpvwxammwTrizvoWzZZGiFEYUYW6Ee51SHLy
+- SimpleX: 2 buys, 2.45 SOL, classes={'normal': 1, 'low_tx': 1}, mcap=$33271, pool=AfsQDcCJcMdn1KwYtrtkVtiSvU1tZrEAmfEwgjSXGxuc
+- Venezuela: 4 buys, 2.26 SOL, classes={'normal': 4}, mcap=$39468, pool=3QLHQX5UzbvQNE5mFbQd2ciiWZpTJTn4tABwYVakbJbX
+- CATerpillar: 2 buys, 2.23 SOL, classes={'normal': 2}, mcap=$86194, pool=9fdFYnW6pBCE6b9CjnJwdp6RJG3cEfRuf8rcJcP5nyUR
+- RƎ́V: 1 buys, 1.30 SOL, classes={'normal': 1}, mcap=$129878, pool=EMm9RL2tHvUvygLCu9WkUMBgnu29K2kePzUuWhiSjdMU
+- world: 1 buys, 1.01 SOL, classes={'normal': 1}, mcap=$157542, pool=3b96syjAEJ1YXNSDMiEANTgshk3s2HkE9mjSUhM1cnYh
+- werld: 1 buys, 0.43 SOL, classes={'normal': 1}, mcap=$30255, pool=AyopYm9QPGWJ7jy7GvQwZbehw6ovfRkwMYJaAUKK5voe
+- WBET: 1 buys, 0.30 SOL, classes={'normal': 1}, mcap=$126341, pool=ApzDirX3ee11c5PpaPNY5ecz29cDhGua76YoC1s7Bs3e
