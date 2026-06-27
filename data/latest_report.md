@@ -1,22 +1,23 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-27T05:08:45.225434Z
+- generated_at: 2026-06-27T06:09:23.102022Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 21
-- scanned_pools: 21
+- universe_pools: 28
+- scanned_pools: 28
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 21, 'getSignaturesForAddress': 43, 'getTransaction': 240}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 28, 'getSignaturesForAddress': 60, 'getTransaction': 333}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- BURNIE: 2 buys, 8.30 SOL, classes={'normal': 2}, mcap=$3689054, pool=5tYFviFWQRKV9BJSTHGitbdqEYC1BGUgRUDnSADUXqJP
-- SimpleX: 10 buys, 8.18 SOL, classes={'normal': 10}, mcap=$32365, pool=AfsQDcCJcMdn1KwYtrtkVtiSvU1tZrEAmfEwgjSXGxuc
-- WEN: 1 buys, 1.78 SOL, classes={'normal': 1}, mcap=$179746, pool=HZyqZRuAUCLdJaHqBfnoFHVBwXmuH3Sm1LyXnWu8Ee15
-- LOA: 1 buys, 1.73 SOL, classes={'normal': 1}, mcap=$1911736, pool=EnYMBPWxnVJ7EBaV3D9sTtiCmiDtM658LorfqVLwvSCF
-- werld: 3 buys, 1.29 SOL, classes={'normal': 3}, mcap=$36170, pool=AyopYm9QPGWJ7jy7GvQwZbehw6ovfRkwMYJaAUKK5voe
-- WBET: 1 buys, 0.68 SOL, classes={'normal': 1}, mcap=$109372, pool=ApzDirX3ee11c5PpaPNY5ecz29cDhGua76YoC1s7Bs3e
-- GRAVEN: 1 buys, 0.19 SOL, classes={'normal': 1}, mcap=$11356, pool=BAJZyGrMFG6cKdECAdZojCrMhY5Da34yPago8jbndbTh
+- Genie: 10 buys, 5.46 SOL, classes={'low_tx': 2, 'normal': 8}, mcap=$35399, pool=G1jJgj331EAmELHLCpzJdpXwMFy6ehPL9jZRmMgSzSXd
+- GLUE: 1 buys, 4.96 SOL, classes={'normal': 1}, mcap=$226147, pool=6JJGvo9PrGqihrLKpTpiowPfsHEA3i5CLPrMzVXyYwVH
+- GTA: 2 buys, 3.45 SOL, classes={'normal': 1, 'freshish': 1}, mcap=$32278, pool=J7AKAAUZiwDP7Rbt27Myr3YwapnFdogkrLYwpPBv9s7b
+- ACRE: 4 buys, 2.37 SOL, classes={'low_tx': 2, 'normal': 2}, mcap=$43638, pool=4762yZ6zikST5Xtb89FtuVsbCcSEBePo2U384EZMgkua
+- LOA: 2 buys, 1.85 SOL, classes={'normal': 2}, mcap=$1925776, pool=EnYMBPWxnVJ7EBaV3D9sTtiCmiDtM658LorfqVLwvSCF
+- SimpleX: 5 buys, 0.98 SOL, classes={'normal': 5}, mcap=$26879, pool=AfsQDcCJcMdn1KwYtrtkVtiSvU1tZrEAmfEwgjSXGxuc
+- GRAVEN: 2 buys, 0.64 SOL, classes={'normal': 2}, mcap=$12450, pool=BAJZyGrMFG6cKdECAdZojCrMhY5Da34yPago8jbndbTh
+- unc: 1 buys, 0.61 SOL, classes={'normal': 1}, mcap=$2883348, pool=BWFZkx1pMpvwxammwTrizvoWzZZGiFEYUYW6Ee51SHLy
