@@ -1,17 +1,21 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-28T11:08:55.144176Z
+- generated_at: 2026-06-28T12:08:57.135643Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 21
-- scanned_pools: 21
+- universe_pools: 28
+- scanned_pools: 28
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 21, 'getSignaturesForAddress': 30, 'getTransaction': 149}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 28, 'getSignaturesForAddress': 44, 'getTransaction': 220}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- SAN: 1 buys, 16.42 SOL, classes={'normal': 1}, mcap=$1536959, pool=E4dZyLB1ousbEnXKhXUrvK6Ern2cRe456KsMWC6BHgTC
-- NEIL: 8 buys, 7.12 SOL, classes={'normal': 8}, mcap=$15414, pool=Gerz5Vw4sxUZkR4dAtnYT5ChgX47GCYLE5Z3oeZinyFJ
+- DUVAL: 3 buys, 4.07 SOL, classes={'normal': 3}, mcap=$38427, pool=99qvvSWiAaEx5tYSgb3Q5JZdoXndcGZg5poJktqod8oY
+- Ansum: 3 buys, 1.72 SOL, classes={'normal': 3}, mcap=$33664, pool=4rryxcharsy8BBtQyMzLsR8pGV8eEh2kxWZtm3bCFj3g
+- Louis : 1 buys, 1.06 SOL, classes={'normal': 1}, mcap=$54220, pool=33954mgGL4Hi83STSEmrgcxage7ZbBJFPjfCYfLcyqgd
+- ALPACAS: 1 buys, 0.51 SOL, classes={'normal': 1}, mcap=$176227, pool=HCGVhwaU61UWipP9Ngamg2Rnd3L4XGdMzrTZT7JJeonR
+- Honey: 2 buys, 0.46 SOL, classes={'normal': 2}, mcap=$29086, pool=3WMwwuB9rztak61DiSgzwiXKVsfPaWqCKJZ6rd27jfsN
+- PENSION: 1 buys, 0.35 SOL, classes={'normal': 1}, mcap=$84012, pool=EEnPhcgv9mMKBUwpY6rqHmwvrs8VkSHkPLJikgvZmExj
