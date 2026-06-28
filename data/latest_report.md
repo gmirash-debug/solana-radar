@@ -1,18 +1,19 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-28T17:08:58.573683Z
+- generated_at: 2026-06-28T18:08:48.933697Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 26
-- scanned_pools: 26
+- universe_pools: 18
+- scanned_pools: 18
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 26, 'getSignaturesForAddress': 44, 'getTransaction': 145}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 18, 'getSignaturesForAddress': 25, 'getTransaction': 137}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- SHARKCASH: 14 buys, 3.40 SOL, classes={'normal': 12, 'low_tx': 1, 'dormant': 1}, mcap=$32965, pool=9cDbFFesKnKS6KcqQr52ZHhbQavSV66ejdUWSj3edyav
-- Xavier: 1 buys, 3.01 SOL, classes={'normal': 1}, mcap=$81417, pool=B4yc4Mh2zEpCGNZKRbEHQHBfktJ3TaqDUGgDRa2mTHsL
-- LOA: 1 buys, 2.74 SOL, classes={'freshish': 1}, mcap=$1652716, pool=EnYMBPWxnVJ7EBaV3D9sTtiCmiDtM658LorfqVLwvSCF
+- spurdo: 1 buys, 6.61 SOL, classes={'normal': 1}, mcap=$507210, pool=8eixuojQL5b6ZHbyXX9ABLh6MggV3UoSdxrhbRzrteiF
+- 🐂🀄️: 2 buys, 2.09 SOL, classes={'normal': 2}, mcap=$49254, pool=FmknACJNWZFWVXxgwCaAkSwp3PYaGYnpEXpbfCCTQXxi
+- MOVEMENT: 1 buys, 1.23 SOL, classes={'freshish': 1}, mcap=$91819, pool=Et9ssNUEQcCsAo7bQ7LuTgUaKhjNUmoPCZzFUVgDCzzS
+- AIRDROP: 2 buys, 0.99 SOL, classes={'normal': 2}, mcap=$34755, pool=2ZxoZmzYmkBQwDzC5m1jHjzMcVJ1BhPv9hbMfgmNZAoL
