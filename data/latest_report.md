@@ -1,21 +1,18 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-29T03:08:55.945095Z
+- generated_at: 2026-06-29T04:09:14.038658Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 30
-- scanned_pools: 30
+- universe_pools: 18
+- scanned_pools: 18
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 30, 'getSignaturesForAddress': 41, 'getTransaction': 260}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 18, 'getSignaturesForAddress': 30, 'getTransaction': 234}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- 🐂🀄️: 4 buys, 13.73 SOL, classes={'normal': 4}, mcap=$25955, pool=FmknACJNWZFWVXxgwCaAkSwp3PYaGYnpEXpbfCCTQXxi
-- RTM: 2 buys, 3.06 SOL, classes={'low_tx': 1, 'normal': 1}, mcap=$217326, pool=DtnW4aadcFK7jxK9D6fHWzSGEKZeLavWn8oXuEJe6nTc
-- Pigeon: 1 buys, 2.96 SOL, classes={'normal': 1}, mcap=$248435, pool=FXRvcgMQfgj3WrmUXGh8qhVLaU3Q4T7jQeKBoqhVecR7
-- QUEST: 1 buys, 1.06 SOL, classes={'normal': 1}, mcap=$131425, pool=8qifgHNXegzE5T6qGQdmAs9dHCBWGeQMwzT2jRtx7gia
-- unc: 1 buys, 0.99 SOL, classes={'normal': 1}, mcap=$2566292, pool=BWFZkx1pMpvwxammwTrizvoWzZZGiFEYUYW6Ee51SHLy
-- GNOME: 1 buys, 0.54 SOL, classes={'low_tx': 1}, mcap=$15554, pool=32xba6e9sVCk23VGi9XemHRfiegu9KNLe6wYcd4fwavA
+- 🐂🀄️: 8 buys, 8.14 SOL, classes={'normal': 8}, mcap=$23334, pool=FmknACJNWZFWVXxgwCaAkSwp3PYaGYnpEXpbfCCTQXxi
+- AC: 2 buys, 1.25 SOL, classes={'normal': 1, 'dormant': 1}, mcap=$86223, pool=FQJFM1xHL1PJkMFq2jQ64AnK2CCq9Cy4C85pvKc4QZyi
+- DARKY: 2 buys, 0.40 SOL, classes={'normal': 1, 'low_tx': 1}, mcap=$38975, pool=7WKt831KnuXsADyGubFfyoPJUGpuSP1H2T22jwPn2fgR
