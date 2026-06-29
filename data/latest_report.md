@@ -1,23 +1,22 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-29T01:09:15.763216Z
+- generated_at: 2026-06-29T02:08:58.909564Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 34
-- scanned_pools: 34
+- universe_pools: 31
+- scanned_pools: 31
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 34, 'getSignaturesForAddress': 64, 'getTransaction': 375}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 31, 'getSignaturesForAddress': 47, 'getTransaction': 277}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- three: 3 buys, 6.63 SOL, classes={'normal': 3}, mcap=$2521705, pool=5ByL7MZoLABYnwMPZKPKjf4MGkZ7FeBzrAnos19Pre2z
-- VOICEBOX: 3 buys, 6.52 SOL, classes={'normal': 3}, mcap=$160302, pool=5ukdRdkEY8takptjBTgS7vfmoWhKJoRLV8zexF1XFs6p
-- BABYANSEM: 10 buys, 4.16 SOL, classes={'normal': 9, 'low_tx': 1}, mcap=$27036, pool=9dPubpu3LkCpVP9yXkiEa7mSv58cLWyiS1pC6HW6B7wG
-- WEN: 3 buys, 3.69 SOL, classes={'normal': 3}, mcap=$167773, pool=HZyqZRuAUCLdJaHqBfnoFHVBwXmuH3Sm1LyXnWu8Ee15
-- BELIEVE: 2 buys, 2.96 SOL, classes={'normal': 2}, mcap=$435497, pool=EBBGBx2L4UyANypmZ1xTsLY84EWcbDMCcRzSvV6Kj4A3
-- ECASH: 1 buys, 2.77 SOL, classes={'normal': 1}, mcap=$172065, pool=EtiNcFxdVVSuphoS44JvcVQCb74vgqqT56PzWm3L678x
-- ANSOM: 2 buys, 0.67 SOL, classes={'low_tx': 2}, mcap=$120424, pool=C1KHGdzEh3DVr7iE8tUiqUuox9eYigLFBhikpU3rbjwD
-- QUANT: 2 buys, 0.26 SOL, classes={'normal': 2}, mcap=$29124, pool=BmzcCAvhMtZRQjWGu1j8NfkEWA8mmwVP6WY5KEURzEpL
+- testicle: 1 buys, 7.89 SOL, classes={'normal': 1}, mcap=$3907755, pool=E616WShkSjxnyToCExYLhNWxyYraFqs1RTQz1gZ9ZDUk
+- Cupsey: 2 buys, 6.90 SOL, classes={'normal': 2}, mcap=$1296576, pool=DPzKoJVewaH1wpchD3gWKeeGm7G2mXkBW48uRniAgbVx
+- 🐂🀄️: 6 buys, 4.99 SOL, classes={'normal': 6}, mcap=$33091, pool=FmknACJNWZFWVXxgwCaAkSwp3PYaGYnpEXpbfCCTQXxi
+- BABYANSEM: 1 buys, 2.95 SOL, classes={'normal': 1}, mcap=$35649, pool=9dPubpu3LkCpVP9yXkiEa7mSv58cLWyiS1pC6HW6B7wG
+- Honey: 4 buys, 2.17 SOL, classes={'normal': 4}, mcap=$47096, pool=3WMwwuB9rztak61DiSgzwiXKVsfPaWqCKJZ6rd27jfsN
+- drooling: 1 buys, 1.99 SOL, classes={'normal': 1}, mcap=$802350, pool=2mQYy3LfJCnauyfufYnLGtLCXmb6M2shXQGV2mHx7Mpy
+- BURNIE: 1 buys, 1.39 SOL, classes={'normal': 1}, mcap=$2686389, pool=5tYFviFWQRKV9BJSTHGitbdqEYC1BGUgRUDnSADUXqJP
