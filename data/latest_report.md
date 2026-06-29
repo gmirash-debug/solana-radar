@@ -1,22 +1,21 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-29T02:08:58.909564Z
+- generated_at: 2026-06-29T03:08:55.945095Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 31
-- scanned_pools: 31
+- universe_pools: 30
+- scanned_pools: 30
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 31, 'getSignaturesForAddress': 47, 'getTransaction': 277}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 30, 'getSignaturesForAddress': 41, 'getTransaction': 260}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- testicle: 1 buys, 7.89 SOL, classes={'normal': 1}, mcap=$3907755, pool=E616WShkSjxnyToCExYLhNWxyYraFqs1RTQz1gZ9ZDUk
-- Cupsey: 2 buys, 6.90 SOL, classes={'normal': 2}, mcap=$1296576, pool=DPzKoJVewaH1wpchD3gWKeeGm7G2mXkBW48uRniAgbVx
-- 🐂🀄️: 6 buys, 4.99 SOL, classes={'normal': 6}, mcap=$33091, pool=FmknACJNWZFWVXxgwCaAkSwp3PYaGYnpEXpbfCCTQXxi
-- BABYANSEM: 1 buys, 2.95 SOL, classes={'normal': 1}, mcap=$35649, pool=9dPubpu3LkCpVP9yXkiEa7mSv58cLWyiS1pC6HW6B7wG
-- Honey: 4 buys, 2.17 SOL, classes={'normal': 4}, mcap=$47096, pool=3WMwwuB9rztak61DiSgzwiXKVsfPaWqCKJZ6rd27jfsN
-- drooling: 1 buys, 1.99 SOL, classes={'normal': 1}, mcap=$802350, pool=2mQYy3LfJCnauyfufYnLGtLCXmb6M2shXQGV2mHx7Mpy
-- BURNIE: 1 buys, 1.39 SOL, classes={'normal': 1}, mcap=$2686389, pool=5tYFviFWQRKV9BJSTHGitbdqEYC1BGUgRUDnSADUXqJP
+- 🐂🀄️: 4 buys, 13.73 SOL, classes={'normal': 4}, mcap=$25955, pool=FmknACJNWZFWVXxgwCaAkSwp3PYaGYnpEXpbfCCTQXxi
+- RTM: 2 buys, 3.06 SOL, classes={'low_tx': 1, 'normal': 1}, mcap=$217326, pool=DtnW4aadcFK7jxK9D6fHWzSGEKZeLavWn8oXuEJe6nTc
+- Pigeon: 1 buys, 2.96 SOL, classes={'normal': 1}, mcap=$248435, pool=FXRvcgMQfgj3WrmUXGh8qhVLaU3Q4T7jQeKBoqhVecR7
+- QUEST: 1 buys, 1.06 SOL, classes={'normal': 1}, mcap=$131425, pool=8qifgHNXegzE5T6qGQdmAs9dHCBWGeQMwzT2jRtx7gia
+- unc: 1 buys, 0.99 SOL, classes={'normal': 1}, mcap=$2566292, pool=BWFZkx1pMpvwxammwTrizvoWzZZGiFEYUYW6Ee51SHLy
+- GNOME: 1 buys, 0.54 SOL, classes={'low_tx': 1}, mcap=$15554, pool=32xba6e9sVCk23VGi9XemHRfiegu9KNLe6wYcd4fwavA
