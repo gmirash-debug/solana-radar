@@ -1,22 +1,26 @@
 # Solana Radar Report
 
-- generated_at: 2026-06-29T10:09:34.738855Z
+- generated_at: 2026-06-29T11:09:19.024644Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 27
-- scanned_pools: 27
+- universe_pools: 32
+- scanned_pools: 32
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 27, 'getSignaturesForAddress': 54, 'getTransaction': 451}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 32, 'getSignaturesForAddress': 56, 'getTransaction': 445}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- LOA: 1 buys, 6.36 SOL, classes={'low_tx': 1}, mcap=$1638137, pool=EnYMBPWxnVJ7EBaV3D9sTtiCmiDtM658LorfqVLwvSCF
-- Honey: 6 buys, 5.29 SOL, classes={'normal': 6}, mcap=$45439, pool=3WMwwuB9rztak61DiSgzwiXKVsfPaWqCKJZ6rd27jfsN
-- BABYANSEM: 8 buys, 3.52 SOL, classes={'normal': 8}, mcap=$37792, pool=E3YZZ7fgV8qquQWW43sT3JB84XiiiryachkEg8whg3MC
-- Percolator: 3 buys, 3.37 SOL, classes={'normal': 3}, mcap=$1733313, pool=Ebs3mXAzqZfzHfsdinTNw7gPy4uNyEAywcCiJxzLRrBW
-- Potato: 2 buys, 2.68 SOL, classes={'normal': 2}, mcap=$110273, pool=Fd35pvzQWUHjD1EPDVH9U85vpgZrxuN9LMjx7SPtEvMg
-- 🐂🀄️: 2 buys, 2.35 SOL, classes={'normal': 2}, mcap=$142718, pool=95UU5jkxhfEtsS32kxFwwcuzzEahNEEuX984BLW5GsfX
-- CLIVE: 1 buys, 0.65 SOL, classes={'normal': 1}, mcap=$117422, pool=B1GFLecDJbYgDDSkKQMDp8xz5TTiCgdW7ADDVqqSUUFe
+- piss: 1 buys, 15.00 SOL, classes={'normal': 1}, mcap=$218984, pool=5EBtmZf6jxeuMCLeW59mu2S34cttep2wnCQdS2WJbrFH
+- three: 1 buys, 12.39 SOL, classes={'normal': 1}, mcap=$2473945, pool=5ByL7MZoLABYnwMPZKPKjf4MGkZ7FeBzrAnos19Pre2z
+- BABYANSEM: 4 buys, 5.88 SOL, classes={'normal': 4}, mcap=$34263, pool=E3YZZ7fgV8qquQWW43sT3JB84XiiiryachkEg8whg3MC
+- FOMO: 2 buys, 2.58 SOL, classes={'normal': 2}, mcap=$82358, pool=9QwpxCSEssoY6NacsYivMptPeYqXa8Hwd2oFpJd4vrXp
+- 🐂🀄: 1 buys, 2.04 SOL, classes={'normal': 1}, mcap=$98198, pool=J8c2wQCZiLoc38GL1uqWsABznXDXgKpxo7Dm4Pnpu311
+- Davinci: 5 buys, 1.95 SOL, classes={'normal': 5}, mcap=$11649, pool=G2ekVLEsj2myughuUHpsZmznJSsTvKC1jCXJwrtLj7Vw
+- wef: 2 buys, 1.88 SOL, classes={'normal': 2}, mcap=$93683, pool=A1xqsvpFVaUDokBT5VQt7fApghXBfXkHnN9TFBtmv6F1
+- NEIL: 2 buys, 1.59 SOL, classes={'normal': 2}, mcap=$112128, pool=Gerz5Vw4sxUZkR4dAtnYT5ChgX47GCYLE5Z3oeZinyFJ
+- DARKY: 1 buys, 1.13 SOL, classes={'normal': 1}, mcap=$141621, pool=7WKt831KnuXsADyGubFfyoPJUGpuSP1H2T22jwPn2fgR
+- tbh: 1 buys, 0.51 SOL, classes={'normal': 1}, mcap=$844507, pool=Aus1BKxzUxuPptAskoxsJ2JUCpVssT7RNvJvh1BGMhaR
+- Potato: 1 buys, 0.30 SOL, classes={'low_tx': 1}, mcap=$115687, pool=Fd35pvzQWUHjD1EPDVH9U85vpgZrxuN9LMjx7SPtEvMg
