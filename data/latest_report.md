@@ -1,24 +1,21 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-01T19:09:20.893975Z
+- generated_at: 2026-07-01T20:09:07.685869Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 21
-- scanned_pools: 21
+- universe_pools: 25
+- scanned_pools: 25
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 21, 'getSignaturesForAddress': 42, 'getTransaction': 293}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 25, 'getSignaturesForAddress': 36, 'getTransaction': 317}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- AVA: 6 buys, 4.21 SOL, classes={'normal': 6}, mcap=$45322, pool=9Z4pCzKZNP9gbRtCQoZVQXczb8RHHZcFhG5cNXtRLfWT
-- Martolexx: 2 buys, 2.42 SOL, classes={'normal': 2}, mcap=$46651, pool=7DvWfEjcg6Dxq2jj5x5W9pMdci2XQWaVtCXUpBrXM66z
-- OFFCHAIN: 1 buys, 0.92 SOL, classes={'normal': 1}, mcap=$331023, pool=DgwPZxjiZiznGYYECytkmWVXQir213RZmuUX7NHEwTR
-- SOLANGELES: 1 buys, 0.83 SOL, classes={'normal': 1}, mcap=$4625851, pool=Ak7hDCxDSocD2ZgJBCa1ZwLcuDQz5F6n747a7rQtpXE3
-- three: 1 buys, 0.63 SOL, classes={'normal': 1}, mcap=$2424796, pool=5ByL7MZoLABYnwMPZKPKjf4MGkZ7FeBzrAnos19Pre2z
-- FOMO: 2 buys, 0.60 SOL, classes={'normal': 2}, mcap=$125093, pool=9QwpxCSEssoY6NacsYivMptPeYqXa8Hwd2oFpJd4vrXp
-- LP: 1 buys, 0.30 SOL, classes={'low_tx': 1}, mcap=$42608, pool=HCMUqh2ipVTfCvjDdYfKBj58z2PeosUgNRXJUZzdLZoN
-- clanktown: 1 buys, 0.17 SOL, classes={'normal': 1}, mcap=$16054, pool=7qspiLJJZ5tYtdtDqzBDFqEDWg6JrEYVDqgy1UMCmYkG
-- ANSOM: 1 buys, 0.12 SOL, classes={'low_tx': 1}, mcap=$34309, pool=C1KHGdzEh3DVr7iE8tUiqUuox9eYigLFBhikpU3rbjwD
+- LOA: 2 buys, 1.89 SOL, classes={'normal': 2}, mcap=$1335683, pool=EnYMBPWxnVJ7EBaV3D9sTtiCmiDtM658LorfqVLwvSCF
+- HoodSwap: 3 buys, 1.74 SOL, classes={'normal': 3}, mcap=$25860, pool=7eKSuS4PyUXYmjWZyKR9CLmovbAzRRpAvGaepKPpNJSS
+- BOGE: 1 buys, 0.79 SOL, classes={'normal': 1}, mcap=$100919, pool=HBXrPXKJzUZeJTYepVQ9izCXytJP8RPoSRHsgpG7CCcv
+- DATA: 1 buys, 0.76 SOL, classes={'normal': 1}, mcap=$144505, pool=EBjhdajq5UeYWL9etEvQ8BnfV5j93kQxx7ZaEke7Ky41
+- MTGoX: 2 buys, 0.55 SOL, classes={'normal': 2}, mcap=$16174, pool=6uuWb3fysxdF2baScTBZq4MDXu5xAkb5Sh4PXjv7i6GE
+- ANSOM: 1 buys, 0.49 SOL, classes={'normal': 1}, mcap=$26043, pool=C1KHGdzEh3DVr7iE8tUiqUuox9eYigLFBhikpU3rbjwD
