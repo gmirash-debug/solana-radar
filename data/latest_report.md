@@ -1,18 +1,19 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-02T18:09:07.792303Z
+- generated_at: 2026-07-02T19:02:59.065126Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 23
-- scanned_pools: 23
+- universe_pools: 20
+- scanned_pools: 20
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 23, 'getSignaturesForAddress': 33, 'getTransaction': 195}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 20, 'getSignaturesForAddress': 42, 'getTransaction': 161}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- 0.2: 7 buys, 5.97 SOL, classes={'normal': 7}, mcap=$22492, pool=CkYYGQTqRHFNKFWszd5198oUixiSVLedhcoUHU885XYr
-- FUNN: 1 buys, 0.99 SOL, classes={'normal': 1}, mcap=$113407, pool=FvQAicHWfNWnFgwYiT6PC1ubj7KdtuvjFg5ViiJVVftm
-- gato: 2 buys, 0.59 SOL, classes={'normal': 2}, mcap=$171453, pool=7hEL7Yfs6s1BjeShnD65yTao2gtiFYRZXkA8GvbccT91
+- maxxing: 3 buys, 7.88 SOL, classes={'normal': 3}, mcap=$1396249, pool=DMnTidVC8dMxRxUzFyZ4StQkbS4R8ACwxhNsEyi6u3Lx
+- BULLATLAS: 10 buys, 6.38 SOL, classes={'low_tx': 7, 'freshish': 3}, mcap=$38134, pool=peJ8bCvd4nCcfB8qPbrNH2XwrLGz1uEfcd2SzFZTM6E
+- WRLD: 7 buys, 1.58 SOL, classes={'normal': 7}, mcap=$18807, pool=E3HjQ1LVBiw9wyADGg5BDj46Z8X8dZqXeikjE7N9sbcH
+- BULLWIF: 1 buys, 0.37 SOL, classes={'normal': 1}, mcap=$134970, pool=FXfmL53naPn8w5L7xQgaxAchU7Akfqo96eztnqJKi59M
