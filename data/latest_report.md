@@ -1,21 +1,22 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-03T14:08:46.063453Z
+- generated_at: 2026-07-03T15:09:00.091875Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
 - universe_pools: 31
 - scanned_pools: 31
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 31, 'getSignaturesForAddress': 50, 'getTransaction': 347}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 31, 'getSignaturesForAddress': 55, 'getTransaction': 296}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- Mymo: 2 buys, 3.53 SOL, classes={'freshish': 1, 'normal': 1}, mcap=$96642, pool=EWNLAgrs1HmLTLxU9r8wvpgwSfHhCy8CR2bP7wretNxu
-- Catchua: 6 buys, 2.32 SOL, classes={'normal': 6}, mcap=$41719, pool=5tWuMuBnbJGTiFqcCqhrSv8gxAQaS7vp5DqhBeiG2GSP
-- GM: 1 buys, 0.82 SOL, classes={'low_tx': 1}, mcap=$68445, pool=GbVZHAcdA9Ae4efgJmks81GEU7PB4MQpGPYdv5W5B3cb
-- Eagle: 4 buys, 0.78 SOL, classes={'normal': 4}, mcap=$25201, pool=4hhBMZ2AM8EYvbubgDXVt4mFDdBMTL2ASTQvvSqkeheD
-- TCB: 1 buys, 0.30 SOL, classes={'low_tx': 1}, mcap=$25073, pool=Ffhyw2GRjgvCX2FNnPEw4WJFKqsojQwh9vEHJ7pwB87P
-- Dr. Trump: 2 buys, 0.21 SOL, classes={'normal': 2}, mcap=$24718, pool=CcRUUAvsxDKWPmnWhqWbgZMLBHbcpTr4k6yhEaAy1AAs
+- three: 1 buys, 5.69 SOL, classes={'normal': 1}, mcap=$2019001, pool=5ByL7MZoLABYnwMPZKPKjf4MGkZ7FeBzrAnos19Pre2z
+- Catchua: 10 buys, 3.21 SOL, classes={'normal': 10}, mcap=$39001, pool=5tWuMuBnbJGTiFqcCqhrSv8gxAQaS7vp5DqhBeiG2GSP
+- 67: 2 buys, 2.33 SOL, classes={'normal': 2}, mcap=$2119187, pool=DMAFL613XTipuA3jFNYczavWT7XsiYf9cR3qmRMZQhB6
+- MAGA: 2 buys, 1.72 SOL, classes={'normal': 2}, mcap=$2307778, pool=HVimk99ygSSDnWz9eSqumdThrFz4DADE7j6phmFms6at
+- Eagle: 4 buys, 1.61 SOL, classes={'normal': 3, 'low_tx': 1}, mcap=$17753, pool=4hhBMZ2AM8EYvbubgDXVt4mFDdBMTL2ASTQvvSqkeheD
+- 1: 2 buys, 1.30 SOL, classes={'normal': 2}, mcap=$89357, pool=mv9nmq9cM1koYNzkJtZnbsUievTDKH8cBnXhQmMcs37
+- GIGABULL: 1 buys, 0.18 SOL, classes={'normal': 1}, mcap=$15107, pool=8JbcoMWxv2sjTiEiEU9KDvjArVGtXbWSu1ccAqbjAdTA
