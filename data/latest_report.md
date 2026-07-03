@@ -1,22 +1,20 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-03T17:08:50.083052Z
+- generated_at: 2026-07-03T18:08:44.709900Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 28
-- scanned_pools: 28
+- universe_pools: 30
+- scanned_pools: 30
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 28, 'getSignaturesForAddress': 41, 'getTransaction': 245}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 30, 'getSignaturesForAddress': 50, 'getTransaction': 200}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- unc: 1 buys, 5.92 SOL, classes={'low_tx': 1}, mcap=$1812050, pool=BWFZkx1pMpvwxammwTrizvoWzZZGiFEYUYW6Ee51SHLy
-- Ansum: 2 buys, 4.61 SOL, classes={'normal': 2}, mcap=$31119, pool=6c2X12dFqcHM84S1AeWmK9GzvuJVDquDPpnzNzQg8JLu
-- maxxing: 1 buys, 3.97 SOL, classes={'normal': 1}, mcap=$1709285, pool=DMnTidVC8dMxRxUzFyZ4StQkbS4R8ACwxhNsEyi6u3Lx
-- Jcat: 1 buys, 3.63 SOL, classes={'normal': 1}, mcap=$107006, pool=5cZWvSGmWjXHyN2883p7ThdJHVQqCce6ws5xVWbhh7WN
-- popeyes: 1 buys, 1.11 SOL, classes={'normal': 1}, mcap=$205652, pool=45acsB9DR1pN7me74rxUzp6yrVDRdxpcG2iZXoib8xZW
-- Firework: 4 buys, 0.96 SOL, classes={'normal': 4}, mcap=$45299, pool=4qEu6L6756Fa46zfB9hk6rFKPJXFbvCzdoVy3gRjqcbr
-- shitcoin: 1 buys, 0.26 SOL, classes={'normal': 1}, mcap=$134033, pool=6QXG9hCvvFDEoQ9ywXT7RJ4WELVGM46mCr61Y7kbrtit
+- ascend: 11 buys, 4.39 SOL, classes={'normal': 11}, mcap=$28816, pool=H8eEdBpPTk3ETZyGceejhQe3wxiVT7hysweKY38HpTJX
+- 1: 2 buys, 1.10 SOL, classes={'normal': 2}, mcap=$48355, pool=mv9nmq9cM1koYNzkJtZnbsUievTDKH8cBnXhQmMcs37
+- shitcoin: 2 buys, 1.01 SOL, classes={'normal': 1, 'low_tx': 1}, mcap=$119938, pool=6QXG9hCvvFDEoQ9ywXT7RJ4WELVGM46mCr61Y7kbrtit
+- AMEN: 1 buys, 0.43 SOL, classes={'normal': 1}, mcap=$95977, pool=AKyDJYM7sBeVr88Fm9QZQ3BNcj4S1oE7iBBzyHAvC1Cv
+- C4: 1 buys, 0.10 SOL, classes={'normal': 1}, mcap=$21951, pool=A8q4kT2CWym6BWtoMgkDZSq4SR7QRWCkt1buCUCzubL3
