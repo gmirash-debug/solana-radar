@@ -1,21 +1,21 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-03T13:09:06.835686Z
+- generated_at: 2026-07-03T14:08:46.063453Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 28
-- scanned_pools: 28
+- universe_pools: 31
+- scanned_pools: 31
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 28, 'getSignaturesForAddress': 49, 'getTransaction': 384}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 31, 'getSignaturesForAddress': 50, 'getTransaction': 347}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- Udin: 1 buys, 3.96 SOL, classes={'normal': 1}, mcap=$238377, pool=6YismmnYSgxCw9aWgf3h2GxMr1GDkvWq7oo76RjQ1i6v
-- GTA: 11 buys, 3.59 SOL, classes={'normal': 11}, mcap=$18152, pool=4CQZwZMp5BjEXkd7i8ZcsF3L61nsFyTvsMUpoembQkFq
-- AALIEN: 2 buys, 2.20 SOL, classes={'normal': 1, 'low_tx': 1}, mcap=$146943, pool=4prwF2THukSaQwfMmZ53MTatqtC18GZBRdDW9EMpwsNp
-- GM: 3 buys, 2.04 SOL, classes={'low_tx': 2, 'normal': 1}, mcap=$83706, pool=GbVZHAcdA9Ae4efgJmks81GEU7PB4MQpGPYdv5W5B3cb
-- DR TRUMP: 1 buys, 0.29 SOL, classes={'low_tx': 1}, mcap=$100243, pool=Dg19RfgXRFz5XnTqeRgnfu36VDQXCUGdj8bT5fsRiA5b
-- TCB: 1 buys, 0.26 SOL, classes={'normal': 1}, mcap=$24958, pool=Ffhyw2GRjgvCX2FNnPEw4WJFKqsojQwh9vEHJ7pwB87P
+- Mymo: 2 buys, 3.53 SOL, classes={'freshish': 1, 'normal': 1}, mcap=$96642, pool=EWNLAgrs1HmLTLxU9r8wvpgwSfHhCy8CR2bP7wretNxu
+- Catchua: 6 buys, 2.32 SOL, classes={'normal': 6}, mcap=$41719, pool=5tWuMuBnbJGTiFqcCqhrSv8gxAQaS7vp5DqhBeiG2GSP
+- GM: 1 buys, 0.82 SOL, classes={'low_tx': 1}, mcap=$68445, pool=GbVZHAcdA9Ae4efgJmks81GEU7PB4MQpGPYdv5W5B3cb
+- Eagle: 4 buys, 0.78 SOL, classes={'normal': 4}, mcap=$25201, pool=4hhBMZ2AM8EYvbubgDXVt4mFDdBMTL2ASTQvvSqkeheD
+- TCB: 1 buys, 0.30 SOL, classes={'low_tx': 1}, mcap=$25073, pool=Ffhyw2GRjgvCX2FNnPEw4WJFKqsojQwh9vEHJ7pwB87P
+- Dr. Trump: 2 buys, 0.21 SOL, classes={'normal': 2}, mcap=$24718, pool=CcRUUAvsxDKWPmnWhqWbgZMLBHbcpTr4k6yhEaAy1AAs
