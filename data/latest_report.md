@@ -1,20 +1,19 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-04T00:09:22.758605Z
+- generated_at: 2026-07-04T01:09:13.617394Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 30
-- scanned_pools: 30
+- universe_pools: 31
+- scanned_pools: 31
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 30, 'getSignaturesForAddress': 46, 'getTransaction': 273}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 31, 'getSignaturesForAddress': 41, 'getTransaction': 226}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- Cobie: 3 buys, 7.97 SOL, classes={'normal': 2, 'dormant': 1}, mcap=$488095, pool=8Nj6AA6u9R27dYVTRcEQokesoe7YZLwjWwJSpPYxdkQk
-- Udin: 2 buys, 2.47 SOL, classes={'normal': 2}, mcap=$199455, pool=6YismmnYSgxCw9aWgf3h2GxMr1GDkvWq7oo76RjQ1i6v
-- BULLANA: 7 buys, 2.33 SOL, classes={'normal': 7}, mcap=$28032, pool=2e6zdvsPodsXAAwurt9LnsGFFkZiRRbgLXAzsmMsbaEz
-- FOMO: 1 buys, 1.86 SOL, classes={'normal': 1}, mcap=$154395, pool=9QwpxCSEssoY6NacsYivMptPeYqXa8Hwd2oFpJd4vrXp
-- Firework: 1 buys, 0.11 SOL, classes={'normal': 1}, mcap=$31261, pool=4qEu6L6756Fa46zfB9hk6rFKPJXFbvCzdoVy3gRjqcbr
+- BULLANA: 5 buys, 4.09 SOL, classes={'normal': 5}, mcap=$32554, pool=2e6zdvsPodsXAAwurt9LnsGFFkZiRRbgLXAzsmMsbaEz
+- Cabinet : 2 buys, 2.36 SOL, classes={'normal': 2}, mcap=$23845, pool=5kchovCPCRsdkmJUK3xo26uenPMnfUFNEtecT1vvogV4
+- SOLANGELES: 1 buys, 0.91 SOL, classes={'normal': 1}, mcap=$4301038, pool=Ak7hDCxDSocD2ZgJBCa1ZwLcuDQz5F6n747a7rQtpXE3
+- BABYANSEM: 1 buys, 0.33 SOL, classes={'normal': 1}, mcap=$87422, pool=CKB2oH5RWERUvNZHGxBGGs5mPMSofRxHgCz7MtAfyXQX
