@@ -1,22 +1,21 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-04T07:09:36.203045Z
+- generated_at: 2026-07-04T08:09:14.041501Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 38
-- scanned_pools: 38
+- universe_pools: 40
+- scanned_pools: 40
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 38, 'getSignaturesForAddress': 56, 'getTransaction': 349}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 40, 'getSignaturesForAddress': 55, 'getTransaction': 261}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- Babyansem : 8 buys, 4.31 SOL, classes={'normal': 8}, mcap=$33566, pool=7EJ6ydDWjGwXA12a42BbA1aDKr3CxoMNNaEyHgHpSGzx
-- 棱角猫: 1 buys, 3.56 SOL, classes={'normal': 1}, mcap=$197565, pool=9vNdjfw5wwFDXmiAa7UBvGMJwaSWa6bbUFoHivyDfvSW
-- 1SOL: 2 buys, 3.42 SOL, classes={'normal': 2}, mcap=$102465, pool=2dF4aQgUCUuTCfZzuoMiK4RzZ5vcNaTsh5pVfrZqgHac
-- PsyopAnime: 1 buys, 1.90 SOL, classes={'normal': 1}, mcap=$1313614, pool=FpyosQzp5ijfrxqqBVNm67rfam7VsbVNAm7PUf8Yvt1c
-- LojakPaul: 1 buys, 0.44 SOL, classes={'normal': 1}, mcap=$68284, pool=BfVhUY3Y2FuvzQZUPpyyHsaoh8CiYdVAXJ25zystWURu
-- Jcat: 1 buys, 0.27 SOL, classes={'normal': 1}, mcap=$92215, pool=5cZWvSGmWjXHyN2883p7ThdJHVQqCce6ws5xVWbhh7WN
-- ansemwifhat: 1 buys, 0.14 SOL, classes={'normal': 1}, mcap=$44360, pool=ED9mpCkq3F3ZtRdbaGVJRboU6ygvXPvUrxrddFMS75aB
+- Machi: 1 buys, 6.01 SOL, classes={'normal': 1}, mcap=$1725521, pool=7cmefCYxzK6yfBcmB4j234A3EKY2w13GfEdB3DJvNWzx
+- Babyansem : 7 buys, 4.09 SOL, classes={'normal': 5, 'low_tx': 2}, mcap=$41456, pool=7EJ6ydDWjGwXA12a42BbA1aDKr3CxoMNNaEyHgHpSGzx
+- HAYES: 2 buys, 1.98 SOL, classes={'low_tx': 1, 'normal': 1}, mcap=$35887, pool=2RcZbCYCtPEbshfXGS8e8AwTAQd818DEjdQfGbU6nv4H
+- Wish: 1 buys, 0.99 SOL, classes={'normal': 1}, mcap=$206013, pool=BkWwDKcMjDx5Xs7vd11Zv8YyP2dL8Dmc6Z2CRujMHKks
+- POKERBULL: 2 buys, 0.65 SOL, classes={'low_tx': 1, 'normal': 1}, mcap=$13783, pool=DXHP8PLgZCxVndw8RrnWeuoBXX4uuXQ3VySRKx2gUJZd
+- HATER: 1 buys, 0.44 SOL, classes={'freshish': 1}, mcap=$88140, pool=H1GZhTQ6A1phCreesWnzc14DewVExenqGCStdkXvy7bH
