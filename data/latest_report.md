@@ -1,22 +1,21 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-04T14:09:38.819779Z
+- generated_at: 2026-07-04T15:09:21.004248Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 31
-- scanned_pools: 31
+- universe_pools: 27
+- scanned_pools: 27
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 31, 'getSignaturesForAddress': 54, 'getTransaction': 373}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 27, 'getSignaturesForAddress': 42, 'getTransaction': 233}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- HORNS: 2 buys, 9.91 SOL, classes={'normal': 2}, mcap=$201546, pool=26AcTT3B1HWucYPNx57ximJ1PKX8HEYQ1uCEMtLrrpeZ
-- BULLANA: 8 buys, 4.15 SOL, classes={'low_tx': 1, 'normal': 7}, mcap=$26025, pool=2e6zdvsPodsXAAwurt9LnsGFFkZiRRbgLXAzsmMsbaEz
-- Hamster : 2 buys, 1.61 SOL, classes={'normal': 2}, mcap=$194529, pool=2RQheXdzvfaQRrCn2bu4soALLdtDdsGMXS3VophWmLSb
-- ansemwifhat: 1 buys, 1.21 SOL, classes={'normal': 1}, mcap=$48687, pool=ED9mpCkq3F3ZtRdbaGVJRboU6ygvXPvUrxrddFMS75aB
-- GIGACAT: 2 buys, 1.08 SOL, classes={'low_tx': 1, 'normal': 1}, mcap=$137024, pool=GdkKGnNQVjwfVs7VT2QW67a9vuAASi8gkh2jfMUPbS8P
-- ANSOM: 2 buys, 1.03 SOL, classes={'normal': 1, 'low_tx': 1}, mcap=$69747, pool=EfkBZpHNAu8E84eswr3S1SZr5QS51PFtCRTBYJzBo9FK
-- pzombie: 1 buys, 1.03 SOL, classes={'normal': 1}, mcap=$65353, pool=Dx1MadQMWnmJGBbhvopTzqjg49D63Km816nAswW5GEPP
+- BABYANSEM: 1 buys, 2.38 SOL, classes={'normal': 1}, mcap=$160973, pool=CKB2oH5RWERUvNZHGxBGGs5mPMSofRxHgCz7MtAfyXQX
+- testicle: 1 buys, 2.28 SOL, classes={'normal': 1}, mcap=$4291470, pool=E616WShkSjxnyToCExYLhNWxyYraFqs1RTQz1gZ9ZDUk
+- popeyes: 2 buys, 2.09 SOL, classes={'normal': 2}, mcap=$58832, pool=45acsB9DR1pN7me74rxUzp6yrVDRdxpcG2iZXoib8xZW
+- TOLY: 6 buys, 1.78 SOL, classes={'normal': 6}, mcap=$21928, pool=EapQQgfguP8fAY5QyJfzNnLCNUPKDbmQ1abYVfG1jNGv
+- MeiMei: 1 buys, 1.49 SOL, classes={'normal': 1}, mcap=$217781, pool=DtDfaWqhCEaeFXJUHjGC8Xo9XxH52ENVhA1XoJ9F4d8Y
+- ANSEM: 2 buys, 0.88 SOL, classes={'normal': 1, 'low_tx': 1}, mcap=$40079, pool=EKvTTcSogAwMzPZo4qE1BhZqqhA6vcqzNH5wtmH1nZKn
