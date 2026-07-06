@@ -1,18 +1,19 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-06T11:09:17.206136Z
+- generated_at: 2026-07-06T12:09:14.020158Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 29
-- scanned_pools: 29
+- universe_pools: 26
+- scanned_pools: 26
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 29, 'getSignaturesForAddress': 40, 'getTransaction': 187}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 26, 'getSignaturesForAddress': 40, 'getTransaction': 177}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- Samourai: 9 buys, 6.56 SOL, classes={'normal': 9}, mcap=$27576, pool=DtEsYYv8SDRSwbUoWbFMnRK1MQbBJUfo2Q1hTZU47JBz
-- CITH: 1 buys, 0.31 SOL, classes={'normal': 1}, mcap=$149639, pool=4Tu8ne3DiiD5NCe4Ue7XGU3zniGpX8KwLo8mnZGpT6Pe
-- v0y4g3: 1 buys, 0.31 SOL, classes={'normal': 1}, mcap=$94087, pool=3zb6LCQTdfBj3hYjJd4cGXUqwFHEEN6vKtkLuMWH9wSM
+- Clude: 2 buys, 16.82 SOL, classes={'normal': 2}, mcap=$1642062, pool=7udbgT6w6X5VpdZuEm4UHbkuUaULYFZmKhntbNuNmaUt
+- BANSEM: 9 buys, 3.63 SOL, classes={'normal': 8, 'freshish': 1}, mcap=$10672, pool=HayaFdyGmrn9pqaHBGhFSzVUHJ7NY81h4x9ZFXKHpAWh
+- BURNIE: 1 buys, 1.75 SOL, classes={'normal': 1}, mcap=$2995988, pool=5tYFviFWQRKV9BJSTHGitbdqEYC1BGUgRUDnSADUXqJP
+- LFG: 1 buys, 0.39 SOL, classes={'normal': 1}, mcap=$24956, pool=Eg5s2Naw5RkXn4gqiAHTcmR3XwEsZT4WLQaNxCMfYGeG
