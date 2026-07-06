@@ -1,19 +1,19 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-06T12:09:14.020158Z
+- generated_at: 2026-07-06T13:09:57.647015Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 26
-- scanned_pools: 26
+- universe_pools: 27
+- scanned_pools: 27
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 26, 'getSignaturesForAddress': 40, 'getTransaction': 177}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 27, 'getSignaturesForAddress': 37, 'getTransaction': 255}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- Clude: 2 buys, 16.82 SOL, classes={'normal': 2}, mcap=$1642062, pool=7udbgT6w6X5VpdZuEm4UHbkuUaULYFZmKhntbNuNmaUt
-- BANSEM: 9 buys, 3.63 SOL, classes={'normal': 8, 'freshish': 1}, mcap=$10672, pool=HayaFdyGmrn9pqaHBGhFSzVUHJ7NY81h4x9ZFXKHpAWh
-- BURNIE: 1 buys, 1.75 SOL, classes={'normal': 1}, mcap=$2995988, pool=5tYFviFWQRKV9BJSTHGitbdqEYC1BGUgRUDnSADUXqJP
-- LFG: 1 buys, 0.39 SOL, classes={'normal': 1}, mcap=$24956, pool=Eg5s2Naw5RkXn4gqiAHTcmR3XwEsZT4WLQaNxCMfYGeG
+- TAC: 6 buys, 7.99 SOL, classes={'normal': 6}, mcap=$46003, pool=BcnbUGsfMQTUHCX5VmCuzG2XnD32VrL8TKuofq3bfV9K
+- CITH: 1 buys, 0.49 SOL, classes={'normal': 1}, mcap=$105457, pool=4Tu8ne3DiiD5NCe4Ue7XGU3zniGpX8KwLo8mnZGpT6Pe
+- frog: 1 buys, 0.10 SOL, classes={'normal': 1}, mcap=$41249, pool=DbtU5QkmRgZeodRuyf1VToPRR9tgBEHivKeQ5DjVp9PL
+- BANSEM: 1 buys, 0.10 SOL, classes={'freshish': 1}, mcap=$11775, pool=HayaFdyGmrn9pqaHBGhFSzVUHJ7NY81h4x9ZFXKHpAWh
