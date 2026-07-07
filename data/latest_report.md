@@ -1,19 +1,17 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-07T00:09:17.848367Z
+- generated_at: 2026-07-07T01:09:15.260560Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 21
-- scanned_pools: 21
+- universe_pools: 19
+- scanned_pools: 19
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 21, 'getSignaturesForAddress': 41, 'getTransaction': 116}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 19, 'getSignaturesForAddress': 25, 'getTransaction': 117}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- munkey: 8 buys, 5.49 SOL, classes={'normal': 7, 'freshish': 1}, mcap=$26072, pool=E31QUt2vF2TnjWjB5D6b4nxFAajLx3skDtYrRAZUGetX
-- ice: 2 buys, 1.45 SOL, classes={'normal': 2}, mcap=$141581, pool=BS3MyQReereuKzAvkfQscvHHLhi4bsFL3X3Zw55oMu2e
-- Fro: 2 buys, 1.22 SOL, classes={'normal': 2}, mcap=$308222, pool=4s4cAwsgMZQPm7HnwHadwUYCw9B3dMZQKVVcqm4Qai53
-- SFB: 5 buys, 0.89 SOL, classes={'normal': 5}, mcap=$33424, pool=8fkdQjBXjG8LMwirTG7zGTj67wHBNbGj15sTJwjgW8mC
+- KIRB: 2 buys, 2.66 SOL, classes={'normal': 1, 'low_tx': 1}, mcap=$44368, pool=F6LEXr4ywS9tDzz4oQiamjn4wUkcDvvg9FzQszvAxsnN
+- J-Space: 3 buys, 1.47 SOL, classes={'normal': 3}, mcap=$41882, pool=A1AnxpPsbXwWjJyS5FiSsFPdgF6vCcAsTjqkckGU2Esj
