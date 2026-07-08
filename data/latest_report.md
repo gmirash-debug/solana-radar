@@ -1,21 +1,18 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-08T18:05:41.162194Z
+- generated_at: 2026-07-08T18:09:14.232865Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 20
-- scanned_pools: 20
+- universe_pools: 18
+- scanned_pools: 18
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 22, 'getSignaturesForAddress': 58, 'getTransaction': 11}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 32, 'getSignaturesForAddress': 95, 'getTokenSupply': 1, 'getTransaction': 83}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- HODL: 2 buys, 17.27 SOL, classes={'normal': 2}, mcap=$1453471, pool=DTdtHUx79bmNMnesv3au7pzBKAkB3mUUi8GwUdZ6Suw
-- CATCOIN: 4 buys, 15.93 SOL, classes={'low_tx': 1, 'normal': 3}, mcap=$542046, pool=6fNWjfFN6kDKybWK5PFLWqZnpTmoBAswUWvxiG3g5D2D
-- Binface : 15 buys, 14.07 SOL, classes={'normal': 13, 'low_tx': 2}, mcap=$230272, pool=BgwnT6xbzqY6JzCvVucDUJ1q816SamfoiWNa9EBPtLv2
-- BabyCupsey: 9 buys, 8.32 SOL, classes={'normal': 9}, mcap=$185376, pool=4dtPPur4Cp7eKsn57BS2cNxAY3E98fJTz5KCe8V5juu2
-- BURNIE: 1 buys, 6.87 SOL, classes={'normal': 1}, mcap=$2352577, pool=5tYFviFWQRKV9BJSTHGitbdqEYC1BGUgRUDnSADUXqJP
-- maxxing: 1 buys, 0.64 SOL, classes={'normal': 1}, mcap=$540785, pool=DMnTidVC8dMxRxUzFyZ4StQkbS4R8ACwxhNsEyi6u3Lx
+- Binface : 36 buys, 81.71 SOL, classes={'low_tx': 5, 'normal': 30, 'dormant': 1}, mcap=$210550, pool=BgwnT6xbzqY6JzCvVucDUJ1q816SamfoiWNa9EBPtLv2
+- StareCat: 5 buys, 32.37 SOL, classes={'normal': 4, 'low_tx': 1}, mcap=$221929, pool=Eg3fTYZEyLYx9Vgkd4EmtYDbmVzKAkfRvEKZRA1kekeT
+- 67: 1 buys, 0.56 SOL, classes={'normal': 1}, mcap=$2352470, pool=DMAFL613XTipuA3jFNYczavWT7XsiYf9cR3qmRMZQhB6
