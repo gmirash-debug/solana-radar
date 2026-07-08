@@ -1,22 +1,21 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-08T17:09:18.785513Z
+- generated_at: 2026-07-08T18:05:41.162194Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 34
-- scanned_pools: 34
+- universe_pools: 20
+- scanned_pools: 20
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 47, 'getSignaturesForAddress': 143, 'getTransaction': 71}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 22, 'getSignaturesForAddress': 58, 'getTransaction': 11}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- 0ICAI: 34 buys, 48.50 SOL, classes={'normal': 32, 'low_tx': 1, 'freshish': 1}, mcap=$19874, pool=2c6unwGUtDFRAQ42He2jCBVNc3AJfPdSuNcd4PKvQsic
-- StareCat: 9 buys, 33.57 SOL, classes={'normal': 8, 'low_tx': 1}, mcap=$202246, pool=Eg3fTYZEyLYx9Vgkd4EmtYDbmVzKAkfRvEKZRA1kekeT
-- spurdo: 2 buys, 23.96 SOL, classes={'normal': 2}, mcap=$443323, pool=8eixuojQL5b6ZHbyXX9ABLh6MggV3UoSdxrhbRzrteiF
-- Theo: 4 buys, 17.83 SOL, classes={'normal': 4}, mcap=$101219, pool=4pow6Evm7cwH3d6ARiiqRpTSuQDajs5aGE6F7jvMT5Y9
-- LOA: 2 buys, 13.58 SOL, classes={'normal': 2}, mcap=$787249, pool=EnYMBPWxnVJ7EBaV3D9sTtiCmiDtM658LorfqVLwvSCF
-- LMAO!: 1 buys, 2.08 SOL, classes={'normal': 1}, mcap=$2396635, pool=AFaYrFH7hUYnkv5mbvbnRHwX29M9JzUL3ySGtQz69AUv
-- 我的刀盾: 1 buys, 1.49 SOL, classes={'normal': 1}, mcap=$849928, pool=9RpsV1vWy6itWjiHsBjrbpw2Z36AeiCnaiktyqTnXxcr
+- HODL: 2 buys, 17.27 SOL, classes={'normal': 2}, mcap=$1453471, pool=DTdtHUx79bmNMnesv3au7pzBKAkB3mUUi8GwUdZ6Suw
+- CATCOIN: 4 buys, 15.93 SOL, classes={'low_tx': 1, 'normal': 3}, mcap=$542046, pool=6fNWjfFN6kDKybWK5PFLWqZnpTmoBAswUWvxiG3g5D2D
+- Binface : 15 buys, 14.07 SOL, classes={'normal': 13, 'low_tx': 2}, mcap=$230272, pool=BgwnT6xbzqY6JzCvVucDUJ1q816SamfoiWNa9EBPtLv2
+- BabyCupsey: 9 buys, 8.32 SOL, classes={'normal': 9}, mcap=$185376, pool=4dtPPur4Cp7eKsn57BS2cNxAY3E98fJTz5KCe8V5juu2
+- BURNIE: 1 buys, 6.87 SOL, classes={'normal': 1}, mcap=$2352577, pool=5tYFviFWQRKV9BJSTHGitbdqEYC1BGUgRUDnSADUXqJP
+- maxxing: 1 buys, 0.64 SOL, classes={'normal': 1}, mcap=$540785, pool=DMnTidVC8dMxRxUzFyZ4StQkbS4R8ACwxhNsEyi6u3Lx
