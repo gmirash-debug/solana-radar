@@ -1,21 +1,21 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-08T03:09:09.855527Z
+- generated_at: 2026-07-08T04:09:11.184167Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 26
-- scanned_pools: 26
+- universe_pools: 30
+- scanned_pools: 30
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 40, 'getSignaturesForAddress': 117, 'getTransaction': 33}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 41, 'getSignaturesForAddress': 127, 'getTransaction': 80}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- DONALD: 29 buys, 82.67 SOL, classes={'normal': 24, 'freshish': 1, 'low_tx': 4}, mcap=$21913, pool=4VoD1W5isENdXTYJrrPxat9z9T22X52AvSsSxoC5NnKy
-- SAN: 5 buys, 54.24 SOL, classes={'normal': 5}, mcap=$1657133, pool=E4dZyLB1ousbEnXKhXUrvK6Ern2cRe456KsMWC6BHgTC
-- BURNIE: 2 buys, 12.62 SOL, classes={'normal': 2}, mcap=$2455611, pool=5tYFviFWQRKV9BJSTHGitbdqEYC1BGUgRUDnSADUXqJP
-- testicle: 2 buys, 8.34 SOL, classes={'normal': 2}, mcap=$2478329, pool=E616WShkSjxnyToCExYLhNWxyYraFqs1RTQz1gZ9ZDUk
-- RETARD: 1 buys, 5.03 SOL, classes={'normal': 1}, mcap=$1101804, pool=4FsJvbRPUs55eXoR2mLdbAKhceusQxSyK5NDu62ntQme
-- Jotchua: 1 buys, 3.00 SOL, classes={'normal': 1}, mcap=$4810639, pool=AKQyQgEifBBhQmANuKzrRuRGoKSkKBv8NVdccc87FrR8
+- WhiteWhale: 33 buys, 32.48 SOL, classes={'normal': 32, 'low_tx': 1}, mcap=$20609, pool=A5ifVpU2tH27kFgzUhwswForiZsKKzYFVHv5rMqg85bW
+- BABYANSEM: 4 buys, 12.07 SOL, classes={'normal': 4}, mcap=$50455, pool=CKB2oH5RWERUvNZHGxBGGs5mPMSofRxHgCz7MtAfyXQX
+- PUMPLON: 3 buys, 9.36 SOL, classes={'normal': 3}, mcap=$19564, pool=2kjgBRhzHsTDd47AZkS8QXZxZr82h7M1VzL45iKfmCJP
+- Jcat: 4 buys, 5.34 SOL, classes={'normal': 4}, mcap=$104555, pool=5cZWvSGmWjXHyN2883p7ThdJHVQqCce6ws5xVWbhh7WN
+- ADA: 4 buys, 5.15 SOL, classes={'normal': 4}, mcap=$455653, pool=rSyt64cs33cvfqXQ2KvnY13A7isRkkE3DBMUc8T9PL8
+- CHILLHOUSE: 1 buys, 1.26 SOL, classes={'normal': 1}, mcap=$2685458, pool=35TqQMeiRwEbK6FR5qiPwastuAAvo32VjnULJpxVSxUK
