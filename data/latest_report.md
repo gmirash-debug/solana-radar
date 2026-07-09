@@ -1,22 +1,23 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-09T07:09:27.221384Z
+- generated_at: 2026-07-09T08:08:56.232904Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 30
-- scanned_pools: 30
+- universe_pools: 24
+- scanned_pools: 24
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 37, 'getSignaturesForAddress': 76, 'getTransaction': 42}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 43, 'getSignaturesForAddress': 95, 'getTransaction': 52}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- 114514: 6 buys, 51.11 SOL, classes={'normal': 6}, mcap=$2369402, pool=AA2x8NAEEen6zQ7wxxL6horSkHmJMPnsiYjLroQZMkCe
-- Punch: 4 buys, 13.95 SOL, classes={'normal': 4}, mcap=$823592, pool=A6KHMiFzn9AM7VKBtVP4fZNY9bCo2jP63R9dphaW1vrq
-- Binface : 11 buys, 13.27 SOL, classes={'low_tx': 1, 'normal': 10}, mcap=$152523, pool=BgwnT6xbzqY6JzCvVucDUJ1q816SamfoiWNa9EBPtLv2
-- BURNIE: 2 buys, 12.62 SOL, classes={'normal': 2}, mcap=$2510243, pool=5tYFviFWQRKV9BJSTHGitbdqEYC1BGUgRUDnSADUXqJP
-- BULLSINO: 10 buys, 10.75 SOL, classes={'normal': 10}, mcap=$39382, pool=793QKq3v7oAdPkRiQEWXe4FdjJcDpUn6U79dNAy7TTbR
-- Jcat: 4 buys, 4.86 SOL, classes={'normal': 4}, mcap=$113301, pool=5cZWvSGmWjXHyN2883p7ThdJHVQqCce6ws5xVWbhh7WN
-- FUCKYEA: 1 buys, 1.04 SOL, classes={'normal': 1}, mcap=$148018, pool=F2CyWDLn3itmhBSwpkKLx2iZqoiBn8aSTfnkoPStdQaA
+- SPAM: 35 buys, 45.47 SOL, classes={'normal': 32, 'low_tx': 3}, mcap=$20661, pool=HnvVat5ojQ73P9USdv3SfcpcHPx4k8pCb93FVCARFS9
+- WOJAK: 1 buys, 33.28 SOL, classes={'low_tx': 1}, mcap=$3027570, pool=FDrY5i5kuadZ1ik8gPS26qjj9Rw9mpufXMegGC2HNSP7
+- RTM: 2 buys, 13.96 SOL, classes={'normal': 2}, mcap=$1024632, pool=EBNUexqpB5WjKXJsfm3ruFt7zb7ZbXHZGR7YdhYuvuyy
+- BURNIE: 2 buys, 12.62 SOL, classes={'normal': 2}, mcap=$2581533, pool=5tYFviFWQRKV9BJSTHGitbdqEYC1BGUgRUDnSADUXqJP
+- Sapijiju: 2 buys, 6.01 SOL, classes={'normal': 2}, mcap=$144664, pool=2wC4qzATB6L7HLoqgLM253K18g3qZ2qoNCkPLzG6oXeb
+- RIF: 3 buys, 4.16 SOL, classes={'normal': 3}, mcap=$70338, pool=PAn7XphfksZCYWTGg6k3NxGjx9zTR91LNQSwQfKE4Qw
+- pendu: 2 buys, 2.76 SOL, classes={'normal': 2}, mcap=$112648, pool=6th25RJGYrMMd9VGzCJySk75CuVSs1sHh8XRerY2corb
+- three: 1 buys, 1.00 SOL, classes={'normal': 1}, mcap=$1313967, pool=5ByL7MZoLABYnwMPZKPKjf4MGkZ7FeBzrAnos19Pre2z
