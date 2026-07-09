@@ -1,29 +1,30 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-09T12:09:51.322520Z
+- generated_at: 2026-07-09T13:12:43.136765Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 32
-- scanned_pools: 32
+- universe_pools: 28
+- scanned_pools: 28
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 47, 'getSignaturesForAddress': 128, 'getTransaction': 43}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 48, 'getSignaturesForAddress': 166, 'getTransaction': 37}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- beluga: 45 buys, 120.48 SOL, classes={'low_tx': 12, 'freshish': 7, 'normal': 26}, mcap=$14246, pool=3PPHocWRGfSK5JUxAvCKE2tCrRJJLJgwaUpmUAKjnHYQ
-- CHILLHOUSE: 6 buys, 49.02 SOL, classes={'normal': 6}, mcap=$2652922, pool=35TqQMeiRwEbK6FR5qiPwastuAAvo32VjnULJpxVSxUK
-- Tokabu: 4 buys, 42.17 SOL, classes={'normal': 3, 'freshish': 1}, mcap=$2839062, pool=Ekv9HdumWqnXZgq5G6ge6bk1ZRHKXYC2WnSFL94sQmLJ
-- 114514: 3 buys, 34.68 SOL, classes={'normal': 3}, mcap=$2294618, pool=AA2x8NAEEen6zQ7wxxL6horSkHmJMPnsiYjLroQZMkCe
-- SOBAT: 5 buys, 18.40 SOL, classes={'normal': 5}, mcap=$218465, pool=7LwEfDXc5NYgoX5CkzRUpirWAD9HUH8DiPwvCNVUDehp
-- Machi: 1 buys, 18.23 SOL, classes={'normal': 1}, mcap=$420762, pool=7cmefCYxzK6yfBcmB4j234A3EKY2w13GfEdB3DJvNWzx
-- drooling: 2 buys, 12.81 SOL, classes={'normal': 2}, mcap=$1578013, pool=2mQYy3LfJCnauyfufYnLGtLCXmb6M2shXQGV2mHx7Mpy
-- BURNIE: 2 buys, 12.62 SOL, classes={'normal': 2}, mcap=$2590101, pool=5tYFviFWQRKV9BJSTHGitbdqEYC1BGUgRUDnSADUXqJP
-- Mbappe: 1 buys, 11.42 SOL, classes={'normal': 1}, mcap=$301499, pool=2kgEb6ExVDavNCUEpKfC3BaSHszct5ax8Bp6MKgCx56Z
-- BabyCupsey: 18 buys, 11.06 SOL, classes={'normal': 15, 'low_tx': 3}, mcap=$46269, pool=4dtPPur4Cp7eKsn57BS2cNxAY3E98fJTz5KCe8V5juu2
-- three: 3 buys, 7.32 SOL, classes={'normal': 3}, mcap=$1225935, pool=5ByL7MZoLABYnwMPZKPKjf4MGkZ7FeBzrAnos19Pre2z
-- MASON: 3 buys, 4.21 SOL, classes={'normal': 3}, mcap=$114216, pool=6Adx5qhm4iwEE39nik8cAmbb3sjdGSLW7VgPomy2Vqwz
-- unc: 3 buys, 2.45 SOL, classes={'normal': 3}, mcap=$1125992, pool=BWFZkx1pMpvwxammwTrizvoWzZZGiFEYUYW6Ee51SHLy
-- 我的刀盾: 1 buys, 1.49 SOL, classes={'normal': 1}, mcap=$685862, pool=9RpsV1vWy6itWjiHsBjrbpw2Z36AeiCnaiktyqTnXxcr
+- CHILLHOUSE: 3 buys, 68.04 SOL, classes={'normal': 3}, mcap=$2700002, pool=35TqQMeiRwEbK6FR5qiPwastuAAvo32VjnULJpxVSxUK
+- SUSCAT: 54 buys, 67.28 SOL, classes={'normal': 53, 'freshish': 1}, mcap=$30635, pool=4bKH5GTVYqhfwHDBigb4rPPVZ51fkQ4gGdhAEJF48cyi
+- 114514: 6 buys, 51.11 SOL, classes={'normal': 6}, mcap=$2199237, pool=AA2x8NAEEen6zQ7wxxL6horSkHmJMPnsiYjLroQZMkCe
+- APU: 6 buys, 30.01 SOL, classes={'normal': 5, 'low_tx': 1}, mcap=$397332, pool=7abF5yhUCp6spgYfuCu4tKkWTM5TWnUWabzity6qSxSG
+- SOBAT: 6 buys, 22.22 SOL, classes={'normal': 6}, mcap=$256768, pool=7LwEfDXc5NYgoX5CkzRUpirWAD9HUH8DiPwvCNVUDehp
+- Jcat: 9 buys, 19.15 SOL, classes={'normal': 9}, mcap=$110871, pool=5cZWvSGmWjXHyN2883p7ThdJHVQqCce6ws5xVWbhh7WN
+- SERIOUS: 8 buys, 17.87 SOL, classes={'normal': 8}, mcap=$82529, pool=HFMLGxje4YrmbFnFWKFwihjcgTLzzDu2zM1PMbDnUeKd
+- ACM: 4 buys, 16.16 SOL, classes={'normal': 4}, mcap=$207866, pool=HKSDMJ6KThscZXMVVuS24wvK3WGzfuepQhwdKCjHKEpZ
+- BURNIE: 2 buys, 12.62 SOL, classes={'normal': 2}, mcap=$2632215, pool=5tYFviFWQRKV9BJSTHGitbdqEYC1BGUgRUDnSADUXqJP
+- AgenC: 5 buys, 12.32 SOL, classes={'normal': 5}, mcap=$940625, pool=BUMh6YebpBvAh4by4oTGJUvzQ9CvH6dqPgrZvXFDMwC1
+- three: 3 buys, 7.32 SOL, classes={'normal': 3}, mcap=$1301864, pool=5ByL7MZoLABYnwMPZKPKjf4MGkZ7FeBzrAnos19Pre2z
+- beluga: 12 buys, 6.45 SOL, classes={'normal': 7, 'low_tx': 5}, mcap=$11294, pool=3PPHocWRGfSK5JUxAvCKE2tCrRJJLJgwaUpmUAKjnHYQ
+- pendu: 4 buys, 4.84 SOL, classes={'normal': 4}, mcap=$114684, pool=6th25RJGYrMMd9VGzCJySk75CuVSs1sHh8XRerY2corb
+- MASON: 3 buys, 3.74 SOL, classes={'normal': 3}, mcap=$36129, pool=6Adx5qhm4iwEE39nik8cAmbb3sjdGSLW7VgPomy2Vqwz
+- unc: 3 buys, 2.45 SOL, classes={'normal': 3}, mcap=$1080700, pool=BWFZkx1pMpvwxammwTrizvoWzZZGiFEYUYW6Ee51SHLy
