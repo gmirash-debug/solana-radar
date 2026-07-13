@@ -1,24 +1,24 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-13T15:09:48.040658Z
+- generated_at: 2026-07-13T16:09:38.227219Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 175
+- universe_pools: 178
 - scanned_pools: 65
 - alerts: 0
-- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 162, 'getSignaturesForAddress': 281, 'getTransaction': 87}
+- rpc_calls: {'getHealth': 1, 'getTransactionsForAddress': 110, 'getSignaturesForAddress': 202, 'getTransaction': 119}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- BRAINLET: 4 buys, 32.44 SOL, classes={'normal': 3, 'freshish': 1}, mcap=$645160, pool=3whYbw26asxFG5Qh9emHA6Mi6uizvduYg1cVKLQ1eetq
-- HAVEN: 5 buys, 27.00 SOL, classes={'low_tx': 1, 'normal': 4}, mcap=$210205, pool=CfN39pfeQB2F3BJ8bd5MDtbvzp4QtfGU8bvHHuJZZyi7
-- SERIOUS: 3 buys, 11.19 SOL, classes={'normal': 3}, mcap=$154716, pool=BUazLVRyK4wFPPsLqXeXQ8S7yz7r3jLH1H9dM5tH1YSv
-- ピングー: 1 buys, 4.95 SOL, classes={'low_tx': 1}, mcap=$105149, pool=HQijWgETrprrurPwyU3U46MSCNS4viwLq2x2EJGg6zFc
-- SUNUSI: 3 buys, 3.42 SOL, classes={'normal': 1, 'low_tx': 1, 'freshish': 1}, mcap=$65497, pool=5smCoCy9FVw3g1APyzyhxD2ozyAseWkozjmtgSpHjSjg
-- acat: 1 buys, 3.24 SOL, classes={'normal': 1}, mcap=$13410, pool=5ahH4QUNr3d6YmqoKnuJYqKbATAHDBaYRSk8Fa5f8sdY
-- UNC: 3 buys, 1.63 SOL, classes={'normal': 3}, mcap=$24018, pool=ak3U4AkfzqqFqTHjsNDbAViCiC8QwzXb9CfkCQeAUx6
-- MEOWSQUITO: 1 buys, 1.61 SOL, classes={'normal': 1}, mcap=$22501, pool=FuRkrUQwxKbXaa9x4Fd6VfKUdfJGBKe8w28fg1rhTiqk
-- Girlcoin: 1 buys, 0.98 SOL, classes={'normal': 1}, mcap=$94878, pool=5WA8WJkUKPLYhjW4vyPdi6iWeZtG8MvQhUAXrfvNEp62
+- ZERO: 2 buys, 52.86 SOL, classes={'normal': 2}, mcap=$2255729, pool=GN9whJWrkgU8jBRpM5oa4iwSzYw1LivjB397DSyvbVG
+- RTM: 2 buys, 22.09 SOL, classes={'normal': 2}, mcap=$563250, pool=EBNUexqpB5WjKXJsfm3ruFt7zb7ZbXHZGR7YdhYuvuyy
+- CASHCAT: 5 buys, 17.64 SOL, classes={'normal': 5}, mcap=$154092, pool=9ASrux6BowiVF5mJfBuuS1BPSzQVoAJMFtKHpdqVKojx
+- GPC: 1 buys, 15.57 SOL, classes={'normal': 1}, mcap=$766146, pool=AjwpTzQCU58PN3d4wz6VGmNEZXscJHx2yr1koc5KPQFi
+- KERMIT: 3 buys, 11.14 SOL, classes={'normal': 3}, mcap=$1081753, pool=HRB4i1TjFEFpWcCghp5Cx3XNVHfxukQnaAVBctVTia5q
+- SUNUSI: 3 buys, 8.78 SOL, classes={'normal': 2, 'low_tx': 1}, mcap=$72048, pool=5smCoCy9FVw3g1APyzyhxD2ozyAseWkozjmtgSpHjSjg
+- huh: 1 buys, 5.91 SOL, classes={'normal': 1}, mcap=$36389, pool=14tjQDFCpQNfkPHgZXVGY9TLnm7GsnpmUjHeQnjzirtH
+- Arlo: 2 buys, 4.45 SOL, classes={'normal': 2}, mcap=$11394, pool=7oavTecomiN9wEWwxZoidp5pZiobHMptPvaHMq6R61A8
+- DAFUAN: 1 buys, 2.96 SOL, classes={'normal': 1}, mcap=$17779, pool=G7FBo4AHSAbYGu4w6RiukMFnf2KYvnFujWtK5J8d7odx
