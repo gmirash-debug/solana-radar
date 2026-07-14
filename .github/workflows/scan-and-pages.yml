@@ -38,9 +38,8 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      pages_ready: ${{ steps.pages_artifact.outcome == 'success' }}
 
     steps:
       - name: Check out repository
@@ -211,12 +210,21 @@ jobs:
           enablement: true
 
       - name: Upload Pages artifact
+        id: pages_artifact
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
         uses: actions/upload-pages-artifact@v3
         with:
           path: .pages
 
+  deploy:
+    if: github.ref == 'refs/heads/main' && needs.scan.outputs.pages_ready == 'true'
+    needs: scan
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
       - name: Deploy Pages
-        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
         id: deployment
         uses: actions/deploy-pages@v4
