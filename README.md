@@ -8,10 +8,15 @@ It uses free DEX data for market discovery and Helius only for onchain work:
 
 - find pools across active lane-based filters: micro sticky, cheap sticky, breakout, and reactivation;
 - keep only migrated pump.fun ecosystem pools by default: `pumpfun-amm`, `pumpswap`;
+- retain a rolling registry of known pools and refresh it through free market APIs, so discovery is not limited to current trending pages;
+- rotate scan capacity between high-activity pools and pools that have gone longest without an onchain check;
+- use a lightweight signature probe before paid parsed-transaction history on previously scanned pools;
 - fetch parsed Helius transactions with pagination instead of relying on raw pool signatures;
 - parse swaps;
 - classify buy wallets as fresh, freshish, low-tx, normal, or dormant;
+- attribute retention only to tokens bought in the detected wave, excluding balances held before the wave;
 - enrich triggered alerts with public X activity through Bright Data Discover;
+- reject incomplete all-lane snapshots and write scanner-health diagnostics into the dashboard report;
 - write alerts and a compact Markdown report.
 
 ## Setup
@@ -90,14 +95,13 @@ python3 solana-radar/scanner.py --watch --lane all
 The repository includes `.github/workflows/scan-and-pages.yml`.
 
 It runs the scanner at most once per hour, commits updated `data/` snapshots,
-and deploys the static dashboard to GitHub Pages. The workflow uses a 10-minute
-watchdog plus a freshness guard: fresh reports are skipped before any paid API
-work, while stale reports trigger the full scan. Already running scans are not
-cancelled by the next watchdog tick. Pushes to `data/` redeploy Pages from the
-new snapshot without forcing another scanner pass. Scanner failures are logged
-as workflow warnings and the previous dashboard snapshot is redeployed, so
-routine API or scanner hiccups do not create failed GitHub Actions runs or
-failure notification emails. The dashboard reads:
+and deploys the static dashboard to GitHub Pages. Hourly triggers share a
+50-minute freshness guard: fresh reports are skipped before paid API work, while
+stale reports trigger the full scan. Already running scans are not cancelled.
+Pushes to `data/` redeploy Pages from the new snapshot without forcing another
+scanner pass. Scanner failures are logged as workflow warnings and the previous
+dashboard snapshot is preserved. A completed report separately exposes data
+freshness and scan health (`healthy`, `degraded`, or `unhealthy`). The dashboard reads:
 
 - `data/latest_report.json`
 - `data/alerts.jsonl`

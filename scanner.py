@@ -352,13 +352,22 @@ class Http:
 
 
 class HeliusRpc:
-    def __init__(self, api_key, timeout_seconds=30, transactions_timeout_seconds=25):
+    def __init__(
+        self,
+        api_key,
+        timeout_seconds=30,
+        transactions_timeout_seconds=25,
+        max_retries=2,
+        retry_base_seconds=0.75,
+    ):
         self.url = f"https://mainnet.helius-rpc.com/?api-key={api_key}"
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
         self.calls = Counter()
         self.timeout_seconds = int(timeout_seconds)
         self.transactions_timeout_seconds = int(transactions_timeout_seconds)
+        self.max_retries = max(0, int(max_retries))
+        self.retry_base_seconds = max(0.0, float(retry_base_seconds))
 
     def request_timeout(self, timeout):
         seconds = float(timeout if timeout is not None else self.timeout_seconds)
@@ -366,14 +375,28 @@ class HeliusRpc:
         return (connect_timeout, seconds)
 
     def call(self, method, params=None, timeout=None):
-        self.calls[method] += 1
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []}
-        response = self.session.post(self.url, json=payload, timeout=self.request_timeout(timeout))
-        response.raise_for_status()
-        body = response.json()
-        if body.get("error"):
-            raise RuntimeError(f"{method}: {body['error']}")
-        return body.get("result")
+        retryable_statuses = {429, 500, 502, 503, 504}
+        for attempt in range(self.max_retries + 1):
+            self.calls[method] += 1
+            try:
+                response = self.session.post(self.url, json=payload, timeout=self.request_timeout(timeout))
+            except requests.RequestException:
+                if attempt >= self.max_retries:
+                    raise
+                time.sleep(min(5.0, max(0.1, self.retry_base_seconds * (2**attempt))))
+                continue
+            if response.status_code in retryable_statuses and attempt < self.max_retries:
+                retry_after = to_float(response.headers.get("Retry-After"))
+                delay = retry_after or self.retry_base_seconds * (2**attempt)
+                time.sleep(min(5.0, max(0.1, delay)))
+                continue
+            response.raise_for_status()
+            body = response.json()
+            if body.get("error"):
+                raise RuntimeError(f"{method}: {body['error']}")
+            return body.get("result")
+        raise RuntimeError(f"{method}: retry budget exhausted")
 
     def health(self):
         return self.call("getHealth")
@@ -739,6 +762,103 @@ def pool_dex_allowed(pool, config):
     return normalize_dex_name(pool.dex) in allowlist
 
 
+def registry_pool_from_market_entry(entry):
+    if not isinstance(entry, dict):
+        return None
+    pool_address = clean_solana_address(entry.get("pool_address"))
+    token_address = clean_solana_address(entry.get("token_address"))
+    if not pool_address or not token_address:
+        return None
+    return Pool(
+        pool_address=pool_address,
+        token_address=token_address,
+        name=clean_social_text(entry.get("name")),
+        symbol=clean_social_text(entry.get("symbol")),
+        dex=clean_social_text(entry.get("dex")),
+        source="registry",
+        url=clean_social_text(entry.get("url")),
+        mcap_usd=to_float(entry.get("latest_mcap_usd") or entry.get("scan_mcap_usd")),
+        liquidity_usd=to_float(entry.get("latest_liquidity_usd") or entry.get("scan_liquidity_usd")),
+        volume_1h_usd=to_float(entry.get("latest_volume_1h_usd")),
+        volume_24h_usd=to_float(entry.get("latest_volume_24h_usd")),
+        price_usd=to_float(entry.get("latest_price_usd") or entry.get("scan_price_usd")),
+        txns_1h=int(to_float(entry.get("latest_txns_1h"))),
+        pair_created_at=parse_timestamp(entry.get("pair_created_at")),
+    )
+
+
+def known_market_pools(state, config, observed_at=None):
+    market = state.get("market") if isinstance(state, dict) else None
+    if not isinstance(market, dict):
+        return []
+    now = parse_timestamp(observed_at) or int(time.time())
+    retention_hours = float(config.get("registry_retention_hours", 720))
+    cutoff = now - int(retention_hours * 3600) if retention_hours > 0 else 0
+    pools = []
+    for entry in market.values():
+        if not isinstance(entry, dict):
+            continue
+        last_seen = parse_timestamp(entry.get("latest_seen_at") or entry.get("scan_mcap_at"))
+        if cutoff and last_seen and last_seen < cutoff:
+            continue
+        pool = registry_pool_from_market_entry(entry)
+        if not pool:
+            continue
+        if pool.dex:
+            if not pool_dex_allowed(pool, config):
+                continue
+        elif not pool.token_address.lower().endswith("pump"):
+            continue
+        pools.append(pool)
+    return pools
+
+
+def merge_market_pools(registry_pools, discovered_pools):
+    merged = {}
+    for pool in registry_pools or []:
+        if pool and pool.pool_address:
+            merged[pool.pool_address] = pool
+    for pool in discovered_pools or []:
+        if pool and pool.pool_address:
+            merged[pool.pool_address] = pool
+    return list(merged.values())
+
+
+def refresh_known_market_pools(http, state, config):
+    registry = known_market_pools(state, config)
+    limit = max(0, int(config.get("registry_refresh_max_tokens", 1000)))
+    market = state.get("market") if isinstance(state, dict) else {}
+    registry.sort(
+        key=lambda pool: parse_timestamp((market.get(pool.token_address) or {}).get("registry_refreshed_at"))
+    )
+    tokens = []
+    seen = set()
+    for pool in registry:
+        if not pool.token_address or pool.token_address in seen:
+            continue
+        seen.add(pool.token_address)
+        tokens.append(pool.token_address)
+        if limit and len(tokens) >= limit:
+            break
+    refreshed = fetch_dex_pairs_for_tokens(http, tokens, "registry_refresh") if tokens else {}
+    refreshed_tokens = {pool.token_address for pool in refreshed.values() if pool.token_address}
+    refreshed_at = utc_now().isoformat().replace("+00:00", "Z")
+    for token in tokens:
+        entry = market.get(token) if isinstance(market, dict) else None
+        if not isinstance(entry, dict):
+            continue
+        entry["registry_refreshed_at"] = refreshed_at
+        entry["registry_refresh_status"] = "ok" if token in refreshed_tokens else "missing"
+    merged = merge_market_pools(registry, refreshed.values())
+    return merged, {
+        "stored_pools": len(registry),
+        "requested_tokens": len(tokens),
+        "refreshed_tokens": len(refreshed_tokens),
+        "refreshed_pools": len(refreshed),
+        "merged_pools": len(merged),
+    }
+
+
 def discover_market_pools(http, config):
     pools = fetch_solana_tracker_universe(http, config)
 
@@ -787,15 +907,29 @@ def pool_matches_config(pool, config):
             return False
         if age_max is not None and age_hours > float(age_max):
             return False
-    if pool.volume_1h_usd < config["volume_1h_min_usd"] and pool.source != "dexscreener_tokens":
+    volume_unknown_registry = pool.source == "registry" and pool.volume_1h_usd <= 0
+    if (
+        pool.volume_1h_usd < config["volume_1h_min_usd"]
+        and pool.source != "dexscreener_tokens"
+        and not volume_unknown_registry
+    ):
         return False
     if config.get("volume_1h_max_usd") is not None and pool.volume_1h_usd > float(config["volume_1h_max_usd"]):
         return False
     if config.get("volume_1h_to_mcap_min") is not None:
-        if pool.mcap_usd <= 0 or (pool.volume_1h_usd / pool.mcap_usd) < float(config["volume_1h_to_mcap_min"]):
+        if not volume_unknown_registry and (
+            pool.mcap_usd <= 0
+            or (pool.volume_1h_usd / pool.mcap_usd) < float(config["volume_1h_to_mcap_min"])
+        ):
             return False
     if config.get("volume_1h_to_liquidity_min") is not None:
-        if pool.liquidity_usd <= 0 or (pool.volume_1h_usd / pool.liquidity_usd) < float(config["volume_1h_to_liquidity_min"]):
+        if not volume_unknown_registry and (
+            pool.liquidity_usd <= 0
+            or (pool.volume_1h_usd / pool.liquidity_usd) < float(config["volume_1h_to_liquidity_min"])
+        ):
+            return False
+    if config.get("liquidity_to_mcap_min") is not None:
+        if pool.mcap_usd <= 0 or (pool.liquidity_usd / pool.mcap_usd) < float(config["liquidity_to_mcap_min"]):
             return False
     return True
 
@@ -819,6 +953,49 @@ def filter_universe_pools(pools, config):
     filtered = list(by_token.values())
     filtered.sort(key=lambda pool: (pool.volume_1h_usd, pool.txns_1h, pool.liquidity_usd), reverse=True)
     return filtered[: int(config["light_pool_limit"])]
+
+
+def pool_last_scanned_at(state, pool):
+    pools_state = state.get("pools") if isinstance(state, dict) else None
+    if not isinstance(pools_state, dict):
+        return 0
+    entry = pools_state.get(pool.pool_address) or {}
+    return parse_timestamp(entry.get("last_scanned_at"))
+
+
+def select_scan_targets(universe, state, config):
+    limit = max(0, int(config.get("active_pool_limit", 0)))
+    if not limit or not universe:
+        return [], {"candidates": len(universe), "priority": 0, "rotation": 0, "never_scanned": 0}
+    if len(universe) <= limit:
+        never_scanned = sum(1 for pool in universe if not pool_last_scanned_at(state, pool))
+        return list(universe), {
+            "candidates": len(universe),
+            "priority": len(universe),
+            "rotation": 0,
+            "never_scanned": never_scanned,
+        }
+
+    priority_share = min(1.0, max(0.0, float(config.get("scan_priority_share", 0.6))))
+    priority_count = min(limit, max(1, int(round(limit * priority_share))))
+    priority = list(universe[:priority_count])
+    priority_keys = {pool.pool_address for pool in priority}
+    rotation_candidates = [pool for pool in universe if pool.pool_address not in priority_keys]
+    rotation_candidates.sort(
+        key=lambda pool: (
+            pool_last_scanned_at(state, pool),
+            -float(pool.liquidity_usd or 0),
+            pool.pool_address,
+        )
+    )
+    rotation = rotation_candidates[: max(0, limit - len(priority))]
+    selected = [*priority, *rotation]
+    return selected, {
+        "candidates": len(universe),
+        "priority": len(priority),
+        "rotation": len(rotation),
+        "never_scanned": sum(1 for pool in selected if not pool_last_scanned_at(state, pool)),
+    }
 
 
 def build_universe(http, config):
@@ -2235,6 +2412,15 @@ def classify_alert_tier(pool, alert, evidence, config):
     sticky_bought_pct = float(wave.get("sticky_bought_pct") or 0)
     net_retention_pct = float(wave.get("net_token_retention_pct") or 0)
     sticky_net_sol = float(wave.get("sticky_net_sol") or 0)
+    top_buyer_share = float(wave.get("top_buyer_share") or 0)
+    top3_buyer_share = float(wave.get("top3_buyer_share") or 0)
+    concentration_prefix = "sticky_accumulation" if alert.get("signal_family") == "sticky_accumulation" else "reactivation_wave"
+    max_top_buyer_share = float(config.get(f"{concentration_prefix}_max_top_buyer_share", 1.0))
+    max_top3_buyer_share = float(config.get(f"{concentration_prefix}_max_top3_buyer_share", 1.0))
+    concentrated_wave = bool(
+        wave_signal
+        and (top_buyer_share > max_top_buyer_share or top3_buyer_share > max_top3_buyer_share)
+    )
 
     if hard_cluster:
         reasons.append("hard wallet cluster")
@@ -2256,6 +2442,8 @@ def classify_alert_tier(pool, alert, evidence, config):
 
     if support_only:
         penalties.append("low_tx only")
+    if concentrated_wave:
+        penalties.append("concentrated buyer flow")
     if actionable_mcap and mcap > actionable_mcap:
         penalties.append("above actionable mcap")
     if watch_mcap and mcap > watch_mcap:
@@ -2292,7 +2480,9 @@ def classify_alert_tier(pool, alert, evidence, config):
         )
     )
     hard_signal = hard_cluster or hard_flow or dormant or coordination or wave_signal
-    if not hard_signal:
+    if concentrated_wave:
+        tier = "noise"
+    elif not hard_signal:
         tier = "noise" if support_only else "watch"
     elif "late mcap" in penalties or "blowoff volume" in penalties or "excess flow after move" in penalties:
         tier = "late_chase"
@@ -2326,6 +2516,8 @@ def classify_alert_tier(pool, alert, evidence, config):
     return tier, reasons, penalties, {
         "volume_1h_to_mcap": volume_to_mcap,
         "ath_current_ratio": ath_ratio,
+        "top_buyer_share": top_buyer_share,
+        "top3_buyer_share": top3_buyer_share,
     }
 
 
@@ -2401,17 +2593,12 @@ def build_alerts(pool, events, config):
 WAVE_SWAP_FIELDS = (
     "signature",
     "block_time",
-    "time",
-    "pool_address",
-    "token_address",
-    "symbol",
     "kind",
     "signer",
     "token_recipient",
     "token_recipient_amount",
     "token_sender",
     "token_sender_amount",
-    "recipient_share",
     "routed",
     "sol_amount",
     "token_amount",
@@ -2468,6 +2655,29 @@ def wave_buy_owner(swap):
 
 def wave_sell_owner(swap):
     return swap.get("token_sender") or swap.get("signer") or ""
+
+
+def attributed_wave_retention(balance, bought_tokens, sold_tokens, min_retention_pct=0.0):
+    balance = max(0.0, float(balance or 0))
+    bought_tokens = max(0.0, float(bought_tokens or 0))
+    sold_tokens = max(0.0, float(sold_tokens or 0))
+    net_tokens = max(0.0, bought_tokens - sold_tokens)
+    retained_tokens = min(balance, net_tokens)
+    retention_pct = retained_tokens / net_tokens * 100 if net_tokens else 0.0
+    return {
+        "net_tokens": net_tokens,
+        "retained_tokens": retained_tokens,
+        "retention_pct": retention_pct,
+        "qualified": bool(retained_tokens > 0 and retention_pct >= float(min_retention_pct or 0)),
+    }
+
+
+def buyer_concentration(buyers):
+    buy_sol = sorted((max(0.0, float(row.get("buy_sol") or 0)) for row in buyers), reverse=True)
+    total = sum(buy_sol)
+    if total <= 0:
+        return 0.0, 0.0
+    return buy_sol[0] / total, sum(buy_sol[:3]) / total
 
 
 def reactivation_wave_window_metrics(window_swaps, config, relaxed=False):
@@ -2531,6 +2741,7 @@ def reactivation_wave_window_metrics(window_swaps, config, relaxed=False):
     unique_buyers = len(buyers)
     large_buyers = sum(1 for row in buyers if row["buy_sol"] >= large_buy_min_sol)
     net_buy_ratio = net_buy_sol / buy_sol if buy_sol else 0.0
+    top_buyer_share, top3_buyer_share = buyer_concentration(buyers)
 
     scale = 0.6 if relaxed else 1.0
 
@@ -2550,7 +2761,6 @@ def reactivation_wave_window_metrics(window_swaps, config, relaxed=False):
         return None
     if large_buyers < scaled_int("reactivation_wave_min_large_buyers", 8):
         return None
-
     return {
         "buy_sol": buy_sol,
         "sell_sol": sell_sol,
@@ -2558,6 +2768,8 @@ def reactivation_wave_window_metrics(window_swaps, config, relaxed=False):
         "net_buy_ratio": net_buy_ratio,
         "unique_buyers": unique_buyers,
         "large_buyers": large_buyers,
+        "top_buyer_share": top_buyer_share,
+        "top3_buyer_share": top3_buyer_share,
         "buyers": sorted(buyers, key=lambda row: row["buy_sol"], reverse=True),
         "buy_count": len(buy_swaps),
         "sell_count": len(sell_swaps),
@@ -2609,6 +2821,7 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
     min_sticky_supply_pct = float(config.get("reactivation_wave_min_sticky_supply_pct", 3.0))
     min_sticky_bought_pct = float(config.get("reactivation_wave_min_sticky_bought_pct", 40.0))
     min_net_retention_pct = float(config.get("reactivation_wave_min_net_token_retention_pct", 60.0))
+    min_wallet_retention_pct = float(config.get("reactivation_wave_min_wallet_retention_pct", 15.0))
     try:
         supply = rpc.token_supply(pool.token_address)
     except Exception:
@@ -2636,11 +2849,18 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
                 balance = 0.0
             bought_tokens = float(row.get("token_bought") or 0)
             sold_tokens = float(row.get("token_sold") or 0)
-            net_tokens = max(0.0, bought_tokens - sold_tokens)
+            retention = attributed_wave_retention(
+                balance,
+                bought_tokens,
+                sold_tokens,
+                min_retention_pct=min_wallet_retention_pct,
+            )
+            net_tokens = retention["net_tokens"]
+            retained_tokens = retention["retained_tokens"]
             checked_bought_tokens += bought_tokens
             checked_net_tokens += net_tokens
-            sticky_tokens += balance
-            if balance > 0:
+            if retention["qualified"]:
+                sticky_tokens += retained_tokens
                 sticky_wallets += 1
             checked.append(
                 {
@@ -2650,6 +2870,9 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
                     "net_sol": row["buy_sol"] - row["sell_sol"],
                     "token_bought": bought_tokens,
                     "token_sold": sold_tokens,
+                    "retained_from_wave": retained_tokens,
+                    "wave_retention_pct": retention["retention_pct"],
+                    "retained_supply_pct": (retained_tokens / supply * 100) if supply else 0.0,
                     "current_balance": balance,
                     "current_supply_pct": (balance / supply * 100) if supply else 0.0,
                     "buy_count": row["buy_count"],
@@ -2681,6 +2904,7 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
         events = []
         for row in metrics["buyers"][: int(config.get("alert_event_export_limit", 80))]:
             event = dict(row["top_buy"])
+            event["time"] = event.get("time") or iso(event.get("block_time"))
             event["wallet_class"] = "wave_buyer"
             event["token_recipient"] = row["owner"]
             event["wave_buy_sol"] = row["buy_sol"]
@@ -2722,6 +2946,8 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
                 "sell_count": metrics["sell_count"],
                 "unique_buyers": metrics["unique_buyers"],
                 "large_buyers": metrics["large_buyers"],
+                "top_buyer_share": metrics["top_buyer_share"],
+                "top3_buyer_share": metrics["top3_buyer_share"],
                 "checked_wallets": len(checked),
                 "sticky_wallets": sticky_wallets,
                 "sticky_tokens": sticky_tokens,
@@ -2856,6 +3082,7 @@ def sticky_accumulation_window_metrics(window_swaps, config, relaxed=False):
     unique_buyers = len(buyers)
     large_buyers = sum(1 for row in buyers if row["buy_sol"] >= large_buy_min_sol)
     net_buy_ratio = net_buy_sol / buy_sol if buy_sol else 0.0
+    top_buyer_share, top3_buyer_share = buyer_concentration(buyers)
 
     scale = 0.6 if relaxed else 1.0
 
@@ -2875,7 +3102,6 @@ def sticky_accumulation_window_metrics(window_swaps, config, relaxed=False):
         return None
     if large_buyers < scaled_int("sticky_accumulation_min_large_buyers", 3):
         return None
-
     return {
         "buy_sol": buy_sol,
         "sell_sol": sell_sol,
@@ -2883,6 +3109,8 @@ def sticky_accumulation_window_metrics(window_swaps, config, relaxed=False):
         "net_buy_ratio": net_buy_ratio,
         "unique_buyers": unique_buyers,
         "large_buyers": large_buyers,
+        "top_buyer_share": top_buyer_share,
+        "top3_buyer_share": top3_buyer_share,
         "buyers": sorted(buyers, key=lambda row: row["buy_sol"], reverse=True),
         "buy_count": len(buy_swaps),
         "sell_count": len(sell_swaps),
@@ -2936,6 +3164,7 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
     min_sticky_supply_pct = float(config.get("sticky_accumulation_min_sticky_supply_pct", 3.0))
     min_sticky_bought_pct = float(config.get("sticky_accumulation_min_sticky_bought_pct", 40.0))
     min_net_retention_pct = float(config.get("sticky_accumulation_min_net_token_retention_pct", 55.0))
+    min_wallet_retention_pct = float(config.get("sticky_accumulation_min_wallet_retention_pct", 20.0))
     try:
         supply = rpc.token_supply(pool.token_address)
     except Exception:
@@ -2965,13 +3194,23 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
                 balance = 0.0
             bought_tokens = float(row.get("token_bought") or 0)
             sold_tokens = float(row.get("token_sold") or 0)
-            net_tokens = max(0.0, bought_tokens - sold_tokens)
+            retention = attributed_wave_retention(
+                balance,
+                bought_tokens,
+                sold_tokens,
+                min_retention_pct=min_wallet_retention_pct,
+            )
+            net_tokens = retention["net_tokens"]
+            retained_tokens = retention["retained_tokens"]
             checked_bought_tokens += bought_tokens
             checked_net_tokens += net_tokens
-            sticky_tokens += balance
-            if balance > 0:
+            if retention["qualified"]:
+                sticky_tokens += retained_tokens
                 sticky_wallets += 1
-                sticky_net_sol += max(0.0, float(row["buy_sol"]) - float(row["sell_sol"]))
+                sticky_net_sol += max(0.0, float(row["buy_sol"]) - float(row["sell_sol"])) * min(
+                    1.0,
+                    retention["retention_pct"] / 100,
+                )
             checked.append(
                 {
                     "owner": owner,
@@ -2980,6 +3219,9 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
                     "net_sol": row["buy_sol"] - row["sell_sol"],
                     "token_bought": bought_tokens,
                     "token_sold": sold_tokens,
+                    "retained_from_wave": retained_tokens,
+                    "wave_retention_pct": retention["retention_pct"],
+                    "retained_supply_pct": (retained_tokens / supply * 100) if supply else 0.0,
                     "current_balance": balance,
                     "current_supply_pct": (balance / supply * 100) if supply else 0.0,
                     "buy_count": row["buy_count"],
@@ -3015,6 +3257,7 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
         events = []
         for row in metrics["buyers"][: int(config.get("alert_event_export_limit", 80))]:
             event = dict(row["top_buy"])
+            event["time"] = event.get("time") or iso(event.get("block_time"))
             event["wallet_class"] = "sticky_buyer"
             event["token_recipient"] = row["owner"]
             event["wave_buy_sol"] = row["buy_sol"]
@@ -3056,6 +3299,8 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
                 "sell_count": metrics["sell_count"],
                 "unique_buyers": metrics["unique_buyers"],
                 "large_buyers": metrics["large_buyers"],
+                "top_buyer_share": metrics["top_buyer_share"],
+                "top3_buyer_share": metrics["top3_buyer_share"],
                 "checked_wallets": len(checked),
                 "sticky_wallets": sticky_wallets,
                 "sticky_net_sol": sticky_net_sol,
@@ -3472,8 +3717,73 @@ def combine_fetch_stats(probe_stats, deep_stats):
     return combined
 
 
+def pool_backfill_pending(pool, pool_state, config):
+    age_hours = pool.age_hours()
+    initial_max_age = float(config.get("helius_initial_backfill_max_age_hours", 96))
+    return bool(
+        pool.pair_created_at
+        and age_hours is not None
+        and age_hours <= initial_max_age
+        and not pool_state.get("helius_initial_backfill_cursor_complete")
+    )
+
+
+def pool_has_new_activity(rpc, pool, pool_state, config):
+    previous_signature = pool_state.get("helius_latest_signature") or pool_state.get("latest_signature")
+    if not config.get("helius_activity_probe_enabled", True) or not previous_signature:
+        return True, {"reason": "first_scan_or_probe_disabled"}
+    if pool_backfill_pending(pool, pool_state, config):
+        return True, {"reason": "launch_backfill_pending"}
+    try:
+        signatures = rpc.signatures_for_address(
+            pool.pool_address,
+            limit=max(1, int(config.get("helius_activity_probe_signature_limit", 5))),
+        )
+    except Exception as exc:
+        return True, {"reason": "probe_failed", "error": str(exc)}
+    latest_successful = next((item.get("signature") for item in signatures if not item.get("err")), None)
+    pool_state["last_activity_probe_at"] = utc_now().isoformat().replace("+00:00", "Z")
+    if latest_successful:
+        pool_state["last_activity_signature"] = latest_successful
+    if not latest_successful:
+        return True, {"reason": "probe_empty"}
+    return latest_successful != previous_signature, {
+        "reason": "new_signature" if latest_successful != previous_signature else "unchanged",
+        "latest_signature": latest_successful,
+    }
+
+
 def scan_pool_helius_transactions(rpc, pool, config, state, classification_budget):
     pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
+    has_new_activity, activity_probe = pool_has_new_activity(rpc, pool, pool_state, config)
+    if not has_new_activity:
+        return [], {
+            "pool": pool.as_dict(),
+            "lane": config.get("lane") or config.get("mode"),
+            "trade_source": "helius_activity_probe",
+            "new_signatures": 0,
+            "transactions_scanned": 0,
+            "parsed_swaps": 0,
+            "candidate_buys": 0,
+            "classified_buys": 0,
+            "classes": {},
+            "buy_sol": 0.0,
+            "wave_alerts": 0,
+            "wave_net_buy_sol": 0.0,
+            "wave_sticky_supply_pct": 0.0,
+            "parse_errors": 0,
+            "classification_errors": 0,
+            "activity_probe": activity_probe,
+            "trade_fetch": {
+                "source": "helius_activity_probe",
+                "phase": "probe_only",
+                "pages": 0,
+                "transactions": 0,
+                "passes": [],
+                "truncated": False,
+                "activity_unchanged": True,
+            },
+        }
     preclassified = False
     swaps = []
     parse_errors = 0
@@ -4031,6 +4341,10 @@ def enrich_market_ath(http, state, pools, alerts, config, observed_at):
 def record_market_observations(state, pools, observed_at):
     market = state.setdefault("market", {})
     for pool in pools:
+        # A registry-only pool carries the previous snapshot. Do not refresh its
+        # TTL unless a live market provider returned it in this run.
+        if pool.source == "registry":
+            continue
         key = pool.token_address or pool.pool_address
         if not key:
             continue
@@ -4041,9 +4355,14 @@ def record_market_observations(state, pools, observed_at):
                 "pool_address": pool.pool_address,
                 "symbol": pool.symbol,
                 "name": pool.name,
+                "dex": pool.dex,
+                "url": pool.url,
                 "latest_mcap_usd": pool.mcap_usd,
                 "latest_price_usd": pool.price_usd,
                 "latest_liquidity_usd": pool.liquidity_usd,
+                "latest_volume_1h_usd": pool.volume_1h_usd,
+                "latest_volume_24h_usd": pool.volume_24h_usd,
+                "latest_txns_1h": pool.txns_1h,
                 "latest_seen_at": observed_at,
                 "scan_mcap_usd": pool.mcap_usd,
                 "scan_price_usd": pool.price_usd,
@@ -4226,6 +4545,61 @@ def dict_item_timestamp(value, keys):
     return max(parse_timestamp(value.get(key)) for key in keys)
 
 
+def compact_pool_swap_buffers(pools_state, config, now):
+    if not isinstance(pools_state, dict):
+        return {
+            "pools_checked": 0,
+            "before_swaps": 0,
+            "after_swaps": 0,
+            "removed_swaps": 0,
+        }
+    retention_hours = float(config.get("state_swap_buffer_retention_hours", 24))
+    max_swaps = max(0, int(config.get("state_swap_buffer_max_swaps", 900)))
+    cutoff = now - int(retention_hours * 3600) if retention_hours > 0 else 0
+    before = 0
+    after = 0
+    pools_with_buffers = 0
+    for pool_state in pools_state.values():
+        if not isinstance(pool_state, dict):
+            continue
+        pool_has_buffer = False
+        for key in ("sticky_accumulation_swaps", "reactivation_wave_swaps"):
+            raw = pool_state.get(key)
+            if not isinstance(raw, list):
+                continue
+            pool_has_buffer = True
+            before += len(raw)
+            compacted = []
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                block_time = int(to_float(item.get("block_time")) or parse_timestamp(item.get("time")))
+                if not block_time or (cutoff and block_time < cutoff):
+                    continue
+                item = compact_wave_swap(item)
+                if item:
+                    compacted.append(item)
+            compacted.sort(key=lambda item: (int(item.get("block_time") or 0), item.get("signature") or ""))
+            if max_swaps and len(compacted) > max_swaps:
+                compacted = compacted[-max_swaps:]
+            if compacted:
+                pool_state[key] = compacted
+            else:
+                pool_state.pop(key, None)
+            after += len(compacted)
+        if pool_has_buffer:
+            pools_with_buffers += 1
+    return {
+        "pools_checked": len(pools_state),
+        "pools_with_buffers": pools_with_buffers,
+        "retention_hours": retention_hours,
+        "max_swaps_per_buffer": max_swaps,
+        "before_swaps": before,
+        "after_swaps": after,
+        "removed_swaps": before - after,
+    }
+
+
 def compact_state(state, pools, alerts, config, observed_at):
     now = parse_timestamp(observed_at) or int(time.time())
     token_keys = set()
@@ -4276,13 +4650,20 @@ def compact_state(state, pools, alerts, config, observed_at):
 
     pools_state = state.get("pools")
     if isinstance(pools_state, dict):
+        stats["swap_buffers"] = compact_pool_swap_buffers(pools_state, config, now)
         before = len(pools_state)
         cutoff = now - int(pool_ttl * 3600) if pool_ttl > 0 else 0
         pruned_pools = {}
         for key, value in pools_state.items():
             last_seen = dict_item_timestamp(
                 value,
-                ("helius_latest_time", "latest_time", "helius_deep_scanned_at"),
+                (
+                    "last_scanned_at",
+                    "last_scan_failed_at",
+                    "helius_latest_time",
+                    "latest_time",
+                    "helius_deep_scanned_at",
+                ),
             )
             if key in pool_keys or (cutoff and last_seen >= cutoff):
                 pruned_pools[key] = value
@@ -4368,6 +4749,76 @@ def apply_market_meta_to_alert(alert, state):
     return enriched
 
 
+def build_scan_health(summaries, lane_stats, config):
+    scanned = len(summaries)
+    candidate_pools = sum(int(item.get("universe_pools") or 0) for item in lane_stats.values())
+    failed = sum(1 for item in summaries if item.get("scan_failed") or item.get("error"))
+    truncated = sum(1 for item in summaries if (item.get("trade_fetch") or {}).get("truncated"))
+    transactions = sum(int(item.get("transactions_scanned") or item.get("new_signatures") or 0) for item in summaries)
+    parsed_swaps = sum(int(item.get("parsed_swaps") or 0) for item in summaries)
+    candidate_buys = sum(int(item.get("candidate_buys") or 0) for item in summaries)
+    classified_buys = sum(int(item.get("classified_buys") or 0) for item in summaries)
+    classification_errors = sum(int(item.get("classification_errors") or 0) for item in summaries)
+    zero_parse_pools = sum(
+        1
+        for item in summaries
+        if not item.get("scan_failed")
+        and not item.get("error")
+        and int(item.get("transactions_scanned") or item.get("new_signatures") or 0) > 0
+        and int(item.get("parsed_swaps") or 0) == 0
+    )
+    failed_ratio = failed / scanned if scanned else 0.0
+    truncated_ratio = truncated / scanned if scanned else 0.0
+    zero_parse_ratio = zero_parse_pools / scanned if scanned else 0.0
+    min_scanned = max(0, int(config.get("scan_health_min_scanned_pools", 5)))
+    max_failed_ratio = float(config.get("scan_health_max_failed_ratio", 0.25))
+    max_truncated_ratio = float(config.get("scan_health_max_truncated_ratio", 0.8))
+    max_zero_parse_ratio = float(config.get("scan_health_max_zero_parse_ratio", 0.25))
+    reasons = []
+    status = "healthy"
+
+    discovery = config.get("_discovery_stats") or {}
+    live_discovered = int(discovery.get("discovered_pools") or 0)
+    if candidate_pools >= min_scanned and scanned < min_scanned:
+        status = "unhealthy"
+        reasons.append(f"only {scanned}/{candidate_pools} candidate pools were scanned")
+    elif scanned == 0 and live_discovered == 0:
+        status = "unhealthy"
+        reasons.append("market discovery and scan both returned zero pools")
+    if scanned and failed_ratio > max_failed_ratio:
+        status = "unhealthy"
+        reasons.append(f"pool failure ratio {failed_ratio:.0%} exceeds {max_failed_ratio:.0%}")
+
+    if status != "unhealthy":
+        if scanned and truncated_ratio > max_truncated_ratio:
+            status = "degraded"
+            reasons.append(f"transaction history truncated for {truncated_ratio:.0%} of pools")
+        if scanned and zero_parse_ratio > max_zero_parse_ratio:
+            status = "degraded"
+            reasons.append(f"no swaps parsed for {zero_parse_ratio:.0%} of scanned pools with transactions")
+        if classification_errors:
+            status = "degraded"
+            reasons.append(f"{classification_errors} wallet classifications failed")
+
+    return {
+        "status": status,
+        "reasons": reasons,
+        "candidate_pools": candidate_pools,
+        "scanned_pools": scanned,
+        "failed_pools": failed,
+        "failed_ratio": failed_ratio,
+        "truncated_pools": truncated,
+        "truncated_ratio": truncated_ratio,
+        "zero_parse_pools": zero_parse_pools,
+        "zero_parse_ratio": zero_parse_ratio,
+        "transactions_scanned": transactions,
+        "parsed_swaps": parsed_swaps,
+        "candidate_buys": candidate_buys,
+        "classified_buys": classified_buys,
+        "classification_errors": classification_errors,
+    }
+
+
 def build_report_payload(universe, summaries, alerts, rpc_calls, config, generated_at, state):
     enriched_summaries = [apply_market_meta_to_summary(summary, state) for summary in summaries]
     enriched_alerts = [apply_market_meta_to_alert(alert, state) for alert in alerts]
@@ -4404,6 +4855,8 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "scanned_pools": len(summaries),
             "alerts": len(alerts),
             "rpc_calls": dict(rpc_calls),
+            "scan_health": config.get("_scan_health", {}),
+            "discovery": config.get("_discovery_stats", {}),
             "caught_market_refresh": (state.get("maintenance") or {}).get("caught_market_refresh", {}),
             "deleted_tokens": {
                 "tokens": len(deleted_tokens["tokens"]),
@@ -4539,7 +4992,15 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
     label = config.get("lane") or config.get("mode") or "scan"
     if base_universe is None:
         print(f"Building market universe for {label}...", flush=True)
-        universe = build_universe(http, config)
+        discovered = discover_market_pools(http, config)
+        registry, registry_stats = refresh_known_market_pools(http, state, config)
+        universe = filter_universe_pools(merge_market_pools(registry, discovered), config)
+        config["_discovery_stats"] = {
+            "discovered_pools": len(discovered),
+            "registry_pools": len(registry),
+            "merged_filtered_pools": len(universe),
+            "registry_refresh": registry_stats,
+        }
     else:
         universe = filter_universe_pools(base_universe, config)
         print(f"{label}: filtered {len(universe)} pools from shared discovery universe", flush=True)
@@ -4560,7 +5021,8 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
     config["_deleted_tokens_skipped"] = deleted_skipped
     if deleted_skipped:
         print(f"{label}: skipped {deleted_skipped} deleted pools before on-chain scan", flush=True)
-    scan_targets = universe[: int(config["active_pool_limit"])]
+    scan_targets, selection_stats = select_scan_targets(universe, state, config)
+    config["_selection_stats"] = selection_stats
     print(f"{label}: universe {len(universe)} pools, scanning {len(scan_targets)}", flush=True)
     classification_budget = {
         "remaining": int(config["max_wallet_classifications_per_scan"]),
@@ -4571,6 +5033,7 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
     summaries = []
     for index, pool in enumerate(scan_targets, start=1):
         print(f"{label}: scanning {index}/{len(scan_targets)} {pool.symbol}", flush=True)
+        pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
         try:
             alerts, summary = scan_pool(rpc, pool, config, state, classification_budget)
         except Exception as exc:
@@ -4592,6 +5055,13 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
                 "classes": {},
                 "buy_sol": 0.0,
             }
+        if summary.get("error") or summary.get("scan_failed"):
+            pool_state["last_scan_failed_at"] = observed_at
+            pool_state["last_scan_error"] = str(summary.get("error") or "pool scan failed")[:500]
+        else:
+            pool_state["last_scanned_at"] = observed_at
+            pool_state.pop("last_scan_failed_at", None)
+            pool_state.pop("last_scan_error", None)
         summaries.append(summary)
         all_alerts.extend(alerts)
         if index % 25 == 0:
@@ -4613,6 +5083,8 @@ def run_once(config, lane_name=None):
         api_key,
         timeout_seconds=int(config.get("helius_rpc_timeout_seconds", 30)),
         transactions_timeout_seconds=int(config.get("helius_transactions_timeout_seconds", 25)),
+        max_retries=int(config.get("helius_rpc_max_retries", 2)),
+        retry_base_seconds=float(config.get("helius_rpc_retry_base_seconds", 0.75)),
     )
     health = rpc.health()
     if health != "ok":
@@ -4626,9 +5098,21 @@ def run_once(config, lane_name=None):
     if config.get("unified_discovery_enabled", True) and len(lane_list) > 1:
         discovery_config = discovery_config_for_lanes(config, lane_list)
         print("Building shared market discovery universe...", flush=True)
-        shared_universe = discover_market_pools(http, discovery_config)
+        discovered_universe = discover_market_pools(http, discovery_config)
+        registry_universe, registry_stats = refresh_known_market_pools(http, state, discovery_config)
+        shared_universe = merge_market_pools(registry_universe, discovered_universe)
         shared_universe = filter_universe_pools(shared_universe, discovery_config)
-        print(f"shared discovery: {len(shared_universe)} candidate pools", flush=True)
+        config["_discovery_stats"] = {
+            "discovered_pools": len(discovered_universe),
+            "registry_pools": len(registry_universe),
+            "merged_filtered_pools": len(shared_universe),
+            "registry_refresh": registry_stats,
+        }
+        print(
+            f"shared discovery: {len(shared_universe)} candidate pools "
+            f"({len(discovered_universe)} live, {len(registry_universe)} registry)",
+            flush=True,
+        )
     all_alerts = []
     summaries = []
     universe = []
@@ -4647,7 +5131,7 @@ def run_once(config, lane_name=None):
         universe.extend(lane_universe)
         lane_stats[lane_config.get("lane") or lane_config.get("mode") or "scan"] = {
             "universe_pools": len(lane_universe),
-            "scanned_pools": min(len(lane_universe), int(lane_config["active_pool_limit"])),
+            "scanned_pools": len(lane_summaries),
             "alerts": len(lane_alerts),
             "mcap_min_usd": lane_config["mcap_min_usd"],
             "mcap_max_usd": lane_config["mcap_max_usd"],
@@ -4662,7 +5146,17 @@ def run_once(config, lane_name=None):
             "ath_require_trusted": lane_config.get("ath_require_trusted"),
             "ath_filter_stats": lane_config.get("_ath_filter_stats"),
             "deleted_tokens_skipped": lane_config.get("_deleted_tokens_skipped", 0),
+            "selection": lane_config.get("_selection_stats", {}),
         }
+
+    scan_health = build_scan_health(summaries, lane_stats, config)
+    config["_scan_health"] = scan_health
+    if (
+        scan_health["status"] == "unhealthy"
+        and config.get("scan_health_reject_unhealthy_snapshot", True)
+        and len(lane_list) > 1
+    ):
+        raise RuntimeError("unhealthy scan rejected: " + "; ".join(scan_health["reasons"]))
 
     generated_at = utc_now().isoformat().replace("+00:00", "Z")
     record_market_observations(state, universe, generated_at)

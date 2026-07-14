@@ -60,6 +60,7 @@
       "actionable_mcap_max_usd": 30000,
       "watch_mcap_max_usd": 50000,
       "liquidity_min_usd": 3000,
+      "liquidity_to_mcap_min": 0.12,
       "volume_1h_min_usd": 250,
       "volume_1h_max_usd": 25000,
       "volume_1h_to_mcap_max_actionable": 0.8,
@@ -94,7 +95,7 @@
       "sticky_accumulation_min_trade_sol": 0.1,
       "sticky_accumulation_min_buy_sol": 35,
       "sticky_accumulation_min_net_buy_sol": 18,
-      "sticky_accumulation_min_net_buy_ratio": 0.18,
+      "sticky_accumulation_min_net_buy_ratio": 0.25,
       "sticky_accumulation_min_unique_buyers": 12,
       "sticky_accumulation_min_large_buyers": 6,
       "sticky_accumulation_large_buy_min_sol": 1,
@@ -107,7 +108,11 @@
       "sticky_accumulation_min_sticky_bought_pct": 40,
       "sticky_accumulation_actionable_sticky_bought_pct": 65,
       "sticky_accumulation_min_net_token_retention_pct": 65,
-      "sticky_accumulation_actionable_net_token_retention_pct": 85
+      "sticky_accumulation_actionable_net_token_retention_pct": 85,
+      "sticky_accumulation_min_wallet_retention_pct": 20,
+      "sticky_accumulation_max_top_buyer_share": 0.35,
+      "sticky_accumulation_max_top3_buyer_share": 0.7,
+      "scan_priority_share": 0.65
     },
     "cheap_sticky": {
       "age_min_hours": 12,
@@ -117,6 +122,7 @@
       "actionable_mcap_max_usd": 150000,
       "watch_mcap_max_usd": 250000,
       "liquidity_min_usd": 10000,
+      "liquidity_to_mcap_min": 0.08,
       "volume_1h_min_usd": 2000,
       "volume_1h_max_usd": 40000,
       "volume_1h_to_mcap_max_actionable": 0.45,
@@ -151,7 +157,7 @@
       "sticky_accumulation_min_trade_sol": 0.25,
       "sticky_accumulation_min_buy_sol": 100,
       "sticky_accumulation_min_net_buy_sol": 35,
-      "sticky_accumulation_min_net_buy_ratio": 0.2,
+      "sticky_accumulation_min_net_buy_ratio": 0.25,
       "sticky_accumulation_min_unique_buyers": 20,
       "sticky_accumulation_min_large_buyers": 10,
       "sticky_accumulation_large_buy_min_sol": 1.5,
@@ -164,7 +170,11 @@
       "sticky_accumulation_min_sticky_bought_pct": 45,
       "sticky_accumulation_actionable_sticky_bought_pct": 70,
       "sticky_accumulation_min_net_token_retention_pct": 70,
-      "sticky_accumulation_actionable_net_token_retention_pct": 90
+      "sticky_accumulation_actionable_net_token_retention_pct": 90,
+      "sticky_accumulation_min_wallet_retention_pct": 20,
+      "sticky_accumulation_max_top_buyer_share": 0.35,
+      "sticky_accumulation_max_top3_buyer_share": 0.7,
+      "scan_priority_share": 0.65
     },
     "breakout": {
       "age_min_hours": 72,
@@ -201,7 +211,8 @@
       "max_new_signatures_per_pool": 50,
       "initial_backfill_signatures": 25,
       "max_wallet_classifications_per_scan": 4500,
-      "solana_tracker_pages": 2
+      "solana_tracker_pages": 2,
+      "scan_priority_share": 0.8
     },
     "reactivation": {
       "age_min_hours": 720,
@@ -240,6 +251,9 @@
       "reactivation_wave_actionable_sticky_bought_pct": 50,
       "reactivation_wave_min_net_token_retention_pct": 60,
       "reactivation_wave_actionable_net_token_retention_pct": 75,
+      "reactivation_wave_min_wallet_retention_pct": 15,
+      "reactivation_wave_max_top_buyer_share": 0.3,
+      "reactivation_wave_max_top3_buyer_share": 0.6,
       "classify_buy_min_sol": 0.5,
       "big_buy_sol": 10,
       "dormant_gap_days": 14,
@@ -259,7 +273,8 @@
       "max_new_signatures_per_pool": 40,
       "initial_backfill_signatures": 25,
       "max_wallet_classifications_per_scan": 8000,
-      "solana_tracker_pages": 2
+      "solana_tracker_pages": 2,
+      "scan_priority_share": 0.45
     }
   },
   "mcap_min_usd": 100000,
@@ -267,7 +282,7 @@
   "liquidity_min_usd": 20000,
   "volume_1h_min_usd": 5000,
   "scan_interval_seconds": 3600,
-  "light_pool_limit": 500,
+  "light_pool_limit": 1000,
   "active_pool_limit": 40,
   "dex_allowlist": [
     "pumpfun-amm",
@@ -277,6 +292,10 @@
   "helius_transactions_fallback_signatures": true,
   "helius_rpc_timeout_seconds": 30,
   "helius_transactions_timeout_seconds": 25,
+  "helius_rpc_max_retries": 2,
+  "helius_rpc_retry_base_seconds": 0.75,
+  "helius_activity_probe_enabled": true,
+  "helius_activity_probe_signature_limit": 5,
   "helius_transactions_limit": 50,
   "helius_transactions_pages": 4,
   "helius_probe_enabled": true,
@@ -305,12 +324,21 @@
   "alert_history_max_tokens": 40,
   "alert_history_max_alerts": 160,
   "alert_history_max_alerts_per_token": 2,
-  "state_market_retention_hours": 96,
+  "registry_retention_hours": 720,
+  "registry_refresh_max_tokens": 1000,
+  "state_market_retention_hours": 720,
   "caught_market_refresh_enabled": true,
   "caught_market_refresh_max_tokens": 80,
   "caught_market_refresh_ttl_minutes": 50,
-  "state_pool_retention_hours": 168,
+  "state_pool_retention_hours": 720,
+  "state_swap_buffer_retention_hours": 24,
+  "state_swap_buffer_max_swaps": 900,
   "state_enrichment_cache_retention_hours": 72,
+  "scan_health_min_scanned_pools": 5,
+  "scan_health_max_failed_ratio": 0.25,
+  "scan_health_max_truncated_ratio": 0.8,
+  "scan_health_max_zero_parse_ratio": 0.25,
+  "scan_health_reject_unhealthy_snapshot": true,
   "wallet_cache_keep_classes": [
     "fresh",
     "freshish",

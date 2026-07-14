@@ -21,6 +21,7 @@ on:
       - "config.example.json"
       - "config.json"
       - "requirements.txt"
+      - "tests/**"
       - "dashboard/**"
       - "data/**"
       - "NARRATIVE_PROTOCOL.md"
@@ -103,6 +104,13 @@ jobs:
           python -m pip install -r requirements.txt
           npm ci
           npm install -g gmgn-cli
+
+      - name: Validate scanner and dashboard
+        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
+        run: |
+          python -m unittest discover -s tests -v
+          python -m json.tool config.example.json > /dev/null
+          node --check dashboard/app.js
 
       - name: Deploy Convex backend
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
