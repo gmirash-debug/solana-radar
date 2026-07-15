@@ -120,7 +120,14 @@ BRIGHTDATA_API_KEY
 `GMGN_API_KEY` is optional but recommended for Pump.fun trending discovery.
 `BRIGHTDATA_API_KEY` can be empty if social enrichment should be disabled.
 
-Optional Convex backend:
+The production dashboard uses the versioned GitHub Pages snapshot directly.
+This is intentional: the report, market history, and alert history already have
+one source of truth in Git, while the Cloudflare worker writes token deletions
+back to the same repository. The experimental Convex code remains in `convex/`
+for future server-side features, but it is not part of the production read path
+or hourly scanner job.
+
+Optional Convex development setup:
 
 ```bash
 # GitHub Actions variable, public client/backend URL
@@ -131,16 +138,13 @@ CONVEX_DEPLOY_KEY=...
 CONVEX_INGEST_SECRET=...
 ```
 
-When `CONVEX_URL` and `CONVEX_INGEST_SECRET` are present, each scan syncs the
-latest dashboard snapshot, alert history, market snapshot, and deleted-token
-list to Convex. GitHub Pages then prefers Convex data and falls back to the
-static `data/` files if Convex is unavailable. `CONVEX_DEPLOY_KEY` lets the
-workflow deploy `convex/` backend functions automatically. The workflow also
-sets the Convex `CONVEX_INGEST_SECRET` environment variable from the GitHub
-secret before deploying.
+These variables are only used when running or deploying Convex manually. The
+GitHub Actions production workflow does not send the large scanner snapshot to
+Convex.
 
-For the Cloudflare delete worker, also set these worker vars/secrets if the
-dashboard should sync Delete/Restore actions to Convex immediately:
+The Cloudflare delete worker writes Delete/Restore actions to GitHub without
+Convex. Its Convex variables are optional and should only be set for backend
+experiments:
 
 ```bash
 CONVEX_URL=https://your-deployment.convex.cloud
