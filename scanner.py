@@ -628,7 +628,7 @@ def fetch_gmgn_trending_token_addresses(config):
 def fetch_solana_tracker_universe(http, config):
     if not config.get("solana_tracker_enabled", True):
         return {}
-    api_key = os.environ.get("SOLANA_TRACKER_API_KEY")
+    api_key = None if config.get("_solana_tracker_auth_failed") else os.environ.get("SOLANA_TRACKER_API_KEY")
     if not api_key:
         return {}
 
@@ -655,7 +655,11 @@ def fetch_solana_tracker_universe(http, config):
         try:
             data = http.get_json("https://data.solanatracker.io/search", params=params, headers=headers)
         except Exception as exc:
-            print(f"warn: solana_tracker search failed: {exc}", file=sys.stderr)
+            message = str(exc)
+            config["_solana_tracker_error"] = message
+            if any(marker in message for marker in ("401", "403", "Forbidden", "Unauthorized")):
+                config["_solana_tracker_auth_failed"] = True
+            print(f"warn: solana_tracker search failed: {message}", file=sys.stderr)
             break
         for item in data.get("data", []) or []:
             pool = solana_tracker_pool_from_item(item)
@@ -960,7 +964,12 @@ def pool_last_scanned_at(state, pool):
     if not isinstance(pools_state, dict):
         return 0
     entry = pools_state.get(pool.pool_address) or {}
-    return parse_timestamp(entry.get("last_scanned_at"))
+    return max(
+        parse_timestamp(entry.get("last_scanned_at")),
+        parse_timestamp(entry.get("last_activity_probe_at")),
+        parse_timestamp(entry.get("helius_latest_time")),
+        parse_timestamp(entry.get("latest_time")),
+    )
 
 
 def select_scan_targets(universe, state, config):
@@ -3578,9 +3587,13 @@ def select_buy_swaps_for_classification(candidates, config, budget_limit):
     return ordered[:budget_limit]
 
 
-def classify_buy_swaps(rpc, swaps, config, state, classification_budget):
+def buy_swap_candidates(swaps, config):
     min_sol = float(config["classify_buy_min_sol"])
-    candidates = [swap for swap in swaps if swap.get("kind") == "buy" and swap.get("sol_amount", 0.0) >= min_sol]
+    return [swap for swap in swaps if swap.get("kind") == "buy" and swap.get("sol_amount", 0.0) >= min_sol]
+
+
+def classify_buy_swaps(rpc, swaps, config, state, classification_budget):
+    candidates = buy_swap_candidates(swaps, config)
     per_pool_limit = int(config.get("max_wallet_classifications_per_pool", classification_budget["remaining"]))
     budget_limit = min(classification_budget["remaining"], per_pool_limit)
     selected = select_buy_swaps_for_classification(candidates, config, budget_limit)
@@ -3785,6 +3798,7 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
             },
         }
     preclassified = False
+    classify_wallets = bool(config.get("classic_alerts_enabled", True))
     swaps = []
     parse_errors = 0
     events = []
@@ -3796,15 +3810,21 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
             probe_txs, probe_fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="probe")
             update_pool_transaction_state(pool_state, pool, probe_txs)
             probe_swaps, probe_parse_errors = parse_helius_swaps(probe_txs, pool)
-            probe_config = probe_classification_config(config)
-            probe_events, probe_candidate_buys, probe_classification_errors = classify_buy_swaps(
-                rpc,
-                probe_swaps,
-                probe_config,
-                state,
-                classification_budget,
-            )
-            probe_alerts = build_alerts(pool, probe_events, config)
+            if classify_wallets:
+                probe_config = probe_classification_config(config)
+                probe_events, probe_candidate_buys, probe_classification_errors = classify_buy_swaps(
+                    rpc,
+                    probe_swaps,
+                    probe_config,
+                    state,
+                    classification_budget,
+                )
+                probe_alerts = build_alerts(pool, probe_events, config)
+            else:
+                probe_events = []
+                probe_candidate_buys = len(buy_swap_candidates(probe_swaps, config))
+                probe_classification_errors = 0
+                probe_alerts = []
             deepen, deep_reason = should_deep_scan(
                 pool,
                 config,
@@ -3843,14 +3863,19 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
     update_pool_transaction_state(pool_state, pool, txs)
     if not preclassified:
         swaps, parse_errors = parse_helius_swaps(txs, pool)
-        classified_events, candidate_buys, classification_errors = classify_buy_swaps(
-            rpc,
-            swaps,
-            config,
-            state,
-            classification_budget,
-        )
-        events = merge_events(seed_events, classified_events)
+        if classify_wallets:
+            classified_events, candidate_buys, classification_errors = classify_buy_swaps(
+                rpc,
+                swaps,
+                config,
+                state,
+                classification_budget,
+            )
+            events = merge_events(seed_events, classified_events)
+        else:
+            candidate_buys = len(buy_swap_candidates(swaps, config))
+            classification_errors = 0
+            events = []
     wave_swaps = merge_reactivation_wave_swaps(pool_state, swaps, config)
     sticky_swaps = merge_sticky_accumulation_swaps(pool_state, swaps, config)
     classic_alerts = build_alerts(pool, events, config) if config.get("classic_alerts_enabled", True) else []
@@ -4189,7 +4214,7 @@ def filter_reactivation_by_ath(http, state, pools, config, observed_at):
     delay = float(config.get("ath_request_delay_seconds", 0.25))
     fetch_limit = int(config.get("ath_filter_max_tokens_per_scan", config.get("ath_max_tokens_per_scan", 25)))
     require_trusted = bool(config.get("ath_require_trusted", True))
-    api_key = os.environ.get("SOLANA_TRACKER_API_KEY")
+    api_key = None if config.get("_solana_tracker_auth_failed") else os.environ.get("SOLANA_TRACKER_API_KEY")
     fetched = 0
     rate_limited = False
     kept = []
@@ -4278,6 +4303,20 @@ def enrich_market_ath(http, state, pools, alerts, config, observed_at):
     if not config.get("ath_enabled", True):
         return
     market = state.setdefault("market", {})
+    provider_stats = {
+        "checked_at": observed_at,
+        "status": "ok",
+        "fetched": 0,
+    }
+    if config.get("_solana_tracker_auth_failed"):
+        provider_stats.update(
+            {
+                "status": "auth_failed",
+                "error": config.get("_solana_tracker_error") or "Solana Tracker authentication failed",
+            }
+        )
+        state.setdefault("maintenance", {})["solana_tracker_ath"] = provider_stats
+        return
     pool_tokens = [pool.token_address for pool in pools if pool.token_address]
     alert_tokens = [(alert.get("pool") or {}).get("token_address") for alert in alerts]
     recent_tokens = recent_alert_token_addresses(int(config.get("ath_recent_alert_limit", 100)))
@@ -4301,10 +4340,11 @@ def enrich_market_ath(http, state, pools, alerts, config, observed_at):
             entry["ath_status"] = "missing_api_key"
             entry["ath_error"] = "missing_solana_tracker_api_key"
             entry["ath_error_checked_at"] = now
+        provider_stats.update({"status": "missing_api_key", "error": "missing_solana_tracker_api_key"})
+        state.setdefault("maintenance", {})["solana_tracker_ath"] = provider_stats
         return
     for token in candidates:
         entry = market.setdefault(token, {"token_address": token})
-        is_required = token in required_tokens
         has_trusted_ath = entry.get("ath_source") in ("solana_tracker", "ohlcv_high") and entry.get("ath_mcap_usd")
         if has_trusted_ath and not entry.get("ath_status"):
             entry["ath_status"] = "ready"
@@ -4312,16 +4352,26 @@ def enrich_market_ath(http, state, pools, alerts, config, observed_at):
             continue
         if entry.get("ath_error_checked_at") and now - int(entry.get("ath_error_checked_at", 0)) < error_ttl:
             continue
-        if not is_required and fetched >= max_tokens:
+        if fetched >= max_tokens:
             break
         try:
             ath = fetch_solana_tracker_ath(http, token)
         except Exception as exc:
-            print(f"warn: solana_tracker ath failed for {token}: {exc}", file=sys.stderr)
-            entry["ath_error"] = str(exc)
+            message = str(exc)
+            print(f"warn: solana_tracker ath failed for {token}: {message}", file=sys.stderr)
+            entry["ath_error"] = message
             entry["ath_error_checked_at"] = now
             entry["ath_status"] = "error"
             fetched += 1
+            if any(marker in message for marker in ("401", "403", "Forbidden", "Unauthorized")):
+                config["_solana_tracker_auth_failed"] = True
+                config["_solana_tracker_error"] = message
+                provider_stats.update({"status": "auth_failed", "error": message})
+                break
+            if "429" in message or "Too Many" in message:
+                config["_solana_tracker_error"] = message
+                provider_stats.update({"status": "rate_limited", "error": message})
+                break
             continue
         fetched += 1
         if ath and not ath.get("error"):
@@ -4336,6 +4386,8 @@ def enrich_market_ath(http, state, pools, alerts, config, observed_at):
             entry["ath_error_checked_at"] = now
             entry["ath_status"] = "error"
         time.sleep(delay)
+    provider_stats["fetched"] = fetched
+    state.setdefault("maintenance", {})["solana_tracker_ath"] = provider_stats
 
 
 def record_market_observations(state, pools, observed_at):
@@ -4799,6 +4851,9 @@ def build_scan_health(summaries, lane_stats, config):
         if classification_errors:
             status = "degraded"
             reasons.append(f"{classification_errors} wallet classifications failed")
+        if config.get("_solana_tracker_error"):
+            status = "degraded"
+            reasons.append("Solana Tracker unavailable; cached ATH only")
 
     return {
         "status": status,
@@ -4816,6 +4871,7 @@ def build_scan_health(summaries, lane_stats, config):
         "candidate_buys": candidate_buys,
         "classified_buys": classified_buys,
         "classification_errors": classification_errors,
+        "solana_tracker_status": "error" if config.get("_solana_tracker_error") else "ok",
     }
 
 
@@ -4857,6 +4913,7 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "rpc_calls": dict(rpc_calls),
             "scan_health": config.get("_scan_health", {}),
             "discovery": config.get("_discovery_stats", {}),
+            "solana_tracker_ath": (state.get("maintenance") or {}).get("solana_tracker_ath", {}),
             "caught_market_refresh": (state.get("maintenance") or {}).get("caught_market_refresh", {}),
             "deleted_tokens": {
                 "tokens": len(deleted_tokens["tokens"]),
@@ -5099,6 +5156,9 @@ def run_once(config, lane_name=None):
         discovery_config = discovery_config_for_lanes(config, lane_list)
         print("Building shared market discovery universe...", flush=True)
         discovered_universe = discover_market_pools(http, discovery_config)
+        for key in ("_solana_tracker_error", "_solana_tracker_auth_failed"):
+            if discovery_config.get(key):
+                config[key] = discovery_config[key]
         registry_universe, registry_stats = refresh_known_market_pools(http, state, discovery_config)
         shared_universe = merge_market_pools(registry_universe, discovered_universe)
         shared_universe = filter_universe_pools(shared_universe, discovery_config)
@@ -5127,6 +5187,9 @@ def run_once(config, lane_name=None):
             base_universe=shared_universe,
         )
         all_alerts.extend(lane_alerts)
+        for key in ("_solana_tracker_error", "_solana_tracker_auth_failed"):
+            if lane_config.get(key):
+                config[key] = lane_config[key]
         summaries.extend(lane_summaries)
         universe.extend(lane_universe)
         lane_stats[lane_config.get("lane") or lane_config.get("mode") or "scan"] = {
@@ -5163,6 +5226,7 @@ def run_once(config, lane_name=None):
     record_alert_observations(state, all_alerts)
     refreshed_caught_pools = refresh_caught_market_observations(http, state, all_alerts, config, generated_at)
     enrich_market_ath(http, state, [*universe, *refreshed_caught_pools], all_alerts, config, generated_at)
+    config["_scan_health"] = build_scan_health(summaries, lane_stats, config)
     prune_wallet_cache(state, config)
     compact_state(state, universe, all_alerts, config, generated_at)
     save_json(STATE_PATH, state, compact=bool(config.get("state_json_compact", True)))

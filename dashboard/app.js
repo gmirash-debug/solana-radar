@@ -1446,6 +1446,7 @@ function renderStatus() {
   const healthStatus = scanHealth.status || "unknown";
   const healthTone = healthStatus === "healthy" ? "good" : healthStatus === "degraded" ? "warn" : "bad";
   const healthReason = (scanHealth.reasons || []).join("; ") || "No scanner health diagnostics in this report";
+  const athProvider = report.stats?.solana_tracker_ath || {};
   if (els.showHiddenInput) els.showHiddenInput.checked = state.showHidden;
   if (els.tierFilter) els.tierFilter.value = state.tier;
   const reportLanes = (report.lanes_scanned || []).filter((name) => FILTER_ORDER.includes(name) && name !== "legacy");
@@ -1459,6 +1460,7 @@ function renderStatus() {
     `<span class="status-pill"><span class="dot ${running ? "warn" : ""}"></span>${running ? "scan running" : "idle"}</span>`,
     `<span class="status-pill freshness-${freshness.tone}"><span class="dot ${freshness.tone === "good" ? "" : freshness.tone}"></span>${esc(freshness.label)}</span>`,
     `<span class="status-pill freshness-${healthTone}" title="${esc(healthReason)}"><span class="dot ${healthTone === "good" ? "" : healthTone}"></span>scan ${esc(healthStatus)}</span>`,
+    athProvider.status && athProvider.status !== "ok" ? `<span class="status-pill freshness-bad" title="${esc(athProvider.error || "Solana Tracker unavailable")}">ATH source ${esc(athProvider.status)}</span>` : "",
     `<span class="status-pill">lane ${esc(laneText)}</span>`,
     state.hiddenTokenKeys.size ? `<span class="status-pill">${esc(state.hiddenTokenKeys.size)} deleted locally</span>` : "",
     state.serverDeletedTokenKeys.size || state.serverDeletedPoolKeys.size ? `<span class="status-pill">${esc(state.serverDeletedTokenKeys.size + state.serverDeletedPoolKeys.size)} scanner-deleted</span>` : "",

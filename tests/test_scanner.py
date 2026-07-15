@@ -147,6 +147,16 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertIn("concentrated buyer flow", penalties)
         self.assertEqual(quality["top_buyer_share"], 0.7)
 
+    def test_sticky_lane_can_count_buys_without_wallet_classification(self):
+        swaps = [
+            {"kind": "buy", "sol_amount": 0.09},
+            {"kind": "buy", "sol_amount": 0.1},
+            {"kind": "buy", "sol_amount": 2},
+            {"kind": "sell", "sol_amount": 3},
+        ]
+        candidates = scanner.buy_swap_candidates(swaps, {"classify_buy_min_sol": 0.1})
+        self.assertEqual(len(candidates), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
