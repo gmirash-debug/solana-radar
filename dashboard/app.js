@@ -69,6 +69,8 @@ const state = {
   selectedNarrative: null,
   selectedFilter: null,
   selectedAlertId: null,
+  detailTab: "overview",
+  mobileDetailOpen: false,
   showHidden: false,
   hiddenTokenKeys: loadHiddenTokenKeys(),
   serverDeletedTokenKeys: new Set(),
@@ -92,6 +94,8 @@ const els = {
   laneFilter: document.querySelector("#laneFilter"),
   scoreInput: document.querySelector("#scoreInput"),
   showHiddenInput: document.querySelector("#showHiddenInput"),
+  filterToggle: document.querySelector("#filterToggle"),
+  filters: document.querySelector(".filters"),
   tabs: document.querySelectorAll(".tab"),
 };
 
@@ -496,6 +500,14 @@ function normalizeFilterName(name) {
 
 function chip(text, tone = "") {
   return `<span class="chip ${tone}">${esc(text)}</span>`;
+}
+
+function tokenAvatar(token, compact = false) {
+  const label = String(token?.symbol || token?.name || "?").replace(/[^a-z0-9]/gi, "").slice(0, 2).toUpperCase() || "?";
+  const image = token?.imageUrl
+    ? `<img src="${esc(token.imageUrl)}" alt="" loading="lazy" onerror="this.remove()">`
+    : "";
+  return `<span class="token-avatar${compact ? " is-compact" : ""}" aria-hidden="true"><span>${esc(label)}</span>${image}</span>`;
 }
 
 function tokenKey(value) {
@@ -1045,6 +1057,7 @@ function buildTokenSignals() {
     const marketMeta = marketMetaForToken(token.key);
     const latestPool = mergeMarketMeta(currentPools.get(token.key) || last.pool || first.pool || {}, marketMeta);
     token.tokenIntel = [...token.alerts].reverse().find((alert) => alert.token_intel)?.token_intel || null;
+    token.imageUrl = token.tokenIntel?.dex?.image || "";
     const observations = observationsByToken.get(token.key) || [];
     const latestObservation = observations.reduce((best, item) => {
       const itemTime = new Date(item.at || 0).getTime();
@@ -1390,7 +1403,9 @@ async function loadStaticExtras(reportGeneratedAt) {
 async function loadData() {
   let payload;
   state.staticMode = false;
-  const staticHost = window.location.hostname.endsWith("github.io") || window.location.protocol === "file:";
+  const staticHost = window.location.hostname.endsWith("github.io")
+    || window.location.protocol === "file:"
+    || ["127.0.0.1", "localhost"].includes(window.location.hostname);
   if (convexUrl()) {
     try {
       payload = await loadConvexData();
@@ -1450,7 +1465,7 @@ function renderStatus() {
   if (els.showHiddenInput) els.showHiddenInput.checked = state.showHidden;
   if (els.tierFilter) els.tierFilter.value = state.tier;
   const reportLanes = (report.lanes_scanned || []).filter((name) => FILTER_ORDER.includes(name) && name !== "legacy");
-  const laneText = status.lane || status.mode || reportLanes.join(", ") || report.mode || "-";
+  const laneText = status.lane || status.mode || (reportLanes.length > 1 ? `${reportLanes.length} lanes` : reportLanes[0]) || report.mode || "-";
   els.subtitle.textContent = report.generated_at
     ? `Latest scan ${dateLabel(report.generated_at)} - ${report.profile || report.lane || report.mode || "unknown"}`
     : "No scan report yet";
@@ -1462,14 +1477,9 @@ function renderStatus() {
     `<span class="status-pill freshness-${healthTone}" title="${esc(healthReason)}"><span class="dot ${healthTone === "good" ? "" : healthTone}"></span>scan ${esc(healthStatus)}</span>`,
     athProvider.status && athProvider.status !== "ok" ? `<span class="status-pill freshness-bad" title="${esc(athProvider.error || "Solana Tracker unavailable")}">ATH source ${esc(athProvider.status)}</span>` : "",
     `<span class="status-pill">lane ${esc(laneText)}</span>`,
-    state.hiddenTokenKeys.size ? `<span class="status-pill">${esc(state.hiddenTokenKeys.size)} deleted locally</span>` : "",
-    state.serverDeletedTokenKeys.size || state.serverDeletedPoolKeys.size ? `<span class="status-pill">${esc(state.serverDeletedTokenKeys.size + state.serverDeletedPoolKeys.size)} scanner-deleted</span>` : "",
     state.staticMode && state.hiddenTokenKeys.size ? `<button class="status-action" id="syncDeleted" type="button">Sync deleted</button>` : "",
-    state.staticMode ? `<span class="status-pill">auto via Cloudflare + GitHub Actions</span>` : "",
     state.staticExtrasLoadingFor === report.generated_at ? `<span class="status-pill freshness-warn">loading history</span>` : "",
-    state.staticExtrasLoadedFor === report.generated_at ? `<span class="status-pill"><span class="dot"></span>history loaded</span>` : "",
     status.next_scan_at ? `<span class="status-pill">next auto ${esc(dateLabel(status.next_scan_at))}</span>` : "",
-    status.returncode === 0 ? `<span class="status-pill"><span class="dot"></span>last scan ok</span>` : "",
   ].filter(Boolean).join("");
   document.querySelector("#syncDeleted")?.addEventListener("click", () => {
     syncLocalDeletedTokens().catch((error) => {
@@ -1483,13 +1493,12 @@ function renderMetrics(tokens) {
   const stats = report.stats || {};
   const baseTokens = buildTokenSignals().filter(tokenMatchesBaseFilters);
   const tierCount = (tier) => baseTokens.filter((token) => token.actionTier === tier).length;
-  const lateNoise = tierCount("late_chase") + tierCount("noise");
   els.metrics.innerHTML = [
     metric("Actionable", tierCount("actionable")),
     metric("Watch", tierCount("watch")),
-    metric("Late/noise", lateNoise),
+    metric("Universe", stats.universe_pools ?? 0),
     metric("Scanned pools", stats.scanned_pools ?? 0),
-    metric("Report age", reportFreshness(report.generated_at).label),
+    metric("Data age", reportFreshness(report.generated_at).label),
   ].join("");
 }
 
@@ -1504,20 +1513,23 @@ function renderTokenRow(token) {
   return `
     <article class="token-row${selected}${hidden}" data-token-key="${esc(token.key)}">
       <div class="token-main">
-        <div class="symbol-line">
-          <span class="symbol">${esc(token.symbol)}</span>
-          <span class="muted">${esc(token.name)}</span>
-          ${token.hidden ? chip("deleted", "warn") : ""}
-        </div>
-        <div class="meta">
-          <span>first ${esc(dateLabel(token.firstSignalAt))}</span>
-          <span>age ${esc(durationLabel(token.tokenAgeHours))}</span>
-          <span>caught ${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)} mcap</span>
-          <span>${esc(athText)}</span>
-          <span>${money(token.liquidityUsd)} liq</span>
-          <span>${token.alertCount} updates</span>
-          ${token.currentScanAlertCount ? `<span>${token.currentScanAlertCount} latest scan</span>` : ""}
-          <span>${token.uniqueWallets} wallets</span>
+        <div class="token-row-heading">
+          ${tokenAvatar(token, true)}
+          <div>
+            <div class="symbol-line">
+              <span class="symbol">${esc(token.symbol)}</span>
+              <span class="muted">${esc(token.name)}</span>
+              ${token.hidden ? chip("deleted", "warn") : ""}
+            </div>
+            <div class="meta">
+              <span>caught ${esc(dateLabel(token.firstSignalAt))}</span>
+              <span>${esc(durationLabel(token.tokenAgeHours))} old</span>
+              <span>${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)} caught mcap</span>
+              <span>${esc(athText)}</span>
+              <span>${money(token.liquidityUsd)} liq</span>
+              <span>${token.uniqueWallets} wallets</span>
+            </div>
+          </div>
         </div>
         <div class="chips">
           ${tierChip(token.actionTier)}
@@ -2061,8 +2073,97 @@ function renderTimeline(token) {
   `;
 }
 
+function detailTabButton(id, label, count = null) {
+  const selected = state.detailTab === id;
+  const suffix = count === null ? "" : `<span>${esc(count)}</span>`;
+  return `<button class="detail-tab${selected ? " is-active" : ""}" type="button" role="tab" aria-selected="${selected}" data-detail-tab="${esc(id)}">${esc(label)}${suffix}</button>`;
+}
+
+function latestTokenSocial(token) {
+  return [...token.alerts].reverse().map((alert) => alert.social).find(Boolean) || {};
+}
+
+function renderOverviewTab(token) {
+  return `
+    <section class="detail-block">
+      <div class="detail-block-title">Decision</div>
+      <div class="kv"><span>Why caught</span><span>${esc(renderScannerReason(token))}</span></div>
+      ${renderWaveLine(token)}
+      <div class="kv"><span>Market phase</span><span>${renderMarketPhaseLine(token)}</span></div>
+      <div class="kv"><span>Risk flags</span><span>${renderRiskFlags(token)}</span></div>
+      <div class="kv"><span>Token age</span><span>${esc(durationLabel(token.tokenAgeHours))}${token.tokenCreatedAt ? ` / launched ${esc(dateLabel(token.tokenCreatedAt))}` : ""}</span></div>
+      ${renderLaunchContext(token)}
+    </section>
+    <section class="detail-block">
+      <div class="detail-block-title">Narrative</div>
+      <div class="kv"><span>Primary</span><span>${renderNarrativeLine(token)}</span></div>
+      <div class="kv"><span>Thesis</span><span>${renderLoreProof(token)}</span></div>
+      <div class="kv"><span>Proof basis</span><span>${renderEvidenceLine(token)}</span></div>
+    </section>
+  `;
+}
+
+function renderWalletsTab(token) {
+  return `
+    <section class="detail-block">
+      <div class="detail-block-title">Wallet signal</div>
+      <div class="kv"><span>Signal tier</span><span>${renderSignalTier(token)}</span></div>
+      <div class="kv"><span>Wallet setup</span><span>${renderWalletCluster(token)}</span></div>
+      <div class="kv"><span>Wallet PnL</span><span>${renderWalletSummary(token)}</span></div>
+      ${renderTopWalletPreview(token)}
+    </section>
+    <section class="detail-block">
+      <div class="detail-block-title">Noticed wallets</div>
+      ${renderWalletRows(token)}
+    </section>
+  `;
+}
+
+function renderSocialTab(token) {
+  const social = latestTokenSocial(token);
+  const callers = tokenCallerGraph(token);
+  const failures = Array.isArray(social.failures) ? social.failures.length : 0;
+  return `
+    <section class="detail-block">
+      <div class="detail-block-title">Social pulse</div>
+      <div class="social-metrics">
+        ${detailMetric("Status", socialLabel(token.socialHeat, token.socialReason), failures ? `${failures} provider errors` : "latest social pass")}
+        ${detailMetric("X posts", compact(social.x_posts || social.results?.length || 0), `${compact(social.unique_authors || 0)} unique authors`)}
+        ${detailMetric("Callers", compact(callers.length), callers.length ? "token-matched accounts" : "none resolved")}
+      </div>
+      <div class="kv"><span>Primary narrative</span><span>${renderNarrativeLine(token)}</span></div>
+    </section>
+    <section class="detail-block">
+      <div class="detail-block-title">Caller network</div>
+      ${renderCallerRows(token)}
+    </section>
+  `;
+}
+
+function renderEvidenceTab(token, gmgnUrl, sourceLinks) {
+  return `
+    <section class="detail-block">
+      <div class="detail-block-title">Signal evidence</div>
+      <div class="kv"><span>Quality</span><span>${renderSignalQuality(token)}</span></div>
+      <div class="kv"><span>Filter</span><span>${renderFilterLine(token)}</span></div>
+      <div class="kv"><span>Risk flags</span><span>${renderRiskFlags(token)}</span></div>
+      ${renderWaveLine(token)}
+    </section>
+    <section class="detail-block">
+      <div class="detail-block-title">Signal timeline</div>
+      ${renderTimeline(token)}
+    </section>
+    <section class="detail-block">
+      <div class="detail-block-title">Sources</div>
+      <div class="kv"><span>Links</span><span>${sourceLinks || "-"}</span></div>
+      <div class="kv"><span>Token</span><span><code>${esc(token.token_address)}</code></span></div>
+      <div class="kv"><span>Terminal</span><span>${gmgnUrl ? `<a href="${esc(gmgnUrl)}" target="_blank" rel="noreferrer">Open GMGN</a>` : `<code>${esc(token.pool_address)}</code>`}</span></div>
+    </section>
+  `;
+}
+
 function renderTokenDetail(token) {
-  if (!token) return `<aside class="detail"><h2>No token selected</h2></aside>`;
+  if (!token) return `<aside class="detail token-detail"><div class="empty compact">No token selected.</div></aside>`;
   const gmgnUrl = gmgnTokenUrl(token);
   const phase = marketPhase(token);
   const athValue = token.athMcapUsd
@@ -2076,61 +2177,62 @@ function renderTokenDetail(token) {
     token.scanMcapAt ? dateLabel(token.scanMcapAt) : "",
   ].filter(Boolean).join(" / ");
   const sourceLinks = renderTokenSourceLinks(token);
+  const tabContent = state.detailTab === "wallets"
+    ? renderWalletsTab(token)
+    : state.detailTab === "social"
+      ? renderSocialTab(token)
+      : state.detailTab === "evidence"
+        ? renderEvidenceTab(token, gmgnUrl, sourceLinks)
+        : renderOverviewTab(token);
   return `
     <aside class="detail token-detail">
+      <button class="detail-back" type="button">Back to tokens</button>
       <div class="detail-head">
-        <div>
-          <h2>${esc(token.symbol)} <span class="muted">${esc(token.name)}</span>${token.hidden ? ` ${chip("deleted", "warn")}` : ""}</h2>
-          <div class="detail-head-chips">
-            ${tierChip(token.actionTier)}
-            ${chip(filterMeta(token.currentFilter).label)}
-            ${token.hasFilterDrift ? chip(`caught ${filterMeta(token.caughtFilter).label}`, "warn") : ""}
-            ${phase ? chip(phase.label, phase.tone) : ""}
+        <div class="detail-identity">
+          ${tokenAvatar(token)}
+          <div>
+            <h2>${esc(token.symbol)} <span class="muted">${esc(token.name)}</span>${token.hidden ? ` ${chip("deleted", "warn")}` : ""}</h2>
+            <div class="detail-head-chips">
+              ${tierChip(token.actionTier)}
+              ${chip(filterMeta(token.currentFilter).label)}
+              ${token.hasFilterDrift ? chip(`caught ${filterMeta(token.caughtFilter).label}`, "warn") : ""}
+              ${phase ? chip(phase.label, phase.tone) : ""}
+            </div>
           </div>
         </div>
         <div class="detail-actions">
-          ${gmgnUrl ? `<a class="secondary-action detail-link" href="${esc(gmgnUrl)}" target="_blank" rel="noreferrer">GMGN</a>` : ""}
+          ${gmgnUrl ? `<a class="secondary-action detail-link" href="${esc(gmgnUrl)}" target="_blank" rel="noreferrer">Open GMGN</a>` : ""}
           ${renderHiddenAction(token)}
         </div>
       </div>
       <div class="decision-grid">
         ${detailMetric("Caught", `${esc(dateLabel(token.firstSignalAt))} / ${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)}`, `${pct(token.profitPct)} since caught`, "", pClass(token.profitPct))}
-        ${detailMetric("Now", `${moneyMaybe(token.scanMcapUsd || token.currentMcap)} mcap`, marketNowSub)}
-        ${detailMetric("ATH", athValue, athSub, token.athMcapUsd ? "" : "bad")}
-        ${detailMetric("Signal", sol(token.totalSuspiciousSol), `score ${esc(token.maxScore)} / ${esc(token.uniqueWallets)} wallets`)}
+        ${detailMetric("Market now", `${moneyMaybe(token.scanMcapUsd || token.currentMcap)} mcap`, marketNowSub)}
+        ${detailMetric("Solana Tracker ATH", athValue, athSub, token.athMcapUsd ? "" : "bad")}
+        ${detailMetric("Noticed flow", sol(token.totalSuspiciousSol), `score ${esc(token.maxScore)} / ${esc(token.uniqueWallets)} wallets`)}
       </div>
-      <section class="detail-block">
-        <div class="detail-block-title">Decision</div>
-        <div class="kv"><span>Why caught</span><span>${esc(renderScannerReason(token))}</span></div>
-        ${renderWaveLine(token)}
-        <div class="kv"><span>Risk flags</span><span>${renderRiskFlags(token)}</span></div>
-        <div class="kv"><span>Market phase</span><span>${renderMarketPhaseLine(token)}</span></div>
-        <div class="kv"><span>Token age</span><span>${esc(durationLabel(token.tokenAgeHours))}${token.tokenCreatedAt ? ` / launched ${esc(dateLabel(token.tokenCreatedAt))}` : ""}</span></div>
-      </section>
-      ${renderLaunchContext(token)}
-      <section class="detail-block">
-        <div class="detail-block-title">Evidence</div>
-        <div class="kv"><span>Signal tier</span><span>${renderSignalTier(token)}</span></div>
-        <div class="kv"><span>Wallet setup</span><span>${renderWalletCluster(token)}</span></div>
-        <div class="kv"><span>Wallet PnL</span><span>${renderWalletSummary(token)}</span></div>
-        ${renderTopWalletPreview(token)}
-      </section>
-      <section class="detail-block">
-        <div class="detail-block-title">Narrative</div>
-        <div class="kv"><span>Primary</span><span>${renderNarrativeLine(token)}</span></div>
-        <div class="kv"><span>Thesis</span><span>${renderLoreProof(token)}</span></div>
-        <div class="kv"><span>Proof basis</span><span>${renderEvidenceLine(token)}</span></div>
-      </section>
-      ${renderDetailSection("Caller Network", `${tokenCallerGraph(token).length} callers`, renderCallerRows(token))}
-      ${renderDetailSection("Wallet table", `${token.wallets.length} wallets`, renderWalletRows(token))}
-      ${renderDetailSection("Signal Timeline", `${token.alertCount} updates`, renderTimeline(token))}
-      ${renderDetailSection("Sources and terminal", token.token_address ? short(token.token_address) : "", `
-        <div class="kv"><span>Sources</span><span>${sourceLinks}</span></div>
-        <div class="kv"><span>Token</span><span><code>${esc(token.token_address)}</code></span></div>
-        <div class="kv"><span>Terminal</span><span>${gmgnUrl ? `<a href="${esc(gmgnUrl)}" target="_blank" rel="noreferrer">Open GMGN</a>` : `<code>${esc(token.pool_address)}</code>`}</span></div>
-      `)}
+      <div class="detail-tabs" role="tablist" aria-label="Token research sections">
+        ${detailTabButton("overview", "Overview")}
+        ${detailTabButton("wallets", "Wallets", token.uniqueWallets)}
+        ${detailTabButton("social", "Social", tokenCallerGraph(token).length)}
+        ${detailTabButton("evidence", "Evidence", token.alertCount)}
+      </div>
+      <div class="detail-tab-panel" role="tabpanel">${tabContent}</div>
     </aside>
   `;
+}
+
+function bindDetailControls() {
+  document.querySelectorAll(".detail-tab").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.detailTab = button.dataset.detailTab || "overview";
+      render();
+    });
+  });
+  document.querySelector(".detail-back")?.addEventListener("click", () => {
+    state.mobileDetailOpen = false;
+    render();
+  });
 }
 
 function renderTokens() {
@@ -2151,6 +2253,7 @@ function renderTokens() {
   document.querySelectorAll(".token-row").forEach((row) => {
     row.addEventListener("click", () => {
       state.selectedTokenKey = row.dataset.tokenKey;
+      state.detailTab = "overview";
       render();
     });
   });
@@ -2158,6 +2261,7 @@ function renderTokens() {
     link.addEventListener("click", (event) => event.stopPropagation());
   });
   bindTokenHideActions();
+  bindDetailControls();
 }
 
 function narrativeGroups(tokens) {
@@ -2302,6 +2406,7 @@ function renderNarratives() {
   document.querySelectorAll(".narrative-token-row").forEach((row) => {
     row.addEventListener("click", () => {
       state.selectedTokenKey = row.dataset.tokenKey;
+      state.detailTab = "overview";
       state.tab = "tokens";
       render();
     });
@@ -2416,11 +2521,14 @@ function renderFilterTokenRows(group) {
     return `
       <button class="filter-token-row${selected}${hidden}" type="button" data-token-key="${esc(token.key)}">
         <span class="filter-token-name">
-          <span class="filter-token-title">
-            <strong>${esc(token.symbol)}</strong>
-            ${tierChip(token.actionTier)}
+          ${tokenAvatar(token, true)}
+          <span class="filter-token-copy">
+            <span class="filter-token-title">
+              <strong>${esc(token.symbol)}</strong>
+              ${tierChip(token.actionTier)}
+            </span>
+            <small>${esc(tokenFilterSubtitle(token) || token.name || token.narrative.primary || "-")}</small>
           </span>
-          <small>${esc(tokenFilterSubtitle(token) || token.name || token.narrative.primary || "-")}</small>
         </span>
         <span class="filter-token-value">
           <strong>${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)}</strong>
@@ -2445,6 +2553,7 @@ function renderFilterTokenPanel(group) {
     <section class="filter-token-panel">
       <div class="filter-panel-head">
         <div>
+          <span class="section-eyebrow">Active lane</span>
           <h2>${esc(group.meta.label)}</h2>
           <p>${esc(group.meta.criteria)}</p>
         </div>
@@ -2457,7 +2566,7 @@ function renderFilterTokenPanel(group) {
       </div>
       <div class="filter-panel-note">
         <span>${esc(group.meta.thesis)}</span>
-        <small>${esc(dateLabel(group.firstSignalAt))} -> ${esc(dateLabel(group.latestSignalAt))} / max score ${esc(group.maxScore)}</small>
+        <small>${esc(dateLabel(group.firstSignalAt))} -> ${esc(dateLabel(group.latestSignalAt))} / score ${esc(group.maxScore)}</small>
       </div>
       <div class="filter-token-head">
         <span>Token</span>
@@ -2485,24 +2594,25 @@ function renderFilters() {
   const token = selectedFilterToken(group);
   if (token) state.selectedTokenKey = token.key;
   els.content.innerHTML = `
-    <div class="filter-workspace">
+    <div class="filter-workspace${state.mobileDetailOpen ? " is-detail-open" : ""}">
       <section class="filter-master">
-        <div class="workspace-title">Scanner Filters</div>
+        <div class="workspace-title">Scanner lanes</div>
         <div class="filter-rail">
           ${groups.map((item) => `
-          <article class="filter-card${item.name === group.name ? " is-selected" : ""}" data-filter="${esc(item.name)}">
+          <button class="filter-card${item.name === group.name ? " is-selected" : ""}" type="button" data-filter="${esc(item.name)}">
             <div class="filter-card-head">
               <strong>${esc(item.meta.label)}</strong>
               <span>${esc(item.tokens.length)}</span>
             </div>
             <div class="filter-card-stats">
-              <span>${esc(item.alerts)} sig</span>
+              <span>${esc(item.alerts)} signals</span>
               <span>${esc(item.noticedWallets)} wallets</span>
               <span>${sol(item.totalSol)}</span>
               <span class="${pClass(item.bestPnl)}">${pct(item.bestPnl)}</span>
             </div>
+            <div class="filter-card-criteria">${esc(item.meta.criteria)}</div>
             <div class="filter-card-tiers">${compactTierSummary(item)}</div>
-          </article>
+          </button>
         `).join("")}
         </div>
       </section>
@@ -2513,6 +2623,7 @@ function renderFilters() {
   document.querySelectorAll(".filter-card").forEach((card) => {
     card.addEventListener("click", () => {
       state.selectedFilter = card.dataset.filter;
+      state.mobileDetailOpen = false;
       const nextGroup = groups.find((item) => item.name === state.selectedFilter);
       if (nextGroup && !nextGroup.tokens.some((token) => token.key === state.selectedTokenKey)) {
         state.selectedTokenKey = nextGroup.tokens[0]?.key || null;
@@ -2523,6 +2634,8 @@ function renderFilters() {
   document.querySelectorAll(".filter-token-row").forEach((row) => {
     row.addEventListener("click", () => {
       state.selectedTokenKey = row.dataset.tokenKey;
+      state.detailTab = "overview";
+      state.mobileDetailOpen = true;
       render();
     });
   });
@@ -2530,6 +2643,7 @@ function renderFilters() {
     link.addEventListener("click", (event) => event.stopPropagation());
   });
   bindTokenHideActions();
+  bindDetailControls();
 }
 
 function alertMatches(alert) {
@@ -2614,6 +2728,10 @@ async function runScan() {
 
 els.refresh.addEventListener("click", loadData);
 els.runScan.addEventListener("click", runScan);
+els.filterToggle?.addEventListener("click", () => {
+  const open = els.filters?.classList.toggle("is-open") || false;
+  els.filterToggle.setAttribute("aria-expanded", String(open));
+});
 els.searchInput.addEventListener("input", (event) => {
   state.query = event.target.value;
   render();
@@ -2629,6 +2747,7 @@ els.heatFilter.addEventListener("change", (event) => {
 });
 els.laneFilter.addEventListener("change", (event) => {
   state.lane = event.target.value;
+  state.mobileDetailOpen = false;
   render();
 });
 els.scoreInput.addEventListener("input", (event) => {
@@ -2645,6 +2764,7 @@ els.showHiddenInput.addEventListener("change", (event) => {
 els.tabs.forEach((tab) => {
   tab.addEventListener("click", () => {
     state.tab = tab.dataset.tab;
+    state.mobileDetailOpen = false;
     render();
   });
 });
