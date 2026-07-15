@@ -364,6 +364,7 @@ class HeliusRpc:
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
         self.calls = Counter()
+        self.retries = Counter()
         self.timeout_seconds = int(timeout_seconds)
         self.transactions_timeout_seconds = int(transactions_timeout_seconds)
         self.max_retries = max(0, int(max_retries))
@@ -384,9 +385,11 @@ class HeliusRpc:
             except requests.RequestException:
                 if attempt >= self.max_retries:
                     raise
+                self.retries[method] += 1
                 time.sleep(min(5.0, max(0.1, self.retry_base_seconds * (2**attempt))))
                 continue
             if response.status_code in retryable_statuses and attempt < self.max_retries:
+                self.retries[method] += 1
                 retry_after = to_float(response.headers.get("Retry-After"))
                 delay = retry_after or self.retry_base_seconds * (2**attempt)
                 time.sleep(min(5.0, max(0.1, delay)))
@@ -394,7 +397,17 @@ class HeliusRpc:
             response.raise_for_status()
             body = response.json()
             if body.get("error"):
-                raise RuntimeError(f"{method}: {body['error']}")
+                error = body["error"]
+                message = str(error.get("message") if isinstance(error, dict) else error)
+                code = error.get("code") if isinstance(error, dict) else None
+                retryable_error = code in (-32004, -32005, -32429) or any(
+                    marker in message.lower() for marker in ("rate limit", "timeout", "temporarily unavailable")
+                )
+                if retryable_error and attempt < self.max_retries:
+                    self.retries[method] += 1
+                    time.sleep(min(5.0, max(0.1, self.retry_base_seconds * (2**attempt))))
+                    continue
+                raise RuntimeError(f"{method}: {error}")
             return body.get("result")
         raise RuntimeError(f"{method}: retry budget exhausted")
 
@@ -430,7 +443,7 @@ class HeliusRpc:
             "encoding": "jsonParsed",
             "maxSupportedTransactionVersion": 0,
             "sortOrder": sort_order,
-            "limit": min(int(limit), 100),
+            "limit": min(max(1, int(limit)), 1000),
             "filters": filters,
         }
         if pagination_token:
@@ -3379,6 +3392,22 @@ def helius_page_budget(pool, config, kind, phase=None):
                 )
             ),
         )
+    if config.get("helius_dynamic_page_budget_enabled", True) and kind in ("recent", "incremental"):
+        limit = max(1, int(config.get("helius_transactions_limit", 250)))
+        if kind == "incremental":
+            target_hours = float(config.get("helius_dynamic_incremental_target_hours", 1.25))
+        else:
+            lookback_hours = float(config.get("helius_recent_lookback_minutes", 360)) / 60
+            target_hours = min(
+                lookback_hours,
+                float(config.get("helius_dynamic_recent_target_hours", 6)),
+            )
+        safety = max(1.0, float(config.get("helius_dynamic_page_safety_factor", 1.15)))
+        estimated_transactions = max(0.0, txns_1h * target_hours * safety)
+        estimated_pages = max(1, int((estimated_transactions + limit - 1) // limit))
+        dynamic_max_key = f"helius_{phase}_dynamic_max_pages" if phase else "helius_dynamic_max_pages"
+        dynamic_max = max(1, int(config.get(dynamic_max_key, config.get("helius_dynamic_max_pages", 4))))
+        pages = max(pages, min(dynamic_max, estimated_pages))
     return max(1, pages)
 
 
@@ -4911,6 +4940,7 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "scanned_pools": len(summaries),
             "alerts": len(alerts),
             "rpc_calls": dict(rpc_calls),
+            "rpc_retries": config.get("_rpc_retries", {}),
             "scan_health": config.get("_scan_health", {}),
             "discovery": config.get("_discovery_stats", {}),
             "solana_tracker_ath": (state.get("maintenance") or {}).get("solana_tracker_ath", {}),
@@ -5227,6 +5257,7 @@ def run_once(config, lane_name=None):
     refreshed_caught_pools = refresh_caught_market_observations(http, state, all_alerts, config, generated_at)
     enrich_market_ath(http, state, [*universe, *refreshed_caught_pools], all_alerts, config, generated_at)
     config["_scan_health"] = build_scan_health(summaries, lane_stats, config)
+    config["_rpc_retries"] = dict(rpc.retries)
     prune_wallet_cache(state, config)
     compact_state(state, universe, all_alerts, config, generated_at)
     save_json(STATE_PATH, state, compact=bool(config.get("state_json_compact", True)))

@@ -157,6 +157,24 @@ class ScannerCoreTests(unittest.TestCase):
         candidates = scanner.buy_swap_candidates(swaps, {"classify_buy_min_sol": 0.1})
         self.assertEqual(len(candidates), 2)
 
+    def test_dynamic_page_budget_scales_with_hourly_activity(self):
+        config = {
+            "helius_transactions_pages": 1,
+            "helius_probe_incremental_pages": 1,
+            "helius_medium_txn_threshold": 10_000,
+            "helius_high_txn_threshold": 20_000,
+            "helius_dynamic_page_budget_enabled": True,
+            "helius_transactions_limit": 250,
+            "helius_dynamic_incremental_target_hours": 1,
+            "helius_dynamic_page_safety_factor": 1,
+            "helius_probe_dynamic_max_pages": 4,
+            "helius_dynamic_max_pages": 4,
+        }
+        active = scanner.Pool(pool_address="active", txns_1h=1_000)
+        quiet = scanner.Pool(pool_address="quiet", txns_1h=50)
+        self.assertEqual(scanner.helius_page_budget(active, config, "incremental", phase="probe"), 4)
+        self.assertEqual(scanner.helius_page_budget(quiet, config, "incremental", phase="probe"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
