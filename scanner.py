@@ -365,6 +365,8 @@ class HeliusRpc:
         self.session.headers.update({"Content-Type": "application/json"})
         self.calls = Counter()
         self.retries = Counter()
+        self.token_supply_cache = {}
+        self.token_balance_cache = {}
         self.timeout_seconds = int(timeout_seconds)
         self.transactions_timeout_seconds = int(transactions_timeout_seconds)
         self.max_retries = max(0, int(max_retries))
@@ -451,10 +453,17 @@ class HeliusRpc:
         return self.call("getTransactionsForAddress", [address, opts], timeout=self.transactions_timeout_seconds) or {}
 
     def token_supply(self, mint):
+        if mint in self.token_supply_cache:
+            return self.token_supply_cache[mint]
         result = self.call("getTokenSupply", [mint]) or {}
-        return rpc_token_amount(result.get("value"))
+        supply = rpc_token_amount(result.get("value"))
+        self.token_supply_cache[mint] = supply
+        return supply
 
     def token_balance(self, owner, mint):
+        cache_key = (owner, mint)
+        if cache_key in self.token_balance_cache:
+            return self.token_balance_cache[cache_key]
         result = self.call(
             "getTokenAccountsByOwner",
             [owner, {"mint": mint}, {"encoding": "jsonParsed"}],
@@ -468,6 +477,7 @@ class HeliusRpc:
                 .get("info", {})
             )
             total += rpc_token_amount(info.get("tokenAmount"))
+        self.token_balance_cache[cache_key] = total
         return total
 
 
@@ -3506,7 +3516,9 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
                 pass_stats["oldest_block_time"] = oldest if current_oldest is None else min(current_oldest, oldest)
                 pass_stats["newest_block_time"] = newest if current_newest is None else max(current_newest, newest)
             cursor = result.get("paginationToken")
-            if not result.get("paginationToken") or not batch:
+            if len(batch) < limit:
+                cursor = None
+            if not cursor or not batch:
                 if save_cursor_key:
                     pool_state.pop(save_cursor_key, None)
                     pool_state[f"{save_cursor_key}_complete"] = True
@@ -4929,18 +4941,25 @@ def build_scan_health(summaries, lane_stats, config):
     candidate_pools = sum(int(item.get("universe_pools") or 0) for item in lane_stats.values())
     failed = sum(1 for item in summaries if item.get("scan_failed") or item.get("error"))
     truncated = sum(1 for item in summaries if (item.get("trade_fetch") or {}).get("truncated"))
-    live_fetches = [
-        item.get("trade_fetch") or {}
+    live_fetch_items = [
+        (item, item.get("trade_fetch") or {})
         for item in summaries
         if (item.get("trade_fetch") or {}).get("source") == "helius_transactions"
     ]
+    live_fetches = [fetch for _item, fetch in live_fetch_items]
     live_truncated = sum(1 for fetch in live_fetches if fetch.get("live_truncated"))
     backfill_pending = sum(1 for fetch in live_fetches if fetch.get("backfill_pending"))
     history_gap = sum(1 for fetch in live_fetches if int(fetch.get("history_gap_seconds") or 0) > 60)
     max_live_lag_seconds = int(float(config.get("scan_health_max_live_lag_minutes", 20)) * 60)
+    min_live_activity = int(config.get("scan_health_live_activity_txns_1h_min", 10))
+    active_live_fetches = [
+        (item, fetch)
+        for item, fetch in live_fetch_items
+        if int((item.get("pool") or {}).get("txns_1h") or 0) >= min_live_activity
+    ]
     stale_live = sum(
         1
-        for fetch in live_fetches
+        for _item, fetch in active_live_fetches
         if fetch.get("live_head_lag_seconds") is not None
         and int(fetch.get("live_head_lag_seconds") or 0) > max_live_lag_seconds
     )
@@ -4962,7 +4981,8 @@ def build_scan_health(summaries, lane_stats, config):
     live_fetch_count = len(live_fetches)
     live_truncated_ratio = live_truncated / live_fetch_count if live_fetch_count else 0.0
     history_gap_ratio = history_gap / live_fetch_count if live_fetch_count else 0.0
-    stale_live_ratio = stale_live / live_fetch_count if live_fetch_count else 0.0
+    active_live_fetch_count = len(active_live_fetches)
+    stale_live_ratio = stale_live / active_live_fetch_count if active_live_fetch_count else 0.0
     zero_parse_ratio = zero_parse_pools / scanned if scanned else 0.0
     min_scanned = max(0, int(config.get("scan_health_min_scanned_pools", 5)))
     max_failed_ratio = float(config.get("scan_health_max_failed_ratio", 0.25))
@@ -5011,6 +5031,7 @@ def build_scan_health(summaries, lane_stats, config):
         "truncated_pools": truncated,
         "truncated_ratio": truncated_ratio,
         "live_fetch_pools": live_fetch_count,
+        "active_live_fetch_pools": active_live_fetch_count,
         "partial_live_windows": live_truncated,
         "partial_live_ratio": live_truncated_ratio,
         "backfill_pending_pools": backfill_pending,

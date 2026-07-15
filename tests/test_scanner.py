@@ -239,7 +239,8 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(rpc.calls[0]["block_time"], {"gte": now - 5_400})
         self.assertEqual(stats["live_head_lag_seconds"], 10)
         self.assertEqual(stats["history_gap_seconds"], 5_400)
-        self.assertTrue(stats["live_truncated"])
+        self.assertFalse(stats["live_truncated"])
+        self.assertEqual(len(rpc.calls), 1)
 
     def test_launch_backfill_does_not_fetch_outside_retained_buffer(self):
         now = 2_000_000
