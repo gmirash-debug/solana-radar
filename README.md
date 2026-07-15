@@ -11,7 +11,7 @@ It uses free DEX data for market discovery and Helius only for onchain work:
 - retain a rolling registry of known pools and refresh it through free market APIs, so discovery is not limited to current trending pages;
 - rotate scan capacity between high-activity pools and pools that have gone longest without an onchain check;
 - use a lightweight signature probe before paid parsed-transaction history on previously scanned pools;
-- fetch parsed Helius transactions with pagination instead of relying on raw pool signatures;
+- read the newest Helius transaction tail first, then advance a separate bounded launch backfill only when it still fits the retained signal window;
 - parse swaps;
 - classify buy wallets as fresh, freshish, low-tx, normal, or dormant;
 - attribute retention only to tokens bought in the detected wave, excluding balances held before the wave;
@@ -184,13 +184,16 @@ DexScreener into pool addresses, and then applies the same local filters and
 Helius onchain analysis.
 
 Onchain buy extraction is Helius-first. The scanner uses
-`getTransactionsForAddress` in full/jsonParsed mode and keeps pagination state
-per pool. Each hourly run starts with a cheap probe: a shallow transaction page
-scan plus classification of unique buyer wallets. A deeper scan is triggered
-only when the probe sees suspicious wallet classes, linked wallets, material
-flow, an alert-level score, or a scheduled deep-audit slot. This keeps API usage
-lower without abandoning slow backfills. If this Helius path fails, it can fall
-back to the older pool-signature scan.
+`getTransactionsForAddress` in full/jsonParsed mode. Each hourly run checks the
+newest edge of the market first, with a rolling overlap that feeds the retained
+swap buffer. A shallow probe is evaluated together with that buffer; a deeper
+scan is triggered only by suspicious wallet classes, linked wallets, material
+flow, a sticky/wave precheck, an alert-level score, or a scheduled audit slot.
+Launch backfill has its own cursor, runs at most one page per scan, and stops
+once the launch is older than the retained 24-hour signal window. This prevents
+historical catch-up from delaying live detection or consuming API credits for
+data that state compaction would immediately discard. If the Helius transaction
+path fails, the scanner can fall back to the older pool-signature scan.
 
 Already caught tokens get a separate hourly market refresh through DexScreener.
 That pass updates dashboard `Market now` fields without re-running expensive

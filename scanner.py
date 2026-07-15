@@ -3408,6 +3408,9 @@ def helius_page_budget(pool, config, kind, phase=None):
         dynamic_max_key = f"helius_{phase}_dynamic_max_pages" if phase else "helius_dynamic_max_pages"
         dynamic_max = max(1, int(config.get(dynamic_max_key, config.get("helius_dynamic_max_pages", 4))))
         pages = max(pages, min(dynamic_max, estimated_pages))
+    phase_max_key = f"helius_{phase}_max_pages" if phase else "helius_max_pages"
+    if config.get(phase_max_key) is not None:
+        pages = min(pages, max(1, int(config[phase_max_key])))
     return max(1, pages)
 
 
@@ -3417,6 +3420,16 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
     lookback_minutes = int(config.get("helius_recent_lookback_minutes", max(60, int(config["alert_window_minutes"]))))
     recent_from = max(0, now - lookback_minutes * 60)
     previous_time = int(pool_state.get("helius_latest_block_time") or 0)
+    live_lookback_minutes = int(config.get("helius_live_lookback_minutes", min(lookback_minutes, 90)))
+    if previous_time:
+        live_from = max(
+            now - live_lookback_minutes * 60,
+            previous_time - int(config.get("helius_incremental_overlap_seconds", 30)),
+        )
+        live_budget_kind = "incremental"
+    else:
+        live_from = recent_from
+        live_budget_kind = "recent"
     transactions = []
     seen = set()
     stats = {
@@ -3426,6 +3439,11 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         "transactions": 0,
         "passes": [],
         "truncated": False,
+        "live_truncated": False,
+        "backfill_pending": False,
+        "had_previous_state": bool(previous_time),
+        "live_from": live_from,
+        "history_gap_seconds": max(0, live_from - previous_time) if previous_time else 0,
     }
 
     def add_batch(batch):
@@ -3439,7 +3457,15 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
             added += 1
         return added
 
-    def run_pass(name, sort_order, max_pages, block_time=None, pagination_token=None, save_cursor_key=None):
+    def run_pass(
+        name,
+        sort_order,
+        max_pages,
+        block_time=None,
+        pagination_token=None,
+        save_cursor_key=None,
+        target_from=None,
+    ):
         cursor = pagination_token
         pages = 0
         pass_stats = {
@@ -3449,10 +3475,14 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
             "transactions": 0,
             "added": 0,
             "truncated": False,
+            "oldest_block_time": None,
+            "newest_block_time": None,
         }
+        if target_from is not None:
+            pass_stats["target_from"] = int(target_from)
         if max_pages <= 0:
             stats["passes"].append(pass_stats)
-            return
+            return pass_stats
         while pages < max_pages:
             result = rpc.transactions_for_address(
                 pool.pool_address,
@@ -3467,6 +3497,14 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
             pass_stats["pages"] += 1
             pass_stats["transactions"] += len(batch)
             pass_stats["added"] += add_batch(batch)
+            block_times = [int(tx.get("blockTime") or 0) for tx in batch if int(tx.get("blockTime") or 0) > 0]
+            if block_times:
+                oldest = min(block_times)
+                newest = max(block_times)
+                current_oldest = pass_stats.get("oldest_block_time")
+                current_newest = pass_stats.get("newest_block_time")
+                pass_stats["oldest_block_time"] = oldest if current_oldest is None else min(current_oldest, oldest)
+                pass_stats["newest_block_time"] = newest if current_newest is None else max(current_newest, newest)
             cursor = result.get("paginationToken")
             if not result.get("paginationToken") or not batch:
                 if save_cursor_key:
@@ -3481,42 +3519,60 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
             stats["truncated"] = True
             if save_cursor_key and cursor:
                 pool_state[save_cursor_key] = cursor
+        pass_stats["pagination_remaining"] = bool(cursor)
+        if target_from is not None:
+            pass_stats["coverage_complete"] = not bool(cursor)
         stats["passes"].append(pass_stats)
+        return pass_stats
 
-    if previous_time:
-        incremental_from = max(0, previous_time - int(config.get("helius_incremental_overlap_seconds", 30)))
-        run_pass(
-            "incremental",
-            "asc",
-            helius_page_budget(pool, config, "incremental", phase=phase),
-            block_time={"gt": incremental_from},
-        )
-    else:
-        run_pass(
-            "recent",
-            "desc",
-            helius_page_budget(pool, config, "recent", phase=phase),
-            block_time={"gte": recent_from},
-        )
+    live_pass = run_pass(
+        "live",
+        "desc",
+        helius_page_budget(pool, config, live_budget_kind, phase=phase),
+        block_time={"gte": live_from},
+        target_from=live_from,
+    )
+    stats["live_truncated"] = bool(live_pass.get("truncated"))
+    stats["live_oldest_block_time"] = live_pass.get("oldest_block_time")
+    stats["live_newest_block_time"] = live_pass.get("newest_block_time")
+    if live_pass.get("newest_block_time"):
+        stats["live_head_lag_seconds"] = max(0, now - int(live_pass["newest_block_time"]))
 
     age_hours = pool.age_hours()
     initial_max_age = float(config.get("helius_initial_backfill_max_age_hours", 96))
+    retention_hours = float(config.get("state_swap_buffer_retention_hours", 24))
     should_backfill = (
-        pool.pair_created_at
+        config.get("helius_initial_backfill_enabled", True)
+        and phase != "probe"
+        and pool.pair_created_at
         and age_hours is not None
-        and age_hours <= initial_max_age
+        and age_hours <= min(initial_max_age, retention_hours)
         and not pool_state.get("helius_initial_backfill_cursor_complete")
     )
     if should_backfill:
-        launch_from = max(0, int(pool.pair_created_at) - int(config.get("helius_launch_time_cushion_seconds", 120)))
-        run_pass(
+        launch_from = max(
+            0,
+            int(pool.pair_created_at) - int(config.get("helius_launch_time_cushion_seconds", 120)),
+            int(now - retention_hours * 3600),
+        )
+        if int(pool_state.get("helius_initial_backfill_from") or 0) != launch_from:
+            pool_state.pop("helius_initial_backfill_cursor", None)
+            pool_state.pop("helius_initial_backfill_cursor_complete", None)
+            pool_state["helius_initial_backfill_from"] = launch_from
+        backfill_pages = min(
+            helius_page_budget(pool, config, "initial_backfill", phase=phase),
+            max(1, int(config.get("helius_backfill_max_pages_per_scan", 1))),
+        )
+        backfill_pass = run_pass(
             "launch_backfill",
             "asc",
-            helius_page_budget(pool, config, "initial_backfill", phase=phase),
+            backfill_pages,
             block_time={"gte": launch_from},
             pagination_token=pool_state.get("helius_initial_backfill_cursor"),
             save_cursor_key="helius_initial_backfill_cursor",
+            target_from=launch_from,
         )
+        stats["backfill_pending"] = bool(backfill_pass.get("truncated"))
 
     if int(pool.txns_1h or 0) >= int(config.get("helius_high_txn_threshold", 10_000)):
         tail_pages_key = f"helius_{phase}_high_tx_tail_pages" if phase else "helius_high_tx_tail_pages"
@@ -3754,6 +3810,38 @@ def combine_fetch_stats(probe_stats, deep_stats):
     combined["transactions"] = int(probe_stats.get("transactions", 0)) + int(deep_stats.get("transactions", 0))
     combined["passes"] = [*(probe_stats.get("passes") or []), *(deep_stats.get("passes") or [])]
     combined["truncated"] = bool(probe_stats.get("truncated") or deep_stats.get("truncated"))
+    combined["live_truncated"] = bool(
+        probe_stats.get("live_truncated") or deep_stats.get("live_truncated")
+    )
+    combined["backfill_pending"] = bool(
+        probe_stats.get("backfill_pending") or deep_stats.get("backfill_pending")
+    )
+    combined["had_previous_state"] = bool(probe_stats.get("had_previous_state"))
+    combined["history_gap_seconds"] = max(
+        int(probe_stats.get("history_gap_seconds") or 0),
+        int(deep_stats.get("history_gap_seconds") or 0),
+    )
+    live_newest = [
+        int(value)
+        for value in (probe_stats.get("live_newest_block_time"), deep_stats.get("live_newest_block_time"))
+        if value
+    ]
+    live_oldest = [
+        int(value)
+        for value in (probe_stats.get("live_oldest_block_time"), deep_stats.get("live_oldest_block_time"))
+        if value
+    ]
+    if live_newest:
+        combined["live_newest_block_time"] = max(live_newest)
+    if live_oldest:
+        combined["live_oldest_block_time"] = min(live_oldest)
+    live_lags = [
+        int(value)
+        for value in (probe_stats.get("live_head_lag_seconds"), deep_stats.get("live_head_lag_seconds"))
+        if value is not None
+    ]
+    if live_lags:
+        combined["live_head_lag_seconds"] = min(live_lags)
     combined["probe"] = probe_stats
     combined["deep"] = deep_stats
     return combined
@@ -3762,10 +3850,12 @@ def combine_fetch_stats(probe_stats, deep_stats):
 def pool_backfill_pending(pool, pool_state, config):
     age_hours = pool.age_hours()
     initial_max_age = float(config.get("helius_initial_backfill_max_age_hours", 96))
+    retention_hours = float(config.get("state_swap_buffer_retention_hours", 24))
     return bool(
-        pool.pair_created_at
+        config.get("helius_initial_backfill_enabled", True)
+        and pool.pair_created_at
         and age_hours is not None
-        and age_hours <= initial_max_age
+        and age_hours <= min(initial_max_age, retention_hours)
         and not pool_state.get("helius_initial_backfill_cursor_complete")
     )
 
@@ -3774,7 +3864,7 @@ def pool_has_new_activity(rpc, pool, pool_state, config):
     previous_signature = pool_state.get("helius_latest_signature") or pool_state.get("latest_signature")
     if not config.get("helius_activity_probe_enabled", True) or not previous_signature:
         return True, {"reason": "first_scan_or_probe_disabled"}
-    if pool_backfill_pending(pool, pool_state, config):
+    if config.get("helius_backfill_on_idle", False) and pool_backfill_pending(pool, pool_state, config):
         return True, {"reason": "launch_backfill_pending"}
     try:
         signatures = rpc.signatures_for_address(
@@ -3837,7 +3927,6 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
     try:
         if config.get("helius_probe_enabled", True):
             probe_txs, probe_fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="probe")
-            update_pool_transaction_state(pool_state, pool, probe_txs)
             probe_swaps, probe_parse_errors = parse_helius_swaps(probe_txs, pool)
             if classify_wallets:
                 probe_config = probe_classification_config(config)
@@ -3854,6 +3943,11 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
                 probe_candidate_buys = len(buy_swap_candidates(probe_swaps, config))
                 probe_classification_errors = 0
                 probe_alerts = []
+            probe_signal_swaps = probe_swaps
+            if config.get("reactivation_wave_enabled"):
+                probe_signal_swaps = merge_reactivation_wave_swaps(pool_state, probe_signal_swaps, config)
+            if config.get("sticky_accumulation_enabled"):
+                probe_signal_swaps = merge_sticky_accumulation_swaps(pool_state, probe_signal_swaps, config)
             deepen, deep_reason = should_deep_scan(
                 pool,
                 config,
@@ -3862,7 +3956,7 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
                 probe_candidate_buys,
                 probe_alerts,
                 classification_budget,
-                swaps=probe_swaps,
+                swaps=probe_signal_swaps,
             )
             if deepen:
                 deep_txs, deep_fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="deep")
@@ -4835,6 +4929,21 @@ def build_scan_health(summaries, lane_stats, config):
     candidate_pools = sum(int(item.get("universe_pools") or 0) for item in lane_stats.values())
     failed = sum(1 for item in summaries if item.get("scan_failed") or item.get("error"))
     truncated = sum(1 for item in summaries if (item.get("trade_fetch") or {}).get("truncated"))
+    live_fetches = [
+        item.get("trade_fetch") or {}
+        for item in summaries
+        if (item.get("trade_fetch") or {}).get("source") == "helius_transactions"
+    ]
+    live_truncated = sum(1 for fetch in live_fetches if fetch.get("live_truncated"))
+    backfill_pending = sum(1 for fetch in live_fetches if fetch.get("backfill_pending"))
+    history_gap = sum(1 for fetch in live_fetches if int(fetch.get("history_gap_seconds") or 0) > 60)
+    max_live_lag_seconds = int(float(config.get("scan_health_max_live_lag_minutes", 20)) * 60)
+    stale_live = sum(
+        1
+        for fetch in live_fetches
+        if fetch.get("live_head_lag_seconds") is not None
+        and int(fetch.get("live_head_lag_seconds") or 0) > max_live_lag_seconds
+    )
     transactions = sum(int(item.get("transactions_scanned") or item.get("new_signatures") or 0) for item in summaries)
     parsed_swaps = sum(int(item.get("parsed_swaps") or 0) for item in summaries)
     candidate_buys = sum(int(item.get("candidate_buys") or 0) for item in summaries)
@@ -4850,11 +4959,16 @@ def build_scan_health(summaries, lane_stats, config):
     )
     failed_ratio = failed / scanned if scanned else 0.0
     truncated_ratio = truncated / scanned if scanned else 0.0
+    live_fetch_count = len(live_fetches)
+    live_truncated_ratio = live_truncated / live_fetch_count if live_fetch_count else 0.0
+    history_gap_ratio = history_gap / live_fetch_count if live_fetch_count else 0.0
+    stale_live_ratio = stale_live / live_fetch_count if live_fetch_count else 0.0
     zero_parse_ratio = zero_parse_pools / scanned if scanned else 0.0
     min_scanned = max(0, int(config.get("scan_health_min_scanned_pools", 5)))
     max_failed_ratio = float(config.get("scan_health_max_failed_ratio", 0.25))
-    max_truncated_ratio = float(config.get("scan_health_max_truncated_ratio", 0.8))
     max_zero_parse_ratio = float(config.get("scan_health_max_zero_parse_ratio", 0.25))
+    max_history_gap_ratio = float(config.get("scan_health_max_history_gap_ratio", 0.25))
+    max_stale_live_ratio = float(config.get("scan_health_max_stale_live_ratio", 0.25))
     reasons = []
     status = "healthy"
 
@@ -4871,9 +4985,12 @@ def build_scan_health(summaries, lane_stats, config):
         reasons.append(f"pool failure ratio {failed_ratio:.0%} exceeds {max_failed_ratio:.0%}")
 
     if status != "unhealthy":
-        if scanned and truncated_ratio > max_truncated_ratio:
+        if live_fetch_count and stale_live_ratio > max_stale_live_ratio:
             status = "degraded"
-            reasons.append(f"transaction history truncated for {truncated_ratio:.0%} of pools")
+            reasons.append(f"live transaction head is stale for {stale_live_ratio:.0%} of active pools")
+        if live_fetch_count and history_gap_ratio > max_history_gap_ratio:
+            status = "degraded"
+            reasons.append(f"rolling buffer has a history gap for {history_gap_ratio:.0%} of active pools")
         if scanned and zero_parse_ratio > max_zero_parse_ratio:
             status = "degraded"
             reasons.append(f"no swaps parsed for {zero_parse_ratio:.0%} of scanned pools with transactions")
@@ -4893,6 +5010,14 @@ def build_scan_health(summaries, lane_stats, config):
         "failed_ratio": failed_ratio,
         "truncated_pools": truncated,
         "truncated_ratio": truncated_ratio,
+        "live_fetch_pools": live_fetch_count,
+        "partial_live_windows": live_truncated,
+        "partial_live_ratio": live_truncated_ratio,
+        "backfill_pending_pools": backfill_pending,
+        "history_gap_pools": history_gap,
+        "history_gap_ratio": history_gap_ratio,
+        "stale_live_pools": stale_live,
+        "stale_live_ratio": stale_live_ratio,
         "zero_parse_pools": zero_parse_pools,
         "zero_parse_ratio": zero_parse_ratio,
         "transactions_scanned": transactions,

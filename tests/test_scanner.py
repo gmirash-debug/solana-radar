@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import scanner
 
@@ -9,6 +10,31 @@ class FakeRpc:
 
     def signatures_for_address(self, _address, limit=5):
         return self.signatures[:limit]
+
+
+class FakeTransactionsRpc:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def transactions_for_address(
+        self,
+        address,
+        limit=100,
+        sort_order="desc",
+        pagination_token=None,
+        block_time=None,
+    ):
+        self.calls.append(
+            {
+                "address": address,
+                "limit": limit,
+                "sort_order": sort_order,
+                "pagination_token": pagination_token,
+                "block_time": block_time,
+            }
+        )
+        return self.responses.pop(0) if self.responses else {"data": []}
 
 
 class ScannerCoreTests(unittest.TestCase):
@@ -174,6 +200,100 @@ class ScannerCoreTests(unittest.TestCase):
         quiet = scanner.Pool(pool_address="quiet", txns_1h=50)
         self.assertEqual(scanner.helius_page_budget(active, config, "incremental", phase="probe"), 4)
         self.assertEqual(scanner.helius_page_budget(quiet, config, "incremental", phase="probe"), 1)
+
+    def test_live_fetch_reads_newest_edge_when_state_is_stale(self):
+        now = 2_000_000
+        rpc = FakeTransactionsRpc(
+            [
+                {
+                    "data": [
+                        {
+                            "blockTime": now - 10,
+                            "transaction": {"signatures": ["newest"]},
+                        }
+                    ],
+                    "paginationToken": "more",
+                }
+            ]
+        )
+        config = {
+            "alert_window_minutes": 240,
+            "helius_transactions_limit": 250,
+            "helius_recent_lookback_minutes": 360,
+            "helius_live_lookback_minutes": 90,
+            "helius_probe_incremental_pages": 1,
+            "helius_dynamic_page_budget_enabled": False,
+            "helius_initial_backfill_enabled": False,
+        }
+        with mock.patch.object(scanner.time, "time", return_value=now):
+            transactions, stats = scanner.fetch_helius_pool_transactions(
+                rpc,
+                scanner.Pool(pool_address="pool", token_address="token", txns_1h=100),
+                config,
+                {"helius_latest_block_time": now - 10_800},
+                phase="probe",
+            )
+
+        self.assertEqual(len(transactions), 1)
+        self.assertEqual(rpc.calls[0]["sort_order"], "desc")
+        self.assertEqual(rpc.calls[0]["block_time"], {"gte": now - 5_400})
+        self.assertEqual(stats["live_head_lag_seconds"], 10)
+        self.assertEqual(stats["history_gap_seconds"], 5_400)
+        self.assertTrue(stats["live_truncated"])
+
+    def test_launch_backfill_does_not_fetch_outside_retained_buffer(self):
+        now = 2_000_000
+        rpc = FakeTransactionsRpc([{"data": []}])
+        config = {
+            "alert_window_minutes": 240,
+            "helius_transactions_limit": 250,
+            "helius_recent_lookback_minutes": 360,
+            "helius_deep_recent_pages": 1,
+            "helius_dynamic_page_budget_enabled": False,
+            "helius_initial_backfill_enabled": True,
+            "helius_initial_backfill_max_age_hours": 96,
+            "state_swap_buffer_retention_hours": 24,
+        }
+        with mock.patch.object(scanner.time, "time", return_value=now):
+            _transactions, stats = scanner.fetch_helius_pool_transactions(
+                rpc,
+                scanner.Pool(
+                    pool_address="pool",
+                    token_address="token",
+                    pair_created_at=now - 48 * 3_600,
+                ),
+                config,
+                {},
+                phase="deep",
+            )
+
+        self.assertEqual([item["name"] for item in stats["passes"]], ["live"])
+        self.assertFalse(stats["backfill_pending"])
+
+    def test_scan_health_ignores_incomplete_background_backfill(self):
+        health = scanner.build_scan_health(
+            [
+                {
+                    "transactions_scanned": 1,
+                    "parsed_swaps": 1,
+                    "trade_fetch": {
+                        "source": "helius_transactions",
+                        "truncated": True,
+                        "live_truncated": False,
+                        "backfill_pending": True,
+                        "live_head_lag_seconds": 10,
+                    },
+                }
+            ],
+            {"reactivation": {"universe_pools": 1}},
+            {
+                "scan_health_min_scanned_pools": 1,
+                "scan_health_max_failed_ratio": 0.25,
+                "scan_health_max_zero_parse_ratio": 0.25,
+            },
+        )
+        self.assertEqual(health["status"], "healthy")
+        self.assertEqual(health["backfill_pending_pools"], 1)
 
 
 if __name__ == "__main__":
