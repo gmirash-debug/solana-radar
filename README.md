@@ -209,9 +209,11 @@ fallback. Chainstack is skipped for `getSignaturesForAddress` and
 Pagination cursors are pinned to the provider that created them. If that
 provider fails mid-window, the scanner restarts the same bounded time range on
 the next enhanced provider and deduplicates by signature, so it never reuses an
-Alchemy cursor on Helius or vice versa. If every enhanced-history provider is
-unavailable, the scanner falls back to standard signatures plus transaction
-details.
+Alchemy cursor on Helius or vice versa. A cursor that is still incomplete after
+ten minutes is restarted from its last observed head, so the next hourly scan
+cannot remain stuck reading an old tail while new buys happen. If every
+enhanced-history provider is unavailable, the scanner falls back to standard
+signatures plus transaction details.
 
 Alchemy requests are paced at 450 ms by default and use exponential retries.
 `getSignaturesForAddress` has a stricter 1.5-second interval when it falls back

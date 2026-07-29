@@ -956,6 +956,63 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(pool_state["helius_latest_signature"], "newest")
         self.assertNotIn("helius_live_cursor", pool_state)
 
+    def test_stale_live_cursor_restarts_from_fresh_transaction_head(self):
+        now = 2_000_000
+        rpc = FakeTransactionsRpc(
+            [
+                {
+                    "data": [
+                        {
+                            "blockTime": now - 5,
+                            "transaction": {"signatures": ["fresh-head"]},
+                        }
+                    ]
+                }
+            ]
+        )
+        config = {
+            "alert_window_minutes": 240,
+            "helius_transactions_limit": 100,
+            "helius_recent_lookback_minutes": 360,
+            "helius_live_lookback_minutes": 90,
+            "helius_incremental_overlap_seconds": 30,
+            "helius_live_cursor_head_refresh_seconds": 600,
+            "helius_probe_incremental_pages": 1,
+            "helius_dynamic_page_budget_enabled": False,
+            "helius_initial_backfill_enabled": False,
+        }
+        pool_state = {
+            "helius_latest_block_time": now - 7_200,
+            "helius_live_cursor": {"provider": "alchemy", "token": "old-tail"},
+            "helius_live_from": now - 7_200,
+            "helius_live_pending_signature": "old-head",
+            "helius_live_pending_block_time": now - 3_600,
+        }
+
+        with mock.patch.object(scanner.time, "time", return_value=now):
+            transactions, stats = scanner.fetch_helius_pool_transactions(
+                rpc,
+                scanner.Pool(pool_address="pool", token_address="token", txns_1h=100),
+                config,
+                pool_state,
+                phase="probe",
+            )
+
+        self.assertTrue(stats["live_cursor_reset"])
+        self.assertFalse(stats["live_resumed"])
+        self.assertEqual(rpc.calls[0]["pagination_token"], None)
+        self.assertEqual(rpc.calls[0]["block_time"], {"gte": now - 3_630})
+        self.assertEqual(stats["live_head_lag_seconds"], 5)
+        self.assertEqual(
+            transactions[0]["transaction"]["signatures"][0],
+            "fresh-head",
+        )
+        self.assertEqual(
+            pool_state["helius_live_pending_signature"],
+            "fresh-head",
+        )
+        self.assertNotIn("helius_live_cursor", pool_state)
+
     def test_legacy_helius_cursor_replays_on_alchemy_without_token_leakage(self):
         now = 2_000_000
         helius = scanner.HeliusRpc("secret-key", max_retries=0)
