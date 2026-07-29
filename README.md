@@ -213,8 +213,9 @@ unavailable, the scanner falls back to standard signatures plus transaction
 details.
 
 Alchemy requests are paced at 220 ms by default and use exponential retries.
-This keeps fast history pagination below the Free-tier throughput without
-changing the hourly scan schedule.
+`getSignaturesForAddress` has a stricter one-second interval because Alchemy
+applies a tighter live limit to that method. This keeps fast history pagination
+below the Free-tier throughput without changing the hourly scan schedule.
 
 Each hourly run checks the newest edge of the market first, with a rolling
 overlap that feeds the retained swap buffer. A shallow probe is evaluated

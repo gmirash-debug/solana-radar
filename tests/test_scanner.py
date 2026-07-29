@@ -182,6 +182,30 @@ class ScannerCoreTests(unittest.TestCase):
         sleep.assert_called_once()
         self.assertAlmostEqual(sleep.call_args.args[0], 0.15)
 
+    def test_rpc_method_interval_can_be_stricter_than_global_interval(self):
+        rpc = scanner.AlchemyRpc(
+            "https://alchemy.invalid",
+            max_retries=0,
+            min_interval_seconds=0.25,
+            method_min_interval_seconds={"getSignaturesForAddress": 1.0},
+        )
+        rpc.session.post = mock.Mock(
+            side_effect=[rpc_response("ok"), rpc_response([])]
+        )
+
+        with (
+            mock.patch.object(scanner.time, "monotonic", side_effect=[10.0, 10.2]),
+            mock.patch.object(scanner.time, "sleep") as sleep,
+        ):
+            self.assertEqual(rpc.call("getHealth"), "ok")
+            self.assertEqual(
+                rpc.call("getSignaturesForAddress", ["pool", {"limit": 1}]),
+                [],
+            )
+
+        sleep.assert_called_once()
+        self.assertAlmostEqual(sleep.call_args.args[0], 0.8)
+
     def test_standard_rpc_prefers_drpc_and_falls_back_to_alchemy(self):
         drpc = scanner.DrpcRpc("https://drpc.invalid", max_retries=0)
         alchemy = scanner.AlchemyRpc("https://alchemy.invalid", max_retries=0)
