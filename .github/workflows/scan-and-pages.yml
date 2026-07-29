@@ -111,10 +111,11 @@ jobs:
               status_error = str(scanner_status.get("error") or "").lower()
               provider_blocked = any(
                   error_categories.get(key)
-                  for key in ("helius_rate_limit", "helius_quota", "helius_auth")
+                  for key in ("rpc_all_unavailable",)
               ) or any(
                   marker in status_error
                   for marker in (
+                      "all rpc provider",
                       "max usage",
                       "rate_limit",
                       "rate limit",
@@ -176,6 +177,10 @@ jobs:
         if: steps.freshness.outputs.should_scan == 'true'
         env:
           HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
+          ALCHEMY_SOLANA_RPC_URL: ${{ secrets.ALCHEMY_SOLANA_RPC_URL }}
+          ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+          DRPC_SOLANA_RPC_URL: ${{ secrets.DRPC_SOLANA_RPC_URL }}
+          DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
           SOLANA_TRACKER_API_KEY: ${{ secrets.SOLANA_TRACKER_API_KEY }}
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
           BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}

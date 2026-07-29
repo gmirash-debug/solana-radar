@@ -369,12 +369,13 @@ class Http:
 
 
 class HeliusRpcError(RuntimeError):
-    def __init__(self, method, category, detail, status=None, code=None):
+    def __init__(self, method, category, detail, status=None, code=None, provider="helius"):
         self.method = method
         self.category = category
         self.status = status
         self.code = code
-        super().__init__(f"{method}: {category}: {detail}")
+        self.provider = provider
+        super().__init__(f"{provider}:{method}: {category}: {detail}")
 
 
 class HeliusCircuitOpen(RuntimeError):
@@ -385,10 +386,17 @@ class WaveDataUnavailable(RuntimeError):
     pass
 
 
-class HeliusRpc:
+class RpcProvidersUnavailable(RuntimeError):
+    pass
+
+
+class SolanaRpcProvider:
     def __init__(
         self,
-        api_key,
+        provider_name,
+        url,
+        enhanced_history=False,
+        credit_model="standard",
         timeout_seconds=30,
         transactions_timeout_seconds=25,
         max_retries=2,
@@ -396,7 +404,10 @@ class HeliusRpc:
         retry_max_seconds=120,
         circuit_failure_threshold=4,
     ):
-        self.url = f"https://mainnet.helius-rpc.com/?api-key={api_key}"
+        self.provider_name = str(provider_name)
+        self.url = str(url)
+        self.enhanced_history = bool(enhanced_history)
+        self.credit_model = str(credit_model)
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
         self.calls = Counter()
@@ -414,6 +425,7 @@ class HeliusRpc:
         self.failures = Counter()
         self.last_error = None
         self.circuit_open_reason = None
+        self.last_success_at = None
 
     def request_timeout(self, timeout):
         seconds = float(timeout if timeout is not None else self.timeout_seconds)
@@ -425,25 +437,52 @@ class HeliusRpc:
         return min(self.retry_max_seconds, max(0.1, float(delay)))
 
     def credit_cost(self, method, result):
-        if method == "getTransactionsForAddress":
-            data = result.get("data") if isinstance(result, dict) else None
-            returned = len(data) if isinstance(data, list) else 0
-            return max(10, ((returned + 99) // 100) * 10)
-        if method == "getTransfersByAddress":
-            return 10
+        if self.credit_model == "helius":
+            if method == "getTransactionsForAddress":
+                data = result.get("data") if isinstance(result, dict) else None
+                returned = len(data) if isinstance(data, list) else 0
+                return max(10, ((returned + 99) // 100) * 10)
+            if method == "getTransfersByAddress":
+                return 10
+            return 1
+        if self.credit_model == "alchemy":
+            return {
+                "getAccountInfo": 10,
+                "getBalance": 10,
+                "getTokenAccountsByOwner": 10,
+                "getHealth": 20,
+                "getTokenAccountBalance": 20,
+                "getTokenSupply": 20,
+                "getSignaturesForAddress": 40,
+                "getTransaction": 40,
+                "getTransactionsForAddress": 100,
+            }.get(method, 20)
+        if self.credit_model == "drpc":
+            return 20
         return 1
 
     def error_category(self, status=None, code=None, detail=""):
         detail = str(detail or "").lower()
         if status in (401, 403) or any(marker in detail for marker in ("unauthorized", "forbidden", "invalid api key")):
             return "auth"
-        if status == 402 or any(
+        if status == 402 or code == 35 or any(
             marker in detail
-            for marker in ("credit", "quota", "billing", "payment required", "max usage", "usage reached")
+            for marker in (
+                "credit",
+                "quota",
+                "billing",
+                "payment required",
+                "max usage",
+                "usage reached",
+                "free plan",
+                "please upgrade",
+            )
         ):
             return "quota"
         if status == 429 or code in (-32429,) or "rate limit" in detail or "too many requests" in detail:
             return "rate_limit"
+        if code == -32601 or "method is not available" in detail or "method not found" in detail:
+            return "unsupported"
         if any(marker in detail for marker in ("timeout", "timed out", "temporarily unavailable")):
             return "temporary"
         if status and status >= 500:
@@ -456,17 +495,18 @@ class HeliusRpc:
         self.consecutive_failures += 1
         self.last_error = str(error)
         if (
-            category in {"auth", "quota", "rate_limit", "provider"}
+            category in {"auth", "quota", "rate_limit", "provider", "temporary"}
             and self.consecutive_failures >= self.circuit_failure_threshold
         ):
             self.circuit_open_reason = str(error)
 
     def record_success(self):
         self.consecutive_failures = 0
+        self.last_success_at = utc_now().isoformat().replace("+00:00", "Z")
 
     def call(self, method, params=None, timeout=None):
         if self.circuit_open_reason and method != "getHealth":
-            raise HeliusCircuitOpen(f"Helius circuit open: {self.circuit_open_reason}")
+            raise HeliusCircuitOpen(f"{self.provider_name} circuit open: {self.circuit_open_reason}")
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []}
         retryable_statuses = {429, 500, 502, 503, 504}
         for attempt in range(self.max_retries + 1):
@@ -475,7 +515,12 @@ class HeliusRpc:
                 response = self.session.post(self.url, json=payload, timeout=self.request_timeout(timeout))
             except requests.RequestException as exc:
                 if attempt >= self.max_retries:
-                    error = HeliusRpcError(method, "temporary", exc.__class__.__name__)
+                    error = HeliusRpcError(
+                        method,
+                        "temporary",
+                        exc.__class__.__name__,
+                        provider=self.provider_name,
+                    )
                     self.record_failure(error)
                     raise error from exc
                 self.retries[method] += 1
@@ -501,13 +546,24 @@ class HeliusRpc:
             if not response.ok:
                 detail = (response.text or response.reason or "request failed").strip().replace("\n", " ")[:300]
                 category = self.error_category(status=response.status_code, detail=detail)
-                error = HeliusRpcError(method, category, detail, status=response.status_code)
+                error = HeliusRpcError(
+                    method,
+                    category,
+                    detail,
+                    status=response.status_code,
+                    provider=self.provider_name,
+                )
                 self.record_failure(error)
                 raise error
             try:
                 body = response.json()
             except ValueError as exc:
-                error = HeliusRpcError(method, "provider", "invalid JSON response")
+                error = HeliusRpcError(
+                    method,
+                    "provider",
+                    "invalid JSON response",
+                    provider=self.provider_name,
+                )
                 self.record_failure(error)
                 raise error from exc
             if body.get("error"):
@@ -532,6 +588,7 @@ class HeliusRpc:
                     self.error_category(code=code, detail=message),
                     message[:300],
                     code=code,
+                    provider=self.provider_name,
                 )
                 self.record_failure(rpc_error)
                 raise rpc_error
@@ -539,7 +596,12 @@ class HeliusRpc:
             self.estimated_credits += self.credit_cost(method, result)
             self.record_success()
             return result
-        error = HeliusRpcError(method, "temporary", "retry budget exhausted")
+        error = HeliusRpcError(
+            method,
+            "temporary",
+            "retry budget exhausted",
+            provider=self.provider_name,
+        )
         self.record_failure(error)
         raise error
 
@@ -567,6 +629,13 @@ class HeliusRpc:
         block_time=None,
         status="succeeded",
     ):
+        if not self.enhanced_history:
+            raise HeliusRpcError(
+                "getTransactionsForAddress",
+                "unsupported",
+                "enhanced address history is not supported",
+                provider=self.provider_name,
+            )
         filters = {"status": status}
         if block_time:
             filters["blockTime"] = block_time
@@ -609,6 +678,449 @@ class HeliusRpc:
             total += rpc_token_amount(info.get("tokenAmount"))
         self.token_balance_cache[cache_key] = total
         return total
+
+
+class HeliusRpc(SolanaRpcProvider):
+    def __init__(
+        self,
+        api_key,
+        timeout_seconds=30,
+        transactions_timeout_seconds=25,
+        max_retries=2,
+        retry_base_seconds=0.75,
+        retry_max_seconds=120,
+        circuit_failure_threshold=4,
+    ):
+        super().__init__(
+            "helius",
+            f"https://mainnet.helius-rpc.com/?api-key={api_key}",
+            enhanced_history=True,
+            credit_model="helius",
+            timeout_seconds=timeout_seconds,
+            transactions_timeout_seconds=transactions_timeout_seconds,
+            max_retries=max_retries,
+            retry_base_seconds=retry_base_seconds,
+            retry_max_seconds=retry_max_seconds,
+            circuit_failure_threshold=circuit_failure_threshold,
+        )
+
+
+class AlchemyRpc(SolanaRpcProvider):
+    def __init__(self, url, **kwargs):
+        super().__init__(
+            "alchemy",
+            url,
+            enhanced_history=True,
+            credit_model="alchemy",
+            **kwargs,
+        )
+
+
+class DrpcRpc(SolanaRpcProvider):
+    def __init__(self, url, **kwargs):
+        super().__init__(
+            "drpc",
+            url,
+            enhanced_history=False,
+            credit_model="drpc",
+            **kwargs,
+        )
+
+
+class RoutedSolanaRpc:
+    def __init__(self, providers, standard_order=None, enhanced_order=None):
+        self.providers = {provider.provider_name: provider for provider in providers}
+        self.standard_order = self._ordered_names(
+            standard_order or ["drpc", "alchemy", "helius"]
+        )
+        self.enhanced_order = self._ordered_names(
+            enhanced_order or ["alchemy", "helius"],
+            enhanced_only=True,
+        )
+        self.blocked_providers = {}
+        self.unsupported_methods = defaultdict(set)
+        self.route_failovers = Counter()
+        self.last_provider_by_method = {}
+        self.health_results = {}
+        self.token_supply_cache = {}
+        self.token_balance_cache = {}
+
+    def _ordered_names(self, names, enhanced_only=False):
+        ordered = []
+        for name in names:
+            provider = self.providers.get(str(name))
+            if not provider or name in ordered:
+                continue
+            if enhanced_only and not provider.enhanced_history:
+                continue
+            ordered.append(str(name))
+        for name, provider in self.providers.items():
+            if name in ordered or (enhanced_only and not provider.enhanced_history):
+                continue
+            ordered.append(name)
+        return ordered
+
+    @property
+    def calls(self):
+        calls = Counter()
+        for provider in self.providers.values():
+            calls.update(provider.calls)
+        return calls
+
+    @property
+    def retries(self):
+        retries = Counter()
+        for name, provider in self.providers.items():
+            for method, count in provider.retries.items():
+                retries[f"{name}:{method}"] += count
+        return retries
+
+    @property
+    def failures(self):
+        failures = Counter()
+        for name, provider in self.providers.items():
+            for category, count in provider.failures.items():
+                failures[f"{name}:{category}"] += count
+        return failures
+
+    @property
+    def estimated_credits(self):
+        return sum(provider.estimated_credits for provider in self.providers.values())
+
+    @property
+    def circuit_open_reason(self):
+        usable = [
+            name
+            for name in self.standard_order
+            if name not in self.blocked_providers
+            and not self.providers[name].circuit_open_reason
+        ]
+        if usable:
+            return None
+        details = [
+            f"{name}: {self.blocked_providers.get(name) or self.providers[name].circuit_open_reason or 'unavailable'}"
+            for name in self.standard_order
+        ]
+        return "all RPC providers unavailable: " + "; ".join(details)
+
+    def _eligible_names(self, order, method, preferred=None, excluded=None):
+        excluded = set(excluded or [])
+        names = [preferred] if preferred else list(order)
+        for name in names:
+            provider = self.providers.get(name)
+            if (
+                not provider
+                or name in excluded
+                or name in self.blocked_providers
+                or provider.circuit_open_reason
+                or method in self.unsupported_methods.get(name, set())
+            ):
+                continue
+            yield name
+
+    def _record_provider_error(self, provider_name, method, exc):
+        category = getattr(exc, "category", "")
+        if category == "unsupported":
+            self.unsupported_methods[provider_name].add(method)
+        elif category in {"auth", "quota", "rate_limit"}:
+            self.blocked_providers[provider_name] = str(exc)
+
+    def _route_call(self, method, params=None, preferred=None, order=None, timeout=None, excluded=None):
+        errors = []
+        names = list(
+            self._eligible_names(
+                order or self.standard_order,
+                method,
+                preferred=preferred,
+                excluded=excluded,
+            )
+        )
+        for index, name in enumerate(names):
+            provider = self.providers[name]
+            try:
+                provider_timeout = timeout
+                if provider_timeout is None and method == "getTransactionsForAddress":
+                    provider_timeout = provider.transactions_timeout_seconds
+                result = provider.call(method, params=params, timeout=provider_timeout)
+            except (HeliusRpcError, HeliusCircuitOpen) as exc:
+                self._record_provider_error(name, method, exc)
+                errors.append(f"{name}={getattr(exc, 'category', 'circuit')}")
+                if index + 1 < len(names):
+                    self.route_failovers[method] += 1
+                continue
+            self.last_provider_by_method[method] = name
+            return result, name
+        detail = ", ".join(errors) if errors else "no configured provider supports this method"
+        raise RpcProvidersUnavailable(f"all RPC providers failed for {method}: {detail}")
+
+    def call(self, method, params=None, timeout=None):
+        result, _provider = self._route_call(method, params=params, timeout=timeout)
+        return result
+
+    def health(self):
+        healthy = []
+        for name in self.standard_order:
+            provider = self.providers[name]
+            try:
+                result = provider.health()
+                status = "ok" if result == "ok" else str(result or "unknown")
+                self.health_results[name] = {"status": status}
+                if result == "ok":
+                    healthy.append(name)
+            except (HeliusRpcError, HeliusCircuitOpen) as exc:
+                self._record_provider_error(name, "getHealth", exc)
+                if getattr(exc, "category", "") == "unsupported":
+                    try:
+                        provider.call("getSlot")
+                        self.health_results[name] = {"status": "ok", "probe": "getSlot"}
+                        healthy.append(name)
+                        continue
+                    except (HeliusRpcError, HeliusCircuitOpen) as slot_exc:
+                        exc = slot_exc
+                        self._record_provider_error(name, "getSlot", exc)
+                self.health_results[name] = {
+                    "status": getattr(exc, "category", "error"),
+                    "error": str(exc)[:300],
+                }
+        if not healthy:
+            raise RpcProvidersUnavailable("all RPC provider health checks failed")
+        return "ok"
+
+    def signatures_for_address(self, address, limit=40, before=None):
+        opts = {"limit": int(limit)}
+        if before:
+            opts["before"] = before
+        result, _provider = self._route_call(
+            "getSignaturesForAddress",
+            [address, opts],
+            order=self.standard_order,
+        )
+        return result or []
+
+    def transaction(self, signature):
+        result, _provider = self._route_call(
+            "getTransaction",
+            [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+            order=self.standard_order,
+        )
+        return result
+
+    def transactions_for_address(
+        self,
+        address,
+        limit=100,
+        sort_order="desc",
+        pagination_token=None,
+        block_time=None,
+        status="succeeded",
+        provider_name=None,
+        excluded_providers=None,
+    ):
+        filters = {"status": status}
+        if block_time:
+            filters["blockTime"] = block_time
+        opts = {
+            "transactionDetails": "full",
+            "encoding": "jsonParsed",
+            "maxSupportedTransactionVersion": 0,
+            "sortOrder": sort_order,
+            "limit": min(max(1, int(limit)), 1000),
+            "filters": filters,
+        }
+        if pagination_token:
+            opts["paginationToken"] = pagination_token
+        result, provider = self._route_call(
+            "getTransactionsForAddress",
+            [address, opts],
+            preferred=provider_name,
+            order=self.enhanced_order,
+            timeout=(
+                self.providers[provider_name].transactions_timeout_seconds
+                if provider_name in self.providers
+                else None
+            ),
+            excluded=excluded_providers,
+        )
+        if not isinstance(result, dict):
+            raise HeliusRpcError(
+                "getTransactionsForAddress",
+                "provider",
+                "invalid paginated response",
+                provider=provider,
+            )
+        routed_result = dict(result)
+        routed_result["_provider"] = provider
+        return routed_result
+
+    def next_enhanced_provider(self, excluded=None):
+        return next(
+            self._eligible_names(
+                self.enhanced_order,
+                "getTransactionsForAddress",
+                excluded=excluded,
+            ),
+            None,
+        )
+
+    def token_supply(self, mint):
+        if mint in self.token_supply_cache:
+            return self.token_supply_cache[mint]
+        result, _provider = self._route_call(
+            "getTokenSupply",
+            [mint],
+            order=self.standard_order,
+        )
+        supply = rpc_token_amount((result or {}).get("value"))
+        self.token_supply_cache[mint] = supply
+        return supply
+
+    def token_balance(self, owner, mint):
+        cache_key = (owner, mint)
+        if cache_key in self.token_balance_cache:
+            return self.token_balance_cache[cache_key]
+        result, _provider = self._route_call(
+            "getTokenAccountsByOwner",
+            [owner, {"mint": mint}, {"encoding": "jsonParsed"}],
+            order=self.standard_order,
+        )
+        total = 0.0
+        for item in (result or {}).get("value") or []:
+            info = (
+                item.get("account", {})
+                .get("data", {})
+                .get("parsed", {})
+                .get("info", {})
+            )
+            total += rpc_token_amount(info.get("tokenAmount"))
+        self.token_balance_cache[cache_key] = total
+        return total
+
+    def provider_stats(self):
+        stats = {}
+        for name, provider in self.providers.items():
+            health = self.health_results.get(name) or {}
+            if name in self.blocked_providers or provider.circuit_open_reason:
+                status = "blocked"
+            elif sum(provider.calls.values()):
+                status = "active"
+            else:
+                status = "ready"
+            stats[name] = {
+                "status": status,
+                "health": health.get("status"),
+                "enhanced_history": provider.enhanced_history,
+                "calls": dict(provider.calls),
+                "retries": dict(provider.retries),
+                "failures": dict(provider.failures),
+                "estimated_credits": int(provider.estimated_credits),
+                "last_success_at": provider.last_success_at,
+                "last_error": (
+                    self.blocked_providers.get(name)
+                    or provider.circuit_open_reason
+                    or provider.last_error
+                ),
+            }
+        return stats
+
+
+def _provider_order(value, default):
+    if isinstance(value, str):
+        value = [item.strip() for item in value.split(",") if item.strip()]
+    if not isinstance(value, list):
+        value = list(default)
+    return [str(item) for item in value]
+
+
+def build_rpc_router(config):
+    providers = []
+    helius_key = os.environ.get("HELIUS_API_KEY")
+    if helius_key:
+        providers.append(
+            HeliusRpc(
+                helius_key,
+                timeout_seconds=int(config.get("helius_rpc_timeout_seconds", 30)),
+                transactions_timeout_seconds=int(
+                    config.get("helius_transactions_timeout_seconds", 25)
+                ),
+                max_retries=int(config.get("helius_rpc_max_retries", 2)),
+                retry_base_seconds=float(
+                    config.get("helius_rpc_retry_base_seconds", 0.75)
+                ),
+                retry_max_seconds=float(
+                    config.get("helius_rpc_retry_max_seconds", 120)
+                ),
+                circuit_failure_threshold=int(
+                    config.get("helius_rpc_circuit_failure_threshold", 4)
+                ),
+            )
+        )
+
+    alchemy_url = os.environ.get("ALCHEMY_SOLANA_RPC_URL")
+    alchemy_key = os.environ.get("ALCHEMY_API_KEY")
+    if not alchemy_url and alchemy_key:
+        alchemy_url = f"https://solana-mainnet.g.alchemy.com/v2/{alchemy_key}"
+    if alchemy_url:
+        providers.append(
+            AlchemyRpc(
+                alchemy_url,
+                timeout_seconds=int(config.get("alchemy_rpc_timeout_seconds", 20)),
+                transactions_timeout_seconds=int(
+                    config.get("alchemy_transactions_timeout_seconds", 35)
+                ),
+                max_retries=int(config.get("alchemy_rpc_max_retries", 1)),
+                retry_base_seconds=float(
+                    config.get("alchemy_rpc_retry_base_seconds", 0.5)
+                ),
+                retry_max_seconds=float(
+                    config.get("alchemy_rpc_retry_max_seconds", 30)
+                ),
+                circuit_failure_threshold=int(
+                    config.get("alchemy_rpc_circuit_failure_threshold", 2)
+                ),
+            )
+        )
+
+    drpc_url = os.environ.get("DRPC_SOLANA_RPC_URL")
+    drpc_key = os.environ.get("DRPC_API_KEY")
+    if not drpc_url and drpc_key:
+        drpc_url = f"https://lb.drpc.live/solana/{drpc_key}"
+    if drpc_url:
+        providers.append(
+            DrpcRpc(
+                drpc_url,
+                timeout_seconds=int(config.get("drpc_rpc_timeout_seconds", 5)),
+                transactions_timeout_seconds=int(
+                    config.get("drpc_transactions_timeout_seconds", 5)
+                ),
+                max_retries=int(config.get("drpc_rpc_max_retries", 1)),
+                retry_base_seconds=float(
+                    config.get("drpc_rpc_retry_base_seconds", 0.25)
+                ),
+                retry_max_seconds=float(
+                    config.get("drpc_rpc_retry_max_seconds", 5)
+                ),
+                circuit_failure_threshold=int(
+                    config.get("drpc_rpc_circuit_failure_threshold", 2)
+                ),
+            )
+        )
+
+    if not providers:
+        raise SystemExit(
+            "No Solana RPC provider is configured. Set HELIUS_API_KEY, "
+            "ALCHEMY_SOLANA_RPC_URL, or DRPC_SOLANA_RPC_URL."
+        )
+    return RoutedSolanaRpc(
+        providers,
+        standard_order=_provider_order(
+            config.get("rpc_standard_provider_order"),
+            ["drpc", "alchemy", "helius"],
+        ),
+        enhanced_order=_provider_order(
+            config.get("rpc_enhanced_provider_order"),
+            ["alchemy", "helius"],
+        ),
+    )
 
 
 def gecko_pool_from_item(item, source):
@@ -3822,12 +4334,35 @@ def helius_page_budget(pool, config, kind, phase=None):
     return max(1, pages)
 
 
+def decode_provider_cursor(value, default_provider="helius"):
+    if isinstance(value, dict):
+        provider = str(value.get("provider") or "").strip() or default_provider
+        token = value.get("token")
+        return provider, token
+    if value:
+        return default_provider, value
+    return None, None
+
+
+def encode_provider_cursor(provider, token):
+    if not token:
+        return None
+    return {
+        "provider": str(provider or "helius"),
+        "token": token,
+    }
+
+
 def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
     now = int(time.time())
     limit = int(config.get("helius_transactions_limit", 100))
     lookback_minutes = int(config.get("helius_recent_lookback_minutes", max(60, int(config["alert_window_minutes"]))))
     recent_from = max(0, now - lookback_minutes * 60)
-    previous_time = int(pool_state.get("helius_latest_block_time") or 0)
+    previous_time = int(
+        pool_state.get("rpc_latest_block_time")
+        or pool_state.get("helius_latest_block_time")
+        or 0
+    )
     live_lookback_minutes = int(config.get("helius_live_lookback_minutes", min(lookback_minutes, 90)))
     if previous_time:
         recovery_hours = max(
@@ -3842,7 +4377,8 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
     else:
         live_from = recent_from
         live_budget_kind = "recent"
-    live_cursor = pool_state.get("helius_live_cursor")
+    live_cursor_record = pool_state.get("helius_live_cursor")
+    live_cursor_provider, live_cursor = decode_provider_cursor(live_cursor_record)
     if live_cursor:
         live_from = int(pool_state.get("helius_live_from") or live_from)
         live_budget_kind = "incremental" if previous_time else "recent"
@@ -3851,7 +4387,7 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
     staged_updates = {}
     staged_deletes = set()
     stats = {
-        "source": "helius_transactions",
+        "source": "enhanced_transactions",
         "phase": phase or "full",
         "pages": 0,
         "transactions": 0,
@@ -3862,6 +4398,8 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         "had_previous_state": bool(previous_time),
         "live_from": live_from,
         "live_resumed": bool(live_cursor),
+        "providers_used": [],
+        "provider_failovers": [],
         "history_gap_seconds": max(0, live_from - previous_time) if previous_time else 0,
     }
 
@@ -3876,12 +4414,12 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
             added += 1
         return added
 
-    def stage_cursor(save_cursor_key, cursor):
+    def stage_cursor(save_cursor_key, cursor, provider=None):
         if not save_cursor_key:
             return
         complete_key = f"{save_cursor_key}_complete"
         if cursor:
-            staged_updates[save_cursor_key] = cursor
+            staged_updates[save_cursor_key] = encode_provider_cursor(provider, cursor)
             staged_deletes.add(complete_key)
         else:
             staged_deletes.add(save_cursor_key)
@@ -3893,11 +4431,14 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         max_pages,
         block_time=None,
         pagination_token=None,
+        pagination_provider=None,
         save_cursor_key=None,
         target_from=None,
     ):
         cursor = pagination_token
+        provider_name = pagination_provider
         pages = 0
+        attempted_providers = set()
         pass_stats = {
             "name": name,
             "sort_order": sort_order,
@@ -3907,44 +4448,91 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
             "truncated": False,
             "oldest_block_time": None,
             "newest_block_time": None,
+            "provider": provider_name,
+            "provider_failovers": [],
         }
         if target_from is not None:
             pass_stats["target_from"] = int(target_from)
         if max_pages <= 0:
             stats["passes"].append(pass_stats)
             return pass_stats
-        while pages < max_pages:
-            result = rpc.transactions_for_address(
-                pool.pool_address,
-                limit=limit,
-                sort_order=sort_order,
-                pagination_token=cursor,
-                block_time=block_time,
-            )
-            batch = result.get("data") or []
-            pages += 1
-            stats["pages"] += 1
-            pass_stats["pages"] += 1
-            pass_stats["transactions"] += len(batch)
-            pass_stats["added"] += add_batch(batch)
-            block_times = [int(tx.get("blockTime") or 0) for tx in batch if int(tx.get("blockTime") or 0) > 0]
-            if block_times:
-                oldest = min(block_times)
-                newest = max(block_times)
-                current_oldest = pass_stats.get("oldest_block_time")
-                current_newest = pass_stats.get("newest_block_time")
-                pass_stats["oldest_block_time"] = oldest if current_oldest is None else min(current_oldest, oldest)
-                pass_stats["newest_block_time"] = newest if current_newest is None else max(current_newest, newest)
-            cursor = result.get("paginationToken")
-            if len(batch) < limit:
-                cursor = None
-            if not cursor or not batch:
-                stage_cursor(save_cursor_key, None)
+        while True:
+            try:
+                while pages < max_pages:
+                    kwargs = {
+                        "limit": limit,
+                        "sort_order": sort_order,
+                        "pagination_token": cursor,
+                        "block_time": block_time,
+                    }
+                    if isinstance(rpc, RoutedSolanaRpc):
+                        kwargs["provider_name"] = provider_name
+                        kwargs["excluded_providers"] = attempted_providers
+                    result = rpc.transactions_for_address(pool.pool_address, **kwargs)
+                    actual_provider = (
+                        result.get("_provider")
+                        or provider_name
+                        or getattr(rpc, "provider_name", "helius")
+                    )
+                    provider_name = str(actual_provider)
+                    pass_stats["provider"] = provider_name
+                    if provider_name not in stats["providers_used"]:
+                        stats["providers_used"].append(provider_name)
+                    batch = result.get("data") or []
+                    pages += 1
+                    stats["pages"] += 1
+                    pass_stats["pages"] += 1
+                    pass_stats["transactions"] += len(batch)
+                    pass_stats["added"] += add_batch(batch)
+                    block_times = [
+                        int(tx.get("blockTime") or 0)
+                        for tx in batch
+                        if int(tx.get("blockTime") or 0) > 0
+                    ]
+                    if block_times:
+                        oldest = min(block_times)
+                        newest = max(block_times)
+                        current_oldest = pass_stats.get("oldest_block_time")
+                        current_newest = pass_stats.get("newest_block_time")
+                        pass_stats["oldest_block_time"] = (
+                            oldest
+                            if current_oldest is None
+                            else min(current_oldest, oldest)
+                        )
+                        pass_stats["newest_block_time"] = (
+                            newest
+                            if current_newest is None
+                            else max(current_newest, newest)
+                        )
+                    cursor = result.get("paginationToken")
+                    if len(batch) < limit:
+                        cursor = None
+                    if not cursor or not batch:
+                        stage_cursor(save_cursor_key, None)
+                        break
+                else:
+                    pass_stats["truncated"] = True
+                    stats["truncated"] = True
+                    stage_cursor(save_cursor_key, cursor, provider_name)
                 break
-        else:
-            pass_stats["truncated"] = True
-            stats["truncated"] = True
-            stage_cursor(save_cursor_key, cursor)
+            except Exception as exc:
+                if not isinstance(rpc, RoutedSolanaRpc):
+                    raise
+                if provider_name:
+                    attempted_providers.add(provider_name)
+                next_provider = rpc.next_enhanced_provider(excluded=attempted_providers)
+                if not next_provider:
+                    raise
+                failover = {
+                    "from": provider_name,
+                    "to": next_provider,
+                    "reason": str(exc)[:200],
+                }
+                pass_stats["provider_failovers"].append(failover)
+                stats["provider_failovers"].append(failover)
+                provider_name = next_provider
+                cursor = None
+                pages = 0
         pass_stats["pagination_remaining"] = bool(cursor)
         if target_from is not None:
             pass_stats["coverage_complete"] = not bool(cursor)
@@ -3957,6 +4545,7 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         helius_page_budget(pool, config, live_budget_kind, phase=phase),
         block_time={"gte": live_from},
         pagination_token=live_cursor,
+        pagination_provider=live_cursor_provider,
         save_cursor_key="helius_live_cursor",
         target_from=live_from,
     )
@@ -4003,8 +4592,10 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
             int(now - retention_hours * 3600),
         )
         backfill_cursor = pool_state.get("helius_initial_backfill_cursor")
+        backfill_provider, backfill_cursor = decode_provider_cursor(backfill_cursor)
         if int(pool_state.get("helius_initial_backfill_from") or 0) != launch_from:
             backfill_cursor = None
+            backfill_provider = None
             staged_deletes.add("helius_initial_backfill_cursor")
             staged_deletes.add("helius_initial_backfill_cursor_complete")
             staged_updates["helius_initial_backfill_from"] = launch_from
@@ -4018,6 +4609,7 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
             backfill_pages,
             block_time={"gte": launch_from},
             pagination_token=backfill_cursor,
+            pagination_provider=backfill_provider,
             save_cursor_key="helius_initial_backfill_cursor",
             target_from=launch_from,
         )
@@ -4066,9 +4658,12 @@ def update_pool_transaction_state(pool_state, pool, txs, checkpoint=None):
         return
     if signature:
         pool_state["latest_signature"] = signature
+        pool_state["rpc_latest_signature"] = signature
         pool_state["helius_latest_signature"] = signature
     if block_time:
         pool_state["latest_time"] = iso(block_time)
+        pool_state["rpc_latest_time"] = iso(block_time)
+        pool_state["rpc_latest_block_time"] = block_time
         pool_state["helius_latest_time"] = iso(block_time)
         pool_state["helius_latest_block_time"] = block_time
     pool_state["symbol"] = pool.symbol
@@ -4431,7 +5026,11 @@ def pool_has_new_activity(rpc, pool, pool_state, config):
     recheck_due = parse_timestamp(pool_state.get("signal_recheck_due_at"))
     if recheck_due and int(time.time()) >= recheck_due:
         return True, {"reason": "signal_retention_recheck"}
-    previous_signature = pool_state.get("helius_latest_signature") or pool_state.get("latest_signature")
+    previous_signature = (
+        pool_state.get("rpc_latest_signature")
+        or pool_state.get("helius_latest_signature")
+        or pool_state.get("latest_signature")
+    )
     if not config.get("helius_activity_probe_enabled", True) or not previous_signature:
         return True, {"reason": "first_scan_or_probe_disabled"}
     market_active_threshold = max(
@@ -4559,7 +5158,7 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
             txs, fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="deep")
     except Exception as exc:
         if not config.get("helius_transactions_fallback_signatures", True):
-            return [], {"pool": pool.as_dict(), "error": str(exc), "trade_source": "helius_transactions"}
+            return [], {"pool": pool.as_dict(), "error": str(exc), "trade_source": "enhanced_transactions"}
         return scan_pool_signatures(rpc, pool, config, state, classification_budget, fallback_error=str(exc))
 
     if not preclassified:
@@ -4610,7 +5209,7 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
     return alerts, {
         "pool": pool.as_dict(),
         "lane": config.get("lane") or config.get("mode"),
-        "trade_source": "helius_transactions",
+        "trade_source": "enhanced_transactions",
         "new_signatures": len(txs),
         "transactions_scanned": len(txs),
         "parsed_swaps": len(swaps),
@@ -4731,8 +5330,11 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
     latest_successful_item = next((item for item in signatures if not item.get("err")), None)
     if latest_successful_item and complete_window:
         pool_state["latest_signature"] = latest_successful_item["signature"]
+        pool_state["rpc_latest_signature"] = latest_successful_item["signature"]
         pool_state["helius_latest_signature"] = latest_successful_item["signature"]
         pool_state["latest_time"] = iso(latest_successful_item.get("blockTime"))
+        pool_state["rpc_latest_time"] = iso(latest_successful_item.get("blockTime"))
+        pool_state["rpc_latest_block_time"] = int(latest_successful_item.get("blockTime") or 0)
         pool_state["helius_latest_time"] = iso(latest_successful_item.get("blockTime"))
         pool_state["helius_latest_block_time"] = int(latest_successful_item.get("blockTime") or 0)
         pool_state["symbol"] = pool.symbol
@@ -5618,12 +6220,13 @@ def build_scan_health(summaries, lane_stats, config):
     coverage_fetch_items = [
         (item, item.get("trade_fetch") or {})
         for item in summaries
-        if (item.get("trade_fetch") or {}).get("source") in ("helius_transactions", "pool_signatures")
+        if (item.get("trade_fetch") or {}).get("source")
+        in ("enhanced_transactions", "helius_transactions", "pool_signatures")
     ]
     live_fetch_items = [
         (item, fetch)
         for item, fetch in coverage_fetch_items
-        if fetch.get("source") == "helius_transactions"
+        if fetch.get("source") in ("enhanced_transactions", "helius_transactions")
     ]
     live_fetches = [fetch for _item, fetch in coverage_fetch_items]
     live_truncated = sum(1 for fetch in live_fetches if fetch.get("live_truncated"))
@@ -5660,14 +6263,21 @@ def build_scan_health(summaries, lane_stats, config):
         error = str(item.get("error") or "")
         if not error:
             continue
-        if "rate_limit" in error or "HTTP 429" in error:
-            scan_errors["helius_rate_limit"] += 1
-        elif "quota" in error or "credit" in error.lower() or "HTTP 402" in error:
-            scan_errors["helius_quota"] += 1
-        elif "auth" in error or "HTTP 401" in error or "HTTP 403" in error:
-            scan_errors["helius_auth"] += 1
-        elif "circuit open" in error.lower():
-            scan_errors["helius_circuit_open"] += 1
+        lower_error = error.lower()
+        provider = next(
+            (name for name in ("alchemy", "drpc", "helius") if f"{name}:" in lower_error),
+            "rpc",
+        )
+        if "all rpc providers" in lower_error:
+            scan_errors["rpc_all_unavailable"] += 1
+        elif "rate_limit" in lower_error or "http 429" in lower_error:
+            scan_errors[f"{provider}_rate_limit"] += 1
+        elif "quota" in lower_error or "credit" in lower_error or "http 402" in lower_error:
+            scan_errors[f"{provider}_quota"] += 1
+        elif "auth" in lower_error or "http 401" in lower_error or "http 403" in lower_error:
+            scan_errors[f"{provider}_auth"] += 1
+        elif "circuit open" in lower_error:
+            scan_errors[f"{provider}_circuit_open"] += 1
         else:
             scan_errors["other"] += 1
     zero_parse_pools = sum(
@@ -5771,6 +6381,7 @@ def build_scan_health(summaries, lane_stats, config):
         "parse_errors": parse_errors,
         "scan_error_categories": dict(scan_errors),
         "estimated_rpc_credits": int(config.get("_rpc_estimated_credits") or 0),
+        "rpc_providers": config.get("_rpc_providers", {}),
         "solana_tracker_status": "error" if config.get("_solana_tracker_error") else "ok",
     }
 
@@ -5814,6 +6425,8 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "rpc_retries": config.get("_rpc_retries", {}),
             "rpc_failures": config.get("_rpc_failures", {}),
             "estimated_rpc_credits": int(config.get("_rpc_estimated_credits") or 0),
+            "rpc_providers": config.get("_rpc_providers", {}),
+            "rpc_failovers": config.get("_rpc_failovers", {}),
             "scan_health": config.get("_scan_health", {}),
             "discovery": config.get("_discovery_stats", {}),
             "solana_tracker_ath": (state.get("maintenance") or {}).get("solana_tracker_ath", {}),
@@ -6043,7 +6656,7 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
             )
         if getattr(rpc, "circuit_open_reason", None):
             print(
-                f"warn: {label}: stopping lane after Helius circuit opened: "
+                f"warn: {label}: stopping lane after all RPC providers became unavailable: "
                 f"{rpc.circuit_open_reason}",
                 file=sys.stderr,
                 flush=True,
@@ -6059,23 +6672,13 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
 
 def run_once(config, lane_name=None):
     load_env()
-    api_key = os.environ.get("HELIUS_API_KEY")
-    if not api_key:
-        raise SystemExit("HELIUS_API_KEY is missing. Put it in .env or environment.")
-
     http = Http()
-    rpc = HeliusRpc(
-        api_key,
-        timeout_seconds=int(config.get("helius_rpc_timeout_seconds", 30)),
-        transactions_timeout_seconds=int(config.get("helius_transactions_timeout_seconds", 25)),
-        max_retries=int(config.get("helius_rpc_max_retries", 2)),
-        retry_base_seconds=float(config.get("helius_rpc_retry_base_seconds", 0.75)),
-        retry_max_seconds=float(config.get("helius_rpc_retry_max_seconds", 120)),
-        circuit_failure_threshold=int(config.get("helius_rpc_circuit_failure_threshold", 4)),
-    )
+    rpc = build_rpc_router(config)
+    config["_rpc_router"] = rpc
     health = rpc.health()
+    config["_rpc_providers"] = rpc.provider_stats()
     if health != "ok":
-        raise SystemExit(f"Helius health is not ok: {health}")
+        raise SystemExit(f"Solana RPC health is not ok: {health}")
 
     state = load_json(STATE_PATH, {"pools": {}, "wallet_cache": {}})
     lane_list = selected_lanes(config, lane_name) if config.get("lanes") else []
@@ -6146,7 +6749,9 @@ def run_once(config, lane_name=None):
 
     config["_rpc_retries"] = dict(rpc.retries)
     config["_rpc_failures"] = dict(rpc.failures)
+    config["_rpc_failovers"] = dict(rpc.route_failovers)
     config["_rpc_estimated_credits"] = int(rpc.estimated_credits)
+    config["_rpc_providers"] = rpc.provider_stats()
     scan_health = build_scan_health(summaries, lane_stats, config)
     config["_scan_health"] = scan_health
     if (
@@ -6173,7 +6778,8 @@ def run_once(config, lane_name=None):
     render_report(report_payload)
     sync_convex_snapshot(report_payload, state, config)
 
-    print(f"Helius: {health}")
+    print(f"Solana RPC: {health}")
+    print(f"RPC providers: {', '.join(rpc.providers)}")
     print(f"Universe pools: {len(universe)}")
     print(f"Scanned pools: {len(summaries)}")
     print(f"Alerts: {len(all_alerts)}")
@@ -6210,6 +6816,14 @@ def main():
         try:
             run_once(config, args.lane)
         except (Exception, SystemExit) as exc:
+            rpc = config.get("_rpc_router")
+            if isinstance(rpc, RoutedSolanaRpc):
+                config["_rpc_providers"] = rpc.provider_stats()
+                scan_health = dict(config.get("_scan_health") or {})
+                scan_health.setdefault("status", "unhealthy")
+                scan_health.setdefault("reasons", [str(exc)[:300]])
+                scan_health["rpc_providers"] = config["_rpc_providers"]
+                config["_scan_health"] = scan_health
             write_scanner_status(
                 "failed",
                 error=exc,

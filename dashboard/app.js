@@ -1511,6 +1511,21 @@ function renderStatus() {
     || (failed ? status.error : "")
     || "No scanner health diagnostics in this report";
   const athProvider = report.stats?.solana_tracker_ath || {};
+  const rpcProviders = scanHealth.rpc_providers || report.stats?.rpc_providers || {};
+  const rpcProviderEntries = ["alchemy", "drpc", "helius"]
+    .filter((name) => rpcProviders[name])
+    .map((name) => [name, rpcProviders[name]]);
+  const rpcLabels = { alchemy: "Alchemy", drpc: "dRPC", helius: "Helius" };
+  const activeRpcProviders = rpcProviderEntries
+    .filter(([, provider]) => ["active", "ready"].includes(provider.status))
+    .map(([name]) => rpcLabels[name] || name);
+  const blockedRpcProviders = rpcProviderEntries
+    .filter(([, provider]) => provider.status === "blocked")
+    .map(([name]) => rpcLabels[name] || name);
+  const rpcTitle = rpcProviderEntries.map(([name, provider]) => {
+    const calls = Object.values(provider.calls || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+    return `${rpcLabels[name] || name}: ${provider.status || "unknown"}, ${calls} calls`;
+  }).join("; ");
   if (els.showHiddenInput) els.showHiddenInput.checked = state.showHidden;
   if (els.tierFilter) els.tierFilter.value = state.tier;
   const reportLanes = (report.lanes_scanned || []).filter((name) => FILTER_ORDER.includes(name) && name !== "legacy");
@@ -1525,6 +1540,8 @@ function renderStatus() {
     failed ? `<span class="status-pill freshness-bad" title="${esc(status.error || "Scanner failed")}"><span class="dot bad"></span>last attempt failed ${esc(dateLabel(status.last_attempt_at))}</span>` : "",
     `<span class="status-pill freshness-${freshness.tone}"><span class="dot ${freshness.tone === "good" ? "" : freshness.tone}"></span>${esc(freshness.label)}</span>`,
     `<span class="status-pill freshness-${healthTone}" title="${esc(healthReason)}"><span class="dot ${healthTone === "good" ? "" : healthTone}"></span>scan ${esc(healthStatus)}</span>`,
+    activeRpcProviders.length ? `<span class="status-pill" title="${esc(rpcTitle)}">RPC ${esc(activeRpcProviders.join(" + "))}</span>` : "",
+    blockedRpcProviders.length ? `<span class="status-pill freshness-warn" title="${esc(rpcTitle)}">${esc(blockedRpcProviders.join(" + "))} blocked</span>` : "",
     athProvider.status && athProvider.status !== "ok" ? `<span class="status-pill freshness-bad" title="${esc(athProvider.error || "Solana Tracker unavailable")}">ATH source ${esc(athProvider.status)}</span>` : "",
     `<span class="status-pill">lane ${esc(laneText)}</span>`,
     state.staticMode && state.hiddenTokenKeys.size ? `<button class="status-action" id="syncDeleted" type="button">Sync deleted</button>` : "",

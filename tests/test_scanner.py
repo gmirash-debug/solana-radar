@@ -4,6 +4,23 @@ from unittest import mock
 import scanner
 
 
+def rpc_response(result=None, *, status_code=200, error=None, text=""):
+    response = mock.Mock(
+        status_code=status_code,
+        ok=200 <= status_code < 300,
+        text=text,
+        reason="OK" if 200 <= status_code < 300 else "RPC error",
+        headers={},
+    )
+    body = {"jsonrpc": "2.0", "id": 1}
+    if error is not None:
+        body["error"] = error
+    else:
+        body["result"] = result
+    response.json.return_value = body
+    return response
+
+
 class FakeRpc:
     def __init__(self, signatures):
         self.signatures = signatures
@@ -144,6 +161,51 @@ class ScannerCoreTests(unittest.TestCase):
             rpc.credit_cost("getTransactionsForAddress", {"data": []}),
             10,
         )
+
+    def test_standard_rpc_prefers_drpc_and_falls_back_to_alchemy(self):
+        drpc = scanner.DrpcRpc("https://drpc.invalid", max_retries=0)
+        alchemy = scanner.AlchemyRpc("https://alchemy.invalid", max_retries=0)
+        drpc.session.post = mock.Mock(
+            return_value=rpc_response(
+                status_code=429,
+                text="rate limit reached",
+            )
+        )
+        alchemy.session.post = mock.Mock(
+            return_value=rpc_response([{"signature": "sig"}])
+        )
+        rpc = scanner.RoutedSolanaRpc(
+            [drpc, alchemy],
+            standard_order=["drpc", "alchemy"],
+            enhanced_order=["alchemy"],
+        )
+
+        result = rpc.signatures_for_address("pool", limit=1)
+
+        self.assertEqual(result[0]["signature"], "sig")
+        self.assertEqual(rpc.last_provider_by_method["getSignaturesForAddress"], "alchemy")
+        self.assertIn("drpc", rpc.blocked_providers)
+        self.assertEqual(rpc.route_failovers["getSignaturesForAddress"], 1)
+
+    def test_enhanced_history_prefers_alchemy_without_touching_drpc(self):
+        drpc = scanner.DrpcRpc("https://drpc.invalid", max_retries=0)
+        alchemy = scanner.AlchemyRpc("https://alchemy.invalid", max_retries=0)
+        helius = scanner.HeliusRpc("secret-key", max_retries=0)
+        alchemy.session.post = mock.Mock(
+            return_value=rpc_response({"data": [], "paginationToken": None})
+        )
+        rpc = scanner.RoutedSolanaRpc(
+            [drpc, alchemy, helius],
+            standard_order=["drpc", "alchemy", "helius"],
+            enhanced_order=["alchemy", "helius"],
+        )
+
+        result = rpc.transactions_for_address("pool", limit=1)
+
+        self.assertEqual(result["_provider"], "alchemy")
+        self.assertEqual(alchemy.session.post.call_count, 1)
+        self.assertEqual(sum(drpc.calls.values()), 0)
+        self.assertEqual(sum(helius.calls.values()), 0)
 
     def test_retention_only_attributes_tokens_bought_in_wave(self):
         result = scanner.attributed_wave_retention(
@@ -697,7 +759,10 @@ class ScannerCoreTests(unittest.TestCase):
                 phase="probe",
             )
         self.assertTrue(first_stats["live_truncated"])
-        self.assertEqual(pool_state["helius_live_cursor"], "older-page")
+        self.assertEqual(
+            pool_state["helius_live_cursor"],
+            {"provider": "helius", "token": "older-page"},
+        )
         self.assertEqual(pool_state["helius_live_pending_signature"], "newest")
 
         second_rpc = FakeTransactionsRpc(
@@ -730,6 +795,140 @@ class ScannerCoreTests(unittest.TestCase):
         )
         self.assertEqual(pool_state["helius_latest_signature"], "newest")
         self.assertNotIn("helius_live_cursor", pool_state)
+
+    def test_legacy_helius_cursor_replays_on_alchemy_without_token_leakage(self):
+        now = 2_000_000
+        helius = scanner.HeliusRpc("secret-key", max_retries=0)
+        alchemy = scanner.AlchemyRpc("https://alchemy.invalid", max_retries=0)
+        helius.session.post = mock.Mock(
+            return_value=rpc_response(
+                status_code=429,
+                text="max usage reached",
+            )
+        )
+        alchemy.session.post = mock.Mock(
+            return_value=rpc_response(
+                {
+                    "data": [
+                        {
+                            "blockTime": now - 5,
+                            "transaction": {"signatures": ["alchemy-head"]},
+                        }
+                    ]
+                }
+            )
+        )
+        rpc = scanner.RoutedSolanaRpc(
+            [alchemy, helius],
+            standard_order=["alchemy", "helius"],
+            enhanced_order=["alchemy", "helius"],
+        )
+        config = {
+            "alert_window_minutes": 240,
+            "helius_transactions_limit": 2,
+            "helius_recent_lookback_minutes": 360,
+            "helius_live_lookback_minutes": 90,
+            "helius_probe_incremental_pages": 1,
+            "helius_dynamic_page_budget_enabled": False,
+            "helius_initial_backfill_enabled": False,
+        }
+        pool_state = {
+            "helius_latest_block_time": now - 600,
+            "helius_live_cursor": "helius-only-token",
+            "helius_live_from": now - 600,
+        }
+
+        with mock.patch.object(scanner.time, "time", return_value=now):
+            transactions, stats = scanner.fetch_helius_pool_transactions(
+                rpc,
+                scanner.Pool(pool_address="pool", token_address="token", txns_1h=10),
+                config,
+                pool_state,
+                phase="probe",
+            )
+
+        helius_payload = helius.session.post.call_args.kwargs["json"]
+        alchemy_payload = alchemy.session.post.call_args.kwargs["json"]
+        self.assertEqual(
+            helius_payload["params"][1]["paginationToken"],
+            "helius-only-token",
+        )
+        self.assertNotIn("paginationToken", alchemy_payload["params"][1])
+        self.assertEqual(transactions[0]["transaction"]["signatures"][0], "alchemy-head")
+        self.assertEqual(stats["providers_used"], ["alchemy"])
+        self.assertEqual(stats["provider_failovers"][0]["to"], "alchemy")
+        self.assertNotIn("helius_live_cursor", pool_state)
+
+    def test_mid_page_failover_restarts_window_and_deduplicates_signatures(self):
+        now = 2_000_000
+        alchemy = scanner.AlchemyRpc("https://alchemy.invalid", max_retries=0)
+        helius = scanner.HeliusRpc("secret-key", max_retries=0)
+        alchemy.session.post = mock.Mock(
+            side_effect=[
+                rpc_response(
+                    {
+                        "data": [
+                            {
+                                "blockTime": now - 5,
+                                "transaction": {"signatures": ["same-head"]},
+                            }
+                        ],
+                        "paginationToken": "alchemy-next",
+                    }
+                ),
+                rpc_response(status_code=429, text="rate limit reached"),
+            ]
+        )
+        helius.session.post = mock.Mock(
+            return_value=rpc_response(
+                {
+                    "data": [
+                        {
+                            "blockTime": now - 5,
+                            "transaction": {"signatures": ["same-head"]},
+                        },
+                        {
+                            "blockTime": now - 10,
+                            "transaction": {"signatures": ["older"]},
+                        },
+                    ]
+                }
+            )
+        )
+        rpc = scanner.RoutedSolanaRpc(
+            [alchemy, helius],
+            standard_order=["alchemy", "helius"],
+            enhanced_order=["alchemy", "helius"],
+        )
+        config = {
+            "alert_window_minutes": 240,
+            "helius_transactions_limit": 1,
+            "helius_recent_lookback_minutes": 360,
+            "helius_live_lookback_minutes": 90,
+            "helius_probe_incremental_pages": 2,
+            "helius_dynamic_page_budget_enabled": False,
+            "helius_initial_backfill_enabled": False,
+        }
+        pool_state = {"helius_latest_block_time": now - 600}
+
+        with mock.patch.object(scanner.time, "time", return_value=now):
+            transactions, stats = scanner.fetch_helius_pool_transactions(
+                rpc,
+                scanner.Pool(pool_address="pool", token_address="token", txns_1h=10),
+                config,
+                pool_state,
+                phase="probe",
+            )
+
+        helius_payload = helius.session.post.call_args.kwargs["json"]
+        signatures = [
+            item["transaction"]["signatures"][0]
+            for item in transactions
+        ]
+        self.assertNotIn("paginationToken", helius_payload["params"][1])
+        self.assertEqual(signatures, ["older", "same-head"])
+        self.assertEqual(stats["provider_failovers"][0]["from"], "alchemy")
+        self.assertEqual(stats["provider_failovers"][0]["to"], "helius")
 
     def test_live_cursor_is_not_advanced_when_a_later_page_fails(self):
         now = 2_000_000

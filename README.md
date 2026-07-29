@@ -4,14 +4,19 @@ Local BBB-lite scanner for Solana meme pools.
 
 Boundary: this project is a market/onchain alert scanner, not the primary narrative-discovery workflow. It may start from DEX/Helius/GMGN because it is looking for caught tokens. For any open-ended narrative scan, start from the top-level universal source-first router before using Solana Radar outputs.
 
-It uses free DEX data for market discovery and Helius only for onchain work:
+It uses free DEX data for market discovery and a routed Solana RPC layer for
+onchain work:
 
 - find pools across active lane-based filters: micro sticky, cheap sticky, breakout, and reactivation;
 - keep only migrated pump.fun ecosystem pools by default: `pumpfun-amm`, `pumpswap`;
 - retain a rolling registry of known pools and refresh it through free market APIs, so discovery is not limited to current trending pages;
 - rotate scan capacity between high-activity pools and pools that have gone longest without an onchain check;
-- use a lightweight signature probe before paid parsed-transaction history on previously scanned pools;
-- read the newest Helius transaction tail first, then advance a separate bounded launch backfill only when it still fits the retained signal window;
+- use dRPC first for standard RPC work such as signature probes, transaction
+  details, token supply, and wallet balances;
+- use Alchemy first for paginated full address history, with Helius as the
+  enhanced-history fallback;
+- read the newest transaction tail first, then advance a separate bounded
+  launch backfill only when it still fits the retained signal window;
 - parse swaps;
 - classify buy wallets as fresh, freshish, low-tx, normal, or dormant;
 - attribute retention only to tokens bought in the detected wave, excluding balances held before the wave;
@@ -25,6 +30,8 @@ Create `.env` in the repository root or inside `solana-radar/`:
 
 ```bash
 HELIUS_API_KEY=...
+ALCHEMY_SOLANA_RPC_URL=...
+DRPC_SOLANA_RPC_URL=...
 SOLANA_TRACKER_API_KEY=...
 GMGN_API_KEY=...
 BRIGHTDATA_API_KEY=...
@@ -108,14 +115,22 @@ freshness and scan health (`healthy`, `degraded`, or `unhealthy`). The dashboard
 - `data/state.json`
 - `data/deleted_tokens.json`
 
-Required GitHub Actions secrets:
+Recommended production GitHub Actions secrets:
 
 ```bash
 HELIUS_API_KEY
+ALCHEMY_SOLANA_RPC_URL
+DRPC_SOLANA_RPC_URL
 SOLANA_TRACKER_API_KEY
 GMGN_API_KEY
 BRIGHTDATA_API_KEY
 ```
+
+At least one Solana RPC provider is required. For the intended production
+layout, configure all three. `ALCHEMY_SOLANA_RPC_URL` and
+`DRPC_SOLANA_RPC_URL` should contain the complete HTTPS endpoints copied from
+their dashboards. `ALCHEMY_API_KEY` and `DRPC_API_KEY` are also supported as
+alternatives, but complete endpoint URLs are preferred.
 
 `GMGN_API_KEY` is optional but recommended for Pump.fun trending discovery.
 `BRIGHTDATA_API_KEY` can be empty if social enrichment should be disabled.
@@ -162,11 +177,11 @@ Retired filters: `incubation` and `young` are no longer scanned or shown as acti
 
 By default, all lanes scan only migrated pump.fun ecosystem pools through
 `dex_allowlist` in `config.example.json`. Pre-migration `pumpfun` bonding-curve
-pools are excluded before Helius onchain analysis.
+pools are excluded before onchain analysis.
 
 ## Outputs
 
-- `solana-radar/data/state.json` - last seen Helius transaction cursors, pool state, and wallet cache.
+- `solana-radar/data/state.json` - provider-aware transaction cursors, pool state, and wallet cache.
 - `solana-radar/data/alerts.jsonl` - machine-readable alerts.
 - `solana-radar/data/latest_report.md` - human-readable latest scan.
 - `solana-radar/data/latest_report.json` - structured dashboard data.
@@ -185,19 +200,25 @@ fallback discovery.
 When `GMGN_API_KEY` is present, the scanner also pulls GMGN Solana trending
 tokens for Pump.fun over `1m`, `5m`, and `1h` windows, resolves them through
 DexScreener into pool addresses, and then applies the same local filters and
-Helius onchain analysis.
+routed onchain analysis.
 
-Onchain buy extraction is Helius-first. The scanner uses
-`getTransactionsForAddress` in full/jsonParsed mode. Each hourly run checks the
-newest edge of the market first, with a rolling overlap that feeds the retained
-swap buffer. A shallow probe is evaluated together with that buffer; a deeper
-scan is triggered only by suspicious wallet classes, linked wallets, material
-flow, a sticky/wave precheck, an alert-level score, or a scheduled audit slot.
-Launch backfill has its own cursor, runs at most one page per scan, and stops
-once the launch is older than the retained 24-hour signal window. This prevents
-historical catch-up from delaying live detection or consuming API credits for
-data that state compaction would immediately discard. If the Helius transaction
-path fails, the scanner can fall back to the older pool-signature scan.
+Onchain buy extraction routes each method to the provider that fits it best.
+dRPC is first for standard Solana JSON-RPC calls. Alchemy is first for
+`getTransactionsForAddress` in full/jsonParsed mode, and Helius is its fallback.
+Pagination cursors are pinned to the provider that created them. If that
+provider fails mid-window, the scanner restarts the same bounded time range on
+the next enhanced provider and deduplicates by signature, so it never reuses an
+Alchemy cursor on Helius or vice versa. If every enhanced-history provider is
+unavailable, the scanner falls back to standard signatures plus transaction
+details.
+
+Each hourly run checks the newest edge of the market first, with a rolling
+overlap that feeds the retained swap buffer. A shallow probe is evaluated
+together with that buffer; a deeper scan is triggered only by suspicious wallet
+classes, linked wallets, material flow, a sticky/wave precheck, an alert-level
+score, or a scheduled audit slot. Launch backfill has its own provider-aware
+cursor, runs at most one page per scan, and stops once the launch is older than
+the retained 24-hour signal window.
 
 Already caught tokens get a separate hourly market refresh through DexScreener.
 That pass updates dashboard `Market now` fields without re-running expensive
