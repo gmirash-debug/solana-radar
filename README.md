@@ -170,7 +170,7 @@ Lanes:
 - `micro_sticky`: `3h-7d`, `$10k-$50k mcap`, `liq >=3k`, low-cap migrated pump.fun tokens with strict sticky buyer supply and net-buy retention. This is the TinyWorld-before-$50k catch lane.
 - `cheap_sticky`: `12h-10d`, `$50k-$250k mcap`, `liq >=10k`, cheap migrated pump.fun tokens with stronger sticky buyer supply before repricing.
 - `breakout`: `3d-30d`, `5m-25m mcap`, `liq >=50k`, `1h vol >=100k`, momentum/anomaly expansion.
-- `reactivation`: `30d+`, `100k-5m mcap`, `liq >=10k`, current mcap `<=40%` of GMGN ATH, low-volume old-token reactivation.
+- `reactivation`: `30d+`, any positive mcap up to `$5m`, `liq >=3k`, renewed activity on an old migrated token. It uses `ignition`, `early`, `established`, and `mature` threshold profiles so a strong retained buy-wave can surface below `$100k`. ATH is fetched as entry-risk context rather than used as a discovery gate.
 
 Retired filters: `incubation` and `young` are no longer scanned or shown as active dashboard filters because they produced too much noise relative to useful catches. The new sticky lanes replace them with a narrower market prefilter plus a balance-retention check: low_tx/freshish buyers only become a dashboard signal when current buyer balances still hold meaningful supply.
 
@@ -195,9 +195,10 @@ DexScreener/GeckoTerminal refresh pool market data. No single trending endpoint
 is treated as a complete market census.
 
 GMGN token info supplies ATH market cap. The scanner locates its timestamp with
-a bounded `1d -> 1h -> 5m` K-line search. Reactivation filtering first reads only
-the ATH value; the more expensive timestamp lookup is limited to dashboard
-enrichment candidates.
+a bounded `1d -> 1h -> 5m` K-line search. Reactivation does not wait for ATH
+before scanning: unknown or high-range ATH context can cap conviction, but it
+cannot hide a strong early buy-wave. The more expensive timestamp lookup remains
+limited to dashboard enrichment candidates.
 
 Onchain buy extraction routes each method to the provider that fits it best.
 Chainstack is first for recent transaction details, token supply, and health

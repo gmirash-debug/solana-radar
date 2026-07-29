@@ -117,8 +117,8 @@ const FILTER_META = {
   },
   reactivation: {
     label: "Reactivation",
-    criteria: "30d+ / $100k-$5m / <=40% ATH / suspicious accumulation or sticky buy-wave",
-    thesis: "older corrected tokens with either linked suspicious-wallet accumulation or broad net buying that remains sticky on buyer wallets.",
+    criteria: "30d+ / any positive mcap up to $5m / liq >= $3k / staged sticky buy-wave",
+    thesis: "older migrated tokens ranked by renewed trading intensity, then confirmed by distributed net buying and retained buyer balances. ATH is risk context, not a discovery gate.",
   },
   legacy: {
     label: "Legacy",
@@ -140,8 +140,14 @@ const TIER_META = {
   actionable: {
     label: "Actionable",
     tone: "good",
-    rank: 4,
+    rank: 5,
     summary: "hard onchain evidence before the move looks fully crowded",
+  },
+  hot_reactivation: {
+    label: "Hot Reactivation",
+    tone: "warn",
+    rank: 4,
+    summary: "strong early reactivation with high velocity or incomplete ATH confirmation",
   },
   watch: {
     label: "Watch",
@@ -333,12 +339,10 @@ const FILTER_RULES = {
   reactivation: {
     ageMin: 720,
     ageMax: null,
-    mcapMin: 100_000,
+    mcapMin: 0,
     mcapMax: 5_000_000,
-    liquidityMin: 10_000,
-    volumeMin: 500,
-    volumeMax: 150_000,
-    athMaxRatio: 0.4,
+    liquidityMin: 3_000,
+    volumeMin: 250,
   },
 };
 
@@ -443,8 +447,8 @@ function tokenFitsReactivationBucket(token) {
   if (snapshot.ageHours < rule.ageMin) return false;
   if (snapshot.mcapUsd < rule.mcapMin || snapshot.mcapUsd > rule.mcapMax) return false;
   if (snapshot.liquidityUsd < rule.liquidityMin) return false;
-  if (snapshot.athMcapUsd === null || snapshot.athMcapUsd <= 0) return false;
-  return snapshot.mcapUsd / snapshot.athMcapUsd <= rule.athMaxRatio;
+  if (snapshot.volume1hUsd !== null && snapshot.volume1hUsd < rule.volumeMin) return false;
+  return true;
 }
 
 function alertId(alert) {
@@ -690,9 +694,39 @@ function alertEvidence(alert = {}) {
     supportSol: Number(supportSol || 0),
     commonLinks,
     waveNetSol: Number(wave.net_buy_sol || 0),
+    waveUniqueBuyers: Number(wave.unique_buyers || 0),
     waveStickySupplyPct: Number(wave.sticky_supply_pct || 0),
     waveStickyWallets: Number(wave.sticky_wallets || 0),
+    waveStickyBoughtPct: Number(wave.sticky_bought_pct || 0),
+    waveNetRetentionPct: Number(wave.net_token_retention_pct || 0),
+    waveTopBuyerShare: Number(wave.top_buyer_share || 0),
+    waveTop3BuyerShare: Number(wave.top3_buyer_share || 0),
+    waveBalanceCoveragePct: finiteNumber(wave.balance_coverage_pct),
   };
+}
+
+function isHotReactivationAlert(alert = {}) {
+  if (effectiveAlertLane(alert) !== "reactivation") return false;
+  if (alert.signal_family !== "reactivation_wave") return false;
+  if (alert.data_quality?.status === "partial") return false;
+  const snapshot = alertMarketSnapshot(alert);
+  const mcap = Number(snapshot.mcapUsd || alert.obs_mcap_usd || alert.pool?.mcap_usd || 0);
+  const evidence = alertEvidence(alert);
+  return mcap > 0
+    && mcap <= 250_000
+    && Number(alert.score || 0) >= 75
+    && evidence.waveNetSol >= 25
+    && evidence.waveUniqueBuyers >= 15
+    && evidence.waveStickyWallets >= 8
+    && evidence.waveStickySupplyPct >= 5
+    && evidence.waveStickyBoughtPct >= 40
+    && evidence.waveNetRetentionPct >= 50
+    && evidence.waveTopBuyerShare <= 0.35
+    && evidence.waveTop3BuyerShare <= 0.6
+    && (
+      evidence.waveBalanceCoveragePct === null
+      || evidence.waveBalanceCoveragePct >= 80
+    );
 }
 
 function deriveAlertTier(alert = {}) {
@@ -706,6 +740,7 @@ function deriveAlertTier(alert = {}) {
   const supportOnly = evidence.supportWallets > 0 && !evidence.hardWallets && !evidence.commonLinks;
   if (supportOnly) return "noise";
   if (!hardSignal) return Number(alert.score || 0) >= 60 ? "watch" : "noise";
+  if (isHotReactivationAlert(alert)) return "hot_reactivation";
   if (volumeToMcap !== null && volumeToMcap > 1.5 && evidence.commonLinks === 0) return "late_chase";
   if (lane === "micro_sticky" || lane === "cheap_sticky") {
     if (evidence.waveStickySupplyPct >= 5) return "actionable";
@@ -724,6 +759,9 @@ function deriveAlertTier(alert = {}) {
 }
 
 function alertTier(alert = {}) {
+  if (alert.action_tier === "late_chase" && isHotReactivationAlert(alert)) {
+    return "hot_reactivation";
+  }
   return TIER_META[alert.action_tier] ? alert.action_tier : deriveAlertTier(alert);
 }
 
@@ -741,7 +779,10 @@ function tierMatches(tier) {
     const scannerUnavailable = state.scanStatus?.status === "failed"
       || reportAgeHours === null
       || reportAgeHours > 2;
-    return tier === "actionable" || tier === "watch" || (scannerUnavailable && tier === "inactive");
+    return tier === "actionable"
+      || tier === "hot_reactivation"
+      || tier === "watch"
+      || (scannerUnavailable && tier === "inactive");
   }
   return tier === state.tier;
 }
@@ -764,7 +805,7 @@ function pClass(value) {
 function sourceAlerts() {
   const current = (state.report?.alerts || []).map((alert) => ({ ...alert, _scope_source: "current" }));
   const history = (state.history || [])
-    .filter((alert) => ["actionable", "watch"].includes(alert.action_tier))
+    .filter((alert) => ["actionable", "hot_reactivation", "watch"].includes(alertTier(alert)))
     .map((alert) => ({ ...alert, _scope_source: "history" }));
   return [...history, ...current];
 }
@@ -1224,6 +1265,9 @@ function buildTokenSignals() {
     token.filterCategories = [token.currentFilter];
     token.primaryFilter = token.currentFilter;
     token.lanes = token.filterCategories;
+    token.reactivationStage = [...token.alerts]
+      .reverse()
+      .find((alert) => alert.reactivation_stage)?.reactivation_stage || null;
     token.hasObservedFilterDrift = token.observedFilters.some((name) => name !== token.caughtFilter);
     token.hasFilterDrift = token.currentFilter !== token.caughtFilter;
     token.currentScanAlerts = token.alerts.filter((alert) => alert._scope_source === "current");
@@ -1249,7 +1293,9 @@ function buildTokenSignals() {
     } else if (scannerOperational && token.scannedCleanThisRun) {
       token.actionTier = "inactive";
     } else if (scannerOperational && lastSignalAgeHours <= 6) {
-      token.actionTier = token.historicalTier === "actionable" ? "watch" : token.historicalTier;
+      token.actionTier = ["actionable", "hot_reactivation"].includes(token.historicalTier)
+        ? "watch"
+        : token.historicalTier;
     } else {
       token.actionTier = "inactive";
     }
@@ -1564,6 +1610,7 @@ function renderMetrics(tokens) {
   const tierCount = (tier) => baseTokens.filter((token) => token.actionTier === tier).length;
   els.metrics.innerHTML = [
     metric("Actionable", tierCount("actionable")),
+    metric("Hot reactivation", tierCount("hot_reactivation")),
     metric("Watch", tierCount("watch")),
     metric("Inactive", tierCount("inactive")),
     metric("Universe", stats.universe_pools ?? 0),
@@ -1885,6 +1932,9 @@ function renderFilterLine(token) {
   const current = token.currentFilter || caught;
   const chips = [
     chip(`now ${filterMeta(current).label}`),
+    current === "reactivation" && token.reactivationStage
+      ? chip(`phase ${token.reactivationStage}`, token.actionTier === "hot_reactivation" ? "warn" : "")
+      : "",
     current !== caught ? chip(`caught ${filterMeta(caught).label}`, "warn") : "",
   ].filter(Boolean).join(" ");
   const inferred = token.hasInferredFilters ? ` ${chip("inferred from snapshot", "warn")}` : "";
@@ -2496,6 +2546,7 @@ function selectedFilterToken(group) {
 function compactTierSummary(group) {
   const parts = [];
   if (group.tierCounts.actionable) parts.push(chip(`${group.tierCounts.actionable} actionable`, "good"));
+  if (group.tierCounts.hot_reactivation) parts.push(chip(`${group.tierCounts.hot_reactivation} hot`, "warn"));
   if (group.tierCounts.watch) parts.push(chip(`${group.tierCounts.watch} watch`, "warn"));
   const parked = Number(group.tierCounts.late_chase || 0) + Number(group.tierCounts.noise || 0);
   if (parked) parts.push(chip(`${parked} parked`, "bad"));

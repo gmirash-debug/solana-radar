@@ -1312,13 +1312,26 @@ def fetch_gmgn_trending_token_addresses(config):
     if not os.environ.get("GMGN_API_KEY"):
         return set()
     addresses = set()
-    intervals = config.get("gmgn_trending_intervals") or ["1m", "5m", "1h"]
     platforms = config.get("gmgn_platforms") or ["Pump.fun"]
     filters = config.get("gmgn_filters") or []
     limit = int(config.get("gmgn_trending_limit", 100))
-    order_by = config.get("gmgn_trending_order_by", "volume")
+    configured_queries = config.get("gmgn_trending_queries")
+    if configured_queries:
+        queries = []
+        for query in configured_queries:
+            if not isinstance(query, dict):
+                continue
+            order_by = query.get("order_by") or "volume"
+            for interval in query.get("intervals") or []:
+                item = (str(interval), str(order_by))
+                if item not in queries:
+                    queries.append(item)
+    else:
+        intervals = config.get("gmgn_trending_intervals") or ["1m", "5m", "1h"]
+        order_by = config.get("gmgn_trending_order_by", "volume")
+        queries = [(str(interval), str(order_by)) for interval in intervals]
 
-    for interval in intervals:
+    for interval, order_by in queries:
         arguments = [
             "market",
             "trending",
@@ -1328,6 +1341,8 @@ def fetch_gmgn_trending_token_addresses(config):
             str(interval),
             "--order-by",
             str(order_by),
+            "--direction",
+            "desc",
             "--limit",
             str(limit),
         ]
@@ -1337,9 +1352,10 @@ def fetch_gmgn_trending_token_addresses(config):
             arguments.extend(["--filter", str(item)])
 
         try:
-            data = run_gmgn_cli(config, arguments, f"gmgn trending {interval}")
+            label = f"gmgn trending {interval}/{order_by}"
+            data = run_gmgn_cli(config, arguments, label)
         except Exception as exc:
-            print(f"warn: gmgn trending {interval} failed: {exc}", file=sys.stderr)
+            print(f"warn: gmgn trending {interval}/{order_by} failed: {exc}", file=sys.stderr)
             continue
 
         rank = data.get("data", {}).get("rank") if isinstance(data, dict) else None
@@ -1680,6 +1696,61 @@ def pool_matches_config(pool, config):
     return True
 
 
+def reactivation_stage_config(pool, config):
+    if (config.get("lane") or config.get("mode")) != "reactivation":
+        return config
+    mcap = float(getattr(pool, "mcap_usd", 0) or 0)
+    for stage in config.get("reactivation_stages") or []:
+        if not isinstance(stage, dict):
+            continue
+        max_mcap = float(stage.get("mcap_max_usd") or 0)
+        if max_mcap and mcap > max_mcap:
+            continue
+        merged = dict(config)
+        merged.update(
+            {
+                key: value
+                for key, value in stage.items()
+                if key not in {"name", "mcap_max_usd"}
+            }
+        )
+        merged["reactivation_stage"] = stage.get("name") or "mature"
+        return merged
+    merged = dict(config)
+    merged["reactivation_stage"] = "mature"
+    return merged
+
+
+def reactivation_activity_score(pool):
+    mcap = max(1.0, float(pool.mcap_usd or 0))
+    liquidity = max(1.0, float(pool.liquidity_usd or 0))
+    volume = max(0.0, float(pool.volume_1h_usd or 0))
+    txns = max(0, int(pool.txns_1h or 0))
+    volume_to_mcap = min(2.0, volume / mcap)
+    volume_to_liquidity = min(4.0, volume / liquidity)
+    return (
+        min(6.0, txns / 100.0)
+        + volume_to_mcap * 8.0
+        + volume_to_liquidity * 2.0
+        + min(3.0, volume / 25_000.0)
+    )
+
+
+def pool_priority_sort_key(pool, config):
+    if (config.get("lane") or config.get("mode")) == "reactivation":
+        return (
+            reactivation_activity_score(pool),
+            int(pool.txns_1h or 0),
+            float(pool.volume_1h_usd or 0),
+            float(pool.liquidity_usd or 0),
+        )
+    return (
+        float(pool.volume_1h_usd or 0),
+        int(pool.txns_1h or 0),
+        float(pool.liquidity_usd or 0),
+    )
+
+
 def filter_universe_pools(pools, config):
     filtered = []
     for pool in pools:
@@ -1697,7 +1768,7 @@ def filter_universe_pools(pools, config):
             by_token[key] = pool
 
     filtered = list(by_token.values())
-    filtered.sort(key=lambda pool: (pool.volume_1h_usd, pool.txns_1h, pool.liquidity_usd), reverse=True)
+    filtered.sort(key=lambda pool: pool_priority_sort_key(pool, config), reverse=True)
     return filtered[: int(config["light_pool_limit"])]
 
 
@@ -3243,6 +3314,39 @@ def pool_ath_ratio(pool):
     return current_mcap / ath_mcap if ath_mcap and current_mcap else None
 
 
+def is_hot_reactivation_signal(pool, alert, config):
+    if (config.get("lane") or config.get("mode")) != "reactivation":
+        return False
+    if alert.get("signal_family") != "reactivation_wave":
+        return False
+    wave = alert.get("wave") or {}
+    mcap = float(getattr(pool, "mcap_usd", 0) or 0)
+    balance_coverage = float(wave.get("balance_coverage_pct") or 0)
+    return bool(
+        0 < mcap <= float(config.get("reactivation_hot_max_mcap_usd", 250_000))
+        and int(alert.get("score") or 0)
+        >= int(config.get("reactivation_hot_min_score", 75))
+        and float(wave.get("net_buy_sol") or 0)
+        >= float(config.get("reactivation_hot_min_net_buy_sol", 25))
+        and int(wave.get("unique_buyers") or 0)
+        >= int(config.get("reactivation_hot_min_unique_buyers", 15))
+        and int(wave.get("sticky_wallets") or 0)
+        >= int(config.get("reactivation_hot_min_sticky_wallets", 8))
+        and float(wave.get("sticky_supply_pct") or 0)
+        >= float(config.get("reactivation_hot_min_sticky_supply_pct", 5))
+        and float(wave.get("sticky_bought_pct") or 0)
+        >= float(config.get("reactivation_hot_min_sticky_bought_pct", 40))
+        and float(wave.get("net_token_retention_pct") or 0)
+        >= float(config.get("reactivation_hot_min_net_token_retention_pct", 50))
+        and float(wave.get("top_buyer_share") or 0)
+        <= float(config.get("reactivation_hot_max_top_buyer_share", 0.35))
+        and float(wave.get("top3_buyer_share") or 0)
+        <= float(config.get("reactivation_hot_max_top3_buyer_share", 0.6))
+        and balance_coverage
+        >= float(config.get("actionable_min_balance_coverage_pct", 80))
+    )
+
+
 def classify_alert_tier(pool, alert, evidence, config):
     lane = config.get("lane") or config.get("mode") or "scan"
     mcap = float(getattr(pool, "mcap_usd", 0) or 0)
@@ -3288,6 +3392,7 @@ def classify_alert_tier(pool, alert, evidence, config):
         wave_signal
         and (top_buyer_share > max_top_buyer_share or top3_buyer_share > max_top3_buyer_share)
     )
+    hot_reactivation = is_hot_reactivation_signal(pool, alert, config)
 
     if hard_cluster:
         reasons.append("hard wallet cluster")
@@ -3306,6 +3411,8 @@ def classify_alert_tier(pool, alert, evidence, config):
             reasons.append("market-wide buying wave")
         if sticky_supply_pct:
             reasons.append("sticky buyers")
+    if hot_reactivation:
+        reasons.append("early reactivation ignition")
 
     if support_only:
         penalties.append("low_tx only")
@@ -3320,7 +3427,7 @@ def classify_alert_tier(pool, alert, evidence, config):
     if watch_mcap and mcap > watch_mcap:
         penalties.append("late mcap")
     if volume_to_mcap is not None and watch_volume_ratio is not None and volume_to_mcap > watch_volume_ratio:
-        penalties.append("blowoff volume")
+        penalties.append("high-velocity ignition" if hot_reactivation else "blowoff volume")
     elif volume_to_mcap is not None and action_volume_ratio is not None and volume_to_mcap > action_volume_ratio:
         penalties.append("hot volume")
     if (
@@ -3355,6 +3462,8 @@ def classify_alert_tier(pool, alert, evidence, config):
         tier = "noise"
     elif not hard_signal:
         tier = "noise" if support_only else "watch"
+    elif hot_reactivation:
+        tier = "hot_reactivation"
     elif "late mcap" in penalties or "blowoff volume" in penalties or "excess flow after move" in penalties:
         tier = "late_chase"
     elif lane == "reactivation":
@@ -3393,6 +3502,8 @@ def classify_alert_tier(pool, alert, evidence, config):
         "hold_age_minutes": hold_age_minutes,
         "min_hold_minutes": min_hold_minutes,
         "balance_coverage_pct": balance_coverage_pct,
+        "hot_reactivation": hot_reactivation,
+        "reactivation_stage": config.get("reactivation_stage"),
     }
 
 
@@ -3824,6 +3935,7 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
         return []
     max_candidates = int(config.get("reactivation_wave_candidate_windows", 3))
     balance_limit = int(config.get("reactivation_wave_balance_wallet_limit", 50))
+    min_sticky_wallets = int(config.get("reactivation_wave_min_sticky_wallets", 1))
     min_sticky_supply_pct = float(config.get("reactivation_wave_min_sticky_supply_pct", 3.0))
     min_sticky_bought_pct = float(config.get("reactivation_wave_min_sticky_bought_pct", 40.0))
     min_net_retention_pct = float(config.get("reactivation_wave_min_net_token_retention_pct", 60.0))
@@ -3914,6 +4026,8 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
         sticky_supply_pct = sticky_tokens / supply * 100 if supply else 0.0
         sticky_bought_pct = sticky_tokens / checked_bought_tokens * 100 if checked_bought_tokens else 0.0
         net_retention_pct = sticky_tokens / checked_net_tokens * 100 if checked_net_tokens else 0.0
+        if sticky_wallets < min_sticky_wallets:
+            continue
         if sticky_supply_pct < min_sticky_supply_pct:
             continue
         if sticky_bought_pct < min_sticky_bought_pct or net_retention_pct < min_net_retention_pct:
@@ -3935,6 +4049,7 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
             "created_at": created_at,
             "score": 0,
             "lane": "reactivation",
+            "reactivation_stage": config.get("reactivation_stage") or "mature",
             "signal_family": "reactivation_wave",
             "pool": pool.as_dict(),
             "obs_mcap_usd": pool.mcap_usd,
@@ -5101,7 +5216,7 @@ def apply_alert_data_quality(
             "classification_coverage_pct": classification_coverage_pct,
             "balance_coverage_pct": balance_coverage_pct,
         }
-        if reasons and alert.get("action_tier") == "actionable":
+        if reasons and alert.get("action_tier") in ("actionable", "hot_reactivation"):
             alert["action_tier"] = "watch"
             penalties = list(alert.get("quality_penalties") or [])
             if "partial onchain coverage" not in penalties:
@@ -5571,8 +5686,36 @@ def alert_is_deleted(alert, deleted):
     )
 
 
+def keep_strong_late_reactivation(alert, config):
+    if alert.get("action_tier") != "late_chase":
+        return False
+    if alert.get("lane") != "reactivation":
+        return False
+    if alert.get("signal_family") != "reactivation_wave":
+        return False
+    if (alert.get("data_quality") or {}).get("status") == "partial":
+        return False
+    pool = alert.get("pool") or {}
+    mcap = float(alert.get("obs_mcap_usd") or pool.get("mcap_usd") or 0)
+    return bool(
+        int(alert.get("score") or 0)
+        >= int(config.get("alert_history_keep_late_reactivation_min_score", 75))
+        and 0
+        < mcap
+        <= float(
+            config.get(
+                "alert_history_keep_late_reactivation_max_mcap_usd",
+                250_000,
+            )
+        )
+    )
+
+
 def compact_alert_history(existing_alerts, new_alerts, config):
-    keep_tiers = set(config.get("alert_history_keep_tiers") or ["actionable", "watch"])
+    keep_tiers = set(
+        config.get("alert_history_keep_tiers")
+        or ["actionable", "hot_reactivation", "watch"]
+    )
     retention_hours = float(config.get("alert_history_retention_hours", 168))
     max_tokens = int(config.get("alert_history_max_tokens", 40))
     max_alerts = int(config.get("alert_history_max_alerts", 160))
@@ -5596,7 +5739,12 @@ def compact_alert_history(existing_alerts, new_alerts, config):
         tier = alert.get("action_tier")
         if not tier and not keep_missing_tier:
             continue
-        if tier and keep_tiers and tier not in keep_tiers:
+        if (
+            tier
+            and keep_tiers
+            and tier not in keep_tiers
+            and not keep_strong_late_reactivation(alert, config)
+        ):
             continue
         key = alert_history_key(alert)
         existing = by_id.get(key)
@@ -5848,7 +5996,18 @@ def trusted_ath_mcap(entry):
 
 def filter_reactivation_by_ath(http, state, pools, config, observed_at):
     max_ratio = config.get("ath_max_current_ratio")
-    if config.get("lane") != "reactivation" or max_ratio is None:
+    if config.get("lane") != "reactivation":
+        return pools
+    if max_ratio is None:
+        market = state.get("market") if isinstance(state, dict) else {}
+        for pool in pools:
+            token = pool.token_address or pool.pool_address
+            entry = market.get(token) if isinstance(market, dict) else None
+            ath_mcap = trusted_ath_mcap(entry)
+            if not ath_mcap or pool.mcap_usd <= 0:
+                continue
+            pool.ath_mcap_usd = ath_mcap
+            pool.ath_current_ratio = pool.mcap_usd / ath_mcap
         return pools
 
     max_ratio = float(max_ratio)
@@ -6867,10 +7026,22 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
     all_alerts = []
     summaries = []
     for index, pool in enumerate(scan_targets, start=1):
-        print(f"{label}: scanning {index}/{len(scan_targets)} {pool.symbol}", flush=True)
+        pool_config = reactivation_stage_config(pool, config)
+        stage = pool_config.get("reactivation_stage")
+        stage_label = f" [{stage}]" if stage else ""
+        print(
+            f"{label}: scanning {index}/{len(scan_targets)} {pool.symbol}{stage_label}",
+            flush=True,
+        )
         pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
         try:
-            alerts, summary = scan_pool(rpc, pool, config, state, classification_budget)
+            alerts, summary = scan_pool(
+                rpc,
+                pool,
+                pool_config,
+                state,
+                classification_budget,
+            )
         except Exception as exc:
             print(
                 f"warn: {label}: pool scan failed for {pool.symbol} "
@@ -6893,13 +7064,15 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
             if isinstance(exc, WaveDataUnavailable):
                 retry_minutes = max(
                     5.0,
-                    float(config.get("signal_data_retry_minutes", 15)),
+                    float(pool_config.get("signal_data_retry_minutes", 15)),
                 )
                 pool_state["signal_recheck_due_at"] = iso(
                     time.time() + retry_minutes * 60
                 )
                 pool_state["force_enhanced_next_scan"] = True
                 summary["data_unavailable"] = True
+        if stage:
+            summary["reactivation_stage"] = stage
         if summary.get("error") or summary.get("scan_failed"):
             pool_state["last_scan_failed_at"] = observed_at
             pool_state["last_scan_error"] = str(summary.get("error") or "pool scan failed")[:500]

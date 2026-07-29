@@ -1324,6 +1324,245 @@ class ScannerCoreTests(unittest.TestCase):
                 rpc,
             )
 
+    def test_reactivation_stages_remove_mcap_floor_and_scale_thresholds(self):
+        config = scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {})
+        lane = scanner.apply_lane(config, "reactivation")
+        self.assertEqual(lane["mcap_min_usd"], 0)
+        self.assertEqual(lane["liquidity_min_usd"], 3_000)
+        self.assertIsNone(lane["ath_max_current_ratio"])
+
+        ignition = scanner.reactivation_stage_config(
+            scanner.Pool(pool_address="pool-1", token_address="token-1", mcap_usd=50_000),
+            lane,
+        )
+        early = scanner.reactivation_stage_config(
+            scanner.Pool(pool_address="pool-2", token_address="token-2", mcap_usd=133_042),
+            lane,
+        )
+        self.assertEqual(ignition["reactivation_stage"], "ignition")
+        self.assertEqual(ignition["reactivation_wave_min_buy_sol"], 20)
+        self.assertEqual(early["reactivation_stage"], "early")
+        self.assertEqual(early["reactivation_wave_min_buy_sol"], 35)
+        self.assertEqual(early["volume_1h_to_mcap_max_watch"], 1.2)
+
+    def test_reactivation_universe_accepts_old_token_below_100k(self):
+        config = scanner.apply_lane(
+            scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {}),
+            "reactivation",
+        )
+        pool = scanner.Pool(
+            pool_address="pool",
+            token_address="token",
+            dex="pumpswap",
+            mcap_usd=20_000,
+            liquidity_usd=4_000,
+            volume_1h_usd=500,
+            pair_created_at=int(scanner.time.time() - 45 * 24 * 3600),
+        )
+        self.assertTrue(scanner.pool_matches_config(pool, config))
+        self.assertEqual(
+            scanner.reactivation_stage_config(pool, config)["reactivation_stage"],
+            "ignition",
+        )
+
+    def test_reactivation_priority_favors_low_cap_activation_velocity(self):
+        low_cap_wave = scanner.Pool(
+            pool_address="low",
+            token_address="low-token",
+            mcap_usd=70_000,
+            liquidity_usd=20_000,
+            volume_1h_usd=20_000,
+            txns_1h=300,
+        )
+        larger_slow_pool = scanner.Pool(
+            pool_address="large",
+            token_address="large-token",
+            mcap_usd=2_000_000,
+            liquidity_usd=200_000,
+            volume_1h_usd=80_000,
+            txns_1h=40,
+        )
+        self.assertGreater(
+            scanner.reactivation_activity_score(low_cap_wave),
+            scanner.reactivation_activity_score(larger_slow_pool),
+        )
+
+    def test_reactivation_without_ath_gate_still_uses_cached_ath_context(self):
+        pool = scanner.Pool(
+            pool_address="pool",
+            token_address="token",
+            mcap_usd=100_000,
+        )
+        kept = scanner.filter_reactivation_by_ath(
+            mock.Mock(),
+            {
+                "market": {
+                    "token": {
+                        "ath_source": "gmgn",
+                        "ath_mcap_usd": 1_000_000,
+                    }
+                }
+            },
+            [pool],
+            {
+                "lane": "reactivation",
+                "ath_max_current_ratio": None,
+            },
+            "2026-07-30T00:00:00Z",
+        )
+        self.assertEqual(kept, [pool])
+        self.assertEqual(pool.ath_mcap_usd, 1_000_000)
+        self.assertEqual(pool.ath_current_ratio, 0.1)
+
+    def test_brotchen_style_early_wave_is_hot_reactivation_not_late_chase(self):
+        base = scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {})
+        pool = scanner.Pool(
+            pool_address="pool",
+            token_address="token",
+            mcap_usd=133_042,
+            liquidity_usd=43_548,
+            volume_1h_usd=34_586,
+        )
+        config = scanner.reactivation_stage_config(
+            pool,
+            scanner.apply_lane(base, "reactivation"),
+        )
+        alert = {
+            "score": 90,
+            "signal_family": "reactivation_wave",
+            "suspicious_sol": 82.6,
+            "wave": {
+                "net_buy_sol": 82.6,
+                "unique_buyers": 142,
+                "sticky_wallets": 36,
+                "sticky_supply_pct": 14.13,
+                "sticky_bought_pct": 43.68,
+                "net_token_retention_pct": 55.42,
+                "top_buyer_share": 0.227,
+                "top3_buyer_share": 0.305,
+                "balance_coverage_pct": 100,
+                "hold_age_minutes": 0,
+                "min_hold_minutes": 45,
+            },
+        }
+        tier, reasons, penalties, quality = scanner.classify_alert_tier(
+            pool,
+            alert,
+            {
+                "hard_wallets": 0,
+                "support_wallets": 0,
+                "hard_sol": 0,
+                "support_sol": 0,
+                "hard_classes": {},
+                "support_only": False,
+            },
+            config,
+        )
+        self.assertEqual(tier, "hot_reactivation")
+        self.assertIn("early reactivation ignition", reasons)
+        self.assertNotIn("blowoff volume", penalties)
+        self.assertTrue(quality["hot_reactivation"])
+
+    def test_high_cap_blowoff_without_early_quality_stays_late_chase(self):
+        base = scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {})
+        pool = scanner.Pool(
+            pool_address="pool",
+            token_address="token",
+            mcap_usd=900_000,
+            liquidity_usd=100_000,
+            volume_1h_usd=800_000,
+        )
+        config = scanner.reactivation_stage_config(
+            pool,
+            scanner.apply_lane(base, "reactivation"),
+        )
+        alert = {
+            "score": 65,
+            "signal_family": "reactivation_wave",
+            "suspicious_sol": 30,
+            "wave": {
+                "net_buy_sol": 30,
+                "unique_buyers": 20,
+                "sticky_wallets": 10,
+                "sticky_supply_pct": 4,
+                "sticky_bought_pct": 50,
+                "net_token_retention_pct": 60,
+                "top_buyer_share": 0.2,
+                "top3_buyer_share": 0.4,
+                "balance_coverage_pct": 100,
+            },
+        }
+        tier, _reasons, penalties, _quality = scanner.classify_alert_tier(
+            pool,
+            alert,
+            {
+                "hard_wallets": 0,
+                "support_wallets": 0,
+                "hard_sol": 0,
+                "support_sol": 0,
+                "hard_classes": {},
+                "support_only": False,
+            },
+            config,
+        )
+        self.assertEqual(tier, "late_chase")
+        self.assertIn("blowoff volume", penalties)
+
+    def test_history_preserves_strong_early_reactivation_even_if_legacy_tier_is_late(self):
+        alert = {
+            "created_at": scanner.iso(scanner.time.time()),
+            "action_tier": "late_chase",
+            "lane": "reactivation",
+            "signal_family": "reactivation_wave",
+            "score": 90,
+            "obs_mcap_usd": 133_042,
+            "pool": {
+                "pool_address": "pool",
+                "token_address": "token",
+                "mcap_usd": 133_042,
+            },
+        }
+        history = scanner.compact_alert_history(
+            [],
+            [alert],
+            {
+                "alert_history_keep_tiers": ["actionable", "hot_reactivation", "watch"],
+                "alert_history_keep_late_reactivation_min_score": 75,
+                "alert_history_keep_late_reactivation_max_mcap_usd": 250_000,
+                "alert_history_retention_hours": 0,
+                "alert_history_max_tokens": 10,
+                "alert_history_max_alerts": 10,
+                "alert_history_max_alerts_per_token": 2,
+            },
+        )
+        self.assertEqual(history, [alert])
+
+    def test_gmgn_discovery_queries_volume_swaps_and_change(self):
+        config = scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {})
+        calls = []
+
+        def fake_run(_config, arguments, _label):
+            calls.append(arguments)
+            return {"data": {"rank": []}}
+
+        with (
+            mock.patch.dict(scanner.os.environ, {"GMGN_API_KEY": "test"}),
+            mock.patch.object(scanner, "run_gmgn_cli", side_effect=fake_run),
+            mock.patch.object(scanner.time, "sleep"),
+        ):
+            scanner.fetch_gmgn_trending_token_addresses(config)
+
+        query_pairs = {
+            (
+                arguments[arguments.index("--interval") + 1],
+                arguments[arguments.index("--order-by") + 1],
+            )
+            for arguments in calls
+        }
+        self.assertIn(("1m", "volume"), query_pairs)
+        self.assertIn(("1m", "swaps"), query_pairs)
+        self.assertIn(("1h", "change1h"), query_pairs)
+
 
 if __name__ == "__main__":
     unittest.main()
