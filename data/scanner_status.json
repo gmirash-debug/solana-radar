@@ -1,39 +1,80 @@
 {
-  "error": "unhealthy scan rejected: only 2/58 candidate pools were scanned; pool failure ratio 100% exceeds 25%",
-  "last_attempt_at": "2026-07-29T19:08:32.561413Z",
-  "last_success_at": "2026-07-27T18:09:19.628383Z",
+  "error": null,
+  "last_attempt_at": "2026-07-29T20:38:45.724964Z",
+  "last_success_at": "2026-07-29T20:38:45.724964Z",
   "scan_health": {
-    "active_live_fetch_pools": 0,
-    "backfill_pending_pools": 0,
-    "candidate_buys": 0,
-    "candidate_pools": 58,
-    "classification_errors": 0,
-    "classified_buys": 0,
-    "failed_pools": 2,
-    "failed_ratio": 1.0,
-    "history_gap_pools": 0,
-    "history_gap_ratio": 0.0,
-    "live_fetch_pools": 0,
-    "parsed_swaps": 0,
-    "partial_live_ratio": 0.0,
-    "partial_live_windows": 0,
+    "active_live_fetch_pools": 37,
+    "backfill_pending_pools": 1,
+    "candidate_buys": 1266,
+    "candidate_pools": 189,
+    "classification_errors": 3,
+    "classified_buys": 5,
+    "estimated_rpc_credits": 7821,
+    "failed_pools": 0,
+    "failed_ratio": 0.0,
+    "history_gap_pools": 21,
+    "history_gap_ratio": 0.5675675675675675,
+    "live_fetch_pools": 37,
+    "parse_errors": 0,
+    "parsed_swaps": 5298,
+    "partial_live_ratio": 0.6756756756756757,
+    "partial_live_windows": 25,
     "reasons": [
-      "only 2/58 candidate pools were scanned",
-      "pool failure ratio 100% exceeds 25%"
+      "live transaction coverage is partial for 68% of scanned pools",
+      "rolling buffer has a history gap for 57% of active pools",
+      "3 wallet classifications failed",
+      "Solana Tracker unavailable; cached ATH only"
     ],
-    "scan_error_categories": {
-      "helius_rate_limit": 2
+    "rpc_providers": {
+      "alchemy": {
+        "calls": {
+          "getHealth": 1,
+          "getSignaturesForAddress": 7,
+          "getTransactionsForAddress": 76
+        },
+        "enhanced_history": true,
+        "estimated_credits": 7820,
+        "failures": {
+          "rate_limit": 1
+        },
+        "health": "ok",
+        "last_error": "alchemy:getSignaturesForAddress: rate_limit: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":429,\"message\":\"Your app has exceeded its compute units per second capacity. If you have retries enabled, you can safely ignore this message. If not, check out https://docs.alchemy.com/reference/throughput\"}}",
+        "last_success_at": "2026-07-29T20:38:44.095460Z",
+        "retries": {
+          "getSignaturesForAddress": 1
+        },
+        "status": "blocked"
+      },
+      "helius": {
+        "calls": {
+          "getHealth": 1,
+          "getSignaturesForAddress": 1
+        },
+        "enhanced_history": true,
+        "estimated_credits": 1,
+        "failures": {
+          "quota": 1
+        },
+        "health": "ok",
+        "last_error": "helius:getSignaturesForAddress: quota: {\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32429,\"message\":\"max usage reached\"}}",
+        "last_success_at": "2026-07-29T20:37:33.533360Z",
+        "retries": {},
+        "status": "blocked"
+      }
     },
-    "scanned_pools": 2,
+    "scan_error_categories": {},
+    "scanned_pools": 37,
     "solana_tracker_status": "error",
-    "stale_live_pools": 0,
-    "stale_live_ratio": 0.0,
-    "status": "unhealthy",
-    "transactions_scanned": 0,
-    "truncated_pools": 0,
-    "truncated_ratio": 0.0,
+    "stale_live_pools": 9,
+    "stale_live_ratio": 0.24324324324324326,
+    "status": "degraded",
+    "transaction_error_ratio": 0.0,
+    "transaction_errors": 0,
+    "transactions_scanned": 6645,
+    "truncated_pools": 27,
+    "truncated_ratio": 0.7297297297297297,
     "zero_parse_pools": 0,
     "zero_parse_ratio": 0.0
   },
-  "status": "failed"
+  "status": "ok"
 }
