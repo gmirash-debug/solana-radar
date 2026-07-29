@@ -1,12 +1,12 @@
 {
-  "error": "unhealthy scan rejected: only 2/55 candidate pools were scanned; pool failure ratio 100% exceeds 25%",
-  "last_attempt_at": "2026-07-29T19:02:08.556624Z",
+  "error": "unhealthy scan rejected: only 2/58 candidate pools were scanned; pool failure ratio 100% exceeds 25%",
+  "last_attempt_at": "2026-07-29T19:08:32.561413Z",
   "last_success_at": "2026-07-27T18:09:19.628383Z",
   "scan_health": {
     "active_live_fetch_pools": 0,
     "backfill_pending_pools": 0,
     "candidate_buys": 0,
-    "candidate_pools": 55,
+    "candidate_pools": 58,
     "classification_errors": 0,
     "classified_buys": 0,
     "failed_pools": 2,
@@ -18,7 +18,7 @@
     "partial_live_ratio": 0.0,
     "partial_live_windows": 0,
     "reasons": [
-      "only 2/55 candidate pools were scanned",
+      "only 2/58 candidate pools were scanned",
       "pool failure ratio 100% exceeds 25%"
     ],
     "scan_error_categories": {
