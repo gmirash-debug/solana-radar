@@ -267,7 +267,7 @@ main {
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   min-height: 58px;
 }
 
@@ -1532,6 +1532,14 @@ tr:last-child td {
 
   .filter-workspace.is-detail-open .filter-master,
   .filter-workspace.is-detail-open .filter-token-panel {
+    display: none;
+  }
+
+  .token-grid:not(.is-detail-open) .token-detail {
+    display: none;
+  }
+
+  .token-grid.is-detail-open .list {
     display: none;
   }
 

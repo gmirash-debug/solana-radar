@@ -16,6 +16,7 @@ REPORT_JSON_PATH = DATA_DIR / "latest_report.json"
 ALERTS_PATH = DATA_DIR / "alerts.jsonl"
 STATE_PATH = DATA_DIR / "state.json"
 DELETED_TOKENS_PATH = DATA_DIR / "deleted_tokens.json"
+SCANNER_STATUS_PATH = DATA_DIR / "scanner_status.json"
 SCANNER_PATH = ROOT / "scanner.py"
 LANES = {"all", "micro_sticky", "cheap_sticky", "breakout", "reactivation"}
 
@@ -87,6 +88,26 @@ def read_deleted_tokens():
     data.setdefault("entries", {})
     data.setdefault("updated_at", None)
     return data
+
+
+def read_scan_status():
+    persisted = read_json(SCANNER_STATUS_PATH, {})
+    with scan_lock:
+        runtime = dict(scan_status)
+    combined = {**persisted, **runtime}
+    if runtime.get("running"):
+        combined["status"] = "running"
+    else:
+        combined["running"] = False
+        if persisted.get("status"):
+            combined["status"] = persisted["status"]
+            combined["last_attempt_at"] = persisted.get("last_attempt_at")
+            combined["last_success_at"] = persisted.get("last_success_at")
+            combined["error"] = persisted.get("error")
+            combined["scan_health"] = persisted.get("scan_health") or {}
+            combined["finished_at"] = persisted.get("last_attempt_at") or runtime.get("finished_at")
+            combined["returncode"] = 0 if persisted.get("status") == "ok" else 1
+    return combined
 
 
 def normalize_id(value):
@@ -231,12 +252,12 @@ class RadarHandler(BaseHTTPRequestHandler):
                 "history": read_recent_alerts(),
                 "market": scanner_state.get("market", {}),
                 "deleted_tokens": read_deleted_tokens(),
-                "scan_status": dict(scan_status),
+                "scan_status": read_scan_status(),
             }
             json_response(self, 200, payload)
             return
         if parsed.path == "/api/status":
-            json_response(self, 200, dict(scan_status))
+            json_response(self, 200, read_scan_status())
             return
         self.serve_static(parsed.path)
 
@@ -263,8 +284,14 @@ class RadarHandler(BaseHTTPRequestHandler):
     def serve_static(self, path):
         if path in ("", "/"):
             path = "/index.html"
-        target = (DASHBOARD_DIR / path.lstrip("/")).resolve()
-        if not str(target).startswith(str(DASHBOARD_DIR.resolve())) or not target.exists() or target.is_dir():
+        if path.startswith("/data/"):
+            base_dir = DATA_DIR
+            relative_path = path.removeprefix("/data/")
+        else:
+            base_dir = DASHBOARD_DIR
+            relative_path = path.lstrip("/")
+        target = (base_dir / relative_path).resolve()
+        if not target.is_relative_to(base_dir.resolve()) or not target.exists() or target.is_dir():
             json_response(self, 404, {"error": "not_found"})
             return
         suffix = target.suffix.lower()

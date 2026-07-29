@@ -38,7 +38,7 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     outputs:
       pages_ready: ${{ steps.pages_artifact.outcome == 'success' }}
 
@@ -70,7 +70,15 @@ jobs:
           from datetime import datetime, timezone
 
           event_name = os.environ.get("GITHUB_EVENT_NAME", "")
-          if event_name == "workflow_dispatch":
+          event = {}
+          scanner_status = {}
+          try:
+              with open(os.environ.get("GITHUB_EVENT_PATH", ""), "r", encoding="utf-8") as handle:
+                  event = json.load(handle)
+          except Exception:
+              pass
+          dispatch_source = (event.get("inputs") or {}).get("source", "")
+          if event_name == "workflow_dispatch" and dispatch_source not in ("cloudflare-cron",):
               print("should_scan=true")
               print("reason=manual_dispatch")
               raise SystemExit
@@ -88,6 +96,53 @@ jobs:
           except Exception:
               print("should_scan=true")
               print("reason=missing_report")
+              raise SystemExit
+
+          try:
+              with open("data/scanner_status.json", "r", encoding="utf-8") as handle:
+                  scanner_status = json.load(handle)
+              last_attempt = datetime.fromisoformat(
+                  str(scanner_status.get("last_attempt_at", "")).replace("Z", "+00:00")
+              )
+              failed_age_seconds = (datetime.now(timezone.utc) - last_attempt).total_seconds()
+              error_categories = (
+                  scanner_status.get("scan_health", {}).get("scan_error_categories", {})
+              )
+              status_error = str(scanner_status.get("error") or "").lower()
+              provider_blocked = any(
+                  error_categories.get(key)
+                  for key in ("helius_rate_limit", "helius_quota", "helius_auth")
+              ) or any(
+                  marker in status_error
+                  for marker in (
+                      "max usage",
+                      "rate_limit",
+                      "rate limit",
+                      "quota",
+                      "credit",
+                      "http 401",
+                      "http 403",
+                      "unauthorized",
+                      "forbidden",
+                      "invalid api key",
+                      "api_key is missing",
+                      "api key is missing",
+                      "missing api key",
+                      "auth:",
+                  )
+              )
+          except Exception:
+              failed_age_seconds = None
+              provider_blocked = False
+
+          if (
+              scanner_status.get("status") == "failed"
+              and provider_blocked
+              and failed_age_seconds is not None
+              and failed_age_seconds < 6 * 60 * 60
+          ):
+              print("should_scan=false")
+              print(f"reason=provider_backoff_{int(failed_age_seconds)}s")
               raise SystemExit
 
           if age_seconds < 50 * 60:
@@ -126,12 +181,29 @@ jobs:
           BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
         run: |
           set +e
-          python scanner.py --once --lane all
+          timeout --signal=TERM --kill-after=30s 25m python scanner.py --once --lane all
           status=$?
+          if [ "$status" = "124" ]; then
+            python - <<'PY'
+          import scanner
+
+          scanner.write_scanner_status(
+              "failed",
+              error=TimeoutError("scanner exceeded the 25 minute workflow limit"),
+          )
+          PY
+          fi
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
           if [ "$status" -ne 0 ]; then
             echo "::warning title=Scanner failed::scanner.py exited with $status; keeping the previous dashboard snapshot"
+            {
+              echo "### Scanner attempt failed"
+              echo ""
+              echo "The previous successful dashboard snapshot was kept. See data/scanner_status.json for the current failure reason."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
+          # Scanner failures are represented in scanner_status.json. Keeping this
+          # step green prevents an hourly provider outage from sending failure mail.
           exit 0
 
       - name: Commit scanner data
@@ -139,6 +211,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ "${{ steps.run_scanner.outputs.exit_code }}" != "0" ]; then
+            cp data/scanner_status.json /tmp/scanner_status.json
+            git restore --worktree -- data/latest_report.json data/latest_report.md data/alerts.jsonl data/state.json data/deleted_tokens.json
+            cp /tmp/scanner_status.json data/scanner_status.json
+          fi
           git add data/scanner_status.json
           if [ "${{ steps.run_scanner.outputs.exit_code }}" = "0" ]; then
             git add data/latest_report.json data/latest_report.md data/alerts.jsonl data/state.json data/deleted_tokens.json

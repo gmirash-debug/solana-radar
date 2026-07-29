@@ -381,6 +381,10 @@ class HeliusCircuitOpen(RuntimeError):
     pass
 
 
+class WaveDataUnavailable(RuntimeError):
+    pass
+
+
 class HeliusRpc:
     def __init__(
         self,
@@ -389,6 +393,7 @@ class HeliusRpc:
         transactions_timeout_seconds=25,
         max_retries=2,
         retry_base_seconds=0.75,
+        retry_max_seconds=120,
         circuit_failure_threshold=4,
     ):
         self.url = f"https://mainnet.helius-rpc.com/?api-key={api_key}"
@@ -396,12 +401,14 @@ class HeliusRpc:
         self.session.headers.update({"Content-Type": "application/json"})
         self.calls = Counter()
         self.retries = Counter()
+        self.estimated_credits = 0
         self.token_supply_cache = {}
         self.token_balance_cache = {}
         self.timeout_seconds = int(timeout_seconds)
         self.transactions_timeout_seconds = int(transactions_timeout_seconds)
         self.max_retries = max(0, int(max_retries))
         self.retry_base_seconds = max(0.0, float(retry_base_seconds))
+        self.retry_max_seconds = max(0.1, float(retry_max_seconds))
         self.circuit_failure_threshold = max(2, int(circuit_failure_threshold))
         self.consecutive_failures = 0
         self.failures = Counter()
@@ -413,11 +420,27 @@ class HeliusRpc:
         connect_timeout = min(10.0, max(3.0, seconds / 3))
         return (connect_timeout, seconds)
 
+    def retry_delay(self, attempt, retry_after=None):
+        delay = retry_after or self.retry_base_seconds * (2**attempt)
+        return min(self.retry_max_seconds, max(0.1, float(delay)))
+
+    def credit_cost(self, method, result):
+        if method == "getTransactionsForAddress":
+            data = result.get("data") if isinstance(result, dict) else None
+            returned = len(data) if isinstance(data, list) else 0
+            return max(10, ((returned + 99) // 100) * 10)
+        if method == "getTransfersByAddress":
+            return 10
+        return 1
+
     def error_category(self, status=None, code=None, detail=""):
         detail = str(detail or "").lower()
         if status in (401, 403) or any(marker in detail for marker in ("unauthorized", "forbidden", "invalid api key")):
             return "auth"
-        if status == 402 or any(marker in detail for marker in ("credit", "quota", "billing", "payment required")):
+        if status == 402 or any(
+            marker in detail
+            for marker in ("credit", "quota", "billing", "payment required", "max usage", "usage reached")
+        ):
             return "quota"
         if status == 429 or code in (-32429,) or "rate limit" in detail or "too many requests" in detail:
             return "rate_limit"
@@ -456,13 +479,24 @@ class HeliusRpc:
                     self.record_failure(error)
                     raise error from exc
                 self.retries[method] += 1
-                time.sleep(min(5.0, max(0.1, self.retry_base_seconds * (2**attempt))))
+                time.sleep(self.retry_delay(attempt))
                 continue
-            if response.status_code in retryable_statuses and attempt < self.max_retries:
+            response_detail = (response.text or response.reason or "").lower()
+            usage_exhausted = any(
+                marker in response_detail
+                for marker in (
+                    "max usage",
+                    "usage reached",
+                    "quota",
+                    "credits exhausted",
+                    "credit limit",
+                    "insufficient credit",
+                )
+            )
+            if response.status_code in retryable_statuses and attempt < self.max_retries and not usage_exhausted:
                 self.retries[method] += 1
                 retry_after = to_float(response.headers.get("Retry-After"))
-                delay = retry_after or self.retry_base_seconds * (2**attempt)
-                time.sleep(min(5.0, max(0.1, delay)))
+                time.sleep(self.retry_delay(attempt, retry_after=retry_after))
                 continue
             if not response.ok:
                 detail = (response.text or response.reason or "request failed").strip().replace("\n", " ")[:300]
@@ -480,12 +514,18 @@ class HeliusRpc:
                 error = body["error"]
                 message = str(error.get("message") if isinstance(error, dict) else error)
                 code = error.get("code") if isinstance(error, dict) else None
-                retryable_error = code in (-32004, -32005, -32429) or any(
+                usage_exhausted = any(
+                    marker in message.lower()
+                    for marker in ("max usage", "usage reached", "quota", "credits exhausted")
+                )
+                retryable_error = not usage_exhausted and (
+                    code in (-32004, -32005, -32429) or any(
                     marker in message.lower() for marker in ("rate limit", "timeout", "temporarily unavailable")
+                    )
                 )
                 if retryable_error and attempt < self.max_retries:
                     self.retries[method] += 1
-                    time.sleep(min(5.0, max(0.1, self.retry_base_seconds * (2**attempt))))
+                    time.sleep(self.retry_delay(attempt))
                     continue
                 rpc_error = HeliusRpcError(
                     method,
@@ -495,8 +535,10 @@ class HeliusRpc:
                 )
                 self.record_failure(rpc_error)
                 raise rpc_error
+            result = body.get("result")
+            self.estimated_credits += self.credit_cost(method, result)
             self.record_success()
-            return body.get("result")
+            return result
         error = HeliusRpcError(method, "temporary", "retry budget exhausted")
         self.record_failure(error)
         raise error
@@ -1096,9 +1138,61 @@ def select_scan_targets(universe, state, config):
             "never_scanned": never_scanned,
         }
 
+    monitor_share = min(0.5, max(0.0, float(config.get("signal_monitor_share", 0.25))))
+    monitor_limit = (
+        min(limit, max(1, int(round(limit * monitor_share))))
+        if monitor_share
+        else 0
+    )
+    monitor_max_age = float(config.get("signal_monitor_max_age_hours", 48))
+    monitor_cutoff = int(time.time() - monitor_max_age * 3600) if monitor_max_age > 0 else 0
+    universe_by_key = {}
+    for pool in universe:
+        for key in (pool.pool_address, pool.token_address):
+            if key:
+                universe_by_key[key] = pool
+    monitored = []
+    monitored_keys = set()
+    now = int(time.time())
+    due_rechecks = []
+    pools_state = state.get("pools") if isinstance(state, dict) else {}
+    pools_state = pools_state if isinstance(pools_state, dict) else {}
+    for pool in universe:
+        due_at = parse_timestamp(
+            (pools_state.get(pool.pool_address) or {}).get("signal_recheck_due_at")
+        )
+        if due_at and due_at <= now:
+            due_rechecks.append((due_at, pool))
+    due_rechecks.sort(key=lambda item: (item[0], item[1].pool_address))
+    for _due_at, pool in due_rechecks:
+        if pool.pool_address in monitored_keys:
+            continue
+        monitored.append(pool)
+        monitored_keys.add(pool.pool_address)
+        if len(monitored) >= monitor_limit:
+            break
+
+    for alert in sorted(load_alert_history(), key=alert_history_sort_key, reverse=True):
+        if len(monitored) >= monitor_limit:
+            break
+        if monitor_cutoff and alert_history_timestamp(alert) < monitor_cutoff:
+            continue
+        alert_pool = alert.get("pool") or {}
+        pool = universe_by_key.get(alert_pool.get("pool_address")) or universe_by_key.get(
+            alert_pool.get("token_address")
+        )
+        if not pool or pool.pool_address in monitored_keys:
+            continue
+        monitored.append(pool)
+        monitored_keys.add(pool.pool_address)
+
     priority_share = min(1.0, max(0.0, float(config.get("scan_priority_share", 0.6))))
     priority_count = min(limit, max(1, int(round(limit * priority_share))))
-    priority = list(universe[:priority_count])
+    market_priority_limit = max(0, priority_count - len(monitored))
+    market_priority = [
+        pool for pool in universe if pool.pool_address not in monitored_keys
+    ][:market_priority_limit]
+    priority = [*monitored, *market_priority]
     priority_keys = {pool.pool_address for pool in priority}
     rotation_candidates = [pool for pool in universe if pool.pool_address not in priority_keys]
     rotation_candidates.sort(
@@ -1113,6 +1207,16 @@ def select_scan_targets(universe, state, config):
     return selected, {
         "candidates": len(universe),
         "priority": len(priority),
+        "signal_monitor": len(monitored),
+        "due_rechecks": sum(
+            1
+            for pool in monitored
+            if 0
+            < parse_timestamp(
+                (pools_state.get(pool.pool_address) or {}).get("signal_recheck_due_at")
+            )
+            <= now
+        ),
         "rotation": len(rotation),
         "never_scanned": sum(1 for pool in selected if not pool_last_scanned_at(state, pool)),
     }
@@ -2445,7 +2549,9 @@ def score_events(events, config):
 
     funding_sources = Counter(event.get("funding_source") for event in suspicious if event.get("funding_source"))
     token_recipients = Counter(
-        event.get("token_recipient") for event in suspicious if event.get("token_recipient")
+        event.get("token_recipient")
+        for event in suspicious
+        if event.get("token_recipient") and not event.get("routed")
     )
     common_funders = [
         {"source": source, "wallets": count}
@@ -2521,7 +2627,7 @@ def classify_alert_tier(pool, alert, evidence, config):
     support_wallets = int(evidence.get("support_wallets") or 0)
     hard_sol = float(evidence.get("hard_sol") or 0)
     hard_classes = evidence.get("hard_classes") or {}
-    coordination = bool(alert.get("common_funders") or alert.get("common_recipients") or alert.get("routed_buys"))
+    coordination = bool(alert.get("common_funders") or alert.get("common_recipients"))
     hard_cluster = hard_wallets >= min_wallets
     hard_flow = hard_sol >= min_sol
     dormant = bool(hard_classes.get("dormant"))
@@ -2534,6 +2640,11 @@ def classify_alert_tier(pool, alert, evidence, config):
     sticky_net_sol = float(wave.get("sticky_net_sol") or 0)
     top_buyer_share = float(wave.get("top_buyer_share") or 0)
     top3_buyer_share = float(wave.get("top3_buyer_share") or 0)
+    hold_age_minutes = float(wave.get("hold_age_minutes") or 0)
+    min_hold_minutes = float(wave.get("min_hold_minutes") or 0)
+    retention_seasoned = not wave_signal or hold_age_minutes >= min_hold_minutes
+    balance_coverage_value = wave.get("balance_coverage_pct")
+    balance_coverage_pct = 100.0 if balance_coverage_value is None else float(balance_coverage_value)
     concentration_prefix = "sticky_accumulation" if alert.get("signal_family") == "sticky_accumulation" else "reactivation_wave"
     max_top_buyer_share = float(config.get(f"{concentration_prefix}_max_top_buyer_share", 1.0))
     max_top3_buyer_share = float(config.get(f"{concentration_prefix}_max_top3_buyer_share", 1.0))
@@ -2564,6 +2675,10 @@ def classify_alert_tier(pool, alert, evidence, config):
         penalties.append("low_tx only")
     if concentrated_wave:
         penalties.append("concentrated buyer flow")
+    if wave_signal and not retention_seasoned:
+        penalties.append("retention not seasoned")
+    if wave_signal and balance_coverage_pct < float(config.get("actionable_min_balance_coverage_pct", 80)):
+        penalties.append("partial balance coverage")
     if actionable_mcap and mcap > actionable_mcap:
         penalties.append("above actionable mcap")
     if watch_mcap and mcap > watch_mcap:
@@ -2593,11 +2708,11 @@ def classify_alert_tier(pool, alert, evidence, config):
 
     wave_actionable = (
         wave_signal
+        and retention_seasoned
+        and "partial balance coverage" not in penalties
         and sticky_supply_pct >= float(config.get("reactivation_wave_actionable_sticky_supply_pct", 5.0))
-        and (
-            sticky_bought_pct >= float(config.get("reactivation_wave_actionable_sticky_bought_pct", 50.0))
-            or net_retention_pct >= float(config.get("reactivation_wave_actionable_net_token_retention_pct", 75.0))
-        )
+        and sticky_bought_pct >= float(config.get("reactivation_wave_actionable_sticky_bought_pct", 50.0))
+        and net_retention_pct >= float(config.get("reactivation_wave_actionable_net_token_retention_pct", 75.0))
     )
     hard_signal = hard_cluster or hard_flow or dormant or coordination or wave_signal
     if concentrated_wave:
@@ -2617,15 +2732,16 @@ def classify_alert_tier(pool, alert, evidence, config):
     elif lane in ("micro_sticky", "cheap_sticky"):
         sticky_actionable = (
             wave_signal
+            and retention_seasoned
+            and "partial balance coverage" not in penalties
             and sticky_supply_pct >= float(config.get("sticky_accumulation_actionable_sticky_supply_pct", 5.0))
             and sticky_net_sol >= float(config.get("sticky_accumulation_min_sticky_net_sol", 0.0))
-            and (
-                sticky_bought_pct >= float(config.get("sticky_accumulation_actionable_sticky_bought_pct", 50.0))
-                or net_retention_pct >= float(config.get("sticky_accumulation_actionable_net_token_retention_pct", 70.0))
-            )
+            and sticky_bought_pct >= float(config.get("sticky_accumulation_actionable_sticky_bought_pct", 50.0))
+            and net_retention_pct >= float(config.get("sticky_accumulation_actionable_net_token_retention_pct", 70.0))
         )
         classic_actionable = coordination and (hard_cluster or hard_flow or dormant)
-        tier = "actionable" if sticky_actionable or classic_actionable else "watch"
+        clean_entry = "above actionable mcap" not in penalties and "hot volume" not in penalties
+        tier = "actionable" if clean_entry and (sticky_actionable or classic_actionable) else "watch"
     elif actionable_mcap and mcap > actionable_mcap:
         tier = "watch"
     elif "hot volume" in penalties and not coordination:
@@ -2638,6 +2754,9 @@ def classify_alert_tier(pool, alert, evidence, config):
         "ath_current_ratio": ath_ratio,
         "top_buyer_share": top_buyer_share,
         "top3_buyer_share": top3_buyer_share,
+        "hold_age_minutes": hold_age_minutes,
+        "min_hold_minutes": min_hold_minutes,
+        "balance_coverage_pct": balance_coverage_pct,
     }
 
 
@@ -2763,18 +2882,22 @@ def merge_reactivation_wave_swaps(pool_state, swaps, config):
         fallback_index += 1
         by_signature[signature] = item
     merged = sorted(by_signature.values(), key=lambda item: (item.get("block_time") or 0, item.get("signature") or ""))
-    if max_swaps > 0 and len(merged) > max_swaps:
+    buffer_truncated = bool(max_swaps > 0 and len(merged) > max_swaps)
+    if buffer_truncated:
         merged = merged[-max_swaps:]
     pool_state["reactivation_wave_swaps"] = merged
+    pool_state["reactivation_wave_buffer_truncated"] = buffer_truncated
     return merged
 
 
 def wave_buy_owner(swap):
+    if swap.get("routed"):
+        return ""
     return swap.get("token_recipient") or swap.get("signer") or ""
 
 
 def wave_sell_owner(swap):
-    return swap.get("token_sender") or swap.get("signer") or ""
+    return swap.get("signer") or swap.get("token_sender") or ""
 
 
 def attributed_wave_retention(balance, bought_tokens, sold_tokens, min_retention_pct=0.0):
@@ -2783,11 +2906,13 @@ def attributed_wave_retention(balance, bought_tokens, sold_tokens, min_retention
     sold_tokens = max(0.0, float(sold_tokens or 0))
     net_tokens = max(0.0, bought_tokens - sold_tokens)
     retained_tokens = min(balance, net_tokens)
-    retention_pct = retained_tokens / net_tokens * 100 if net_tokens else 0.0
+    retention_pct = retained_tokens / bought_tokens * 100 if bought_tokens else 0.0
+    net_coverage_pct = retained_tokens / net_tokens * 100 if net_tokens else 0.0
     return {
         "net_tokens": net_tokens,
         "retained_tokens": retained_tokens,
         "retention_pct": retention_pct,
+        "net_coverage_pct": net_coverage_pct,
         "qualified": bool(retained_tokens > 0 and retention_pct >= float(min_retention_pct or 0)),
     }
 
@@ -2800,12 +2925,122 @@ def buyer_concentration(buyers):
     return buy_sol[0] / total, sum(buy_sol[:3]) / total
 
 
+def scaled_score(value, threshold, points, full_ratio=2.0):
+    value = max(0.0, float(value or 0))
+    threshold = max(0.0, float(threshold or 0))
+    if threshold <= 0:
+        return float(points) if value > 0 else 0.0
+    return float(points) * min(1.0, value / (threshold * max(1.0, float(full_ratio))))
+
+
+def wave_quality_score(alert, config):
+    wave = alert.get("wave") or {}
+    family = alert.get("signal_family")
+    prefix = "sticky_accumulation" if family == "sticky_accumulation" else "reactivation_wave"
+    score = 15.0
+    score += scaled_score(
+        wave.get("net_buy_sol"),
+        config.get(f"{prefix}_min_net_buy_sol", 10),
+        15,
+        full_ratio=4,
+    )
+    score += scaled_score(
+        wave.get("unique_buyers"),
+        config.get(f"{prefix}_min_unique_buyers", 5),
+        10,
+        full_ratio=5,
+    )
+    score += scaled_score(
+        wave.get("sticky_supply_pct"),
+        config.get(f"{prefix}_actionable_sticky_supply_pct", 5),
+        15,
+        full_ratio=2,
+    )
+    score += scaled_score(
+        wave.get("sticky_bought_pct"),
+        100,
+        15,
+        full_ratio=1,
+    )
+    score += scaled_score(
+        wave.get("net_token_retention_pct"),
+        100,
+        10,
+        full_ratio=1,
+    )
+    min_sticky_wallets = config.get(
+        f"{prefix}_min_sticky_wallets",
+        max(2, int(float(config.get(f"{prefix}_min_unique_buyers", 5)) / 2)),
+    )
+    score += scaled_score(wave.get("sticky_wallets"), min_sticky_wallets, 10, full_ratio=4)
+    score += min(5.0, max(0.0, float(wave.get("balance_coverage_pct") or 0)) / 20)
+    min_hold = max(
+        0.0,
+        float(
+            wave.get("min_hold_minutes")
+            or config.get(f"{prefix}_min_hold_minutes")
+            or 0
+        ),
+    )
+    hold_age = max(0.0, float(wave.get("hold_age_minutes") or 0))
+    score += 10.0 if min_hold <= 0 else min(10.0, hold_age / min_hold * 10)
+
+    top_buyer = float(wave.get("top_buyer_share") or 0)
+    top3_buyers = float(wave.get("top3_buyer_share") or 0)
+    if top_buyer > float(config.get(f"{prefix}_max_top_buyer_share", 1.0)):
+        score -= 10
+    if top3_buyers > float(config.get(f"{prefix}_max_top3_buyer_share", 1.0)):
+        score -= 10
+    if float(wave.get("balance_coverage_pct") or 0) < float(
+        config.get("actionable_min_balance_coverage_pct", 80)
+    ):
+        score -= 10
+    return max(0, min(95, int(round(score))))
+
+
+def owner_activity_since(swaps, start_time, owners):
+    owners = {owner for owner in owners if owner}
+    activity = {
+        owner: {
+            "buy_sol": 0.0,
+            "sell_sol": 0.0,
+            "token_bought": 0.0,
+            "token_sold": 0.0,
+            "last_buy_time": 0,
+            "last_sell_time": 0,
+        }
+        for owner in owners
+    }
+    for swap in swaps or []:
+        block_time = int(swap.get("block_time") or 0)
+        if block_time < int(start_time or 0):
+            continue
+        kind = swap.get("kind")
+        owner = wave_buy_owner(swap) if kind == "buy" else wave_sell_owner(swap) if kind == "sell" else ""
+        if owner not in activity:
+            continue
+        row = activity[owner]
+        if kind == "buy":
+            row["buy_sol"] += float(swap.get("sol_amount") or 0)
+            row["token_bought"] += float(swap.get("token_amount") or swap.get("token_recipient_amount") or 0)
+            row["last_buy_time"] = max(row["last_buy_time"], block_time)
+        elif kind == "sell":
+            row["sell_sol"] += float(swap.get("sol_amount") or 0)
+            row["token_sold"] += float(swap.get("token_amount") or swap.get("token_sender_amount") or 0)
+            row["last_sell_time"] = max(row["last_sell_time"], block_time)
+    return activity
+
+
 def reactivation_wave_window_metrics(window_swaps, config, relaxed=False):
     min_trade_sol = float(config.get("reactivation_wave_min_trade_sol", 0.25))
     buy_swaps = [
         swap
         for swap in window_swaps
-        if swap.get("kind") == "buy" and float(swap.get("sol_amount") or 0) >= min_trade_sol
+        if (
+            swap.get("kind") == "buy"
+            and float(swap.get("sol_amount") or 0) >= min_trade_sol
+            and wave_buy_owner(swap)
+        )
     ]
     sell_swaps = [
         swap
@@ -2890,6 +3125,7 @@ def reactivation_wave_window_metrics(window_swaps, config, relaxed=False):
         "large_buyers": large_buyers,
         "top_buyer_share": top_buyer_share,
         "top3_buyer_share": top3_buyer_share,
+        "last_buy_time": max((int(swap.get("block_time") or 0) for swap in buy_swaps), default=0),
         "buyers": sorted(buyers, key=lambda row: row["buy_sol"], reverse=True),
         "buy_count": len(buy_swaps),
         "sell_count": len(sell_swaps),
@@ -2942,23 +3178,32 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
     min_sticky_bought_pct = float(config.get("reactivation_wave_min_sticky_bought_pct", 40.0))
     min_net_retention_pct = float(config.get("reactivation_wave_min_net_token_retention_pct", 60.0))
     min_wallet_retention_pct = float(config.get("reactivation_wave_min_wallet_retention_pct", 15.0))
+    min_hold_minutes = float(config.get("reactivation_wave_min_hold_minutes", 90))
+    min_balance_coverage_pct = float(config.get("actionable_min_balance_coverage_pct", 80))
     try:
         supply = rpc.token_supply(pool.token_address)
-    except Exception:
-        return []
+    except Exception as exc:
+        raise WaveDataUnavailable(
+            f"reactivation supply unavailable for {pool.token_address}: {exc}"
+        ) from exc
     if not supply:
-        return []
+        raise WaveDataUnavailable(
+            f"reactivation supply unavailable for {pool.token_address}"
+        )
 
     alerts = []
+    coverage_available = False
     created_at = utc_now().isoformat().replace("+00:00", "Z")
     for candidate in candidates[:max_candidates]:
         metrics = candidate["metrics"]
         buyers = metrics["buyers"][:balance_limit]
+        owner_activity = owner_activity_since(swaps, candidate["start"], [row.get("owner") for row in buyers])
         checked = []
         sticky_tokens = 0.0
         sticky_wallets = 0
         checked_bought_tokens = 0.0
         checked_net_tokens = 0.0
+        balance_errors = 0
         for row in buyers:
             owner = row.get("owner")
             if not owner:
@@ -2967,8 +3212,13 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
                 balance = rpc.token_balance(owner, pool.token_address)
             except Exception:
                 balance = 0.0
+                balance_errors += 1
             bought_tokens = float(row.get("token_bought") or 0)
-            sold_tokens = float(row.get("token_sold") or 0)
+            activity = owner_activity.get(owner) or {}
+            sold_tokens = max(
+                float(row.get("token_sold") or 0),
+                float(activity.get("token_sold") or 0),
+            )
             retention = attributed_wave_retention(
                 balance,
                 bought_tokens,
@@ -2987,11 +3237,13 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
                     "owner": owner,
                     "buy_sol": row["buy_sol"],
                     "sell_sol": row["sell_sol"],
-                    "net_sol": row["buy_sol"] - row["sell_sol"],
+                    "net_sol": row["buy_sol"] - float(activity.get("sell_sol") or row["sell_sol"]),
                     "token_bought": bought_tokens,
                     "token_sold": sold_tokens,
+                    "post_window_sell_sol": max(0.0, float(activity.get("sell_sol") or 0) - float(row["sell_sol"])),
                     "retained_from_wave": retained_tokens,
                     "wave_retention_pct": retention["retention_pct"],
+                    "wave_net_coverage_pct": retention["net_coverage_pct"],
                     "retained_supply_pct": (retained_tokens / supply * 100) if supply else 0.0,
                     "current_balance": balance,
                     "current_supply_pct": (balance / supply * 100) if supply else 0.0,
@@ -3001,25 +3253,21 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
                 }
             )
 
+        balance_coverage_pct = (
+            (len(checked) - balance_errors) / len(checked) * 100
+            if checked
+            else 0.0
+        )
+        if balance_coverage_pct < min_balance_coverage_pct:
+            continue
+        coverage_available = True
         sticky_supply_pct = sticky_tokens / supply * 100 if supply else 0.0
         sticky_bought_pct = sticky_tokens / checked_bought_tokens * 100 if checked_bought_tokens else 0.0
         net_retention_pct = sticky_tokens / checked_net_tokens * 100 if checked_net_tokens else 0.0
         if sticky_supply_pct < min_sticky_supply_pct:
             continue
-        if sticky_bought_pct < min_sticky_bought_pct and net_retention_pct < min_net_retention_pct:
+        if sticky_bought_pct < min_sticky_bought_pct or net_retention_pct < min_net_retention_pct:
             continue
-
-        score = 50
-        score += min(15, int(metrics["net_buy_sol"] / max(1.0, float(config.get("reactivation_wave_min_net_buy_sol", 25))) * 5))
-        score += min(10, int(metrics["unique_buyers"] / max(1, int(config.get("reactivation_wave_min_unique_buyers", 20))) * 5))
-        if sticky_supply_pct >= float(config.get("reactivation_wave_actionable_sticky_supply_pct", 5.0)):
-            score += 15
-        if (
-            sticky_bought_pct >= float(config.get("reactivation_wave_actionable_sticky_bought_pct", 50.0))
-            or net_retention_pct >= float(config.get("reactivation_wave_actionable_net_token_retention_pct", 75.0))
-        ):
-            score += 10
-        score = min(score, 95)
 
         events = []
         for row in metrics["buyers"][: int(config.get("alert_event_export_limit", 80))]:
@@ -3035,7 +3283,7 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
 
         alert = {
             "created_at": created_at,
-            "score": score,
+            "score": 0,
             "lane": "reactivation",
             "signal_family": "reactivation_wave",
             "pool": pool.as_dict(),
@@ -3069,6 +3317,13 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
                 "top_buyer_share": metrics["top_buyer_share"],
                 "top3_buyer_share": metrics["top3_buyer_share"],
                 "checked_wallets": len(checked),
+                "balance_errors": balance_errors,
+                "balance_coverage_pct": balance_coverage_pct,
+                "hold_age_minutes": max(
+                    0.0,
+                    (time.time() - int(metrics.get("last_buy_time") or candidate["start"])) / 60,
+                ),
+                "min_hold_minutes": min_hold_minutes,
                 "sticky_wallets": sticky_wallets,
                 "sticky_tokens": sticky_tokens,
                 "sticky_supply_pct": sticky_supply_pct,
@@ -3079,6 +3334,7 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
             },
             "events": events,
         }
+        alert["score"] = wave_quality_score(alert, config)
         tier, reasons, penalties, quality_metrics = classify_alert_tier(
             pool,
             alert,
@@ -3102,6 +3358,11 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
             }
         )
         alerts.append(alert)
+    if not coverage_available:
+        raise WaveDataUnavailable(
+            f"reactivation balance coverage below {min_balance_coverage_pct:.0f}% "
+            f"for {pool.token_address}"
+        )
     return dedupe_pool_alerts(alerts)
 
 
@@ -3135,9 +3396,11 @@ def merge_sticky_accumulation_swaps(pool_state, swaps, config):
         fallback_index += 1
         by_signature[signature] = item
     merged = sorted(by_signature.values(), key=lambda item: (item.get("block_time") or 0, item.get("signature") or ""))
-    if max_swaps > 0 and len(merged) > max_swaps:
+    buffer_truncated = bool(max_swaps > 0 and len(merged) > max_swaps)
+    if buffer_truncated:
         merged = merged[-max_swaps:]
     pool_state["sticky_accumulation_swaps"] = merged
+    pool_state["sticky_accumulation_buffer_truncated"] = buffer_truncated
     return merged
 
 
@@ -3146,7 +3409,11 @@ def sticky_accumulation_window_metrics(window_swaps, config, relaxed=False):
     buy_swaps = [
         swap
         for swap in window_swaps
-        if swap.get("kind") == "buy" and float(swap.get("sol_amount") or 0) >= min_trade_sol
+        if (
+            swap.get("kind") == "buy"
+            and float(swap.get("sol_amount") or 0) >= min_trade_sol
+            and wave_buy_owner(swap)
+        )
     ]
     sell_swaps = [
         swap
@@ -3231,6 +3498,7 @@ def sticky_accumulation_window_metrics(window_swaps, config, relaxed=False):
         "large_buyers": large_buyers,
         "top_buyer_share": top_buyer_share,
         "top3_buyer_share": top3_buyer_share,
+        "last_buy_time": max((int(swap.get("block_time") or 0) for swap in buy_swaps), default=0),
         "buyers": sorted(buyers, key=lambda row: row["buy_sol"], reverse=True),
         "buy_count": len(buy_swaps),
         "sell_count": len(sell_swaps),
@@ -3285,25 +3553,34 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
     min_sticky_bought_pct = float(config.get("sticky_accumulation_min_sticky_bought_pct", 40.0))
     min_net_retention_pct = float(config.get("sticky_accumulation_min_net_token_retention_pct", 55.0))
     min_wallet_retention_pct = float(config.get("sticky_accumulation_min_wallet_retention_pct", 20.0))
+    min_hold_minutes = float(config.get("sticky_accumulation_min_hold_minutes", 90))
+    min_balance_coverage_pct = float(config.get("actionable_min_balance_coverage_pct", 80))
     try:
         supply = rpc.token_supply(pool.token_address)
-    except Exception:
-        return []
+    except Exception as exc:
+        raise WaveDataUnavailable(
+            f"sticky supply unavailable for {pool.token_address}: {exc}"
+        ) from exc
     if not supply:
-        return []
+        raise WaveDataUnavailable(
+            f"sticky supply unavailable for {pool.token_address}"
+        )
 
     alerts = []
+    coverage_available = False
     created_at = utc_now().isoformat().replace("+00:00", "Z")
     lane = config.get("lane") or config.get("mode")
     for candidate in candidates[:max_candidates]:
         metrics = candidate["metrics"]
         buyers = metrics["buyers"][:balance_limit]
+        owner_activity = owner_activity_since(swaps, candidate["start"], [row.get("owner") for row in buyers])
         checked = []
         sticky_tokens = 0.0
         sticky_wallets = 0
         checked_bought_tokens = 0.0
         checked_net_tokens = 0.0
         sticky_net_sol = 0.0
+        balance_errors = 0
         for row in buyers:
             owner = row.get("owner")
             if not owner:
@@ -3312,8 +3589,13 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
                 balance = rpc.token_balance(owner, pool.token_address)
             except Exception:
                 balance = 0.0
+                balance_errors += 1
             bought_tokens = float(row.get("token_bought") or 0)
-            sold_tokens = float(row.get("token_sold") or 0)
+            activity = owner_activity.get(owner) or {}
+            sold_tokens = max(
+                float(row.get("token_sold") or 0),
+                float(activity.get("token_sold") or 0),
+            )
             retention = attributed_wave_retention(
                 balance,
                 bought_tokens,
@@ -3327,7 +3609,10 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
             if retention["qualified"]:
                 sticky_tokens += retained_tokens
                 sticky_wallets += 1
-                sticky_net_sol += max(0.0, float(row["buy_sol"]) - float(row["sell_sol"])) * min(
+                sticky_net_sol += max(
+                    0.0,
+                    float(row["buy_sol"]) - float(activity.get("sell_sol") or row["sell_sol"]),
+                ) * min(
                     1.0,
                     retention["retention_pct"] / 100,
                 )
@@ -3336,11 +3621,13 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
                     "owner": owner,
                     "buy_sol": row["buy_sol"],
                     "sell_sol": row["sell_sol"],
-                    "net_sol": row["buy_sol"] - row["sell_sol"],
+                    "net_sol": row["buy_sol"] - float(activity.get("sell_sol") or row["sell_sol"]),
                     "token_bought": bought_tokens,
                     "token_sold": sold_tokens,
+                    "post_window_sell_sol": max(0.0, float(activity.get("sell_sol") or 0) - float(row["sell_sol"])),
                     "retained_from_wave": retained_tokens,
                     "wave_retention_pct": retention["retention_pct"],
+                    "wave_net_coverage_pct": retention["net_coverage_pct"],
                     "retained_supply_pct": (retained_tokens / supply * 100) if supply else 0.0,
                     "current_balance": balance,
                     "current_supply_pct": (balance / supply * 100) if supply else 0.0,
@@ -3350,6 +3637,14 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
                 }
             )
 
+        balance_coverage_pct = (
+            (len(checked) - balance_errors) / len(checked) * 100
+            if checked
+            else 0.0
+        )
+        if balance_coverage_pct < min_balance_coverage_pct:
+            continue
+        coverage_available = True
         sticky_supply_pct = sticky_tokens / supply * 100 if supply else 0.0
         sticky_bought_pct = sticky_tokens / checked_bought_tokens * 100 if checked_bought_tokens else 0.0
         net_retention_pct = sticky_tokens / checked_net_tokens * 100 if checked_net_tokens else 0.0
@@ -3359,20 +3654,8 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
             continue
         if sticky_supply_pct < min_sticky_supply_pct:
             continue
-        if sticky_bought_pct < min_sticky_bought_pct and net_retention_pct < min_net_retention_pct:
+        if sticky_bought_pct < min_sticky_bought_pct or net_retention_pct < min_net_retention_pct:
             continue
-
-        score = 50
-        score += min(15, int(metrics["net_buy_sol"] / max(1.0, float(config.get("sticky_accumulation_min_net_buy_sol", 10))) * 5))
-        score += min(10, int(metrics["unique_buyers"] / max(1, int(config.get("sticky_accumulation_min_unique_buyers", 5))) * 5))
-        if sticky_supply_pct >= float(config.get("sticky_accumulation_actionable_sticky_supply_pct", 5.0)):
-            score += 15
-        if (
-            sticky_bought_pct >= float(config.get("sticky_accumulation_actionable_sticky_bought_pct", 50.0))
-            or net_retention_pct >= float(config.get("sticky_accumulation_actionable_net_token_retention_pct", 75.0))
-        ):
-            score += 10
-        score = min(score, 95)
 
         events = []
         for row in metrics["buyers"][: int(config.get("alert_event_export_limit", 80))]:
@@ -3388,7 +3671,7 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
 
         alert = {
             "created_at": created_at,
-            "score": score,
+            "score": 0,
             "lane": lane,
             "signal_family": "sticky_accumulation",
             "pool": pool.as_dict(),
@@ -3422,6 +3705,13 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
                 "top_buyer_share": metrics["top_buyer_share"],
                 "top3_buyer_share": metrics["top3_buyer_share"],
                 "checked_wallets": len(checked),
+                "balance_errors": balance_errors,
+                "balance_coverage_pct": balance_coverage_pct,
+                "hold_age_minutes": max(
+                    0.0,
+                    (time.time() - int(metrics.get("last_buy_time") or candidate["start"])) / 60,
+                ),
+                "min_hold_minutes": min_hold_minutes,
                 "sticky_wallets": sticky_wallets,
                 "sticky_net_sol": sticky_net_sol,
                 "sticky_tokens": sticky_tokens,
@@ -3433,6 +3723,7 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
             },
             "events": events,
         }
+        alert["score"] = wave_quality_score(alert, config)
         tier, reasons, penalties, quality_metrics = classify_alert_tier(
             pool,
             alert,
@@ -3456,6 +3747,11 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
             }
         )
         alerts.append(alert)
+    if not coverage_available:
+        raise WaveDataUnavailable(
+            f"sticky balance coverage below {min_balance_coverage_pct:.0f}% "
+            f"for {pool.token_address}"
+        )
     return dedupe_pool_alerts(alerts)
 
 
@@ -3491,7 +3787,7 @@ def helius_page_budget(pool, config, kind, phase=None):
             ),
         )
     if config.get("helius_dynamic_page_budget_enabled", True) and kind in ("recent", "incremental"):
-        limit = max(1, int(config.get("helius_transactions_limit", 250)))
+        limit = max(1, int(config.get("helius_transactions_limit", 100)))
         if kind == "incremental":
             target_hours = float(config.get("helius_dynamic_incremental_target_hours", 1.25))
         else:
@@ -3520,16 +3816,26 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
     previous_time = int(pool_state.get("helius_latest_block_time") or 0)
     live_lookback_minutes = int(config.get("helius_live_lookback_minutes", min(lookback_minutes, 90)))
     if previous_time:
+        recovery_hours = max(
+            live_lookback_minutes / 60,
+            float(config.get("helius_incremental_recovery_max_hours", 24)),
+        )
         live_from = max(
-            now - live_lookback_minutes * 60,
+            now - int(recovery_hours * 3600),
             previous_time - int(config.get("helius_incremental_overlap_seconds", 30)),
         )
         live_budget_kind = "incremental"
     else:
         live_from = recent_from
         live_budget_kind = "recent"
+    live_cursor = pool_state.get("helius_live_cursor")
+    if live_cursor:
+        live_from = int(pool_state.get("helius_live_from") or live_from)
+        live_budget_kind = "incremental" if previous_time else "recent"
     transactions = []
     seen = set()
+    staged_updates = {}
+    staged_deletes = set()
     stats = {
         "source": "helius_transactions",
         "phase": phase or "full",
@@ -3541,6 +3847,7 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         "backfill_pending": False,
         "had_previous_state": bool(previous_time),
         "live_from": live_from,
+        "live_resumed": bool(live_cursor),
         "history_gap_seconds": max(0, live_from - previous_time) if previous_time else 0,
     }
 
@@ -3554,6 +3861,17 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
             transactions.append(tx)
             added += 1
         return added
+
+    def stage_cursor(save_cursor_key, cursor):
+        if not save_cursor_key:
+            return
+        complete_key = f"{save_cursor_key}_complete"
+        if cursor:
+            staged_updates[save_cursor_key] = cursor
+            staged_deletes.add(complete_key)
+        else:
+            staged_deletes.add(save_cursor_key)
+            staged_updates[complete_key] = True
 
     def run_pass(
         name,
@@ -3607,18 +3925,12 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
             if len(batch) < limit:
                 cursor = None
             if not cursor or not batch:
-                if save_cursor_key:
-                    pool_state.pop(save_cursor_key, None)
-                    pool_state[f"{save_cursor_key}_complete"] = True
+                stage_cursor(save_cursor_key, None)
                 break
-            if save_cursor_key:
-                pool_state[save_cursor_key] = cursor
-                pool_state.pop(f"{save_cursor_key}_complete", None)
         else:
             pass_stats["truncated"] = True
             stats["truncated"] = True
-            if save_cursor_key and cursor:
-                pool_state[save_cursor_key] = cursor
+            stage_cursor(save_cursor_key, cursor)
         pass_stats["pagination_remaining"] = bool(cursor)
         if target_from is not None:
             pass_stats["coverage_complete"] = not bool(cursor)
@@ -3630,13 +3942,34 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         "desc",
         helius_page_budget(pool, config, live_budget_kind, phase=phase),
         block_time={"gte": live_from},
+        pagination_token=live_cursor,
+        save_cursor_key="helius_live_cursor",
         target_from=live_from,
     )
-    stats["live_truncated"] = bool(live_pass.get("truncated"))
+    pending_signature = pool_state.get("helius_live_pending_signature")
+    pending_block_time = int(pool_state.get("helius_live_pending_block_time") or 0)
+    if not pending_signature and transactions:
+        newest_live = max(
+            transactions,
+            key=lambda tx: (int(tx.get("blockTime") or 0), int(tx.get("transactionIndex") or 0)),
+        )
+        newest_signature = (newest_live.get("transaction") or {}).get("signatures", [""])[0]
+        if newest_signature:
+            pending_signature = newest_signature
+            pending_block_time = int(newest_live.get("blockTime") or 0)
+            staged_updates["helius_live_pending_signature"] = pending_signature
+            staged_updates["helius_live_pending_block_time"] = pending_block_time
+            staged_updates["helius_live_from"] = live_from
+    stats["live_truncated"] = bool(live_pass.get("pagination_remaining"))
     stats["live_oldest_block_time"] = live_pass.get("oldest_block_time")
-    stats["live_newest_block_time"] = live_pass.get("newest_block_time")
-    if live_pass.get("newest_block_time"):
-        stats["live_head_lag_seconds"] = max(0, now - int(live_pass["newest_block_time"]))
+    stats["live_newest_block_time"] = pending_block_time or live_pass.get("newest_block_time")
+    if stats.get("live_newest_block_time"):
+        stats["live_head_lag_seconds"] = max(0, now - int(stats["live_newest_block_time"]))
+    if not stats["live_truncated"] and pending_signature:
+        stats["live_checkpoint"] = {
+            "signature": pending_signature,
+            "block_time": pending_block_time,
+        }
 
     age_hours = pool.age_hours()
     initial_max_age = float(config.get("helius_initial_backfill_max_age_hours", 96))
@@ -3655,10 +3988,12 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
             int(pool.pair_created_at) - int(config.get("helius_launch_time_cushion_seconds", 120)),
             int(now - retention_hours * 3600),
         )
+        backfill_cursor = pool_state.get("helius_initial_backfill_cursor")
         if int(pool_state.get("helius_initial_backfill_from") or 0) != launch_from:
-            pool_state.pop("helius_initial_backfill_cursor", None)
-            pool_state.pop("helius_initial_backfill_cursor_complete", None)
-            pool_state["helius_initial_backfill_from"] = launch_from
+            backfill_cursor = None
+            staged_deletes.add("helius_initial_backfill_cursor")
+            staged_deletes.add("helius_initial_backfill_cursor_complete")
+            staged_updates["helius_initial_backfill_from"] = launch_from
         backfill_pages = min(
             helius_page_budget(pool, config, "initial_backfill", phase=phase),
             max(1, int(config.get("helius_backfill_max_pages_per_scan", 1))),
@@ -3668,7 +4003,7 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
             "asc",
             backfill_pages,
             block_time={"gte": launch_from},
-            pagination_token=pool_state.get("helius_initial_backfill_cursor"),
+            pagination_token=backfill_cursor,
             save_cursor_key="helius_initial_backfill_cursor",
             target_from=launch_from,
         )
@@ -3683,6 +4018,9 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
             block_time={"gte": recent_from},
         )
 
+    for key in staged_deletes:
+        pool_state.pop(key, None)
+    pool_state.update(staged_updates)
     stats["transactions"] = len(transactions)
     return sorted(transactions, key=lambda tx: (tx.get("blockTime") or 0, tx.get("transactionIndex") or 0)), stats
 
@@ -3701,12 +4039,17 @@ def merge_transactions(*transaction_groups):
     )
 
 
-def update_pool_transaction_state(pool_state, pool, txs):
-    if not txs:
+def update_pool_transaction_state(pool_state, pool, txs, checkpoint=None):
+    checkpoint = checkpoint or {}
+    if checkpoint:
+        signature = checkpoint.get("signature")
+        block_time = int(checkpoint.get("block_time") or 0)
+    elif txs:
+        latest = max(txs, key=lambda tx: ((tx.get("blockTime") or 0), tx.get("transactionIndex") or 0))
+        signature = (latest.get("transaction") or {}).get("signatures", [""])[0]
+        block_time = int(latest.get("blockTime") or 0)
+    else:
         return
-    latest = max(txs, key=lambda tx: ((tx.get("blockTime") or 0), tx.get("transactionIndex") or 0))
-    signature = (latest.get("transaction") or {}).get("signatures", [""])[0]
-    block_time = int(latest.get("blockTime") or 0)
     if signature:
         pool_state["latest_signature"] = signature
         pool_state["helius_latest_signature"] = signature
@@ -3715,6 +4058,14 @@ def update_pool_transaction_state(pool_state, pool, txs):
         pool_state["helius_latest_time"] = iso(block_time)
         pool_state["helius_latest_block_time"] = block_time
     pool_state["symbol"] = pool.symbol
+    for key in (
+        "helius_live_cursor",
+        "helius_live_cursor_complete",
+        "helius_live_pending_signature",
+        "helius_live_pending_block_time",
+        "helius_live_from",
+    ):
+        pool_state.pop(key, None)
 
 
 def select_buy_swaps_for_classification(candidates, config, budget_limit):
@@ -3779,6 +4130,16 @@ def buy_swap_candidates(swaps, config):
 
 def classify_buy_swaps(rpc, swaps, config, state, classification_budget):
     candidates = buy_swap_candidates(swaps, config)
+    if config.get("helius_dedupe_classification_wallets", True):
+        candidate_count = len(
+            {
+                swap.get("signer") or swap.get("signature")
+                for swap in candidates
+                if swap.get("signer") or swap.get("signature")
+            }
+        )
+    else:
+        candidate_count = len(candidates)
     per_pool_limit = int(config.get("max_wallet_classifications_per_pool", classification_budget["remaining"]))
     budget_limit = min(classification_budget["remaining"], per_pool_limit)
     selected = select_buy_swaps_for_classification(candidates, config, budget_limit)
@@ -3803,7 +4164,7 @@ def classify_buy_swaps(rpc, swaps, config, state, classification_budget):
             continue
         swap.update(wallet_info)
         events.append(swap)
-    return events, len(candidates), classification_errors
+    return events, candidate_count, classification_errors
 
 
 def parse_helius_swaps(txs, pool):
@@ -3910,9 +4271,12 @@ def combine_fetch_stats(probe_stats, deep_stats):
     combined["transactions"] = int(probe_stats.get("transactions", 0)) + int(deep_stats.get("transactions", 0))
     combined["passes"] = [*(probe_stats.get("passes") or []), *(deep_stats.get("passes") or [])]
     combined["truncated"] = bool(probe_stats.get("truncated") or deep_stats.get("truncated"))
-    combined["live_truncated"] = bool(
-        probe_stats.get("live_truncated") or deep_stats.get("live_truncated")
-    )
+    if deep_stats.get("live_resumed"):
+        combined["live_truncated"] = bool(deep_stats.get("live_truncated"))
+    else:
+        combined["live_truncated"] = bool(
+            probe_stats.get("live_truncated") or deep_stats.get("live_truncated")
+        )
     combined["backfill_pending"] = bool(
         probe_stats.get("backfill_pending") or deep_stats.get("backfill_pending")
     )
@@ -3942,9 +4306,98 @@ def combine_fetch_stats(probe_stats, deep_stats):
     ]
     if live_lags:
         combined["live_head_lag_seconds"] = min(live_lags)
+    live_checkpoint = deep_stats.get("live_checkpoint") or probe_stats.get("live_checkpoint")
+    if live_checkpoint:
+        combined["live_checkpoint"] = live_checkpoint
     combined["probe"] = probe_stats
     combined["deep"] = deep_stats
     return combined
+
+
+def apply_alert_data_quality(
+    alerts,
+    fetch_stats,
+    candidate_buys,
+    classified_buys,
+    classification_errors,
+    config,
+):
+    fetch_stats = fetch_stats or {}
+    partial_reasons = []
+    if fetch_stats.get("live_truncated"):
+        partial_reasons.append("partial live transaction window")
+    if int(fetch_stats.get("transaction_errors") or 0):
+        partial_reasons.append("transaction detail fetch errors")
+    if int(fetch_stats.get("parse_errors") or 0):
+        partial_reasons.append("transaction parse errors")
+    if fetch_stats.get("wave_buffer_truncated"):
+        partial_reasons.append("partial accumulation buffer")
+    if int(fetch_stats.get("history_gap_seconds") or 0) > int(
+        config.get("actionable_max_history_gap_seconds", 60)
+    ):
+        partial_reasons.append("onchain history gap")
+    if classification_errors:
+        partial_reasons.append("wallet classification errors")
+
+    classification_coverage_pct = (
+        classified_buys / candidate_buys * 100 if candidate_buys else 100.0
+    )
+    for alert in alerts or []:
+        reasons = list(partial_reasons)
+        if (
+            alert.get("signal_family") not in ("sticky_accumulation", "reactivation_wave")
+            and classification_coverage_pct < float(config.get("actionable_min_classification_coverage_pct", 35))
+        ):
+            reasons.append("partial wallet classification")
+        wave = alert.get("wave") or {}
+        balance_coverage_value = wave.get("balance_coverage_pct")
+        balance_coverage_pct = 100.0 if balance_coverage_value is None else float(balance_coverage_value)
+        if balance_coverage_pct < float(
+            config.get("actionable_min_balance_coverage_pct", 80)
+        ):
+            reasons.append("partial balance coverage")
+        reasons = list(dict.fromkeys(reasons))
+        alert["data_quality"] = {
+            "status": "partial" if reasons else "complete",
+            "reasons": reasons,
+            "live_truncated": bool(fetch_stats.get("live_truncated")),
+            "history_gap_seconds": int(fetch_stats.get("history_gap_seconds") or 0),
+            "transaction_errors": int(fetch_stats.get("transaction_errors") or 0),
+            "parse_errors": int(fetch_stats.get("parse_errors") or 0),
+            "wave_buffer_truncated": bool(fetch_stats.get("wave_buffer_truncated")),
+            "classification_coverage_pct": classification_coverage_pct,
+            "balance_coverage_pct": balance_coverage_pct,
+        }
+        if reasons and alert.get("action_tier") == "actionable":
+            alert["action_tier"] = "watch"
+            penalties = list(alert.get("quality_penalties") or [])
+            if "partial onchain coverage" not in penalties:
+                penalties.append("partial onchain coverage")
+            alert["quality_penalties"] = penalties
+    return alerts
+
+
+def schedule_signal_recheck(pool_state, alerts, config):
+    wave_alerts = [alert for alert in alerts or [] if alert.get("wave")]
+    if not wave_alerts:
+        pool_state.pop("signal_recheck_due_at", None)
+        return None
+
+    pending_minutes = []
+    for alert in wave_alerts:
+        wave = alert.get("wave") or {}
+        remaining = float(wave.get("min_hold_minutes") or 0) - float(
+            wave.get("hold_age_minutes") or 0
+        )
+        if remaining > 0:
+            pending_minutes.append(remaining)
+    if not pending_minutes:
+        pending_minutes.append(
+            max(15.0, float(config.get("signal_retention_recheck_minutes", 60)))
+        )
+    due_at = int(time.time() + max(60, min(pending_minutes) * 60))
+    pool_state["signal_recheck_due_at"] = iso(due_at)
+    return due_at
 
 
 def pool_backfill_pending(pool, pool_state, config):
@@ -3961,9 +4414,21 @@ def pool_backfill_pending(pool, pool_state, config):
 
 
 def pool_has_new_activity(rpc, pool, pool_state, config):
+    recheck_due = parse_timestamp(pool_state.get("signal_recheck_due_at"))
+    if recheck_due and int(time.time()) >= recheck_due:
+        return True, {"reason": "signal_retention_recheck"}
     previous_signature = pool_state.get("helius_latest_signature") or pool_state.get("latest_signature")
     if not config.get("helius_activity_probe_enabled", True) or not previous_signature:
         return True, {"reason": "first_scan_or_probe_disabled"}
+    market_active_threshold = max(
+        0,
+        int(config.get("helius_activity_probe_market_active_txns_1h", 5)),
+    )
+    if market_active_threshold and int(pool.txns_1h or 0) >= market_active_threshold:
+        return True, {
+            "reason": "market_activity",
+            "txns_1h": int(pool.txns_1h or 0),
+        }
     if config.get("helius_backfill_on_idle", False) and pool_backfill_pending(pool, pool_state, config):
         return True, {"reason": "launch_backfill_pending"}
     try:
@@ -4083,7 +4548,6 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
             return [], {"pool": pool.as_dict(), "error": str(exc), "trade_source": "helius_transactions"}
         return scan_pool_signatures(rpc, pool, config, state, classification_budget, fallback_error=str(exc))
 
-    update_pool_transaction_state(pool_state, pool, txs)
     if not preclassified:
         swaps, parse_errors = parse_helius_swaps(txs, pool)
         if classify_wallets:
@@ -4101,10 +4565,34 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
             events = []
     wave_swaps = merge_reactivation_wave_swaps(pool_state, swaps, config)
     sticky_swaps = merge_sticky_accumulation_swaps(pool_state, swaps, config)
+    fetch_stats["parse_errors"] = parse_errors
+    fetch_stats["wave_buffer_truncated"] = bool(
+        pool_state.get("reactivation_wave_buffer_truncated")
+        or pool_state.get("sticky_accumulation_buffer_truncated")
+    )
     classic_alerts = build_alerts(pool, events, config) if config.get("classic_alerts_enabled", True) else []
     wave_alerts = build_reactivation_wave_alerts(pool, wave_swaps, config, rpc)
     sticky_alerts = build_sticky_accumulation_alerts(pool, sticky_swaps, config, rpc)
     alerts = dedupe_pool_alerts([*classic_alerts, *wave_alerts, *sticky_alerts])
+    alerts = apply_alert_data_quality(
+        alerts,
+        fetch_stats,
+        candidate_buys,
+        len(events),
+        classification_errors,
+        config,
+    )
+    if parse_errors:
+        pool_state["force_enhanced_next_scan"] = True
+    else:
+        live_checkpoint = fetch_stats.get("live_checkpoint")
+        if live_checkpoint:
+            update_pool_transaction_state(pool_state, pool, txs, checkpoint=live_checkpoint)
+            pool_state.pop("force_enhanced_next_scan", None)
+        elif not fetch_stats.get("live_truncated"):
+            update_pool_transaction_state(pool_state, pool, txs)
+            pool_state.pop("force_enhanced_next_scan", None)
+    schedule_signal_recheck(pool_state, alerts, config)
     return alerts, {
         "pool": pool.as_dict(),
         "lane": config.get("lane") or config.get("mode"),
@@ -4130,7 +4618,11 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
 def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallback_error=None):
     pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
     previous_latest = pool_state.get("latest_signature")
-    limit = int(config["max_new_signatures_per_pool"]) if previous_latest else int(config["initial_backfill_signatures"])
+    limit = (
+        int(config.get("helius_standard_incremental_signature_limit", 100))
+        if previous_latest
+        else int(config["initial_backfill_signatures"])
+    )
 
     try:
         signatures = rpc.signatures_for_address(pool.pool_address, limit=limit)
@@ -4145,57 +4637,120 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
             "trade_source": "pool_signatures",
         }
 
-    if signatures:
-        pool_state["latest_signature"] = signatures[0]["signature"]
-        pool_state["latest_time"] = iso(signatures[0].get("blockTime"))
-        pool_state["symbol"] = pool.symbol
-
     new_signatures = []
+    previous_found = not previous_latest
     for item in signatures:
         if previous_latest and item["signature"] == previous_latest:
+            previous_found = True
             break
         if item.get("err"):
             continue
         new_signatures.append(item["signature"])
-
-    events = []
-    classification_errors = 0
+    live_truncated = bool(previous_latest and not previous_found and len(signatures) >= limit)
+    swaps = []
+    transaction_errors = 0
+    parse_errors = 0
     for signature in reversed(new_signatures):
         try:
             tx = rpc.transaction(signature)
-        except Exception:
-            continue
-        swap = parse_pool_swap(tx, pool)
-        if not swap or swap["kind"] != "buy":
-            continue
-        if swap["sol_amount"] < float(config["classify_buy_min_sol"]):
-            continue
-        if classification_budget["remaining"] <= 0:
-            continue
-        classification_budget["remaining"] -= 1
-        try:
-            wallet_info = classify_wallet(rpc, swap["signer"], swap["signature"], swap["block_time"], config, state)
         except Exception as exc:
-            classification_errors += 1
+            transaction_errors += 1
             print(
-                f"warn: wallet classification failed for {swap.get('signer')} "
-                f"on {swap.get('signature')}: {exc}",
+                f"warn: transaction detail failed for {signature}: {exc}",
                 file=sys.stderr,
             )
             continue
-        swap.update(wallet_info)
-        events.append(swap)
+        try:
+            swap = parse_pool_swap(tx, pool)
+        except Exception:
+            parse_errors += 1
+            continue
+        if swap:
+            swaps.append(swap)
 
-    alerts = build_alerts(pool, events, config) if config.get("classic_alerts_enabled", True) else []
+    classify_wallets = bool(config.get("classic_alerts_enabled", True))
+    if classify_wallets:
+        events, candidate_buys, classification_errors = classify_buy_swaps(
+            rpc,
+            swaps,
+            config,
+            state,
+            classification_budget,
+        )
+    else:
+        events = []
+        candidate_buys = len(buy_swap_candidates(swaps, config))
+        classification_errors = 0
+
+    wave_swaps = merge_reactivation_wave_swaps(pool_state, swaps, config)
+    sticky_swaps = merge_sticky_accumulation_swaps(pool_state, swaps, config)
+    classic_alerts = build_alerts(pool, events, config) if classify_wallets else []
+    wave_alerts = build_reactivation_wave_alerts(pool, wave_swaps, config, rpc)
+    sticky_alerts = build_sticky_accumulation_alerts(pool, sticky_swaps, config, rpc)
+    fetch_stats = {
+        "source": "pool_signatures",
+        "phase": "standard_incremental",
+        "pages": 1,
+        "transactions_requested": len(new_signatures),
+        "transactions": max(0, len(new_signatures) - transaction_errors),
+        "truncated": live_truncated,
+        "live_truncated": live_truncated,
+        "transaction_errors": transaction_errors,
+        "parse_errors": parse_errors,
+        "wave_buffer_truncated": bool(
+            pool_state.get("reactivation_wave_buffer_truncated")
+            or pool_state.get("sticky_accumulation_buffer_truncated")
+        ),
+        "history_gap_seconds": 0,
+    }
+    alerts = dedupe_pool_alerts([*classic_alerts, *wave_alerts, *sticky_alerts])
+    alerts = apply_alert_data_quality(
+        alerts,
+        fetch_stats,
+        candidate_buys,
+        len(events),
+        classification_errors,
+        config,
+    )
+
+    complete_window = not live_truncated and not transaction_errors and not parse_errors
+    latest_successful_item = next((item for item in signatures if not item.get("err")), None)
+    if latest_successful_item and complete_window:
+        pool_state["latest_signature"] = latest_successful_item["signature"]
+        pool_state["helius_latest_signature"] = latest_successful_item["signature"]
+        pool_state["latest_time"] = iso(latest_successful_item.get("blockTime"))
+        pool_state["helius_latest_time"] = iso(latest_successful_item.get("blockTime"))
+        pool_state["helius_latest_block_time"] = int(latest_successful_item.get("blockTime") or 0)
+        pool_state["symbol"] = pool.symbol
+        pool_state.pop("force_enhanced_next_scan", None)
+    elif live_truncated or transaction_errors or parse_errors:
+        pool_state["force_enhanced_next_scan"] = True
+
+    schedule_signal_recheck(pool_state, alerts, config)
+
     summary = {
         "pool": pool.as_dict(),
         "lane": config.get("lane") or config.get("mode"),
         "trade_source": "pool_signatures",
         "new_signatures": len(new_signatures),
+        "transactions_scanned": max(0, len(new_signatures) - transaction_errors),
+        "parsed_swaps": len(swaps),
+        "candidate_buys": candidate_buys,
         "classified_buys": len(events),
         "classes": dict(Counter(event.get("wallet_class") for event in events)),
         "buy_sol": sum(event.get("sol_amount", 0.0) for event in events),
+        "wave_alerts": len(wave_alerts) + len(sticky_alerts),
+        "wave_net_buy_sol": sum(
+            (alert.get("wave") or {}).get("net_buy_sol", 0.0)
+            for alert in [*wave_alerts, *sticky_alerts]
+        ),
+        "wave_sticky_supply_pct": max(
+            [(alert.get("wave") or {}).get("sticky_supply_pct", 0.0) for alert in [*wave_alerts, *sticky_alerts]]
+            or [0.0]
+        ),
         "classification_errors": classification_errors,
+        "parse_errors": parse_errors,
+        "trade_fetch": fetch_stats,
     }
     if fallback_error:
         summary["fallback_error"] = fallback_error
@@ -4204,6 +4759,15 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
 
 def scan_pool(rpc, pool, config, state, classification_budget):
     if config.get("helius_transactions_enabled", True):
+        pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
+        standard_threshold = int(config.get("helius_standard_incremental_max_txns_1h", 30))
+        if (
+            config.get("helius_standard_incremental_enabled", True)
+            and pool_state.get("latest_signature")
+            and not pool_state.get("force_enhanced_next_scan")
+            and int(pool.txns_1h or 0) <= standard_threshold
+        ):
+            return scan_pool_signatures(rpc, pool, config, state, classification_budget)
         return scan_pool_helius_transactions(rpc, pool, config, state, classification_budget)
     return scan_pool_signatures(rpc, pool, config, state, classification_budget)
 
@@ -5037,12 +5601,17 @@ def build_scan_health(summaries, lane_stats, config):
     candidate_pools = sum(int(item.get("universe_pools") or 0) for item in lane_stats.values())
     failed = sum(1 for item in summaries if item.get("scan_failed") or item.get("error"))
     truncated = sum(1 for item in summaries if (item.get("trade_fetch") or {}).get("truncated"))
-    live_fetch_items = [
+    coverage_fetch_items = [
         (item, item.get("trade_fetch") or {})
         for item in summaries
-        if (item.get("trade_fetch") or {}).get("source") == "helius_transactions"
+        if (item.get("trade_fetch") or {}).get("source") in ("helius_transactions", "pool_signatures")
     ]
-    live_fetches = [fetch for _item, fetch in live_fetch_items]
+    live_fetch_items = [
+        (item, fetch)
+        for item, fetch in coverage_fetch_items
+        if fetch.get("source") == "helius_transactions"
+    ]
+    live_fetches = [fetch for _item, fetch in coverage_fetch_items]
     live_truncated = sum(1 for fetch in live_fetches if fetch.get("live_truncated"))
     backfill_pending = sum(1 for fetch in live_fetches if fetch.get("backfill_pending"))
     history_gap = sum(1 for fetch in live_fetches if int(fetch.get("history_gap_seconds") or 0) > 60)
@@ -5064,6 +5633,14 @@ def build_scan_health(summaries, lane_stats, config):
     candidate_buys = sum(int(item.get("candidate_buys") or 0) for item in summaries)
     classified_buys = sum(int(item.get("classified_buys") or 0) for item in summaries)
     classification_errors = sum(int(item.get("classification_errors") or 0) for item in summaries)
+    transaction_errors = sum(
+        int((item.get("trade_fetch") or {}).get("transaction_errors") or 0)
+        for item in summaries
+    )
+    parse_errors = sum(
+        int(item.get("parse_errors") or (item.get("trade_fetch") or {}).get("parse_errors") or 0)
+        for item in summaries
+    )
     scan_errors = Counter()
     for item in summaries:
         error = str(item.get("error") or "")
@@ -5090,16 +5667,21 @@ def build_scan_health(summaries, lane_stats, config):
     failed_ratio = failed / scanned if scanned else 0.0
     truncated_ratio = truncated / scanned if scanned else 0.0
     live_fetch_count = len(live_fetches)
+    enhanced_fetch_count = len(live_fetch_items)
     live_truncated_ratio = live_truncated / live_fetch_count if live_fetch_count else 0.0
-    history_gap_ratio = history_gap / live_fetch_count if live_fetch_count else 0.0
+    history_gap_ratio = history_gap / enhanced_fetch_count if enhanced_fetch_count else 0.0
     active_live_fetch_count = len(active_live_fetches)
     stale_live_ratio = stale_live / active_live_fetch_count if active_live_fetch_count else 0.0
     zero_parse_ratio = zero_parse_pools / scanned if scanned else 0.0
+    transaction_attempts = transactions + transaction_errors
+    transaction_error_ratio = transaction_errors / transaction_attempts if transaction_attempts else 0.0
     min_scanned = max(0, int(config.get("scan_health_min_scanned_pools", 5)))
     max_failed_ratio = float(config.get("scan_health_max_failed_ratio", 0.25))
     max_zero_parse_ratio = float(config.get("scan_health_max_zero_parse_ratio", 0.25))
+    max_live_truncated_ratio = float(config.get("scan_health_max_truncated_ratio", 0.25))
     max_history_gap_ratio = float(config.get("scan_health_max_history_gap_ratio", 0.25))
     max_stale_live_ratio = float(config.get("scan_health_max_stale_live_ratio", 0.25))
+    max_transaction_error_ratio = float(config.get("scan_health_max_transaction_error_ratio", 0.1))
     reasons = []
     status = "healthy"
 
@@ -5119,15 +5701,28 @@ def build_scan_health(summaries, lane_stats, config):
         if live_fetch_count and stale_live_ratio > max_stale_live_ratio:
             status = "degraded"
             reasons.append(f"live transaction head is stale for {stale_live_ratio:.0%} of active pools")
+        if live_fetch_count and live_truncated_ratio > max_live_truncated_ratio:
+            status = "degraded"
+            reasons.append(
+                f"live transaction coverage is partial for {live_truncated_ratio:.0%} of scanned pools"
+            )
         if live_fetch_count and history_gap_ratio > max_history_gap_ratio:
             status = "degraded"
             reasons.append(f"rolling buffer has a history gap for {history_gap_ratio:.0%} of active pools")
+        if transaction_error_ratio > max_transaction_error_ratio:
+            status = "degraded"
+            reasons.append(
+                f"transaction detail errors reached {transaction_error_ratio:.0%} of requested transactions"
+            )
         if scanned and zero_parse_ratio > max_zero_parse_ratio:
             status = "degraded"
             reasons.append(f"no swaps parsed for {zero_parse_ratio:.0%} of scanned pools with transactions")
         if classification_errors:
             status = "degraded"
             reasons.append(f"{classification_errors} wallet classifications failed")
+        if parse_errors:
+            status = "degraded"
+            reasons.append(f"{parse_errors} transactions could not be parsed")
         if config.get("_solana_tracker_error"):
             status = "degraded"
             reasons.append("Solana Tracker unavailable; cached ATH only")
@@ -5157,7 +5752,11 @@ def build_scan_health(summaries, lane_stats, config):
         "candidate_buys": candidate_buys,
         "classified_buys": classified_buys,
         "classification_errors": classification_errors,
+        "transaction_errors": transaction_errors,
+        "transaction_error_ratio": transaction_error_ratio,
+        "parse_errors": parse_errors,
         "scan_error_categories": dict(scan_errors),
+        "estimated_rpc_credits": int(config.get("_rpc_estimated_credits") or 0),
         "solana_tracker_status": "error" if config.get("_solana_tracker_error") else "ok",
     }
 
@@ -5200,6 +5799,7 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "rpc_calls": dict(rpc_calls),
             "rpc_retries": config.get("_rpc_retries", {}),
             "rpc_failures": config.get("_rpc_failures", {}),
+            "estimated_rpc_credits": int(config.get("_rpc_estimated_credits") or 0),
             "scan_health": config.get("_scan_health", {}),
             "discovery": config.get("_discovery_stats", {}),
             "solana_tracker_ath": (state.get("maintenance") or {}).get("solana_tracker_ath", {}),
@@ -5401,6 +6001,16 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
                 "classes": {},
                 "buy_sol": 0.0,
             }
+            if isinstance(exc, WaveDataUnavailable):
+                retry_minutes = max(
+                    5.0,
+                    float(config.get("signal_data_retry_minutes", 15)),
+                )
+                pool_state["signal_recheck_due_at"] = iso(
+                    time.time() + retry_minutes * 60
+                )
+                pool_state["force_enhanced_next_scan"] = True
+                summary["data_unavailable"] = True
         if summary.get("error") or summary.get("scan_failed"):
             pool_state["last_scan_failed_at"] = observed_at
             pool_state["last_scan_error"] = str(summary.get("error") or "pool scan failed")[:500]
@@ -5446,6 +6056,7 @@ def run_once(config, lane_name=None):
         transactions_timeout_seconds=int(config.get("helius_transactions_timeout_seconds", 25)),
         max_retries=int(config.get("helius_rpc_max_retries", 2)),
         retry_base_seconds=float(config.get("helius_rpc_retry_base_seconds", 0.75)),
+        retry_max_seconds=float(config.get("helius_rpc_retry_max_seconds", 120)),
         circuit_failure_threshold=int(config.get("helius_rpc_circuit_failure_threshold", 4)),
     )
     health = rpc.health()
@@ -5519,6 +6130,9 @@ def run_once(config, lane_name=None):
         if rpc.circuit_open_reason:
             break
 
+    config["_rpc_retries"] = dict(rpc.retries)
+    config["_rpc_failures"] = dict(rpc.failures)
+    config["_rpc_estimated_credits"] = int(rpc.estimated_credits)
     scan_health = build_scan_health(summaries, lane_stats, config)
     config["_scan_health"] = scan_health
     if (
@@ -5534,8 +6148,6 @@ def run_once(config, lane_name=None):
     refreshed_caught_pools = refresh_caught_market_observations(http, state, all_alerts, config, generated_at)
     enrich_market_ath(http, state, [*universe, *refreshed_caught_pools], all_alerts, config, generated_at)
     config["_scan_health"] = build_scan_health(summaries, lane_stats, config)
-    config["_rpc_retries"] = dict(rpc.retries)
-    config["_rpc_failures"] = dict(rpc.failures)
     prune_wallet_cache(state, config)
     compact_state(state, universe, all_alerts, config, generated_at)
     save_json(STATE_PATH, state, compact=bool(config.get("state_json_compact", True)))
@@ -5584,7 +6196,11 @@ def main():
         try:
             run_once(config, args.lane)
         except (Exception, SystemExit) as exc:
-            write_scanner_status("failed", error=exc, scan_health=config.get("_scan_health"))
+            write_scanner_status(
+                "failed",
+                error=exc,
+                scan_health=config.get("_scan_health"),
+            )
             raise
         write_scanner_status("ok", scan_health=config.get("_scan_health"))
         if not args.watch:

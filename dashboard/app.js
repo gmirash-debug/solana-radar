@@ -161,6 +161,12 @@ const TIER_META = {
     rank: 1,
     summary: "weak or support-only evidence",
   },
+  inactive: {
+    label: "Inactive",
+    tone: "",
+    rank: 0,
+    summary: "historical signal is no longer confirmed by a fresh scanner pass",
+  },
 };
 
 const TOKEN_MARKET_CONTEXT = {
@@ -674,8 +680,7 @@ function alertEvidence(alert = {}) {
       .filter((event) => SUPPORT_WALLET_CLASSES.has(event.wallet_class))
       .reduce((sum, event) => sum + Number(event.sol_amount || 0), 0);
   const commonLinks = Number(alert.common_funders?.length || 0)
-    + Number(alert.common_recipients?.length || 0)
-    + Number(alert.routed_buys || 0);
+    + Number(alert.common_recipients?.length || 0);
   return {
     hardWallets: Number(hardWallets || 0),
     supportWallets: Number(supportWallets || 0),
@@ -729,7 +734,13 @@ function bestTier(tiers = []) {
 
 function tierMatches(tier) {
   if (state.tier === "all") return true;
-  if (state.tier === "focus") return tier === "actionable" || tier === "watch";
+  if (state.tier === "focus") {
+    const reportAgeHours = reportFreshness(state.report?.generated_at).ageHours;
+    const scannerUnavailable = state.scanStatus?.status === "failed"
+      || reportAgeHours === null
+      || reportAgeHours > 2;
+    return tier === "actionable" || tier === "watch" || (scannerUnavailable && tier === "inactive");
+  }
   return tier === state.tier;
 }
 
@@ -1027,6 +1038,12 @@ function callerPostKeys(caller = {}) {
 function buildTokenSignals() {
   const currentPools = currentPoolsByToken();
   const observationsByToken = poolObservationsByToken();
+  const cleanScannedTokenKeys = new Set(
+    (state.report?.summaries || [])
+      .filter((summary) => !summary?.error && !summary?.scan_failed)
+      .map((summary) => tokenKeyFromPool(summary.pool || {}))
+      .filter(Boolean),
+  );
   const groups = new Map();
   allAlerts().forEach((alert) => {
     const pool = alert.pool || {};
@@ -1209,6 +1226,7 @@ function buildTokenSignals() {
     token.hasFilterDrift = token.currentFilter !== token.caughtFilter;
     token.currentScanAlerts = token.alerts.filter((alert) => alert._scope_source === "current");
     token.currentScanAlertCount = token.currentScanAlerts.length;
+    token.scannedCleanThisRun = cleanScannedTokenKeys.has(token.key);
     token.latestUpdateAt = token.lastSignalAt;
     token.hasInferredFilters = token.alerts.some((alert) => alert.filterInferred || alert.filterLane !== alert.baseFilterLane);
     token.alertTiers = token.alerts.map(alertTier);
@@ -1216,7 +1234,30 @@ function buildTokenSignals() {
       counts[tier] = (counts[tier] || 0) + 1;
       return counts;
     }, {});
-    token.actionTier = bestTier(token.alertTiers);
+    token.historicalTier = bestTier(token.alertTiers);
+    const reportAgeHours = reportFreshness(state.report?.generated_at).ageHours;
+    const scannerFailed = state.scanStatus?.status === "failed";
+    const scannerOperational = !scannerFailed && reportAgeHours !== null && reportAgeHours <= 2;
+    const currentTier = bestTier(token.currentScanAlerts.map(alertTier));
+    const lastSignalAgeHours = token.lastSignalAt
+      ? Math.max(0, (Date.now() - new Date(token.lastSignalAt).getTime()) / 3_600_000)
+      : Number.POSITIVE_INFINITY;
+    if (scannerOperational && token.currentScanAlertCount) {
+      token.actionTier = currentTier;
+    } else if (scannerOperational && token.scannedCleanThisRun) {
+      token.actionTier = "inactive";
+    } else if (scannerOperational && lastSignalAgeHours <= 6) {
+      token.actionTier = token.historicalTier === "actionable" ? "watch" : token.historicalTier;
+    } else {
+      token.actionTier = "inactive";
+    }
+    token.signalLifecycle = {
+      scannerOperational,
+      currentConfirmed: scannerOperational && token.currentScanAlertCount > 0,
+      scannedCleanThisRun: token.scannedCleanThisRun,
+      lastSignalAgeHours,
+      historicalTier: token.historicalTier,
+    };
     token.qualityReasons = aggregateAlertLabels(token.alerts, "quality_reasons");
     token.qualityPenalties = aggregateAlertLabels(token.alerts, "quality_penalties");
     const heats = token.alerts.map(socialHeat);
@@ -1344,9 +1385,10 @@ function parseJsonl(text) {
 }
 
 async function loadStaticData() {
-  const [report, deletedTokens] = await Promise.all([
+  const [report, deletedTokens, scannerStatus] = await Promise.all([
     fetchJson("data/latest_report.json"),
     fetchJson("data/deleted_tokens.json", true),
+    fetchJson("data/scanner_status.json", true),
   ]);
   applyDeletedTokenList(deletedTokens || {});
   const extrasReady = state.staticExtrasLoadedFor === report.generated_at;
@@ -1355,11 +1397,12 @@ async function loadStaticData() {
     history: extrasReady ? state.history : [],
     market: extrasReady ? state.market : {},
     scan_status: {
-      running: false,
+      ...(scannerStatus || {}),
+      running: scannerStatus?.status === "running",
       source: "github_actions",
       static_mode: true,
-      finished_at: report.generated_at,
-      returncode: 0,
+      finished_at: scannerStatus?.last_attempt_at || report.generated_at,
+      returncode: scannerStatus?.status === "failed" ? 1 : 0,
     },
   };
 }
@@ -1456,23 +1499,30 @@ function renderStatus() {
   const report = state.report || {};
   const status = state.scanStatus || {};
   const running = Boolean(status.running);
+  const failed = status.status === "failed";
   const freshness = reportFreshness(report.generated_at);
-  const scanHealth = report.stats?.scan_health || {};
+  const failedHealth = failed && status.scan_health && Object.keys(status.scan_health).length
+    ? status.scan_health
+    : null;
+  const scanHealth = failedHealth || report.stats?.scan_health || {};
   const healthStatus = scanHealth.status || "unknown";
   const healthTone = healthStatus === "healthy" ? "good" : healthStatus === "degraded" ? "warn" : "bad";
-  const healthReason = (scanHealth.reasons || []).join("; ") || "No scanner health diagnostics in this report";
+  const healthReason = (scanHealth.reasons || []).join("; ")
+    || (failed ? status.error : "")
+    || "No scanner health diagnostics in this report";
   const athProvider = report.stats?.solana_tracker_ath || {};
   if (els.showHiddenInput) els.showHiddenInput.checked = state.showHidden;
   if (els.tierFilter) els.tierFilter.value = state.tier;
   const reportLanes = (report.lanes_scanned || []).filter((name) => FILTER_ORDER.includes(name) && name !== "legacy");
   const laneText = status.lane || status.mode || (reportLanes.length > 1 ? `${reportLanes.length} lanes` : reportLanes[0]) || report.mode || "-";
   els.subtitle.textContent = report.generated_at
-    ? `Latest scan ${dateLabel(report.generated_at)} - ${report.profile || report.lane || report.mode || "unknown"}`
+    ? `Latest successful scan ${dateLabel(report.generated_at)} - ${report.profile || report.lane || report.mode || "unknown"}`
     : "No scan report yet";
   els.runScan.disabled = running || state.staticMode;
   els.runScan.title = state.staticMode ? "Scanner runs by GitHub Actions schedule" : "";
   els.statusRow.innerHTML = [
     `<span class="status-pill"><span class="dot ${running ? "warn" : ""}"></span>${running ? "scan running" : "idle"}</span>`,
+    failed ? `<span class="status-pill freshness-bad" title="${esc(status.error || "Scanner failed")}"><span class="dot bad"></span>last attempt failed ${esc(dateLabel(status.last_attempt_at))}</span>` : "",
     `<span class="status-pill freshness-${freshness.tone}"><span class="dot ${freshness.tone === "good" ? "" : freshness.tone}"></span>${esc(freshness.label)}</span>`,
     `<span class="status-pill freshness-${healthTone}" title="${esc(healthReason)}"><span class="dot ${healthTone === "good" ? "" : healthTone}"></span>scan ${esc(healthStatus)}</span>`,
     athProvider.status && athProvider.status !== "ok" ? `<span class="status-pill freshness-bad" title="${esc(athProvider.error || "Solana Tracker unavailable")}">ATH source ${esc(athProvider.status)}</span>` : "",
@@ -1496,6 +1546,7 @@ function renderMetrics(tokens) {
   els.metrics.innerHTML = [
     metric("Actionable", tierCount("actionable")),
     metric("Watch", tierCount("watch")),
+    metric("Inactive", tierCount("inactive")),
     metric("Universe", stats.universe_pools ?? 0),
     metric("Scanned pools", stats.scanned_pools ?? 0),
     metric("Data age", reportFreshness(report.generated_at).label),
@@ -2245,7 +2296,7 @@ function renderTokens() {
   const token = selectedToken(tokens);
   state.selectedTokenKey = token.key;
   els.content.innerHTML = `
-    <div class="grid token-grid">
+    <div class="grid token-grid${state.mobileDetailOpen ? " is-detail-open" : ""}">
       <div class="list">${tokens.map(renderTokenRow).join("")}</div>
       ${renderTokenDetail(token)}
     </div>
@@ -2254,6 +2305,7 @@ function renderTokens() {
     row.addEventListener("click", () => {
       state.selectedTokenKey = row.dataset.tokenKey;
       state.detailTab = "overview";
+      state.mobileDetailOpen = true;
       render();
     });
   });
@@ -2651,7 +2703,10 @@ function alertMatches(alert) {
   const key = tokenKeyFromPool(pool);
   if (!state.showHidden && isTokenHidden(key)) return false;
   const token = buildTokenSignals().find((item) => item.key === key);
-  if (!tierMatches(alertTier(alert))) return false;
+  const effectiveTier = alert._scope_source === "history" && token
+    ? token.actionTier
+    : alertTier(alert);
+  if (!tierMatches(effectiveTier)) return false;
   if (state.lane !== "all" && effectiveAlertLane(alert) !== state.lane) return false;
   if (state.heat !== "all" && socialHeat(alert) !== state.heat) return false;
   if (Number(alert.score || 0) < state.minScore) return false;
@@ -2663,6 +2718,9 @@ function alertMatches(alert) {
 function renderAlertRow(alert) {
   const pool = alert.pool || {};
   const token = buildTokenSignals().find((item) => item.key === tokenKeyFromPool(pool));
+  const effectiveTier = alert._scope_source === "history" && token
+    ? token.actionTier
+    : alertTier(alert);
   return `
     <article class="alert-row">
       <div class="score"><strong>${esc(alert.score ?? 0)}</strong><span>score</span></div>
@@ -2678,7 +2736,7 @@ function renderAlertRow(alert) {
           <span class="${pClass(token?.profitPct)}">token ${pct(token?.profitPct)}</span>
         </div>
         <div class="chips">${classChips(alert.classes)}${chip(socialLabel(socialHeat(alert), alert.social?.reason || ""), socialHeat(alert) === "disabled" ? "warn" : "")}${(alert.routed_buys || 0) ? chip(`routed ${alert.routed_buys}`, "warn") : ""}</div>
-        <div class="chips">${tierChip(alertTier(alert))}${(alert.quality_reasons || []).slice(0, 3).map((item) => chip(item)).join("")}${(alert.quality_penalties || []).slice(0, 3).map((item) => chip(item, "warn")).join("")}</div>
+        <div class="chips">${tierChip(effectiveTier)}${alert._scope_source === "history" ? chip("historical") : ""}${(alert.quality_reasons || []).slice(0, 3).map((item) => chip(item)).join("")}${(alert.quality_penalties || []).slice(0, 3).map((item) => chip(item, "warn")).join("")}</div>
       </div>
       <div class="right-metrics">
         <span>${money(pool.mcap_usd)} mcap</span>
