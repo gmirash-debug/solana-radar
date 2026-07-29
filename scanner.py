@@ -4618,13 +4618,51 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         live_budget_kind = "recent"
     live_cursor_record = pool_state.get("helius_live_cursor")
     live_cursor_provider, live_cursor = decode_provider_cursor(live_cursor_record)
+    pending_signature_record = pool_state.get("helius_live_pending_signature")
+    pending_block_time_record = int(
+        pool_state.get("helius_live_pending_block_time") or 0
+    )
+    cursor_head_age_seconds = (
+        max(0, now - pending_block_time_record)
+        if pending_block_time_record
+        else 0
+    )
+    cursor_refresh_seconds = max(
+        0,
+        int(config.get("helius_live_cursor_head_refresh_seconds", 600)),
+    )
+    live_cursor_reset = bool(
+        live_cursor
+        and pending_block_time_record
+        and cursor_refresh_seconds
+        and cursor_head_age_seconds >= cursor_refresh_seconds
+    )
     if live_cursor:
         live_from = int(pool_state.get("helius_live_from") or live_from)
         live_budget_kind = "incremental" if previous_time else "recent"
+    if live_cursor_reset:
+        live_cursor_provider = None
+        live_cursor = None
+        live_from = max(
+            recent_from,
+            pending_block_time_record
+            - int(config.get("helius_incremental_overlap_seconds", 30)),
+        )
+        live_budget_kind = "incremental"
     transactions = []
     seen = set()
     staged_updates = {}
     staged_deletes = set()
+    if live_cursor_reset:
+        staged_deletes.update(
+            {
+                "helius_live_cursor",
+                "helius_live_cursor_complete",
+                "helius_live_pending_signature",
+                "helius_live_pending_block_time",
+                "helius_live_from",
+            }
+        )
     stats = {
         "source": "enhanced_transactions",
         "phase": phase or "full",
@@ -4637,6 +4675,8 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         "had_previous_state": bool(previous_time),
         "live_from": live_from,
         "live_resumed": bool(live_cursor),
+        "live_cursor_reset": live_cursor_reset,
+        "live_cursor_head_age_seconds": cursor_head_age_seconds,
         "providers_used": [],
         "provider_failovers": [],
         "history_gap_seconds": max(0, live_from - previous_time) if previous_time else 0,
@@ -4788,8 +4828,8 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         save_cursor_key="helius_live_cursor",
         target_from=live_from,
     )
-    pending_signature = pool_state.get("helius_live_pending_signature")
-    pending_block_time = int(pool_state.get("helius_live_pending_block_time") or 0)
+    pending_signature = None if live_cursor_reset else pending_signature_record
+    pending_block_time = 0 if live_cursor_reset else pending_block_time_record
     if not pending_signature and transactions:
         newest_live = max(
             transactions,
