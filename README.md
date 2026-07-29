@@ -200,10 +200,11 @@ the ATH value; the more expensive timestamp lookup is limited to dashboard
 enrichment candidates.
 
 Onchain buy extraction routes each method to the provider that fits it best.
-Chainstack is first for recent standard Solana JSON-RPC calls. Alchemy is first
-for `getTransactionsForAddress` in full/jsonParsed mode and for token-account
-balances, while Helius is its fallback. Chainstack is skipped for
-`getTokenAccountsByOwner`, which is not available on its free Developer plan.
+Chainstack is first for recent transaction details, token supply, and health
+checks. Alchemy is first for `getTransactionsForAddress` in full/jsonParsed
+mode, `getSignaturesForAddress`, and token-account balances, while Helius is its
+fallback. Chainstack is skipped for `getSignaturesForAddress` and
+`getTokenAccountsByOwner`, which are not available on its free Developer plan.
 Pagination cursors are pinned to the provider that created them. If that
 provider fails mid-window, the scanner restarts the same bounded time range on
 the next enhanced provider and deduplicates by signature, so it never reuses an

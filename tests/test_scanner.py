@@ -206,7 +206,7 @@ class ScannerCoreTests(unittest.TestCase):
         sleep.assert_called_once()
         self.assertAlmostEqual(sleep.call_args.args[0], 0.8)
 
-    def test_standard_rpc_prefers_chainstack_and_falls_back_to_alchemy(self):
+    def test_standard_transaction_prefers_chainstack_and_falls_back_to_alchemy(self):
         chainstack = scanner.ChainstackRpc(
             "https://chainstack.invalid",
             max_retries=0,
@@ -219,6 +219,28 @@ class ScannerCoreTests(unittest.TestCase):
             )
         )
         alchemy.session.post = mock.Mock(
+            return_value=rpc_response({"slot": 123})
+        )
+        rpc = scanner.RoutedSolanaRpc(
+            [chainstack, alchemy],
+            standard_order=["chainstack", "alchemy"],
+            enhanced_order=["alchemy"],
+        )
+
+        result = rpc.transaction("sig")
+
+        self.assertEqual(result["slot"], 123)
+        self.assertEqual(rpc.last_provider_by_method["getTransaction"], "alchemy")
+        self.assertIn("chainstack", rpc.blocked_providers)
+        self.assertEqual(rpc.route_failovers["getTransaction"], 1)
+
+    def test_signatures_skip_unsupported_chainstack_method(self):
+        chainstack = scanner.ChainstackRpc(
+            "https://chainstack.invalid",
+            max_retries=0,
+        )
+        alchemy = scanner.AlchemyRpc("https://alchemy.invalid", max_retries=0)
+        alchemy.session.post = mock.Mock(
             return_value=rpc_response([{"signature": "sig"}])
         )
         rpc = scanner.RoutedSolanaRpc(
@@ -230,9 +252,9 @@ class ScannerCoreTests(unittest.TestCase):
         result = rpc.signatures_for_address("pool", limit=1)
 
         self.assertEqual(result[0]["signature"], "sig")
-        self.assertEqual(rpc.last_provider_by_method["getSignaturesForAddress"], "alchemy")
-        self.assertIn("chainstack", rpc.blocked_providers)
-        self.assertEqual(rpc.route_failovers["getSignaturesForAddress"], 1)
+        self.assertEqual(sum(chainstack.calls.values()), 0)
+        self.assertEqual(alchemy.calls["getSignaturesForAddress"], 1)
+        self.assertEqual(rpc.route_failovers["getSignaturesForAddress"], 0)
 
     def test_single_chainstack_rate_limit_does_not_block_provider_for_run(self):
         chainstack = scanner.ChainstackRpc(
@@ -245,7 +267,7 @@ class ScannerCoreTests(unittest.TestCase):
             return_value=rpc_response(status_code=429, text="rate limit reached")
         )
         alchemy.session.post = mock.Mock(
-            return_value=rpc_response([{"signature": "sig"}])
+            return_value=rpc_response({"slot": 123})
         )
         rpc = scanner.RoutedSolanaRpc(
             [chainstack, alchemy],
@@ -253,7 +275,7 @@ class ScannerCoreTests(unittest.TestCase):
             enhanced_order=["alchemy"],
         )
 
-        self.assertEqual(rpc.signatures_for_address("pool", limit=1)[0]["signature"], "sig")
+        self.assertEqual(rpc.transaction("sig")["slot"], 123)
         self.assertNotIn("chainstack", rpc.blocked_providers)
         self.assertIsNone(chainstack.circuit_open_reason)
 

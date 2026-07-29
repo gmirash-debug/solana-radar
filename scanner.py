@@ -760,7 +760,10 @@ class ChainstackRpc(SolanaRpcProvider):
             url,
             enhanced_history=False,
             credit_model="chainstack",
-            unsupported_methods={"getTokenAccountsByOwner"},
+            unsupported_methods={
+                "getSignaturesForAddress",
+                "getTokenAccountsByOwner",
+            },
             **kwargs,
         )
 
