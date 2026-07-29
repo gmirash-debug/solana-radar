@@ -1,81 +1,76 @@
 {
   "error": null,
-  "last_attempt_at": "2026-07-29T20:48:29.869646Z",
-  "last_success_at": "2026-07-29T20:48:29.869646Z",
+  "last_attempt_at": "2026-07-29T20:59:28.814511Z",
+  "last_success_at": "2026-07-29T20:59:28.814511Z",
   "scan_health": {
-    "active_live_fetch_pools": 36,
-    "backfill_pending_pools": 1,
-    "candidate_buys": 1036,
-    "candidate_pools": 184,
+    "active_live_fetch_pools": 43,
+    "backfill_pending_pools": 2,
+    "candidate_buys": 1143,
+    "candidate_pools": 194,
     "classification_errors": 0,
-    "classified_buys": 12,
-    "estimated_rpc_credits": 19841,
-    "failed_pools": 1,
-    "failed_ratio": 0.025,
-    "history_gap_pools": 16,
-    "history_gap_ratio": 0.4444444444444444,
-    "live_fetch_pools": 39,
+    "classified_buys": 174,
+    "estimated_rpc_credits": 53931,
+    "failed_pools": 0,
+    "failed_ratio": 0.0,
+    "history_gap_pools": 22,
+    "history_gap_ratio": 0.5116279069767442,
+    "live_fetch_pools": 58,
     "parse_errors": 0,
-    "parsed_swaps": 4026,
-    "partial_live_ratio": 0.6410256410256411,
-    "partial_live_windows": 25,
+    "parsed_swaps": 5104,
+    "partial_live_ratio": 0.6896551724137931,
+    "partial_live_windows": 40,
     "reasons": [
-      "live transaction head is stale for 28% of active pools",
-      "live transaction coverage is partial for 64% of scanned pools",
-      "rolling buffer has a history gap for 44% of active pools",
+      "live transaction head is stale for 37% of active pools",
+      "live transaction coverage is partial for 69% of scanned pools",
+      "rolling buffer has a history gap for 51% of active pools",
       "Solana Tracker unavailable; cached ATH only"
     ],
     "rpc_providers": {
       "alchemy": {
         "calls": {
           "getHealth": 1,
-          "getSignaturesForAddress": 33,
-          "getTransaction": 295,
-          "getTransactionsForAddress": 73
+          "getSignaturesForAddress": 263,
+          "getTokenAccountsByOwner": 23,
+          "getTokenSupply": 1,
+          "getTransaction": 940,
+          "getTransactionsForAddress": 85
         },
         "enhanced_history": true,
-        "estimated_credits": 19840,
-        "failures": {
-          "rate_limit": 1
-        },
+        "estimated_credits": 53930,
+        "failures": {},
         "health": "ok",
-        "last_error": "alchemy:getSignaturesForAddress: rate_limit: Too Many Requests",
-        "last_success_at": "2026-07-29T20:48:21.921095Z",
+        "last_error": null,
+        "last_success_at": "2026-07-29T20:59:27.994098Z",
         "retries": {
-          "getSignaturesForAddress": 14
+          "getSignaturesForAddress": 74
         },
-        "status": "blocked"
+        "status": "active"
       },
       "helius": {
         "calls": {
-          "getHealth": 1,
-          "getSignaturesForAddress": 1
+          "getHealth": 1
         },
         "enhanced_history": true,
         "estimated_credits": 1,
-        "failures": {
-          "quota": 1
-        },
+        "failures": {},
         "health": "ok",
-        "last_error": "helius:getSignaturesForAddress: quota: {\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32429,\"message\":\"max usage reached\"}}",
-        "last_success_at": "2026-07-29T20:46:15.273224Z",
+        "last_error": null,
+        "last_success_at": "2026-07-29T20:50:37.887042Z",
         "retries": {},
-        "status": "blocked"
+        "status": "active"
       }
     },
-    "scan_error_categories": {
-      "rpc_all_unavailable": 1
-    },
-    "scanned_pools": 40,
+    "scan_error_categories": {},
+    "scanned_pools": 58,
     "solana_tracker_status": "error",
-    "stale_live_pools": 10,
-    "stale_live_ratio": 0.2777777777777778,
+    "stale_live_pools": 16,
+    "stale_live_ratio": 0.37209302325581395,
     "status": "degraded",
     "transaction_error_ratio": 0.0,
     "transaction_errors": 0,
-    "transactions_scanned": 6017,
-    "truncated_pools": 25,
-    "truncated_ratio": 0.625,
+    "transactions_scanned": 8025,
+    "truncated_pools": 42,
+    "truncated_ratio": 0.7241379310344828,
     "zero_parse_pools": 0,
     "zero_parse_ratio": 0.0
   },
