@@ -391,6 +391,10 @@ class RpcProvidersUnavailable(RuntimeError):
     pass
 
 
+class EnhancedHistoryHeadMismatch(RuntimeError):
+    pass
+
+
 class SolanaRpcProvider:
     def __init__(
         self,
@@ -1736,6 +1740,138 @@ def reactivation_activity_score(pool):
     )
 
 
+def market_activity_fingerprint(pool):
+    return {
+        "mcap_usd": round(float(pool.mcap_usd or 0), 2),
+        "volume_1h_usd": round(float(pool.volume_1h_usd or 0), 2),
+        "txns_1h": int(pool.txns_1h or 0),
+    }
+
+
+def market_activity_expected_head_lag_seconds(pool, config):
+    txns_1h = max(0, int(pool.txns_1h or 0))
+    high_threshold = max(
+        1,
+        int(config.get("market_activity_consistency_high_txns_1h", 100)),
+    )
+    medium_threshold = max(
+        1,
+        int(config.get("market_activity_consistency_medium_txns_1h", 20)),
+    )
+    if txns_1h >= high_threshold:
+        return max(
+            60,
+            int(config.get("market_activity_consistency_high_max_lag_seconds", 600)),
+        )
+    if txns_1h >= medium_threshold:
+        return max(
+            60,
+            int(config.get("market_activity_consistency_medium_max_lag_seconds", 1200)),
+        )
+    return max(
+        60,
+        int(config.get("market_activity_consistency_low_max_lag_seconds", 4200)),
+    )
+
+
+def market_activity_requires_head_check(pool, config):
+    if not config.get("market_activity_consistency_enabled", True):
+        return False
+    return int(pool.txns_1h or 0) >= max(
+        1,
+        int(config.get("market_activity_consistency_min_txns_1h", 5)),
+    )
+
+
+def market_activity_head_probe(pool, signatures, config, now=None):
+    now = int(now or time.time())
+    expected_max_lag = market_activity_expected_head_lag_seconds(pool, config)
+    latest = next(
+        (
+            item
+            for item in signatures or []
+            if not item.get("err") and int(item.get("blockTime") or 0) > 0
+        ),
+        None,
+    )
+    if not latest:
+        return {
+            "status": "stale",
+            "expected_max_lag_seconds": expected_max_lag,
+            "latest_signature": None,
+            "latest_block_time": None,
+            "head_lag_seconds": None,
+        }
+    latest_block_time = int(latest.get("blockTime") or 0)
+    head_lag = max(0, now - latest_block_time)
+    return {
+        "status": "fresh" if head_lag <= expected_max_lag else "stale",
+        "expected_max_lag_seconds": expected_max_lag,
+        "latest_signature": latest.get("signature"),
+        "latest_block_time": latest_block_time,
+        "head_lag_seconds": head_lag,
+    }
+
+
+def market_activity_snapshot_changed(pool, fingerprint, config):
+    if not isinstance(fingerprint, dict):
+        return True
+    ratio = max(
+        0.05,
+        float(config.get("market_activity_stale_rearm_change_ratio", 0.25)),
+    )
+    current = market_activity_fingerprint(pool)
+    for key in ("mcap_usd", "volume_1h_usd", "txns_1h"):
+        previous = float(fingerprint.get(key) or 0)
+        value = float(current.get(key) or 0)
+        if abs(value - previous) / max(1.0, abs(previous)) >= ratio:
+            return True
+    return False
+
+
+def mark_market_activity_head_state(pool_state, pool, probe, config, now=None):
+    now = int(now or time.time())
+    if probe.get("status") == "fresh":
+        for key in (
+            "market_activity_stale_at",
+            "market_activity_stale_until",
+            "market_activity_stale_reason",
+            "market_activity_stale_fingerprint",
+        ):
+            pool_state.pop(key, None)
+        return
+    if probe.get("status") != "stale":
+        return
+    cooldown_minutes = max(
+        1,
+        int(config.get("market_activity_stale_cooldown_minutes", 360)),
+    )
+    pool_state.update(
+        {
+            "market_activity_stale_at": iso(now),
+            "market_activity_stale_until": iso(now + cooldown_minutes * 60),
+            "market_activity_stale_reason": "market activity is not present on the pool transaction head",
+            "market_activity_stale_fingerprint": market_activity_fingerprint(pool),
+        }
+    )
+
+
+def market_activity_priority_suppressed(pool, state, config, now=None):
+    if (config.get("lane") or config.get("mode")) != "reactivation":
+        return False
+    pools_state = state.get("pools") if isinstance(state, dict) else None
+    pool_state = (pools_state or {}).get(pool.pool_address) or {}
+    stale_until = parse_timestamp(pool_state.get("market_activity_stale_until"))
+    now = int(now or time.time())
+    if not stale_until or stale_until <= now:
+        return False
+    return not market_activity_snapshot_changed(
+        pool,
+        pool_state.get("market_activity_stale_fingerprint"),
+        config,
+    )
+
+
 def pool_priority_sort_key(pool, config):
     if (config.get("lane") or config.get("mode")) == "reactivation":
         return (
@@ -1788,7 +1924,20 @@ def pool_last_scanned_at(state, pool):
 def select_scan_targets(universe, state, config):
     limit = max(0, int(config.get("active_pool_limit", 0)))
     if not limit or not universe:
-        return [], {"candidates": len(universe), "priority": 0, "rotation": 0, "never_scanned": 0}
+        return [], {
+            "candidates": len(universe),
+            "priority": 0,
+            "rotation": 0,
+            "never_scanned": 0,
+            "market_stale_suppressed": 0,
+            "market_stale_selected": 0,
+        }
+    now = int(time.time())
+    suppressed_pool_keys = {
+        pool.pool_address
+        for pool in universe
+        if market_activity_priority_suppressed(pool, state, config, now=now)
+    }
     if len(universe) <= limit:
         never_scanned = sum(1 for pool in universe if not pool_last_scanned_at(state, pool))
         return list(universe), {
@@ -1796,6 +1945,8 @@ def select_scan_targets(universe, state, config):
             "priority": len(universe),
             "rotation": 0,
             "never_scanned": never_scanned,
+            "market_stale_suppressed": len(suppressed_pool_keys),
+            "market_stale_selected": len(suppressed_pool_keys),
         }
 
     monitor_share = min(0.5, max(0.0, float(config.get("signal_monitor_share", 0.25))))
@@ -1813,7 +1964,6 @@ def select_scan_targets(universe, state, config):
                 universe_by_key[key] = pool
     monitored = []
     monitored_keys = set()
-    now = int(time.time())
     due_rechecks = []
     pools_state = state.get("pools") if isinstance(state, dict) else {}
     pools_state = pools_state if isinstance(pools_state, dict) else {}
@@ -1849,9 +1999,20 @@ def select_scan_targets(universe, state, config):
     priority_share = min(1.0, max(0.0, float(config.get("scan_priority_share", 0.6))))
     priority_count = min(limit, max(1, int(round(limit * priority_share))))
     market_priority_limit = max(0, priority_count - len(monitored))
-    market_priority = [
+    market_candidates = [
         pool for pool in universe if pool.pool_address not in monitored_keys
-    ][:market_priority_limit]
+    ]
+    if suppressed_pool_keys:
+        market_candidates = [
+            pool
+            for pool in market_candidates
+            if pool.pool_address not in suppressed_pool_keys
+        ] + [
+            pool
+            for pool in market_candidates
+            if pool.pool_address in suppressed_pool_keys
+        ]
+    market_priority = market_candidates[:market_priority_limit]
     priority = [*monitored, *market_priority]
     priority_keys = {pool.pool_address for pool in priority}
     rotation_candidates = [pool for pool in universe if pool.pool_address not in priority_keys]
@@ -1879,6 +2040,10 @@ def select_scan_targets(universe, state, config):
         ),
         "rotation": len(rotation),
         "never_scanned": sum(1 for pool in selected if not pool_last_scanned_at(state, pool)),
+        "market_stale_suppressed": len(suppressed_pool_keys),
+        "market_stale_selected": sum(
+            1 for pool in selected if pool.pool_address in suppressed_pool_keys
+        ),
     }
 
 
@@ -4853,6 +5018,75 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
             "block_time": pending_block_time,
         }
 
+    market_head = None
+    if market_activity_requires_head_check(pool, config):
+        expected_max_lag = market_activity_expected_head_lag_seconds(pool, config)
+        enhanced_head = int(stats.get("live_newest_block_time") or 0)
+        enhanced_lag = (
+            max(0, now - enhanced_head)
+            if enhanced_head
+            else expected_max_lag + 1
+        )
+        if enhanced_lag <= expected_max_lag:
+            mark_market_activity_head_state(
+                pool_state,
+                pool,
+                {"status": "fresh"},
+                config,
+                now=now,
+            )
+        else:
+            try:
+                head_signatures = rpc.signatures_for_address(
+                    pool.pool_address,
+                    limit=max(
+                        1,
+                        int(config.get("market_activity_consistency_signature_limit", 5)),
+                    ),
+                )
+                market_head = market_activity_head_probe(
+                    pool,
+                    head_signatures,
+                    config,
+                    now=now,
+                )
+            except Exception as exc:
+                market_head = {
+                    "status": "unverified",
+                    "expected_max_lag_seconds": expected_max_lag,
+                    "error": str(exc)[:200],
+                }
+            stats["market_activity_probe"] = market_head
+            if market_head.get("status") == "stale":
+                stats["market_activity_stale"] = True
+                mark_market_activity_head_state(
+                    pool_state,
+                    pool,
+                    market_head,
+                    config,
+                    now=now,
+                )
+            elif market_head.get("status") == "unverified":
+                stats["market_activity_unverified"] = True
+            elif market_head.get("status") == "fresh":
+                mark_market_activity_head_state(
+                    pool_state,
+                    pool,
+                    market_head,
+                    config,
+                    now=now,
+                )
+                standard_head = int(market_head.get("latest_block_time") or 0)
+                mismatch_seconds = max(
+                    0,
+                    int(config.get("market_activity_consistency_head_mismatch_seconds", 60)),
+                )
+                if not enhanced_head or standard_head - enhanced_head > mismatch_seconds:
+                    raise EnhancedHistoryHeadMismatch(
+                        "enhanced transaction head lagged the standard RPC head "
+                        f"by {max(0, standard_head - enhanced_head)}s"
+                    )
+
     age_hours = pool.age_hours()
     initial_max_age = float(config.get("helius_initial_backfill_max_age_hours", 96))
     retention_hours = float(config.get("state_swap_buffer_retention_hours", 24))
@@ -5168,6 +5402,24 @@ def combine_fetch_stats(probe_stats, deep_stats):
     combined["backfill_pending"] = bool(
         probe_stats.get("backfill_pending") or deep_stats.get("backfill_pending")
     )
+    combined["live_cursor_reset"] = bool(
+        probe_stats.get("live_cursor_reset") or deep_stats.get("live_cursor_reset")
+    )
+    combined["market_activity_stale"] = bool(
+        probe_stats.get("market_activity_stale") or deep_stats.get("market_activity_stale")
+    )
+    combined["market_activity_unverified"] = bool(
+        probe_stats.get("market_activity_unverified")
+        or deep_stats.get("market_activity_unverified")
+    )
+    combined["market_activity_probe"] = (
+        deep_stats.get("market_activity_probe")
+        or probe_stats.get("market_activity_probe")
+    )
+    combined["live_cursor_head_age_seconds"] = max(
+        int(probe_stats.get("live_cursor_head_age_seconds") or 0),
+        int(deep_stats.get("live_cursor_head_age_seconds") or 0),
+    )
     combined["had_previous_state"] = bool(probe_stats.get("had_previous_state"))
     combined["history_gap_seconds"] = max(
         int(probe_stats.get("history_gap_seconds") or 0),
@@ -5220,6 +5472,8 @@ def apply_alert_data_quality(
         partial_reasons.append("transaction parse errors")
     if fetch_stats.get("wave_buffer_truncated"):
         partial_reasons.append("partial accumulation buffer")
+    if fetch_stats.get("market_activity_unverified"):
+        partial_reasons.append("market activity head could not be verified")
     if int(fetch_stats.get("history_gap_seconds") or 0) > int(
         config.get("actionable_max_history_gap_seconds", 60)
     ):
@@ -5384,6 +5638,26 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
     try:
         if config.get("helius_probe_enabled", True):
             probe_txs, probe_fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="probe")
+            if probe_fetch_stats.get("market_activity_stale"):
+                return [], {
+                    "pool": pool.as_dict(),
+                    "lane": config.get("lane") or config.get("mode"),
+                    "trade_source": "enhanced_transactions",
+                    "new_signatures": len(probe_txs),
+                    "transactions_scanned": len(probe_txs),
+                    "parsed_swaps": 0,
+                    "candidate_buys": 0,
+                    "classified_buys": 0,
+                    "classes": {},
+                    "buy_sol": 0.0,
+                    "wave_alerts": 0,
+                    "wave_net_buy_sol": 0.0,
+                    "wave_sticky_supply_pct": 0.0,
+                    "parse_errors": 0,
+                    "classification_errors": 0,
+                    "market_snapshot_suppressed": True,
+                    "trade_fetch": probe_fetch_stats,
+                }
             probe_swaps, probe_parse_errors = parse_helius_swaps(probe_txs, pool)
             if classify_wallets:
                 probe_config = probe_classification_config(config)
@@ -5529,6 +5803,52 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
             "trade_source": "pool_signatures",
         }
 
+    market_head = None
+    if market_activity_requires_head_check(pool, config):
+        market_head = market_activity_head_probe(
+            pool,
+            signatures,
+            config,
+        )
+        mark_market_activity_head_state(
+            pool_state,
+            pool,
+            market_head,
+            config,
+        )
+        if market_head.get("status") == "stale":
+            fetch_stats = {
+                "source": "pool_signatures",
+                "phase": "market_activity_check",
+                "pages": 1,
+                "transactions_requested": 0,
+                "transactions": 0,
+                "truncated": False,
+                "live_truncated": False,
+                "history_gap_seconds": 0,
+                "market_activity_probe": market_head,
+                "market_activity_stale": True,
+            }
+            return [], {
+                "pool": pool.as_dict(),
+                "lane": config.get("lane") or config.get("mode"),
+                "trade_source": "pool_signatures",
+                "new_signatures": 0,
+                "transactions_scanned": 0,
+                "parsed_swaps": 0,
+                "candidate_buys": 0,
+                "classified_buys": 0,
+                "classes": {},
+                "buy_sol": 0.0,
+                "wave_alerts": 0,
+                "wave_net_buy_sol": 0.0,
+                "wave_sticky_supply_pct": 0.0,
+                "classification_errors": 0,
+                "parse_errors": 0,
+                "market_snapshot_suppressed": True,
+                "trade_fetch": fetch_stats,
+            }
+
     new_signatures = []
     previous_found = not previous_latest
     for item in signatures:
@@ -5595,6 +5915,8 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
         ),
         "history_gap_seconds": 0,
     }
+    if market_head:
+        fetch_stats["market_activity_probe"] = market_head
     alerts = dedupe_pool_alerts([*classic_alerts, *wave_alerts, *sticky_alerts])
     alerts = apply_alert_data_quality(
         alerts,
@@ -5618,6 +5940,15 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
         pool_state["helius_latest_block_time"] = int(latest_successful_item.get("blockTime") or 0)
         pool_state["symbol"] = pool.symbol
         pool_state.pop("force_enhanced_next_scan", None)
+        if isinstance(fallback_error, str) and "enhanced transaction head lagged" in fallback_error.lower():
+            for key in (
+                "helius_live_cursor",
+                "helius_live_cursor_complete",
+                "helius_live_pending_signature",
+                "helius_live_pending_block_time",
+                "helius_live_from",
+            ):
+                pool_state.pop(key, None)
     elif live_truncated or transaction_errors or parse_errors:
         pool_state["force_enhanced_next_scan"] = True
 
@@ -6693,6 +7024,15 @@ def build_scan_health(summaries, lane_stats, config):
     live_truncated = sum(1 for fetch in live_fetches if fetch.get("live_truncated"))
     backfill_pending = sum(1 for fetch in live_fetches if fetch.get("backfill_pending"))
     history_gap = sum(1 for fetch in live_fetches if int(fetch.get("history_gap_seconds") or 0) > 60)
+    stale_market_snapshots = sum(
+        1 for fetch in live_fetches if fetch.get("market_activity_stale")
+    )
+    enhanced_head_fallbacks = sum(
+        1
+        for item in summaries
+        if "enhanced transaction head lagged the standard rpc head"
+        in str(item.get("fallback_error") or "").lower()
+    )
     max_live_lag_seconds = int(float(config.get("scan_health_max_live_lag_minutes", 20)) * 60)
     min_live_activity = int(config.get("scan_health_live_activity_txns_1h_min", 10))
     active_live_fetches = [
@@ -6828,6 +7168,8 @@ def build_scan_health(summaries, lane_stats, config):
         "backfill_pending_pools": backfill_pending,
         "history_gap_pools": history_gap,
         "history_gap_ratio": history_gap_ratio,
+        "stale_market_snapshot_pools": stale_market_snapshots,
+        "enhanced_head_fallback_pools": enhanced_head_fallbacks,
         "stale_live_pools": stale_live,
         "stale_live_ratio": stale_live_ratio,
         "zero_parse_pools": zero_parse_pools,

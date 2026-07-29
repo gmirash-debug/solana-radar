@@ -215,6 +215,14 @@ cannot remain stuck reading an old tail while new buys happen. If every
 enhanced-history provider is unavailable, the scanner falls back to standard
 signatures plus transaction details.
 
+Market activity is also checked against the pool's standard RPC transaction
+head. The tolerated lag scales with reported hourly transaction count. If the
+standard head is fresh but enhanced history is behind, the pool is rescanned
+through the signatures fallback. If both heads are old, the market snapshot is
+marked stale and moved out of Reactivation priority for six hours. A material
+change in mcap, volume, or transaction count rearms it immediately, and normal
+rotation can still audit it during the cooldown.
+
 Alchemy requests are paced at 450 ms by default and use exponential retries.
 `getSignaturesForAddress` has a stricter 1.5-second interval when it falls back
 to Alchemy. Chainstack is paced at 220 ms to stay below its Developer-plan

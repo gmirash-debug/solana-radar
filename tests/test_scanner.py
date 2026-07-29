@@ -1013,6 +1013,122 @@ class ScannerCoreTests(unittest.TestCase):
         )
         self.assertNotIn("helius_live_cursor", pool_state)
 
+    def test_market_activity_head_mismatch_uses_signature_fallback(self):
+        now = 2_000_000
+        rpc = FakeTransactionsRpc(
+            [
+                {
+                    "data": [
+                        {
+                            "blockTime": now - 1_800,
+                            "transaction": {"signatures": ["stale-enhanced-head"]},
+                        }
+                    ]
+                }
+            ]
+        )
+        rpc.signatures_for_address = mock.Mock(
+            return_value=[
+                {
+                    "signature": "fresh-standard-head",
+                    "blockTime": now - 10,
+                    "err": None,
+                }
+            ]
+        )
+        config = {
+            "alert_window_minutes": 240,
+            "helius_transactions_limit": 100,
+            "helius_recent_lookback_minutes": 360,
+            "helius_live_lookback_minutes": 90,
+            "helius_probe_recent_pages": 1,
+            "helius_dynamic_page_budget_enabled": False,
+            "helius_initial_backfill_enabled": False,
+            "market_activity_consistency_enabled": True,
+            "market_activity_consistency_min_txns_1h": 5,
+            "market_activity_consistency_high_txns_1h": 100,
+            "market_activity_consistency_high_max_lag_seconds": 600,
+            "market_activity_consistency_head_mismatch_seconds": 60,
+        }
+        with (
+            mock.patch.object(scanner.time, "time", return_value=now),
+            self.assertRaises(scanner.EnhancedHistoryHeadMismatch),
+        ):
+            scanner.fetch_helius_pool_transactions(
+                rpc,
+                scanner.Pool(
+                    pool_address="pool",
+                    token_address="token",
+                    txns_1h=500,
+                ),
+                config,
+                {},
+                phase="probe",
+            )
+        rpc.signatures_for_address.assert_called_once()
+
+    def test_stale_market_snapshot_is_suppressed_when_both_heads_are_old(self):
+        now = 2_000_000
+        rpc = FakeTransactionsRpc(
+            [
+                {
+                    "data": [
+                        {
+                            "blockTime": now - 1_800,
+                            "transaction": {"signatures": ["stale-enhanced-head"]},
+                        }
+                    ]
+                }
+            ]
+        )
+        rpc.signatures_for_address = mock.Mock(
+            return_value=[
+                {
+                    "signature": "stale-standard-head",
+                    "blockTime": now - 1_700,
+                    "err": None,
+                }
+            ]
+        )
+        config = {
+            "alert_window_minutes": 240,
+            "helius_transactions_limit": 100,
+            "helius_recent_lookback_minutes": 360,
+            "helius_live_lookback_minutes": 90,
+            "helius_probe_recent_pages": 1,
+            "helius_dynamic_page_budget_enabled": False,
+            "helius_initial_backfill_enabled": False,
+            "market_activity_consistency_enabled": True,
+            "market_activity_consistency_min_txns_1h": 5,
+            "market_activity_consistency_high_txns_1h": 100,
+            "market_activity_consistency_high_max_lag_seconds": 600,
+            "market_activity_stale_cooldown_minutes": 360,
+        }
+        pool_state = {}
+        with mock.patch.object(scanner.time, "time", return_value=now):
+            _transactions, stats = scanner.fetch_helius_pool_transactions(
+                rpc,
+                scanner.Pool(
+                    pool_address="pool",
+                    token_address="token",
+                    mcap_usd=20_000,
+                    volume_1h_usd=20_000,
+                    txns_1h=500,
+                ),
+                config,
+                pool_state,
+                phase="probe",
+            )
+        self.assertTrue(stats["market_activity_stale"])
+        self.assertEqual(
+            stats["market_activity_probe"]["status"],
+            "stale",
+        )
+        self.assertEqual(
+            scanner.parse_timestamp(pool_state["market_activity_stale_until"]),
+            now + 360 * 60,
+        )
+
     def test_legacy_helius_cursor_replays_on_alchemy_without_token_leakage(self):
         now = 2_000_000
         helius = scanner.HeliusRpc("secret-key", max_retries=0)
@@ -1236,6 +1352,53 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(state["pools"]["pool"]["latest_signature"], "previous")
         self.assertTrue(state["pools"]["pool"]["force_enhanced_next_scan"])
 
+    def test_complete_head_mismatch_fallback_clears_stale_enhanced_cursor(self):
+        state = {
+            "pools": {
+                "pool": {
+                    "latest_signature": "previous",
+                    "helius_latest_signature": "previous",
+                    "helius_live_cursor": {"provider": "alchemy", "token": "stale-tail"},
+                    "helius_live_pending_signature": "stale-head",
+                    "helius_live_pending_block_time": 150,
+                    "helius_live_from": 100,
+                }
+            }
+        }
+        rpc = FakeSignatureTransactionRpc(
+            [
+                {"signature": "new", "blockTime": 200, "err": None},
+                {"signature": "previous", "blockTime": 100, "err": None},
+            ]
+        )
+        rpc.transaction = mock.Mock(return_value={"transaction": {}})
+        with mock.patch.object(scanner, "parse_pool_swap", return_value=None):
+            _alerts, summary = scanner.scan_pool_signatures(
+                rpc,
+                scanner.Pool(pool_address="pool", token_address="token"),
+                {
+                    "initial_backfill_signatures": 100,
+                    "helius_standard_incremental_signature_limit": 100,
+                    "classic_alerts_enabled": False,
+                    "sticky_accumulation_enabled": False,
+                    "reactivation_wave_enabled": False,
+                    "classify_buy_min_sol": 0.1,
+                    "alert_window_minutes": 240,
+                },
+                state,
+                {"remaining": 0},
+                fallback_error=(
+                    "enhanced transaction head lagged the standard RPC head by 1200s"
+                ),
+            )
+        self.assertEqual(
+            summary["fallback_error"],
+            "enhanced transaction head lagged the standard RPC head by 1200s",
+        )
+        self.assertEqual(state["pools"]["pool"]["latest_signature"], "new")
+        self.assertNotIn("helius_live_cursor", state["pools"]["pool"])
+        self.assertNotIn("helius_live_pending_signature", state["pools"]["pool"])
+
     def test_standard_incremental_does_not_advance_past_parse_error(self):
         state = {
             "pools": {
@@ -1442,6 +1605,91 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertGreater(
             scanner.reactivation_activity_score(low_cap_wave),
             scanner.reactivation_activity_score(larger_slow_pool),
+        )
+
+    def test_reactivation_priority_defers_unchanged_stale_market_snapshot(self):
+        now = 2_000_000
+        stale = scanner.Pool(
+            pool_address="stale",
+            token_address="stale-token",
+            mcap_usd=20_000,
+            liquidity_usd=5_000,
+            volume_1h_usd=20_000,
+            txns_1h=500,
+        )
+        fresh_one = scanner.Pool(
+            pool_address="fresh-1",
+            token_address="fresh-token-1",
+            mcap_usd=30_000,
+            liquidity_usd=7_000,
+            volume_1h_usd=5_000,
+            txns_1h=100,
+        )
+        fresh_two = scanner.Pool(
+            pool_address="fresh-2",
+            token_address="fresh-token-2",
+            mcap_usd=40_000,
+            liquidity_usd=8_000,
+            volume_1h_usd=4_000,
+            txns_1h=80,
+        )
+        state = {
+            "pools": {
+                "stale": {
+                    "market_activity_stale_until": scanner.iso(now + 3_600),
+                    "market_activity_stale_fingerprint": scanner.market_activity_fingerprint(stale),
+                }
+            }
+        }
+        with mock.patch.object(scanner.time, "time", return_value=now):
+            selected, stats = scanner.select_scan_targets(
+                [stale, fresh_one, fresh_two],
+                state,
+                {
+                    "lane": "reactivation",
+                    "active_pool_limit": 2,
+                    "scan_priority_share": 1,
+                    "signal_monitor_share": 0,
+                },
+            )
+        self.assertEqual(
+            {pool.pool_address for pool in selected},
+            {"fresh-1", "fresh-2"},
+        )
+        self.assertEqual(stats["market_stale_suppressed"], 1)
+        self.assertEqual(stats["market_stale_selected"], 0)
+
+    def test_changed_market_snapshot_rearms_suppressed_reactivation(self):
+        now = 2_000_000
+        pool = scanner.Pool(
+            pool_address="pool",
+            token_address="token",
+            mcap_usd=25_000,
+            volume_1h_usd=8_000,
+            txns_1h=120,
+        )
+        state = {
+            "pools": {
+                "pool": {
+                    "market_activity_stale_until": scanner.iso(now + 3_600),
+                    "market_activity_stale_fingerprint": {
+                        "mcap_usd": 20_000,
+                        "volume_1h_usd": 1_000,
+                        "txns_1h": 20,
+                    },
+                }
+            }
+        }
+        self.assertFalse(
+            scanner.market_activity_priority_suppressed(
+                pool,
+                state,
+                {
+                    "lane": "reactivation",
+                    "market_activity_stale_rearm_change_ratio": 0.25,
+                },
+                now=now,
+            )
         )
 
     def test_reactivation_without_ath_gate_still_uses_cached_ath_context(self):
