@@ -1,46 +1,45 @@
 {
   "error": null,
-  "last_attempt_at": "2026-07-29T23:26:27.765754Z",
-  "last_success_at": "2026-07-29T23:26:27.765754Z",
+  "last_attempt_at": "2026-07-29T23:41:05.545862Z",
+  "last_success_at": "2026-07-29T23:41:05.545862Z",
   "scan_health": {
-    "active_live_fetch_pools": 69,
+    "active_live_fetch_pools": 66,
     "backfill_pending_pools": 2,
-    "candidate_buys": 1372,
-    "candidate_pools": 386,
+    "candidate_buys": 1204,
+    "candidate_pools": 387,
     "classification_errors": 0,
-    "classified_buys": 253,
-    "estimated_rpc_credits": 26013,
+    "classified_buys": 146,
+    "estimated_rpc_credits": 20002,
     "failed_pools": 0,
     "failed_ratio": 0.0,
     "gmgn_status": "ok",
     "history_gap_pools": 33,
-    "history_gap_ratio": 0.4583333333333333,
+    "history_gap_ratio": 0.4714285714285714,
     "live_fetch_pools": 72,
     "parse_errors": 0,
-    "parsed_swaps": 7739,
-    "partial_live_ratio": 0.5972222222222222,
-    "partial_live_windows": 43,
+    "parsed_swaps": 6746,
+    "partial_live_ratio": 0.4444444444444444,
+    "partial_live_windows": 32,
     "reasons": [
-      "live transaction head is stale for 51% of active pools",
-      "live transaction coverage is partial for 60% of scanned pools",
-      "rolling buffer has a history gap for 46% of active pools"
+      "live transaction coverage is partial for 44% of scanned pools",
+      "rolling buffer has a history gap for 47% of active pools"
     ],
     "rpc_providers": {
       "alchemy": {
         "calls": {
           "getHealth": 1,
-          "getSignaturesForAddress": 297,
+          "getSignaturesForAddress": 161,
           "getTokenAccountsByOwner": 116,
-          "getTransactionsForAddress": 147
+          "getTransactionsForAddress": 130
         },
         "enhanced_history": true,
-        "estimated_credits": 26000,
+        "estimated_credits": 19900,
         "failures": {},
         "health": "ok",
         "last_error": null,
-        "last_success_at": "2026-07-29T23:25:45.851162Z",
+        "last_success_at": "2026-07-29T23:40:03.610584Z",
         "retries": {
-          "getSignaturesForAddress": 44
+          "getSignaturesForAddress": 18
         },
         "status": "active"
       },
@@ -48,14 +47,14 @@
         "calls": {
           "getHealth": 1,
           "getTokenSupply": 4,
-          "getTransaction": 7
+          "getTransaction": 96
         },
         "enhanced_history": false,
-        "estimated_credits": 12,
+        "estimated_credits": 101,
         "failures": {},
         "health": "ok",
         "last_error": null,
-        "last_success_at": "2026-07-29T23:25:29.722937Z",
+        "last_success_at": "2026-07-29T23:39:51.648564Z",
         "retries": {},
         "status": "active"
       },
@@ -68,23 +67,23 @@
         "failures": {},
         "health": "ok",
         "last_error": null,
-        "last_success_at": "2026-07-29T23:16:01.822227Z",
+        "last_success_at": "2026-07-29T23:33:30.893098Z",
         "retries": {},
         "status": "active"
       }
     },
     "scan_error_categories": {},
     "scanned_pools": 72,
-    "stale_live_pools": 35,
-    "stale_live_ratio": 0.5072463768115942,
+    "stale_live_pools": 12,
+    "stale_live_ratio": 0.18181818181818182,
     "status": "degraded",
     "transaction_error_ratio": 0.0,
     "transaction_errors": 0,
-    "transactions_scanned": 11911,
-    "truncated_pools": 44,
-    "truncated_ratio": 0.6111111111111112,
-    "zero_parse_pools": 2,
-    "zero_parse_ratio": 0.027777777777777776
+    "transactions_scanned": 9156,
+    "truncated_pools": 34,
+    "truncated_ratio": 0.4722222222222222,
+    "zero_parse_pools": 0,
+    "zero_parse_ratio": 0.0
   },
   "status": "ok"
 }
