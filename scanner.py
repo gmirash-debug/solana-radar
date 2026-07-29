@@ -2896,8 +2896,16 @@ def wave_buy_owner(swap):
     return swap.get("token_recipient") or swap.get("signer") or ""
 
 
-def wave_sell_owner(swap):
-    return swap.get("signer") or swap.get("token_sender") or ""
+def wave_sell_owner(swap, known_owners=None):
+    signer = swap.get("signer") or ""
+    token_sender = swap.get("token_sender") or ""
+    if known_owners:
+        known_owners = set(known_owners)
+        if token_sender in known_owners:
+            return token_sender
+        if signer in known_owners:
+            return signer
+    return signer or token_sender
 
 
 def attributed_wave_retention(balance, bought_tokens, sold_tokens, min_retention_pct=0.0):
@@ -3016,7 +3024,13 @@ def owner_activity_since(swaps, start_time, owners):
         if block_time < int(start_time or 0):
             continue
         kind = swap.get("kind")
-        owner = wave_buy_owner(swap) if kind == "buy" else wave_sell_owner(swap) if kind == "sell" else ""
+        owner = (
+            wave_buy_owner(swap)
+            if kind == "buy"
+            else wave_sell_owner(swap, owners)
+            if kind == "sell"
+            else ""
+        )
         if owner not in activity:
             continue
         row = activity[owner]
@@ -3083,7 +3097,7 @@ def reactivation_wave_window_metrics(window_swaps, config, relaxed=False):
             row["first_buy_time"] = swap.get("time")
 
     for swap in sell_swaps:
-        owner = wave_sell_owner(swap)
+        owner = wave_sell_owner(swap, buyer_rows)
         if not owner or owner not in buyer_rows:
             continue
         row = buyer_rows[owner]
@@ -3456,7 +3470,7 @@ def sticky_accumulation_window_metrics(window_swaps, config, relaxed=False):
             row["first_buy_time"] = swap.get("time")
 
     for swap in sell_swaps:
-        owner = wave_sell_owner(swap)
+        owner = wave_sell_owner(swap, buyer_rows)
         if not owner or owner not in buyer_rows:
             continue
         row = buyer_rows[owner]

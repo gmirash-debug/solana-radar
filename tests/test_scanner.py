@@ -223,6 +223,14 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(scanner.wave_buy_owner(routed_buy), "")
         self.assertEqual(scanner.wave_sell_owner(routed_sell), "seller")
 
+    def test_delegated_sell_is_attributed_to_token_sender(self):
+        delegated_sell = {
+            "kind": "sell",
+            "signer": "delegate",
+            "token_sender": "buyer",
+        }
+        self.assertEqual(scanner.wave_sell_owner(delegated_sell, {"buyer"}), "buyer")
+
     def test_routed_recipient_is_not_reported_as_wallet_link(self):
         score = scanner.score_events(
             [
