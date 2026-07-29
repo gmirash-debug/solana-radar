@@ -176,7 +176,7 @@ Every caught-token deep dive should use the same visible order:
 16. `Source links`, token address, GMGN token terminal link.
 17. Deep sections: caller network, noticed-wallet PnL, signal timeline.
 
-Market phase is not the same as scanner filter. The live `Reactivation` filter requires a trusted ATH and only admits tokens whose current scanner market cap is `<= 40%` of GMGN ATH. Older historical alerts created before this rule may still appear as `Upper range` or `Near ATH`; those should be visibly marked as not a clean low-zone reactivation thesis rather than treated as fresh Reactivation evidence.
+Market phase is not the same as scanner filter. The live `Reactivation` filter scans old migrated tokens from the first tradeable low-cap stage instead of waiting for `$100k` or a trusted ATH. GMGN ATH remains mandatory dashboard context and affects conviction: a deep correction can become `Actionable`, while a strong low-cap wave with high velocity or unresolved ATH is shown as `Hot Reactivation`. `Upper range` and `Near ATH` must remain visible risk context rather than silently excluding the token from discovery.
 
 Do not add duplicate rows for the same concept. In particular:
 
