@@ -74,6 +74,10 @@ jobs:
               print("should_scan=true")
               print("reason=manual_dispatch")
               raise SystemExit
+          if event_name == "push":
+              print("should_scan=false")
+              print("reason=push_deploy_only")
+              raise SystemExit
 
           try:
               with open("data/latest_report.json", "r", encoding="utf-8") as handle:
@@ -131,13 +135,20 @@ jobs:
           exit 0
 
       - name: Commit scanner data
-        if: steps.freshness.outputs.should_scan == 'true' && steps.run_scanner.outputs.exit_code == '0'
+        if: steps.freshness.outputs.should_scan == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/latest_report.json data/latest_report.md data/alerts.jsonl data/state.json data/deleted_tokens.json
+          git add data/scanner_status.json
+          if [ "${{ steps.run_scanner.outputs.exit_code }}" = "0" ]; then
+            git add data/latest_report.json data/latest_report.md data/alerts.jsonl data/state.json data/deleted_tokens.json
+          fi
           if ! git diff --cached --quiet; then
-            git commit -m "Update scanner data"
+            if [ "${{ steps.run_scanner.outputs.exit_code }}" = "0" ]; then
+              git commit -m "Update scanner data"
+            else
+              git commit -m "Record scanner failure"
+            fi
             for attempt in 1 2 3; do
               if git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME"; then
                 break
@@ -156,7 +167,7 @@ jobs:
           rm -rf .pages
           mkdir -p .pages/data
           cp dashboard/index.html dashboard/app.js dashboard/styles.css dashboard/config.js .pages/
-          cp data/latest_report.json data/latest_report.md data/alerts.jsonl .pages/data/
+          cp data/latest_report.json data/latest_report.md data/alerts.jsonl data/scanner_status.json .pages/data/
           if [ -f data/deleted_tokens.json ]; then
             cp data/deleted_tokens.json .pages/data/
           else

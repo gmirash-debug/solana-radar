@@ -38,6 +38,32 @@ class FakeTransactionsRpc:
 
 
 class ScannerCoreTests(unittest.TestCase):
+    def test_helius_circuit_opens_after_repeated_provider_failures(self):
+        rpc = scanner.HeliusRpc(
+            "secret-key",
+            max_retries=0,
+            circuit_failure_threshold=2,
+        )
+        response = mock.Mock(
+            status_code=429,
+            ok=False,
+            text="credits exhausted",
+            reason="Too Many Requests",
+            headers={},
+        )
+        rpc.session.post = mock.Mock(return_value=response)
+
+        with self.assertRaises(scanner.HeliusRpcError):
+            rpc.call("getSignaturesForAddress", ["pool", {"limit": 1}])
+        with self.assertRaises(scanner.HeliusRpcError):
+            rpc.call("getTransactionsForAddress", ["pool", {}])
+        with self.assertRaises(scanner.HeliusCircuitOpen):
+            rpc.call("getTokenSupply", ["mint"])
+
+        self.assertEqual(rpc.failures["quota"], 2)
+        self.assertEqual(rpc.session.post.call_count, 2)
+        self.assertNotIn("secret-key", rpc.circuit_open_reason)
+
     def test_retention_only_attributes_tokens_bought_in_wave(self):
         result = scanner.attributed_wave_retention(
             balance=1_000,

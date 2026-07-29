@@ -23,6 +23,7 @@ STATE_PATH = DATA_DIR / "state.json"
 ALERTS_PATH = DATA_DIR / "alerts.jsonl"
 REPORT_PATH = DATA_DIR / "latest_report.md"
 REPORT_JSON_PATH = DATA_DIR / "latest_report.json"
+SCANNER_STATUS_PATH = DATA_DIR / "scanner_status.json"
 DELETED_TOKENS_PATH = DATA_DIR / "deleted_tokens.json"
 CONFIG_PATH = ROOT / "config.json"
 DEFAULT_CONFIG_PATH = ROOT / "config.example.json"
@@ -199,6 +200,22 @@ def save_json(path, value, compact=False):
         path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
+def write_scanner_status(status, error=None, scan_health=None):
+    previous = load_json(SCANNER_STATUS_PATH, {})
+    now = utc_now().isoformat().replace("+00:00", "Z")
+    payload = {
+        "status": status,
+        "last_attempt_at": now,
+        "last_success_at": previous.get("last_success_at"),
+        "error": str(error or "")[:500] or None,
+        "scan_health": scan_health or {},
+    }
+    if status == "ok":
+        payload["last_success_at"] = now
+    save_json(SCANNER_STATUS_PATH, payload)
+    return payload
+
+
 def convex_url_from_env():
     for key in ("CONVEX_URL", "NEXT_PUBLIC_CONVEX_URL", "VITE_CONVEX_URL"):
         value = os.environ.get(key)
@@ -351,6 +368,19 @@ class Http:
         return response.json()
 
 
+class HeliusRpcError(RuntimeError):
+    def __init__(self, method, category, detail, status=None, code=None):
+        self.method = method
+        self.category = category
+        self.status = status
+        self.code = code
+        super().__init__(f"{method}: {category}: {detail}")
+
+
+class HeliusCircuitOpen(RuntimeError):
+    pass
+
+
 class HeliusRpc:
     def __init__(
         self,
@@ -359,6 +389,7 @@ class HeliusRpc:
         transactions_timeout_seconds=25,
         max_retries=2,
         retry_base_seconds=0.75,
+        circuit_failure_threshold=4,
     ):
         self.url = f"https://mainnet.helius-rpc.com/?api-key={api_key}"
         self.session = requests.Session()
@@ -371,22 +402,59 @@ class HeliusRpc:
         self.transactions_timeout_seconds = int(transactions_timeout_seconds)
         self.max_retries = max(0, int(max_retries))
         self.retry_base_seconds = max(0.0, float(retry_base_seconds))
+        self.circuit_failure_threshold = max(2, int(circuit_failure_threshold))
+        self.consecutive_failures = 0
+        self.failures = Counter()
+        self.last_error = None
+        self.circuit_open_reason = None
 
     def request_timeout(self, timeout):
         seconds = float(timeout if timeout is not None else self.timeout_seconds)
         connect_timeout = min(10.0, max(3.0, seconds / 3))
         return (connect_timeout, seconds)
 
+    def error_category(self, status=None, code=None, detail=""):
+        detail = str(detail or "").lower()
+        if status in (401, 403) or any(marker in detail for marker in ("unauthorized", "forbidden", "invalid api key")):
+            return "auth"
+        if status == 402 or any(marker in detail for marker in ("credit", "quota", "billing", "payment required")):
+            return "quota"
+        if status == 429 or code in (-32429,) or "rate limit" in detail or "too many requests" in detail:
+            return "rate_limit"
+        if any(marker in detail for marker in ("timeout", "timed out", "temporarily unavailable")):
+            return "temporary"
+        if status and status >= 500:
+            return "provider"
+        return "rpc"
+
+    def record_failure(self, error):
+        category = getattr(error, "category", "rpc")
+        self.failures[category] += 1
+        self.consecutive_failures += 1
+        self.last_error = str(error)
+        if (
+            category in {"auth", "quota", "rate_limit", "provider"}
+            and self.consecutive_failures >= self.circuit_failure_threshold
+        ):
+            self.circuit_open_reason = str(error)
+
+    def record_success(self):
+        self.consecutive_failures = 0
+
     def call(self, method, params=None, timeout=None):
+        if self.circuit_open_reason and method != "getHealth":
+            raise HeliusCircuitOpen(f"Helius circuit open: {self.circuit_open_reason}")
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []}
         retryable_statuses = {429, 500, 502, 503, 504}
         for attempt in range(self.max_retries + 1):
             self.calls[method] += 1
             try:
                 response = self.session.post(self.url, json=payload, timeout=self.request_timeout(timeout))
-            except requests.RequestException:
+            except requests.RequestException as exc:
                 if attempt >= self.max_retries:
-                    raise
+                    error = HeliusRpcError(method, "temporary", exc.__class__.__name__)
+                    self.record_failure(error)
+                    raise error from exc
                 self.retries[method] += 1
                 time.sleep(min(5.0, max(0.1, self.retry_base_seconds * (2**attempt))))
                 continue
@@ -396,8 +464,18 @@ class HeliusRpc:
                 delay = retry_after or self.retry_base_seconds * (2**attempt)
                 time.sleep(min(5.0, max(0.1, delay)))
                 continue
-            response.raise_for_status()
-            body = response.json()
+            if not response.ok:
+                detail = (response.text or response.reason or "request failed").strip().replace("\n", " ")[:300]
+                category = self.error_category(status=response.status_code, detail=detail)
+                error = HeliusRpcError(method, category, detail, status=response.status_code)
+                self.record_failure(error)
+                raise error
+            try:
+                body = response.json()
+            except ValueError as exc:
+                error = HeliusRpcError(method, "provider", "invalid JSON response")
+                self.record_failure(error)
+                raise error from exc
             if body.get("error"):
                 error = body["error"]
                 message = str(error.get("message") if isinstance(error, dict) else error)
@@ -409,9 +487,19 @@ class HeliusRpc:
                     self.retries[method] += 1
                     time.sleep(min(5.0, max(0.1, self.retry_base_seconds * (2**attempt))))
                     continue
-                raise RuntimeError(f"{method}: {error}")
+                rpc_error = HeliusRpcError(
+                    method,
+                    self.error_category(code=code, detail=message),
+                    message[:300],
+                    code=code,
+                )
+                self.record_failure(rpc_error)
+                raise rpc_error
+            self.record_success()
             return body.get("result")
-        raise RuntimeError(f"{method}: retry budget exhausted")
+        error = HeliusRpcError(method, "temporary", "retry budget exhausted")
+        self.record_failure(error)
+        raise error
 
     def health(self):
         return self.call("getHealth")
@@ -4047,7 +4135,15 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
     try:
         signatures = rpc.signatures_for_address(pool.pool_address, limit=limit)
     except Exception as exc:
-        return [], {"pool": pool.as_dict(), "error": str(exc), "trade_source": "pool_signatures"}
+        error = str(exc)
+        if fallback_error:
+            error = f"transactions={fallback_error}; signatures={error}"
+        return [], {
+            "pool": pool.as_dict(),
+            "error": error,
+            "fallback_error": fallback_error,
+            "trade_source": "pool_signatures",
+        }
 
     if signatures:
         pool_state["latest_signature"] = signatures[0]["signature"]
@@ -4968,6 +5064,21 @@ def build_scan_health(summaries, lane_stats, config):
     candidate_buys = sum(int(item.get("candidate_buys") or 0) for item in summaries)
     classified_buys = sum(int(item.get("classified_buys") or 0) for item in summaries)
     classification_errors = sum(int(item.get("classification_errors") or 0) for item in summaries)
+    scan_errors = Counter()
+    for item in summaries:
+        error = str(item.get("error") or "")
+        if not error:
+            continue
+        if "rate_limit" in error or "HTTP 429" in error:
+            scan_errors["helius_rate_limit"] += 1
+        elif "quota" in error or "credit" in error.lower() or "HTTP 402" in error:
+            scan_errors["helius_quota"] += 1
+        elif "auth" in error or "HTTP 401" in error or "HTTP 403" in error:
+            scan_errors["helius_auth"] += 1
+        elif "circuit open" in error.lower():
+            scan_errors["helius_circuit_open"] += 1
+        else:
+            scan_errors["other"] += 1
     zero_parse_pools = sum(
         1
         for item in summaries
@@ -5046,6 +5157,7 @@ def build_scan_health(summaries, lane_stats, config):
         "candidate_buys": candidate_buys,
         "classified_buys": classified_buys,
         "classification_errors": classification_errors,
+        "scan_error_categories": dict(scan_errors),
         "solana_tracker_status": "error" if config.get("_solana_tracker_error") else "ok",
     }
 
@@ -5087,6 +5199,7 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "alerts": len(alerts),
             "rpc_calls": dict(rpc_calls),
             "rpc_retries": config.get("_rpc_retries", {}),
+            "rpc_failures": config.get("_rpc_failures", {}),
             "scan_health": config.get("_scan_health", {}),
             "discovery": config.get("_discovery_stats", {}),
             "solana_tracker_ath": (state.get("maintenance") or {}).get("solana_tracker_ath", {}),
@@ -5297,6 +5410,21 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
             pool_state.pop("last_scan_error", None)
         summaries.append(summary)
         all_alerts.extend(alerts)
+        if summary.get("error") or summary.get("scan_failed"):
+            print(
+                f"warn: {label}: {pool.symbol or pool.pool_address} scan returned "
+                f"{str(summary.get('error') or 'pool scan failed')[:500]}",
+                file=sys.stderr,
+                flush=True,
+            )
+        if getattr(rpc, "circuit_open_reason", None):
+            print(
+                f"warn: {label}: stopping lane after Helius circuit opened: "
+                f"{rpc.circuit_open_reason}",
+                file=sys.stderr,
+                flush=True,
+            )
+            break
         if index % 25 == 0:
             print(f"{label}: scanned {index}/{len(scan_targets)} pools", flush=True)
         time.sleep(0.05)
@@ -5318,6 +5446,7 @@ def run_once(config, lane_name=None):
         transactions_timeout_seconds=int(config.get("helius_transactions_timeout_seconds", 25)),
         max_retries=int(config.get("helius_rpc_max_retries", 2)),
         retry_base_seconds=float(config.get("helius_rpc_retry_base_seconds", 0.75)),
+        circuit_failure_threshold=int(config.get("helius_rpc_circuit_failure_threshold", 4)),
     )
     health = rpc.health()
     if health != "ok":
@@ -5387,6 +5516,8 @@ def run_once(config, lane_name=None):
             "deleted_tokens_skipped": lane_config.get("_deleted_tokens_skipped", 0),
             "selection": lane_config.get("_selection_stats", {}),
         }
+        if rpc.circuit_open_reason:
+            break
 
     scan_health = build_scan_health(summaries, lane_stats, config)
     config["_scan_health"] = scan_health
@@ -5404,6 +5535,7 @@ def run_once(config, lane_name=None):
     enrich_market_ath(http, state, [*universe, *refreshed_caught_pools], all_alerts, config, generated_at)
     config["_scan_health"] = build_scan_health(summaries, lane_stats, config)
     config["_rpc_retries"] = dict(rpc.retries)
+    config["_rpc_failures"] = dict(rpc.failures)
     prune_wallet_cache(state, config)
     compact_state(state, universe, all_alerts, config, generated_at)
     save_json(STATE_PATH, state, compact=bool(config.get("state_json_compact", True)))
@@ -5448,7 +5580,13 @@ def main():
         args.once = True
 
     while True:
-        run_once(config, args.lane)
+        write_scanner_status("running")
+        try:
+            run_once(config, args.lane)
+        except (Exception, SystemExit) as exc:
+            write_scanner_status("failed", error=exc, scan_health=config.get("_scan_health"))
+            raise
+        write_scanner_status("ok", scan_health=config.get("_scan_health"))
         if not args.watch:
             break
         time.sleep(int(config["scan_interval_seconds"]))

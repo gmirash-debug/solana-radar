@@ -295,6 +295,7 @@
   "helius_transactions_timeout_seconds": 45,
   "helius_rpc_max_retries": 2,
   "helius_rpc_retry_base_seconds": 0.75,
+  "helius_rpc_circuit_failure_threshold": 4,
   "helius_activity_probe_enabled": true,
   "helius_activity_probe_signature_limit": 5,
   "helius_transactions_limit": 250,
