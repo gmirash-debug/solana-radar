@@ -406,6 +406,7 @@ class SolanaRpcProvider:
         circuit_failure_threshold=4,
         min_interval_seconds=0,
         method_min_interval_seconds=None,
+        unsupported_methods=None,
     ):
         self.provider_name = str(provider_name)
         self.url = str(url)
@@ -428,6 +429,9 @@ class SolanaRpcProvider:
         self.method_min_interval_seconds = {
             str(method): max(0.0, float(seconds))
             for method, seconds in (method_min_interval_seconds or {}).items()
+        }
+        self.unsupported_methods = {
+            str(method) for method in (unsupported_methods or [])
         }
         self.last_request_started_at = None
         self.rate_limit_lock = threading.Lock()
@@ -485,8 +489,8 @@ class SolanaRpcProvider:
                 "getTransaction": 40,
                 "getTransactionsForAddress": 100,
             }.get(method, 20)
-        if self.credit_model == "drpc":
-            return 20
+        if self.credit_model == "chainstack":
+            return 1
         return 1
 
     def error_category(self, status=None, code=None, detail=""):
@@ -749,29 +753,41 @@ class AlchemyRpc(SolanaRpcProvider):
         )
 
 
-class DrpcRpc(SolanaRpcProvider):
+class ChainstackRpc(SolanaRpcProvider):
     def __init__(self, url, **kwargs):
         super().__init__(
-            "drpc",
+            "chainstack",
             url,
             enhanced_history=False,
-            credit_model="drpc",
+            credit_model="chainstack",
+            unsupported_methods={"getTokenAccountsByOwner"},
             **kwargs,
         )
 
 
 class RoutedSolanaRpc:
-    def __init__(self, providers, standard_order=None, enhanced_order=None):
+    def __init__(
+        self,
+        providers,
+        standard_order=None,
+        enhanced_order=None,
+        balance_order=None,
+    ):
         self.providers = {provider.provider_name: provider for provider in providers}
         self.standard_order = self._ordered_names(
-            standard_order or ["drpc", "alchemy", "helius"]
+            standard_order or ["chainstack", "alchemy", "helius"]
         )
         self.enhanced_order = self._ordered_names(
             enhanced_order or ["alchemy", "helius"],
             enhanced_only=True,
         )
+        self.balance_order = self._ordered_names(
+            balance_order or ["alchemy", "helius", "chainstack"]
+        )
         self.blocked_providers = {}
         self.unsupported_methods = defaultdict(set)
+        for name, provider in self.providers.items():
+            self.unsupported_methods[name].update(provider.unsupported_methods)
         self.route_failovers = Counter()
         self.last_provider_by_method = {}
         self.health_results = {}
@@ -855,7 +871,7 @@ class RoutedSolanaRpc:
         category = getattr(exc, "category", "")
         if category == "unsupported":
             self.unsupported_methods[provider_name].add(method)
-        elif category in {"auth", "quota", "rate_limit"}:
+        elif category in {"auth", "quota"}:
             self.blocked_providers[provider_name] = str(exc)
 
     def _route_call(self, method, params=None, preferred=None, order=None, timeout=None, excluded=None):
@@ -1014,7 +1030,7 @@ class RoutedSolanaRpc:
         result, _provider = self._route_call(
             "getTokenAccountsByOwner",
             [owner, {"mint": mint}, {"encoding": "jsonParsed"}],
-            order=self.standard_order,
+            order=self.balance_order,
         )
         total = 0.0
         for item in (result or {}).get("value") or []:
@@ -1111,43 +1127,40 @@ def build_rpc_router(config):
                     config.get("alchemy_rpc_circuit_failure_threshold", 2)
                 ),
                 min_interval_seconds=float(
-                    config.get("alchemy_rpc_min_interval_seconds", 0.22)
+                    config.get("alchemy_rpc_min_interval_seconds", 0.45)
                 ),
                 method_min_interval_seconds={
                     "getSignaturesForAddress": float(
                         config.get(
                             "alchemy_get_signatures_min_interval_seconds",
-                            1.0,
+                            1.5,
                         )
                     )
                 },
             )
         )
 
-    drpc_url = os.environ.get("DRPC_SOLANA_RPC_URL")
-    drpc_key = os.environ.get("DRPC_API_KEY")
-    if not drpc_url and drpc_key:
-        drpc_url = f"https://lb.drpc.live/solana/{drpc_key}"
-    if drpc_url:
+    chainstack_url = os.environ.get("CHAINSTACK_SOLANA_RPC_URL")
+    if chainstack_url:
         providers.append(
-            DrpcRpc(
-                drpc_url,
-                timeout_seconds=int(config.get("drpc_rpc_timeout_seconds", 5)),
+            ChainstackRpc(
+                chainstack_url,
+                timeout_seconds=int(config.get("chainstack_rpc_timeout_seconds", 12)),
                 transactions_timeout_seconds=int(
-                    config.get("drpc_transactions_timeout_seconds", 5)
+                    config.get("chainstack_transactions_timeout_seconds", 20)
                 ),
-                max_retries=int(config.get("drpc_rpc_max_retries", 1)),
+                max_retries=int(config.get("chainstack_rpc_max_retries", 2)),
                 retry_base_seconds=float(
-                    config.get("drpc_rpc_retry_base_seconds", 0.25)
+                    config.get("chainstack_rpc_retry_base_seconds", 0.5)
                 ),
                 retry_max_seconds=float(
-                    config.get("drpc_rpc_retry_max_seconds", 5)
+                    config.get("chainstack_rpc_retry_max_seconds", 10)
                 ),
                 circuit_failure_threshold=int(
-                    config.get("drpc_rpc_circuit_failure_threshold", 2)
+                    config.get("chainstack_rpc_circuit_failure_threshold", 3)
                 ),
                 min_interval_seconds=float(
-                    config.get("drpc_rpc_min_interval_seconds", 0.05)
+                    config.get("chainstack_rpc_min_interval_seconds", 0.22)
                 ),
             )
         )
@@ -1155,17 +1168,21 @@ def build_rpc_router(config):
     if not providers:
         raise SystemExit(
             "No Solana RPC provider is configured. Set HELIUS_API_KEY, "
-            "ALCHEMY_SOLANA_RPC_URL, or DRPC_SOLANA_RPC_URL."
+            "ALCHEMY_SOLANA_RPC_URL, or CHAINSTACK_SOLANA_RPC_URL."
         )
     return RoutedSolanaRpc(
         providers,
         standard_order=_provider_order(
             config.get("rpc_standard_provider_order"),
-            ["drpc", "alchemy", "helius"],
+            ["chainstack", "alchemy", "helius"],
         ),
         enhanced_order=_provider_order(
             config.get("rpc_enhanced_provider_order"),
             ["alchemy", "helius"],
+        ),
+        balance_order=_provider_order(
+            config.get("rpc_balance_provider_order"),
+            ["alchemy", "helius", "chainstack"],
         ),
     )
 
@@ -1219,31 +1236,33 @@ def dexscreener_pool_from_pair(pair, source):
     )
 
 
-def solana_tracker_pool_from_item(item):
-    mint = item.get("mint", "")
-    pool_address = item.get("poolAddress", "")
-    symbol = item.get("symbol", "")
-    name = item.get("name", "")
+def gmgn_pool_from_trenches_item(item):
+    mint = clean_solana_address(item.get("address")) or ""
+    pool_address = clean_solana_address(item.get("pool_address")) or ""
+    exchange = clean_social_text(item.get("exchange"))
+    if exchange == "pump_amm":
+        exchange = "pumpfun-amm"
+    total_supply = to_float(item.get("total_supply"))
+    mcap_usd = to_float(item.get("usd_market_cap") or item.get("market_cap"))
+    price_usd = mcap_usd / total_supply if mcap_usd > 0 and total_supply > 0 else 0.0
     return Pool(
         pool_address=pool_address,
         token_address=mint,
-        name=name,
-        symbol=symbol,
-        dex=item.get("market", ""),
-        source="solana_tracker",
-        url=f"https://www.solanatracker.io/tokens/{mint}" if mint else "",
-        mcap_usd=to_float(item.get("marketCapUsd")),
-        liquidity_usd=to_float(item.get("liquidityUsd")),
+        name=clean_social_text(item.get("name")),
+        symbol=clean_social_text(item.get("symbol")),
+        dex=exchange,
+        source="gmgn_trenches",
+        url=f"https://gmgn.ai/sol/token/{mint}" if mint else "",
+        mcap_usd=mcap_usd,
+        liquidity_usd=to_float(item.get("liquidity")),
         volume_1h_usd=to_float(item.get("volume_1h")),
-        volume_24h_usd=to_float(item.get("volume_24h") or item.get("volume")),
-        price_usd=to_float(item.get("priceUsd")),
-        txns_1h=int(to_float(item.get("buys")) + to_float(item.get("sells"))),
+        volume_24h_usd=to_float(item.get("volume_24h")),
+        price_usd=price_usd,
+        txns_1h=int(to_float(item.get("swaps_1h"))),
         pair_created_at=parse_timestamp(
-            item.get("pairCreatedAt")
-            or item.get("poolCreatedAt")
-            or item.get("createdAt")
-            or item.get("created_at")
-            or item.get("created")
+            item.get("created_timestamp")
+            or item.get("open_timestamp")
+            or item.get("complete_timestamp")
         ),
     )
 
@@ -1256,27 +1275,48 @@ def gmgn_cli_command():
     return None
 
 
+def run_gmgn_cli(config, arguments, label):
+    if not config.get("gmgn_enabled", True) or not os.environ.get("GMGN_API_KEY"):
+        return None
+    command_prefix = gmgn_cli_command()
+    if not command_prefix:
+        raise RuntimeError("GMGN_API_KEY is set but gmgn-cli/npx is unavailable")
+    command = [*command_prefix, *arguments]
+    if "--raw" not in command:
+        command.append("--raw")
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=int(config.get("gmgn_timeout_seconds", 45)),
+        check=False,
+    )
+    if completed.returncode != 0:
+        api_key = os.environ.get("GMGN_API_KEY", "")
+        message = (completed.stderr or completed.stdout or "request failed").strip()
+        if api_key:
+            message = message.replace(api_key, "***")
+        raise RuntimeError(f"{label}: {message[:500]}")
+    try:
+        return json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{label}: invalid JSON response") from exc
+
+
 def fetch_gmgn_trending_token_addresses(config):
     if not config.get("gmgn_enabled", True):
         return set()
     if not os.environ.get("GMGN_API_KEY"):
         return set()
-    command_prefix = gmgn_cli_command()
-    if not command_prefix:
-        print("warn: GMGN_API_KEY is set but gmgn-cli/npx is unavailable", file=sys.stderr)
-        return set()
-
     addresses = set()
     intervals = config.get("gmgn_trending_intervals") or ["1m", "5m", "1h"]
     platforms = config.get("gmgn_platforms") or ["Pump.fun"]
     filters = config.get("gmgn_filters") or []
     limit = int(config.get("gmgn_trending_limit", 100))
     order_by = config.get("gmgn_trending_order_by", "volume")
-    timeout_seconds = int(config.get("gmgn_timeout_seconds", 45))
 
     for interval in intervals:
-        command = [
-            *command_prefix,
+        arguments = [
             "market",
             "trending",
             "--chain",
@@ -1287,34 +1327,16 @@ def fetch_gmgn_trending_token_addresses(config):
             str(order_by),
             "--limit",
             str(limit),
-            "--raw",
         ]
         for platform in platforms:
-            command.extend(["--platform", str(platform)])
+            arguments.extend(["--platform", str(platform)])
         for item in filters:
-            command.extend(["--filter", str(item)])
+            arguments.extend(["--filter", str(item)])
 
         try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                check=False,
-            )
+            data = run_gmgn_cli(config, arguments, f"gmgn trending {interval}")
         except Exception as exc:
             print(f"warn: gmgn trending {interval} failed: {exc}", file=sys.stderr)
-            continue
-
-        if completed.returncode != 0:
-            message = (completed.stderr or completed.stdout or "").strip().replace(os.environ.get("GMGN_API_KEY", ""), "***")
-            print(f"warn: gmgn trending {interval} failed: {message[:500]}", file=sys.stderr)
-            continue
-
-        try:
-            data = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            print(f"warn: gmgn trending {interval} returned invalid JSON: {exc}", file=sys.stderr)
             continue
 
         rank = data.get("data", {}).get("rank") if isinstance(data, dict) else None
@@ -1337,50 +1359,49 @@ def fetch_gmgn_trending_token_addresses(config):
     return addresses
 
 
-def fetch_solana_tracker_universe(http, config):
-    if not config.get("solana_tracker_enabled", True):
+def fetch_gmgn_trenches_universe(config):
+    if not config.get("gmgn_enabled", True):
         return {}
-    api_key = None if config.get("_solana_tracker_auth_failed") else os.environ.get("SOLANA_TRACKER_API_KEY")
-    if not api_key:
+    if not os.environ.get("GMGN_API_KEY"):
         return {}
-
+    arguments = [
+        "market",
+        "trenches",
+        "--chain",
+        "sol",
+        "--type",
+        "completed",
+        "--limit",
+        str(min(80, int(config.get("gmgn_trenches_limit", 80)))),
+        "--sort-by",
+        str(config.get("gmgn_trenches_sort_by", "volume_1h")),
+        "--direction",
+        "desc",
+        "--min-marketcap",
+        str(config["mcap_min_usd"]),
+        "--max-marketcap",
+        str(config["mcap_max_usd"]),
+        "--min-liquidity",
+        str(config["liquidity_min_usd"]),
+    ]
+    for platform in config.get("gmgn_launchpad_platforms") or ["Pump.fun"]:
+        arguments.extend(["--launchpad-platform", str(platform)])
+    try:
+        data = run_gmgn_cli(config, arguments, "gmgn trenches")
+    except Exception as exc:
+        config["_gmgn_error"] = str(exc)
+        print(f"warn: gmgn trenches failed: {exc}", file=sys.stderr)
+        return {}
     pools = {}
-    headers = {"x-api-key": api_key}
-    cursor = None
-    pages = int(config.get("solana_tracker_pages", 1))
-    delay = float(config.get("market_request_delay_seconds", 1.0))
-
-    for page in range(1, pages + 1):
-        params = {
-            "limit": int(config.get("solana_tracker_limit", 500)),
-            "sortBy": "volume_1h",
-            "sortOrder": "desc",
-            "minMarketCap": config["mcap_min_usd"],
-            "maxMarketCap": config["mcap_max_usd"],
-            "minLiquidity": config["liquidity_min_usd"],
-            "minVolume_1h": config["volume_1h_min_usd"],
-        }
-        if cursor:
-            params["cursor"] = cursor
-        else:
-            params["page"] = page
-        try:
-            data = http.get_json("https://data.solanatracker.io/search", params=params, headers=headers)
-        except Exception as exc:
-            message = str(exc)
-            config["_solana_tracker_error"] = message
-            if any(marker in message for marker in ("401", "403", "Forbidden", "Unauthorized")):
-                config["_solana_tracker_auth_failed"] = True
-            print(f"warn: solana_tracker search failed: {message}", file=sys.stderr)
-            break
-        for item in data.get("data", []) or []:
-            pool = solana_tracker_pool_from_item(item)
-            if pool.pool_address:
-                pools[pool.key()] = pool
-        cursor = data.get("nextCursor")
-        if not data.get("hasMore") or not cursor:
-            break
-        time.sleep(delay)
+    for item in (data or {}).get("completed", []) or []:
+        if not isinstance(item, dict):
+            continue
+        pool = gmgn_pool_from_trenches_item(item)
+        if pool.pool_address and pool.token_address:
+            pools[pool.key()] = pool
+    if pools:
+        config.pop("_gmgn_error", None)
+        print(f"GMGN trenches: {len(pools)} migrated Pump.fun pools", flush=True)
     return pools
 
 
@@ -1576,7 +1597,13 @@ def refresh_known_market_pools(http, state, config):
 
 
 def discover_market_pools(http, config):
-    pools = fetch_solana_tracker_universe(http, config)
+    pools = fetch_gmgn_trenches_universe(config)
+    trenches_tokens = {
+        pool.token_address for pool in pools.values() if pool.token_address
+    }
+    pools.update(
+        fetch_dex_pairs_for_tokens(http, trenches_tokens, "gmgn_trenches")
+    )
 
     gmgn_tokens = fetch_gmgn_trending_token_addresses(config)
     pools.update(fetch_dex_pairs_for_tokens(http, gmgn_tokens, "gmgn_trending"))
@@ -1798,11 +1825,12 @@ def discovery_config_for_lanes(config, lane_list):
     discovery["age_max_hours"] = None
     discovery["volume_1h_to_mcap_min"] = None
     discovery["volume_1h_to_liquidity_min"] = None
-    discovery["solana_tracker_pages"] = int(
-        config.get(
-            "unified_solana_tracker_pages",
-            max(int(item.get("solana_tracker_pages", config.get("solana_tracker_pages", 1))) for item in lane_configs),
-        )
+    discovery["gmgn_trenches_limit"] = min(
+        80,
+        max(
+            int(item.get("gmgn_trenches_limit", config.get("gmgn_trenches_limit", 80)))
+            for item in lane_configs
+        ),
     )
     discovery["gecko_pages"] = int(config.get("unified_gecko_pages", config.get("gecko_pages", 2)))
     return discovery
@@ -2151,31 +2179,77 @@ def dedupe_links(links):
     return output
 
 
-def fetch_solana_tracker_token_info(http, token_address):
-    api_key = os.environ.get("SOLANA_TRACKER_API_KEY")
-    if not api_key or not token_address:
+def gmgn_external_url(value, kind):
+    value = clean_social_text(value)
+    if not value:
+        return ""
+    if value.startswith(("http://", "https://")):
+        return value
+    value = value.lstrip("@/")
+    if kind == "twitter":
+        return f"https://x.com/{value}"
+    if kind == "telegram":
+        return f"https://t.me/{value}"
+    return f"https://{value}"
+
+
+def fetch_gmgn_raw_token_info(config, token_address):
+    if not token_address or not os.environ.get("GMGN_API_KEY"):
         return {}
-    headers = {"x-api-key": api_key}
-    data = http.get_json(f"https://data.solanatracker.io/tokens/{token_address}", headers=headers, timeout=30)
-    token = data.get("token") or {}
-    strict = token.get("strictSocials") or {}
+    cache = config.setdefault("_gmgn_token_info_cache", {})
+    if token_address in cache:
+        return cache[token_address]
+    data = run_gmgn_cli(
+        config,
+        ["token", "info", "--chain", "sol", "--address", token_address],
+        f"gmgn token info {token_address}",
+    )
+    if not isinstance(data, dict):
+        return {}
+    cache[token_address] = data
+    return data
+
+
+def fetch_gmgn_token_info(config, token_address):
+    cache = config.setdefault("_gmgn_profile_cache", {})
+    if token_address in cache:
+        return cache[token_address]
+    data = fetch_gmgn_raw_token_info(config, token_address)
+    if not data:
+        return {}
+    link = data.get("link") or {}
+    dev = data.get("dev") or {}
     links = [
-        normalize_link(token.get("website") or strict.get("website"), "Website", "website"),
-        normalize_link(token.get("twitter") or strict.get("twitter"), "X", "twitter"),
-        normalize_link(token.get("telegram") or strict.get("telegram"), "Telegram", "telegram"),
+        normalize_link(gmgn_external_url(link.get("website"), "website"), "Website", "website"),
+        normalize_link(
+            gmgn_external_url(
+                link.get("twitter_username") or link.get("twitter"),
+                "twitter",
+            ),
+            "X",
+            "twitter",
+        ),
+        normalize_link(gmgn_external_url(link.get("telegram"), "telegram"), "Telegram", "telegram"),
+        normalize_link(link.get("discord"), "Discord", "discord"),
+        normalize_link(link.get("github"), "GitHub", "github"),
     ]
-    return {
-        "source": "solana_tracker",
-        "name": clean_social_text(token.get("name")),
-        "symbol": clean_social_text(token.get("symbol")),
-        "description": clean_social_text(token.get("description")),
-        "image": token.get("image"),
-        "created_on": token.get("createdOn"),
-        "creator": (token.get("creation") or {}).get("creator"),
-        "created_tx": (token.get("creation") or {}).get("created_tx"),
-        "created_time": (token.get("creation") or {}).get("created_time"),
+    profile = {
+        "source": "gmgn",
+        "name": clean_social_text(data.get("name")),
+        "symbol": clean_social_text(data.get("symbol")),
+        "description": clean_social_text(link.get("description")),
+        "image": data.get("logo"),
+        "created_on": clean_social_text(data.get("launchpad_platform") or data.get("launchpad")),
+        "creator": dev.get("creator_address"),
+        "created_tx": None,
+        "created_time": parse_timestamp(data.get("creation_timestamp")),
+        "launchpad_status": data.get("launchpad_status"),
+        "migrated_pool": data.get("migrated_pool"),
+        "migrated_time": parse_timestamp(data.get("migrated_timestamp")),
         "links": dedupe_links(links),
     }
+    cache[token_address] = profile
+    return profile
 
 
 def fetch_dex_token_info(http, token_address):
@@ -2408,8 +2482,8 @@ def build_lore_analysis(pool, primary, secondary, ranked, profile, dex_info, con
         add_row(
             "official_profile",
             profile.get("description"),
-            "Solana Tracker token profile",
-            f"https://www.solanatracker.io/tokens/{pool.token_address}",
+            "GMGN token profile",
+            f"https://gmgn.ai/sol/token/{pool.token_address}",
             confidence="strong" if primary != "Unclear" else "supporting",
         )
     for item in context[:5]:
@@ -2640,7 +2714,7 @@ def classify_token_narrative(pool, profile, dex_info, context, social):
     gap = score - (ranked[1][1] if len(ranked) > 1 else 0)
     tilt = "strong tilt" if score >= 6 and gap >= 2 else "medium tilt" if score >= 4 else "weak tilt"
     sources = []
-    sources.append({"label": "Solana Tracker profile", "url": f"https://www.solanatracker.io/tokens/{pool.token_address}"})
+    sources.append({"label": "GMGN profile", "url": f"https://gmgn.ai/sol/token/{pool.token_address}"})
     if pool.url:
         sources.append({"label": "Primary pair", "url": pool.url})
     for link in [*profile.get("links", []), *dex_info.get("links", [])]:
@@ -2654,7 +2728,7 @@ def classify_token_narrative(pool, profile, dex_info, context, social):
     overlay = {
         "headline": f"{overlay_type.title()} overlay: {primary}",
         "summary": (
-            f"Scanner enriched this token with Solana Tracker/Dexscreener metadata, official/social links, "
+            f"Scanner enriched this token with GMGN/Dexscreener metadata, official/social links, "
             f"and public context. Primary narrative is {primary} because: {'; '.join(evidence.get(primary, []))}."
         ),
         "sources": sources[:8],
@@ -2695,9 +2769,9 @@ def build_token_intel(http, pool, config, state, social=None):
     context = []
     failures = []
     try:
-        profile = fetch_solana_tracker_token_info(http, token_key)
+        profile = fetch_gmgn_token_info(config, token_key)
     except Exception as exc:
-        failures.append(f"solana_tracker_profile: {exc}")
+        failures.append(f"gmgn_profile: {exc}")
     try:
         dex_info = fetch_dex_token_info(http, token_key)
     except Exception as exc:
@@ -5625,15 +5699,117 @@ def caught_market_token_addresses(state, alerts=None, limit=80):
     return ordered
 
 
-def fetch_solana_tracker_ath(http, token_address):
-    api_key = os.environ.get("SOLANA_TRACKER_API_KEY")
-    if not api_key:
+def fetch_gmgn_kline(config, token_address, resolution, from_timestamp, to_timestamp):
+    data = run_gmgn_cli(
+        config,
+        [
+            "market",
+            "kline",
+            "--chain",
+            "sol",
+            "--address",
+            token_address,
+            "--resolution",
+            resolution,
+            "--from",
+            str(int(from_timestamp)),
+            "--to",
+            str(int(to_timestamp)),
+        ],
+        f"gmgn kline {resolution} {token_address}",
+    )
+    rows = data.get("list") if isinstance(data, dict) else None
+    return rows if isinstance(rows, list) else []
+
+
+def gmgn_peak_candle(rows):
+    candidates = [
+        row
+        for row in rows
+        if isinstance(row, dict) and parse_timestamp(row.get("time"))
+    ]
+    if not candidates:
         return None
-    headers = {"x-api-key": api_key}
-    return http.get_json(f"https://data.solanatracker.io/tokens/{token_address}/ath", headers=headers)
+    return max(
+        candidates,
+        key=lambda row: (to_float(row.get("high")), -parse_timestamp(row.get("time"))),
+    )
 
 
-def apply_solana_tracker_ath(entry, ath, observed_at):
+def fetch_gmgn_ath_timestamp(config, token_address, creation_timestamp=0):
+    now = int(time.time())
+    start = parse_timestamp(creation_timestamp) or now - 1_000 * 24 * 60 * 60
+    day = gmgn_peak_candle(
+        fetch_gmgn_kline(config, token_address, "1d", start, now + 60)
+    )
+    if not day:
+        return 0
+    day_start = parse_timestamp(day.get("time"))
+    hour = gmgn_peak_candle(
+        fetch_gmgn_kline(
+            config,
+            token_address,
+            "1h",
+            max(start, day_start - 60),
+            min(now + 60, day_start + 24 * 60 * 60 + 60),
+        )
+    )
+    if not hour:
+        return day_start
+    hour_start = parse_timestamp(hour.get("time"))
+    five_minute = gmgn_peak_candle(
+        fetch_gmgn_kline(
+            config,
+            token_address,
+            "5m",
+            max(start, hour_start - 60),
+            min(now + 60, hour_start + 60 * 60 + 60),
+        )
+    )
+    return parse_timestamp((five_minute or hour).get("time"))
+
+
+def fetch_gmgn_ath(config, token_address, include_timestamp=True):
+    result_cache = config.setdefault("_gmgn_ath_result_cache", {})
+    cached = result_cache.get(token_address)
+    if cached and (not include_timestamp or cached.get("timestamp")):
+        return dict(cached)
+    data = fetch_gmgn_raw_token_info(config, token_address)
+    if not data:
+        return None
+    dev = data.get("dev") or {}
+    ath_token_info = dev.get("ath_token_info") or {}
+    ath_price = to_float(data.get("ath_price"))
+    ath_mcap = to_float(ath_token_info.get("ath_mc"))
+    supply = to_float(
+        data.get("circulating_supply")
+        or data.get("total_supply")
+        or data.get("max_supply")
+    )
+    if ath_mcap <= 0 and ath_price > 0 and supply > 0:
+        ath_mcap = ath_price * supply
+    if ath_mcap <= 0:
+        return None
+    ath = {
+        "highest_market_cap": ath_mcap,
+        "highest_price": ath_price,
+        "pool_id": data.get("biggest_pool_address") or data.get("migrated_pool"),
+    }
+    if include_timestamp:
+        try:
+            ath["timestamp"] = fetch_gmgn_ath_timestamp(
+                config,
+                token_address,
+                data.get("creation_timestamp"),
+            )
+        except Exception as exc:
+            ath["timestamp_error"] = str(exc)
+    result_cache[token_address] = dict(ath)
+    return ath
+
+
+def apply_gmgn_ath(entry, ath, observed_at):
+    previous_source = entry.get("ath_source")
     if ath.get("highest_market_cap") is not None:
         entry["ath_mcap_usd"] = to_float(ath.get("highest_market_cap"))
     if ath.get("highest_price") is not None:
@@ -5643,19 +5819,26 @@ def apply_solana_tracker_ath(entry, ath, observed_at):
         if timestamp > 10_000_000_000:
             timestamp = timestamp // 1000
         entry["ath_mcap_at"] = iso(timestamp)
+    elif previous_source != "gmgn":
+        entry.pop("ath_mcap_at", None)
     if ath.get("pool_id"):
         entry["ath_pool_address"] = ath.get("pool_id")
-    entry["ath_source"] = "solana_tracker"
-    entry["ath_status"] = "ready"
+    entry["ath_source"] = "gmgn"
+    entry["ath_status"] = "ready" if entry.get("ath_mcap_at") else "partial"
     entry["ath_latest_checked_at"] = observed_at
+    if ath.get("timestamp_error"):
+        entry["ath_timestamp_error"] = ath.get("timestamp_error")
+    else:
+        entry.pop("ath_timestamp_error", None)
     entry.pop("ath_error", None)
     entry.pop("ath_error_checked_at", None)
+    entry.pop("ath_error_source", None)
 
 
 def trusted_ath_mcap(entry):
     if not entry:
         return 0.0
-    if entry.get("ath_source") not in ("solana_tracker", "ohlcv_high"):
+    if entry.get("ath_source") not in ("gmgn", "solana_tracker", "ohlcv_high"):
         return 0.0
     return to_float(entry.get("ath_mcap_usd"))
 
@@ -5672,7 +5855,7 @@ def filter_reactivation_by_ath(http, state, pools, config, observed_at):
     delay = float(config.get("ath_request_delay_seconds", 0.25))
     fetch_limit = int(config.get("ath_filter_max_tokens_per_scan", config.get("ath_max_tokens_per_scan", 25)))
     require_trusted = bool(config.get("ath_require_trusted", True))
-    api_key = None if config.get("_solana_tracker_auth_failed") else os.environ.get("SOLANA_TRACKER_API_KEY")
+    api_key = os.environ.get("GMGN_API_KEY")
     fetched = 0
     rate_limited = False
     kept = []
@@ -5688,22 +5871,28 @@ def filter_reactivation_by_ath(http, state, pools, config, observed_at):
         ath_mcap = trusted_ath_mcap(entry)
 
         if not ath_mcap and api_key and not rate_limited:
-            recent_error = entry.get("ath_error_checked_at") and now - int(entry.get("ath_error_checked_at", 0)) < error_ttl
+            recent_error = (
+                entry.get("ath_error_source") == "gmgn"
+                and entry.get("ath_error_checked_at")
+                and now - int(entry.get("ath_error_checked_at", 0)) < error_ttl
+            )
             if not recent_error and fetched < fetch_limit:
                 try:
-                    ath = fetch_solana_tracker_ath(http, token)
+                    ath = fetch_gmgn_ath(config, token, include_timestamp=False)
                     fetched += 1
                     if ath and not ath.get("error"):
                         entry["ath_checked_at"] = now
-                        apply_solana_tracker_ath(entry, ath, observed_at)
+                        apply_gmgn_ath(entry, ath, observed_at)
                         ath_mcap = trusted_ath_mcap(entry)
                     elif ath and ath.get("error"):
                         entry["ath_error"] = ath.get("error")
                         entry["ath_error_checked_at"] = now
+                        entry["ath_error_source"] = "gmgn"
                         entry["ath_status"] = "error"
                     else:
                         entry["ath_error"] = "empty_ath_response"
                         entry["ath_error_checked_at"] = now
+                        entry["ath_error_source"] = "gmgn"
                         entry["ath_status"] = "error"
                     time.sleep(delay)
                 except Exception as exc:
@@ -5711,6 +5900,7 @@ def filter_reactivation_by_ath(http, state, pools, config, observed_at):
                     print(f"warn: reactivation ath filter failed for {token}: {message}", file=sys.stderr)
                     entry["ath_error"] = message
                     entry["ath_error_checked_at"] = now
+                    entry["ath_error_source"] = "gmgn"
                     entry["ath_status"] = "error"
                     fetched += 1
                     if "429" in message or "Too Many" in message:
@@ -5723,6 +5913,7 @@ def filter_reactivation_by_ath(http, state, pools, config, observed_at):
                     entry["ath_status"] = "unverified"
                     entry["ath_error"] = entry.get("ath_error") or "ath_unavailable_for_reactivation_filter"
                     entry["ath_error_checked_at"] = now
+                    entry["ath_error_source"] = "gmgn"
                     unverified.append(pool)
                 continue
             kept.append(pool)
@@ -5766,20 +5957,15 @@ def enrich_market_ath(http, state, pools, alerts, config, observed_at):
         "status": "ok",
         "fetched": 0,
     }
-    if config.get("_solana_tracker_auth_failed"):
-        provider_stats.update(
-            {
-                "status": "auth_failed",
-                "error": config.get("_solana_tracker_error") or "Solana Tracker authentication failed",
-            }
-        )
-        state.setdefault("maintenance", {})["solana_tracker_ath"] = provider_stats
-        return
     pool_tokens = [pool.token_address for pool in pools if pool.token_address]
     alert_tokens = [(alert.get("pool") or {}).get("token_address") for alert in alerts]
     recent_tokens = recent_alert_token_addresses(int(config.get("ath_recent_alert_limit", 100)))
+    priority_tokens = []
+    for token in alert_tokens:
+        if token and token not in priority_tokens:
+            priority_tokens.append(token)
     required_tokens = []
-    for token in [*alert_tokens, *recent_tokens]:
+    for token in [*priority_tokens, *recent_tokens]:
         if token and token not in required_tokens:
             required_tokens.append(token)
     candidates = []
@@ -5792,60 +5978,86 @@ def enrich_market_ath(http, state, pools, alerts, config, observed_at):
     delay = float(config.get("ath_request_delay_seconds", 0.25))
     now = int(time.time())
     fetched = 0
-    if not os.environ.get("SOLANA_TRACKER_API_KEY"):
+    priority_fetched = 0
+    broad_fetched = 0
+    priority_set = set(priority_tokens)
+    if not os.environ.get("GMGN_API_KEY"):
         for token in required_tokens:
             entry = market.setdefault(token, {"token_address": token})
             entry["ath_status"] = "missing_api_key"
-            entry["ath_error"] = "missing_solana_tracker_api_key"
+            entry["ath_error"] = "missing_gmgn_api_key"
             entry["ath_error_checked_at"] = now
-        provider_stats.update({"status": "missing_api_key", "error": "missing_solana_tracker_api_key"})
-        state.setdefault("maintenance", {})["solana_tracker_ath"] = provider_stats
+            entry["ath_error_source"] = "gmgn"
+        provider_stats.update({"status": "missing_api_key", "error": "missing_gmgn_api_key"})
+        state.setdefault("maintenance", {})["gmgn_ath"] = provider_stats
         return
     for token in candidates:
         entry = market.setdefault(token, {"token_address": token})
-        has_trusted_ath = entry.get("ath_source") in ("solana_tracker", "ohlcv_high") and entry.get("ath_mcap_usd")
-        if has_trusted_ath and not entry.get("ath_status"):
+        has_gmgn_ath = entry.get("ath_source") == "gmgn" and entry.get("ath_mcap_usd")
+        if has_gmgn_ath and not entry.get("ath_status"):
             entry["ath_status"] = "ready"
-        if has_trusted_ath and entry.get("ath_checked_at") and now - int(entry.get("ath_checked_at", 0)) < ttl:
+        if (
+            has_gmgn_ath
+            and entry.get("ath_mcap_at")
+            and entry.get("ath_checked_at")
+            and now - int(entry.get("ath_checked_at", 0)) < ttl
+        ):
             continue
-        if entry.get("ath_error_checked_at") and now - int(entry.get("ath_error_checked_at", 0)) < error_ttl:
+        if (
+            entry.get("ath_error_source") == "gmgn"
+            and entry.get("ath_error_checked_at")
+            and now - int(entry.get("ath_error_checked_at", 0)) < error_ttl
+        ):
             continue
-        if fetched >= max_tokens:
-            break
+        is_priority = token in priority_set
+        if not is_priority and broad_fetched >= max_tokens:
+            continue
         try:
-            ath = fetch_solana_tracker_ath(http, token)
+            ath = fetch_gmgn_ath(config, token, include_timestamp=True)
         except Exception as exc:
             message = str(exc)
-            print(f"warn: solana_tracker ath failed for {token}: {message}", file=sys.stderr)
+            print(f"warn: gmgn ath failed for {token}: {message}", file=sys.stderr)
             entry["ath_error"] = message
             entry["ath_error_checked_at"] = now
+            entry["ath_error_source"] = "gmgn"
             entry["ath_status"] = "error"
             fetched += 1
+            if is_priority:
+                priority_fetched += 1
+            else:
+                broad_fetched += 1
             if any(marker in message for marker in ("401", "403", "Forbidden", "Unauthorized")):
-                config["_solana_tracker_auth_failed"] = True
-                config["_solana_tracker_error"] = message
+                config["_gmgn_error"] = message
                 provider_stats.update({"status": "auth_failed", "error": message})
                 break
             if "429" in message or "Too Many" in message:
-                config["_solana_tracker_error"] = message
+                config["_gmgn_error"] = message
                 provider_stats.update({"status": "rate_limited", "error": message})
                 break
             continue
         fetched += 1
+        if is_priority:
+            priority_fetched += 1
+        else:
+            broad_fetched += 1
         if ath and not ath.get("error"):
             entry["ath_checked_at"] = now
-            apply_solana_tracker_ath(entry, ath, observed_at)
+            apply_gmgn_ath(entry, ath, observed_at)
         elif ath and ath.get("error"):
             entry["ath_error"] = ath.get("error")
             entry["ath_error_checked_at"] = now
+            entry["ath_error_source"] = "gmgn"
             entry["ath_status"] = "error"
         else:
             entry["ath_error"] = "empty_ath_response"
             entry["ath_error_checked_at"] = now
+            entry["ath_error_source"] = "gmgn"
             entry["ath_status"] = "error"
         time.sleep(delay)
     provider_stats["fetched"] = fetched
-    state.setdefault("maintenance", {})["solana_tracker_ath"] = provider_stats
+    provider_stats["priority_fetched"] = priority_fetched
+    provider_stats["broad_fetched"] = broad_fetched
+    state.setdefault("maintenance", {})["gmgn_ath"] = provider_stats
 
 
 def record_market_observations(state, pools, observed_at):
@@ -6312,7 +6524,7 @@ def build_scan_health(summaries, lane_stats, config):
             continue
         lower_error = error.lower()
         provider = next(
-            (name for name in ("alchemy", "drpc", "helius") if f"{name}:" in lower_error),
+            (name for name in ("chainstack", "alchemy", "helius") if f"{name}:" in lower_error),
             "rpc",
         )
         if "all rpc providers" in lower_error:
@@ -6394,9 +6606,9 @@ def build_scan_health(summaries, lane_stats, config):
         if parse_errors:
             status = "degraded"
             reasons.append(f"{parse_errors} transactions could not be parsed")
-        if config.get("_solana_tracker_error"):
+        if config.get("_gmgn_error"):
             status = "degraded"
-            reasons.append("Solana Tracker unavailable; cached ATH only")
+            reasons.append("GMGN unavailable; registry/fallback discovery and cached ATH only")
 
     return {
         "status": status,
@@ -6429,7 +6641,7 @@ def build_scan_health(summaries, lane_stats, config):
         "scan_error_categories": dict(scan_errors),
         "estimated_rpc_credits": int(config.get("_rpc_estimated_credits") or 0),
         "rpc_providers": config.get("_rpc_providers", {}),
-        "solana_tracker_status": "error" if config.get("_solana_tracker_error") else "ok",
+        "gmgn_status": "error" if config.get("_gmgn_error") else "ok",
     }
 
 
@@ -6476,7 +6688,7 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "rpc_failovers": config.get("_rpc_failovers", {}),
             "scan_health": config.get("_scan_health", {}),
             "discovery": config.get("_discovery_stats", {}),
-            "solana_tracker_ath": (state.get("maintenance") or {}).get("solana_tracker_ath", {}),
+            "gmgn_ath": (state.get("maintenance") or {}).get("gmgn_ath", {}),
             "caught_market_refresh": (state.get("maintenance") or {}).get("caught_market_refresh", {}),
             "deleted_tokens": {
                 "tokens": len(deleted_tokens["tokens"]),
@@ -6719,6 +6931,9 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
 
 def run_once(config, lane_name=None):
     load_env()
+    config["_gmgn_token_info_cache"] = {}
+    config["_gmgn_profile_cache"] = {}
+    config["_gmgn_ath_result_cache"] = {}
     http = Http()
     rpc = build_rpc_router(config)
     config["_rpc_router"] = rpc
@@ -6736,7 +6951,7 @@ def run_once(config, lane_name=None):
         discovery_config = discovery_config_for_lanes(config, lane_list)
         print("Building shared market discovery universe...", flush=True)
         discovered_universe = discover_market_pools(http, discovery_config)
-        for key in ("_solana_tracker_error", "_solana_tracker_auth_failed"):
+        for key in ("_gmgn_error",):
             if discovery_config.get(key):
                 config[key] = discovery_config[key]
         registry_universe, registry_stats = refresh_known_market_pools(http, state, discovery_config)
@@ -6767,7 +6982,7 @@ def run_once(config, lane_name=None):
             base_universe=shared_universe,
         )
         all_alerts.extend(lane_alerts)
-        for key in ("_solana_tracker_error", "_solana_tracker_auth_failed"):
+        for key in ("_gmgn_error",):
             if lane_config.get(key):
                 config[key] = lane_config[key]
         summaries.extend(lane_summaries)

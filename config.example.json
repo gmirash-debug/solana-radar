@@ -87,7 +87,6 @@
       "max_new_signatures_per_pool": 30,
       "initial_backfill_signatures": 20,
       "max_wallet_classifications_per_scan": 2600,
-      "solana_tracker_pages": 2,
       "sticky_accumulation_enabled": true,
       "classic_alerts_enabled": false,
       "sticky_accumulation_buffer_minutes": 720,
@@ -150,7 +149,6 @@
       "max_new_signatures_per_pool": 35,
       "initial_backfill_signatures": 20,
       "max_wallet_classifications_per_scan": 2800,
-      "solana_tracker_pages": 2,
       "sticky_accumulation_enabled": true,
       "classic_alerts_enabled": false,
       "sticky_accumulation_buffer_minutes": 720,
@@ -213,7 +211,6 @@
       "max_new_signatures_per_pool": 50,
       "initial_backfill_signatures": 25,
       "max_wallet_classifications_per_scan": 4500,
-      "solana_tracker_pages": 2,
       "scan_priority_share": 0.8
     },
     "reactivation": {
@@ -277,7 +274,6 @@
       "max_new_signatures_per_pool": 40,
       "initial_backfill_signatures": 25,
       "max_wallet_classifications_per_scan": 500,
-      "solana_tracker_pages": 2,
       "scan_priority_share": 0.45
     }
   },
@@ -299,7 +295,7 @@
   "helius_transactions_enabled": true,
   "helius_transactions_fallback_signatures": true,
   "rpc_standard_provider_order": [
-    "drpc",
+    "chainstack",
     "alchemy",
     "helius"
   ],
@@ -307,21 +303,26 @@
     "alchemy",
     "helius"
   ],
+  "rpc_balance_provider_order": [
+    "alchemy",
+    "helius",
+    "chainstack"
+  ],
   "alchemy_rpc_timeout_seconds": 20,
   "alchemy_transactions_timeout_seconds": 35,
   "alchemy_rpc_max_retries": 4,
   "alchemy_rpc_retry_base_seconds": 1,
   "alchemy_rpc_retry_max_seconds": 30,
   "alchemy_rpc_circuit_failure_threshold": 2,
-  "alchemy_rpc_min_interval_seconds": 0.22,
-  "alchemy_get_signatures_min_interval_seconds": 1,
-  "drpc_rpc_timeout_seconds": 5,
-  "drpc_transactions_timeout_seconds": 5,
-  "drpc_rpc_max_retries": 1,
-  "drpc_rpc_retry_base_seconds": 0.25,
-  "drpc_rpc_retry_max_seconds": 5,
-  "drpc_rpc_circuit_failure_threshold": 2,
-  "drpc_rpc_min_interval_seconds": 0.05,
+  "alchemy_rpc_min_interval_seconds": 0.45,
+  "alchemy_get_signatures_min_interval_seconds": 1.5,
+  "chainstack_rpc_timeout_seconds": 12,
+  "chainstack_transactions_timeout_seconds": 20,
+  "chainstack_rpc_max_retries": 2,
+  "chainstack_rpc_retry_base_seconds": 0.5,
+  "chainstack_rpc_retry_max_seconds": 10,
+  "chainstack_rpc_circuit_failure_threshold": 3,
+  "chainstack_rpc_min_interval_seconds": 0.22,
   "helius_rpc_timeout_seconds": 30,
   "helius_transactions_timeout_seconds": 45,
   "helius_rpc_max_retries": 2,
@@ -433,17 +434,20 @@
   "helius_classify_global_buy_limit": 60,
   "helius_classify_top_buys_per_window": 10,
   "max_wallet_classifications_per_pool": 160,
-  "solana_tracker_enabled": true,
-  "solana_tracker_limit": 500,
-  "solana_tracker_pages": 1,
   "unified_discovery_enabled": true,
-  "unified_solana_tracker_pages": 2,
   "unified_gecko_pages": 2,
   "gmgn_enabled": true,
+  "gmgn_trenches_limit": 80,
+  "gmgn_trenches_sort_by": "volume_1h",
+  "gmgn_launchpad_platforms": [
+    "Pump.fun"
+  ],
   "gmgn_trending_intervals": [
     "1m",
     "5m",
-    "1h"
+    "1h",
+    "6h",
+    "24h"
   ],
   "gmgn_trending_limit": 100,
   "gmgn_trending_order_by": "volume",

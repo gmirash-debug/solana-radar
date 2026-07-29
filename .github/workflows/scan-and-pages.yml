@@ -179,9 +179,7 @@ jobs:
           HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
           ALCHEMY_SOLANA_RPC_URL: ${{ secrets.ALCHEMY_SOLANA_RPC_URL }}
           ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
-          DRPC_SOLANA_RPC_URL: ${{ secrets.DRPC_SOLANA_RPC_URL }}
-          DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
-          SOLANA_TRACKER_API_KEY: ${{ secrets.SOLANA_TRACKER_API_KEY }}
+          CHAINSTACK_SOLANA_RPC_URL: ${{ secrets.CHAINSTACK_SOLANA_RPC_URL }}
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
           BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
         run: |

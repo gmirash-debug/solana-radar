@@ -64,7 +64,7 @@ Filter categories should be based on alert lane or, for old untagged alerts, inf
 
 ## Enrichment Timing
 
-When a scanner alert is created, token intel must be fetched in the same scan before the alert is written. This is separate from the social scan limit: if X/social enrichment is skipped because the per-scan social budget is full, backend token intel and narrative classification should still run. The alert record should include Solana Tracker metadata, Dexscreener profile links, Bright Data/public context when available, social results when available, caller graph when available, and the backend narrative decision.
+When a scanner alert is created, token intel must be fetched in the same scan before the alert is written. This is separate from the social scan limit: if X/social enrichment is skipped because the per-scan social budget is full, backend token intel and narrative classification should still run. The alert record should include GMGN metadata, Dexscreener profile links, Bright Data/public context when available, social results when available, caller graph when available, and the backend narrative decision.
 
 The dashboard should read the backend `token_intel.narrative` as the source of truth. The frontend must not infer a narrative from keywords. If backend enrichment is missing, the dashboard should show `Token intel missing` and treat the token as not classified until enrichment is refreshed.
 
@@ -78,7 +78,7 @@ Split source priority into two different jobs:
 - Narrative thesis should prefer official project sources, source posts, public context, and matched social evidence over ticker/name/market metadata. Market data can show that a token is active; it cannot prove what narrative is spreading.
 
 1. Direct market/onchain data:
-   - Solana Tracker token, ATH, and chart endpoints;
+   - GMGN token, ATH, and K-line endpoints;
    - Dexscreener token and pair profile;
    - GeckoTerminal pool and OHLCV data;
    - Helius parsed transactions;
@@ -87,7 +87,7 @@ Split source priority into two different jobs:
    - project website;
    - official X account;
    - official Telegram, Discord, docs, GitHub, or app;
-   - token profile links embedded in Dexscreener, CoinGecko, Solana Tracker.
+   - token profile links embedded in GMGN, Dexscreener, or CoinGecko.
 3. Third-party project coverage:
    - CoinGecko categories and listing data;
    - DEXTools/news writeups;
@@ -105,7 +105,7 @@ Inference cannot override clear project evidence. Example: `BLOXX / BloxAPI` is 
 
 Caller/account biographies are not token lore. They can be shown in caller metrics, but they must not classify the token narrative unless the account is confirmed as an official project source from token profile links. Narrative classification should use the matched post text, official token/project metadata, and public context, not generic bio wording from an influencer or ecosystem account.
 
-Official X profiles are project evidence when the X URL comes from Solana Tracker, Dexscreener, or another official token profile link. The profile bio/description should be fetched during token-intel enrichment and treated above generic public context. Example: `Lambda / LBD` should use the official `@Lambdaprivacy` description about zero-knowledge, MPC, and confidential execution as the core thesis, not a generic `DevTool/Infra` sentence.
+Official X profiles are project evidence when the X URL comes from GMGN, Dexscreener, or another official token profile link. The profile bio/description should be fetched during token-intel enrichment and treated above generic public context. Example: `Lambda / LBD` should use the official `@Lambdaprivacy` description about zero-knowledge, MPC, and confidential execution as the core thesis, not a generic `DevTool/Infra` sentence.
 
 ## Required Token Fields
 
@@ -123,13 +123,13 @@ Each token deep dive should show these fields when available:
 - `current market cap`
 - `current liquidity`
 - `24h and 1h volume`
-- `Solana Tracker ATH market cap`
-- `Solana Tracker ATH date/time`
-- `Solana Tracker ATH source`
-- `Solana Tracker ATH status`
+- `GMGN ATH market cap`
+- `GMGN ATH date/time`
+- `GMGN ATH source`
+- `GMGN ATH status`
 - `Caught mcap`: market cap observed by the scanner when the token first produced a signal
 - `Market now`: latest scanner snapshot market cap and liquidity
-- `Market phase`: current scanner market cap as a percentage of Solana Tracker ATH
+- `Market phase`: current scanner market cap as a percentage of GMGN ATH
 - `Launch context`: compact early market path and current entry-risk note when a verified retrospective read exists
 - `first signal date/time`
 - `profit since first signal`
@@ -164,7 +164,7 @@ Every caught-token deep dive should use the same visible order:
 4. `Caught`: first signal date/time, then first observed market cap, formatted as `date / $mcap mcap`.
 5. `ATH mcap`: ATH date/time, then ATH market cap, formatted as `date / $mcap mcap`, with source chip or status if missing.
 6. `Market now`: latest scanner-observed market cap, liquidity, and snapshot time.
-7. `Market phase`: `Near ATH`, `Upper range`, `Mid-range`, or `Low range` based on current mcap / Solana Tracker ATH.
+7. `Market phase`: `Near ATH`, `Upper range`, `Mid-range`, or `Low range` based on current mcap / GMGN ATH.
 8. `Launch context`: optional compact retrospective read, only when backed by verified chart/history data.
 9. `Scanner filter`: filter/lane chips, inferred marker if applicable, and criteria for the primary filter.
 10. `Signal quality`: max score, unique buys, unique flow, unique wallets, and duplicate raw rows collapsed.
@@ -176,7 +176,7 @@ Every caught-token deep dive should use the same visible order:
 16. `Source links`, token address, GMGN token terminal link.
 17. Deep sections: caller network, noticed-wallet PnL, signal timeline.
 
-Market phase is not the same as scanner filter. The live `Reactivation` filter requires a trusted ATH and only admits tokens whose current scanner market cap is `<= 40%` of Solana Tracker ATH. Older historical alerts created before this rule may still appear as `Upper range` or `Near ATH`; those should be visibly marked as not a clean low-zone reactivation thesis rather than treated as fresh Reactivation evidence.
+Market phase is not the same as scanner filter. The live `Reactivation` filter requires a trusted ATH and only admits tokens whose current scanner market cap is `<= 40%` of GMGN ATH. Older historical alerts created before this rule may still appear as `Upper range` or `Near ATH`; those should be visibly marked as not a clean low-zone reactivation thesis rather than treated as fresh Reactivation evidence.
 
 Do not add duplicate rows for the same concept. In particular:
 
@@ -187,19 +187,19 @@ Do not add duplicate rows for the same concept. In particular:
 
 ## ATH Rules
 
-Every caught token must show a Solana Tracker ATH metric:
+Every caught token must show a GMGN ATH metric:
 
-- `Solana Tracker ATH mcap`
-- `Solana Tracker ATH date/time`
-- `Solana Tracker ATH source`
-- `Solana Tracker ATH status`: `ready`, `pending`, `retry pending`, or `missing API key`.
+- `GMGN ATH mcap`
+- `GMGN ATH date/time`
+- `GMGN ATH source`
+- `GMGN ATH status`: `ready`, `market cap ready/date pending`, `pending`, `retry pending`, or `missing API key`.
 
 This is a required token-card and token-detail field. It should not be hidden behind fallback values.
 
 Historical ATH must be labeled by source quality:
 
-- `Solana Tracker ATH`: preferred when available.
-- `OHLCV high`: acceptable fallback from GeckoTerminal or Solana Tracker chart data.
+- `GMGN ATH`: preferred when available.
+- `OHLCV high`: acceptable fallback from GeckoTerminal chart data.
 - `Caught mcap`: first-alert scanner snapshot only; this is not a historical ATH and must not be rendered inside the ATH metric.
 - `Market now`: latest scanner snapshot only; this is not a historical ATH and must not be rendered inside the ATH metric.
 
@@ -213,7 +213,7 @@ ATH enrichment is mandatory for caught tokens:
 - The UI labels for scanner snapshots should be `Caught` and `Market now`, not `ATH` or any high-watermark wording.
 - Signal Timeline rows should include each alert's `OBS mcap`, so the token keeps a readable log of the market cap at every scanner catch.
 
-Low-liquidity or stale alternate pools must not define ATH unless explicitly labeled as a low-liquidity anomaly. For normal dashboard display, prefer the ATH from the primary liquid pool or Solana Tracker ATH endpoint.
+Low-liquidity or stale alternate pools must not define ATH unless explicitly labeled as a low-liquidity anomaly. For normal dashboard display, prefer GMGN token ATH and use the primary liquid pool only for market-now validation.
 
 ## Social Status Rules
 
@@ -404,7 +404,7 @@ When overriding:
 - Secondary: `Anime/Asia`
 - Reason: Hanta/hantavirus keyword aligns with current hantavirus news cycle; anime/Kun branding is packaging.
 - Overlay type: `News overlay`
-- ATH source: Solana Tracker ATH.
+- ATH source: GMGN ATH.
 
 ### BLOXX
 
@@ -414,7 +414,7 @@ When overriding:
 - Reason: BloxAPI is a Game Creator Launchpad / Roblox-style creator infrastructure project with AI tooling, analytics, Studio plugin, and token-gated product features.
 - Overlay type: `Project overlay`
 - Supporting context: reported Pump.fun Build in Public Hackathon winner with $250k investment.
-- ATH source: Solana Tracker ATH.
+- ATH source: GMGN ATH.
 
 ### BP / Barking Puppy
 
