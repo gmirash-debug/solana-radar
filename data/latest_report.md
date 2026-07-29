@@ -1,36 +1,33 @@
 # Solana Radar Report
 
-- generated_at: 2026-07-29T20:59:28.050259Z
+- generated_at: 2026-07-29T22:10:40.810925Z
 - profile: all
 - lanes_scanned: micro_sticky, cheap_sticky, breakout, reactivation
-- universe_pools: 194
+- universe_pools: 208
 - scanned_pools: 58
 - alerts: 0
-- rpc_calls: {'getHealth': 2, 'getTransactionsForAddress': 85, 'getSignaturesForAddress': 263, 'getTransaction': 940, 'getTokenSupply': 1, 'getTokenAccountsByOwner': 23}
+- rpc_calls: {'getHealth': 2, 'getTransactionsForAddress': 107, 'getSignaturesForAddress': 158, 'getTransaction': 449, 'getTokenSupply': 1, 'getTokenAccountsByOwner': 42}
 
 ## Alerts
 
 No alerts in this scan.
 
 ## Active Pools
-- Punch: 41 buys, 266.35 SOL, classes={'normal': 37, 'low_tx': 4}, mcap=$700162, pool=A6KHMiFzn9AM7VKBtVP4fZNY9bCo2jP63R9dphaW1vrq
-- GOR: 4 buys, 82.26 SOL, classes={'normal': 4}, mcap=$450159, pool=H66r4cb3LrvEZowN6eJZxMVbjrzxmRzPRT7Z6aMEXunb
-- BOXABL: 9 buys, 80.00 SOL, classes={'normal': 8, 'freshish': 1}, mcap=$406710, pool=9shHp1YwJQ2Jb4dUp2upv96txAyCbdjKCssqD8THQhxt
-- RAGEGUY: 14 buys, 59.89 SOL, classes={'normal': 13, 'freshish': 1}, mcap=$681203, pool=6gTQBJBV7DUQUGfsQoxzqi8Kgpa5ymF5riquo1k9sXoe
-- ECASH: 7 buys, 57.89 SOL, classes={'normal': 7}, mcap=$410572, pool=EtiNcFxdVVSuphoS44JvcVQCb74vgqqT56PzWm3L678x
-- PsyopAnime: 6 buys, 41.73 SOL, classes={'normal': 6}, mcap=$713577, pool=FpyosQzp5ijfrxqqBVNm67rfam7VsbVNAm7PUf8Yvt1c
-- XPT : 5 buys, 41.66 SOL, classes={'normal': 5}, mcap=$1364658, pool=E7AAB5spEZRTa8Rj2nawtPVGWvXGg3DVNXGfE9bSkpmk
-- DEXTER: 11 buys, 34.07 SOL, classes={'normal': 11}, mcap=$486238, pool=Csqt5aXbzLcSd13DpY6AYLtRKcU5q1NztAPaM67eLxRo
-- CHANCE: 10 buys, 32.38 SOL, classes={'normal': 10}, mcap=$738986, pool=2cz2GC3UkwKaFomL8uHAcSgRW6gLHBDx5viRMPVykics
-- HeavyPulp: 10 buys, 32.37 SOL, classes={'normal': 10}, mcap=$1625323, pool=3LHYwhm61rVwPxHJwnkV7zB7tmknAoa6scHXX4nCZfQY
-- drooling: 7 buys, 32.04 SOL, classes={'normal': 7}, mcap=$404546, pool=2mQYy3LfJCnauyfufYnLGtLCXmb6M2shXQGV2mHx7Mpy
-- RAGE: 11 buys, 26.10 SOL, classes={'normal': 9, 'low_tx': 2}, mcap=$114036, pool=4XUUrG5a7vHpotaAhF5fm9YCPpBcWDnjSmmYU61Sh6qR
-- MESA: 8 buys, 23.84 SOL, classes={'normal': 7, 'low_tx': 1}, mcap=$118465, pool=ACHCmd3pHfkYPzkHsxi5zvxg9ZQA3YZ5tFB8L27Ne5ZV
-- BLOXX: 5 buys, 18.17 SOL, classes={'freshish': 1, 'normal': 4}, mcap=$209024, pool=5hUhovgEDZRLEFT7Dvqg7ctfQo221BJ5obEn3EgtBGmX
-- SPARK: 7 buys, 17.88 SOL, classes={'normal': 7}, mcap=$158639, pool=3mgxf9VVDd82E75bovuAJPS1wYmJoZCAo4MB6zpQDjnv
-- BioLLM: 7 buys, 13.86 SOL, classes={'normal': 7}, mcap=$840755, pool=PkwihQgfvHaM7B1Ezvq3Hj6hBx2raj1L1ZiyC8Gs6me
-- SQUIRE: 3 buys, 13.55 SOL, classes={'normal': 3}, mcap=$949334, pool=4CPVihvjKUUsXq3HFrS8wniUKffbpDqz2h6jHKjeXoYD
-- NEURIX: 4 buys, 11.05 SOL, classes={'low_tx': 1, 'normal': 3}, mcap=$234426, pool=hkYzqzZFiD2KtR1PPvtFcE7xDYDf19qYvWoWbC6cfvC
-- WhiteWhale: 3 buys, 8.01 SOL, classes={'normal': 3}, mcap=$1210315, pool=4qxSqMh6iEdbdvtMp8r5MK2psAGKNk57PfGeVo2VhczQ
-- Aliens: 1 buys, 1.37 SOL, classes={'normal': 1}, mcap=$244967, pool=7nVP4qykvMpEuhobyrzCn1TQiz7K8PMK5UXQeeBrZyh
-- $FAAV: 1 buys, 0.85 SOL, classes={'normal': 1}, mcap=$326707, pool=F3bP8pe11LB9Cnf3FPd7M8SEVVeiV5nddWm6JsPnRe3d
+- YAJUCoin: 28 buys, 115.36 SOL, classes={'normal': 25, 'freshish': 2, 'low_tx': 1}, mcap=$492399, pool=3hRYvwMVQr25ytA2p8XetPmtbX44ux2NrpajJKhnxcBZ
+- Punch: 14 buys, 88.36 SOL, classes={'normal': 14}, mcap=$700162, pool=A6KHMiFzn9AM7VKBtVP4fZNY9bCo2jP63R9dphaW1vrq
+- traindog: 9 buys, 87.19 SOL, classes={'normal': 9}, mcap=$559429, pool=rG3bs2yMYgptgyvfnmvBdLBjwizY9HCDDVQGpxuyoUx
+- Osiris: 9 buys, 55.51 SOL, classes={'normal': 9}, mcap=$150266, pool=G3rchnZ2WLsBDZSrVME4fTyzFP57F3yvvqWMxAy2b4ce
+- Brötchen: 8 buys, 54.38 SOL, classes={'low_tx': 3, 'normal': 5}, mcap=$673270, pool=74hJkM2dqyvJ9koQtW4Jbs1ujK7uzKhxYTJMBxKfcjLk
+- Chiikawa: 8 buys, 42.95 SOL, classes={'normal': 8}, mcap=$698406, pool=EY75tsmUY7GnB3noq7pdcjg8GxCzTHou6h6XjwcCFVh3
+- SIMD: 5 buys, 28.30 SOL, classes={'freshish': 1, 'normal': 4}, mcap=$232245, pool=EozBrsBqcmuNuZNFxiugHbrPxaq6g8jW1Hr3XHWsBcMp
+- TOLYBOT: 10 buys, 26.23 SOL, classes={'normal': 9, 'freshish': 1}, mcap=$101874, pool=EH5FYz1qcRhrs6VivDNfYjaxuN76HZc1oNWK6AHW43KL
+- $PRINT: 14 buys, 23.22 SOL, classes={'normal': 14}, mcap=$775770, pool=91FPaXonom2yWwK6t4AWxKJ8gexh6AV6tLji41HFt8FB
+- Mirumi: 10 buys, 21.23 SOL, classes={'normal': 10}, mcap=$129850, pool=A1RWbpHPwuYtM2cCPq8E4scDXeyYfUfy5JiKyrHMQ696
+- LARP: 6 buys, 19.25 SOL, classes={'normal': 6}, mcap=$203898, pool=2YTdAkr7YxyWZk5GmU3ihhVzYYR8xj8fRRNReJukHe6N
+- Hobbes: 9 buys, 16.51 SOL, classes={'normal': 9}, mcap=$100131, pool=55HjYFDTgkP2dMJ7AzykXoP3FgrnW9DyQewWQ3Sg7Qdo
+- HermesWorld: 6 buys, 14.31 SOL, classes={'normal': 5, 'low_tx': 1}, mcap=$124139, pool=BGXR3rhzmq215fNeunCtzrfar6NYEC3KPnGFUC9LmG7h
+- POCK: 2 buys, 11.46 SOL, classes={'normal': 2}, mcap=$2515656, pool=KmZEaV28iXohQNMzVuLce1Z82caaeXFL8V1wuSN7ZXN
+- drooling: 2 buys, 10.31 SOL, classes={'normal': 2}, mcap=$609049, pool=2mQYy3LfJCnauyfufYnLGtLCXmb6M2shXQGV2mHx7Mpy
+- Magpie: 2 buys, 7.07 SOL, classes={'freshish': 1, 'low_tx': 1}, mcap=$133394, pool=9QPMfSvFMutRxr9F6cDw9jWSyV6hNdosbNEnRqUQ1uQK
+- crypto: 1 buys, 2.98 SOL, classes={'normal': 1}, mcap=$1195098, pool=4yFioXwUAiVqUN6c9VRiz8aM6zUA4eoB52Nv4Git1bAx
+- APE: 1 buys, 0.99 SOL, classes={'normal': 1}, mcap=$123706, pool=GiV7bAkQ6dipyPd5rFuoQeLLBJCNrRwP57dETVe6ourc
