@@ -11,10 +11,10 @@ onchain work:
 - keep only migrated pump.fun ecosystem pools by default: `pumpfun-amm`, `pumpswap`;
 - retain a rolling registry of known pools and refresh it through free market APIs, so discovery is not limited to current trending pages;
 - rotate scan capacity between high-activity pools and pools that have gone longest without an onchain check;
-- use dRPC first for standard RPC work such as signature probes, transaction
-  details, token supply, and wallet balances;
-- use Alchemy first for paginated full address history, with Helius as the
-  enhanced-history fallback;
+- use Chainstack first for recent signature probes, transaction details, and
+  token supply;
+- use Alchemy for paginated full address history and wallet balances, with
+  Helius as the enhanced-history fallback;
 - read the newest transaction tail first, then advance a separate bounded
   launch backfill only when it still fits the retained signal window;
 - parse swaps;
@@ -31,8 +31,7 @@ Create `.env` in the repository root or inside `solana-radar/`:
 ```bash
 HELIUS_API_KEY=...
 ALCHEMY_SOLANA_RPC_URL=...
-DRPC_SOLANA_RPC_URL=...
-SOLANA_TRACKER_API_KEY=...
+CHAINSTACK_SOLANA_RPC_URL=...
 GMGN_API_KEY=...
 BRIGHTDATA_API_KEY=...
 ```
@@ -120,19 +119,19 @@ Recommended production GitHub Actions secrets:
 ```bash
 HELIUS_API_KEY
 ALCHEMY_SOLANA_RPC_URL
-DRPC_SOLANA_RPC_URL
-SOLANA_TRACKER_API_KEY
+CHAINSTACK_SOLANA_RPC_URL
 GMGN_API_KEY
 BRIGHTDATA_API_KEY
 ```
 
 At least one Solana RPC provider is required. For the intended production
 layout, configure all three. `ALCHEMY_SOLANA_RPC_URL` and
-`DRPC_SOLANA_RPC_URL` should contain the complete HTTPS endpoints copied from
-their dashboards. `ALCHEMY_API_KEY` and `DRPC_API_KEY` are also supported as
-alternatives, but complete endpoint URLs are preferred.
+`CHAINSTACK_SOLANA_RPC_URL` should contain the complete HTTPS endpoints copied
+from their dashboards. `ALCHEMY_API_KEY` is also supported as an alternative to
+the full Alchemy endpoint, but complete endpoint URLs are preferred.
 
-`GMGN_API_KEY` is optional but recommended for Pump.fun trending discovery.
+`GMGN_API_KEY` is strongly recommended. It supplies migrated Pump.fun Trenches,
+multi-window trending discovery, token metadata, and ATH market cap/date.
 `BRIGHTDATA_API_KEY` can be empty if social enrichment should be disabled.
 
 The production dashboard uses the versioned GitHub Pages snapshot directly.
@@ -171,7 +170,7 @@ Lanes:
 - `micro_sticky`: `3h-7d`, `$10k-$50k mcap`, `liq >=3k`, low-cap migrated pump.fun tokens with strict sticky buyer supply and net-buy retention. This is the TinyWorld-before-$50k catch lane.
 - `cheap_sticky`: `12h-10d`, `$50k-$250k mcap`, `liq >=10k`, cheap migrated pump.fun tokens with stronger sticky buyer supply before repricing.
 - `breakout`: `3d-30d`, `5m-25m mcap`, `liq >=50k`, `1h vol >=100k`, momentum/anomaly expansion.
-- `reactivation`: `30d+`, `100k-5m mcap`, `liq >=10k`, current mcap `<=40%` of Solana Tracker ATH, low-volume old-token reactivation.
+- `reactivation`: `30d+`, `100k-5m mcap`, `liq >=10k`, current mcap `<=40%` of GMGN ATH, low-volume old-token reactivation.
 
 Retired filters: `incubation` and `young` are no longer scanned or shown as active dashboard filters because they produced too much noise relative to useful catches. The new sticky lanes replace them with a narrower market prefilter plus a balance-retention check: low_tx/freshish buyers only become a dashboard signal when current buyer balances still hold meaningful supply.
 
@@ -189,22 +188,22 @@ pools are excluded before onchain analysis.
 
 ## Notes
 
-The free market-universe sources are not exhaustive. They are good enough for a
-starter radar, but a full "all Solana tokens from 100k to 1m market cap"
-universe needs a market data API such as Solana Tracker Data API.
+The market universe is intentionally composite. GMGN Trenches supplies completed
+Pump.fun launches, GMGN Trending covers `1m`, `5m`, `1h`, `6h`, and `24h`
+activity, the persistent registry keeps older candidates visible, and
+DexScreener/GeckoTerminal refresh pool market data. No single trending endpoint
+is treated as a complete market census.
 
-When `SOLANA_TRACKER_API_KEY` is present, the scanner uses Solana Tracker
-`/search` as the primary universe source and keeps DexScreener/GeckoTerminal as
-fallback discovery.
-
-When `GMGN_API_KEY` is present, the scanner also pulls GMGN Solana trending
-tokens for Pump.fun over `1m`, `5m`, and `1h` windows, resolves them through
-DexScreener into pool addresses, and then applies the same local filters and
-routed onchain analysis.
+GMGN token info supplies ATH market cap. The scanner locates its timestamp with
+a bounded `1d -> 1h -> 5m` K-line search. Reactivation filtering first reads only
+the ATH value; the more expensive timestamp lookup is limited to dashboard
+enrichment candidates.
 
 Onchain buy extraction routes each method to the provider that fits it best.
-dRPC is first for standard Solana JSON-RPC calls. Alchemy is first for
-`getTransactionsForAddress` in full/jsonParsed mode, and Helius is its fallback.
+Chainstack is first for recent standard Solana JSON-RPC calls. Alchemy is first
+for `getTransactionsForAddress` in full/jsonParsed mode and for token-account
+balances, while Helius is its fallback. Chainstack is skipped for
+`getTokenAccountsByOwner`, which is not available on its free Developer plan.
 Pagination cursors are pinned to the provider that created them. If that
 provider fails mid-window, the scanner restarts the same bounded time range on
 the next enhanced provider and deduplicates by signature, so it never reuses an
@@ -212,10 +211,10 @@ Alchemy cursor on Helius or vice versa. If every enhanced-history provider is
 unavailable, the scanner falls back to standard signatures plus transaction
 details.
 
-Alchemy requests are paced at 220 ms by default and use exponential retries.
-`getSignaturesForAddress` has a stricter one-second interval because Alchemy
-applies a tighter live limit to that method. This keeps fast history pagination
-below the Free-tier throughput without changing the hourly scan schedule.
+Alchemy requests are paced at 450 ms by default and use exponential retries.
+`getSignaturesForAddress` has a stricter 1.5-second interval when it falls back
+to Alchemy. Chainstack is paced at 220 ms to stay below its Developer-plan
+five-request-per-second limit without changing the hourly scan schedule.
 
 Each hourly run checks the newest edge of the market first, with a rolling
 overlap that feeds the retained swap buffer. A shallow probe is evaluated

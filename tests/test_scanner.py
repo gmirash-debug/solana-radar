@@ -206,21 +206,24 @@ class ScannerCoreTests(unittest.TestCase):
         sleep.assert_called_once()
         self.assertAlmostEqual(sleep.call_args.args[0], 0.8)
 
-    def test_standard_rpc_prefers_drpc_and_falls_back_to_alchemy(self):
-        drpc = scanner.DrpcRpc("https://drpc.invalid", max_retries=0)
+    def test_standard_rpc_prefers_chainstack_and_falls_back_to_alchemy(self):
+        chainstack = scanner.ChainstackRpc(
+            "https://chainstack.invalid",
+            max_retries=0,
+        )
         alchemy = scanner.AlchemyRpc("https://alchemy.invalid", max_retries=0)
-        drpc.session.post = mock.Mock(
+        chainstack.session.post = mock.Mock(
             return_value=rpc_response(
-                status_code=429,
-                text="rate limit reached",
+                status_code=402,
+                text="quota reached",
             )
         )
         alchemy.session.post = mock.Mock(
             return_value=rpc_response([{"signature": "sig"}])
         )
         rpc = scanner.RoutedSolanaRpc(
-            [drpc, alchemy],
-            standard_order=["drpc", "alchemy"],
+            [chainstack, alchemy],
+            standard_order=["chainstack", "alchemy"],
             enhanced_order=["alchemy"],
         )
 
@@ -228,19 +231,45 @@ class ScannerCoreTests(unittest.TestCase):
 
         self.assertEqual(result[0]["signature"], "sig")
         self.assertEqual(rpc.last_provider_by_method["getSignaturesForAddress"], "alchemy")
-        self.assertIn("drpc", rpc.blocked_providers)
+        self.assertIn("chainstack", rpc.blocked_providers)
         self.assertEqual(rpc.route_failovers["getSignaturesForAddress"], 1)
 
-    def test_enhanced_history_prefers_alchemy_without_touching_drpc(self):
-        drpc = scanner.DrpcRpc("https://drpc.invalid", max_retries=0)
+    def test_single_chainstack_rate_limit_does_not_block_provider_for_run(self):
+        chainstack = scanner.ChainstackRpc(
+            "https://chainstack.invalid",
+            max_retries=0,
+            circuit_failure_threshold=3,
+        )
+        alchemy = scanner.AlchemyRpc("https://alchemy.invalid", max_retries=0)
+        chainstack.session.post = mock.Mock(
+            return_value=rpc_response(status_code=429, text="rate limit reached")
+        )
+        alchemy.session.post = mock.Mock(
+            return_value=rpc_response([{"signature": "sig"}])
+        )
+        rpc = scanner.RoutedSolanaRpc(
+            [chainstack, alchemy],
+            standard_order=["chainstack", "alchemy"],
+            enhanced_order=["alchemy"],
+        )
+
+        self.assertEqual(rpc.signatures_for_address("pool", limit=1)[0]["signature"], "sig")
+        self.assertNotIn("chainstack", rpc.blocked_providers)
+        self.assertIsNone(chainstack.circuit_open_reason)
+
+    def test_enhanced_history_prefers_alchemy_without_touching_chainstack(self):
+        chainstack = scanner.ChainstackRpc(
+            "https://chainstack.invalid",
+            max_retries=0,
+        )
         alchemy = scanner.AlchemyRpc("https://alchemy.invalid", max_retries=0)
         helius = scanner.HeliusRpc("secret-key", max_retries=0)
         alchemy.session.post = mock.Mock(
             return_value=rpc_response({"data": [], "paginationToken": None})
         )
         rpc = scanner.RoutedSolanaRpc(
-            [drpc, alchemy, helius],
-            standard_order=["drpc", "alchemy", "helius"],
+            [chainstack, alchemy, helius],
+            standard_order=["chainstack", "alchemy", "helius"],
             enhanced_order=["alchemy", "helius"],
         )
 
@@ -248,8 +277,73 @@ class ScannerCoreTests(unittest.TestCase):
 
         self.assertEqual(result["_provider"], "alchemy")
         self.assertEqual(alchemy.session.post.call_count, 1)
-        self.assertEqual(sum(drpc.calls.values()), 0)
+        self.assertEqual(sum(chainstack.calls.values()), 0)
         self.assertEqual(sum(helius.calls.values()), 0)
+
+    def test_token_balance_skips_unsupported_chainstack_method(self):
+        chainstack = scanner.ChainstackRpc(
+            "https://chainstack.invalid",
+            max_retries=0,
+        )
+        alchemy = scanner.AlchemyRpc("https://alchemy.invalid", max_retries=0)
+        alchemy.session.post = mock.Mock(
+            return_value=rpc_response({"value": []})
+        )
+        rpc = scanner.RoutedSolanaRpc(
+            [chainstack, alchemy],
+            standard_order=["chainstack", "alchemy"],
+            enhanced_order=["alchemy"],
+            balance_order=["alchemy", "chainstack"],
+        )
+
+        self.assertEqual(rpc.token_balance("owner", "mint"), 0.0)
+        self.assertEqual(sum(chainstack.calls.values()), 0)
+        self.assertEqual(alchemy.calls["getTokenAccountsByOwner"], 1)
+
+    def test_gmgn_trenches_pool_normalization(self):
+        pool = scanner.gmgn_pool_from_trenches_item(
+            {
+                "address": "7bK4jRMa3aY85wJMQEQqWsmY9mmrRT32AFWZ23cBpump",
+                "pool_address": "HXFDxwervt35vNJq91y57P8vzfpocK3Qm8dC8kmBLwiH",
+                "name": "Tiny World Builder",
+                "symbol": "TinyWorld",
+                "exchange": "pump_amm",
+                "usd_market_cap": 41_000,
+                "liquidity": 20_000,
+                "volume_1h": 2_500,
+                "volume_24h": 30_000,
+                "swaps_1h": 45,
+                "total_supply": 1_000_000_000,
+                "created_timestamp": 1_779_267_918,
+            }
+        )
+
+        self.assertEqual(pool.dex, "pumpfun-amm")
+        self.assertEqual(pool.source, "gmgn_trenches")
+        self.assertEqual(pool.mcap_usd, 41_000)
+        self.assertAlmostEqual(pool.price_usd, 0.000041)
+        self.assertEqual(pool.txns_1h, 45)
+
+    def test_apply_gmgn_ath_marks_timestamp_pending_without_losing_mcap(self):
+        entry = {
+            "ath_source": "solana_tracker",
+            "ath_mcap_at": "2026-05-10T10:43:00Z",
+        }
+        scanner.apply_gmgn_ath(
+            entry,
+            {
+                "highest_market_cap": 1_270_134,
+                "highest_price": 0.00127,
+                "pool_id": "pool",
+            },
+            "2026-07-29T12:00:00Z",
+        )
+
+        self.assertEqual(entry["ath_source"], "gmgn")
+        self.assertEqual(entry["ath_status"], "partial")
+        self.assertEqual(entry["ath_mcap_usd"], 1_270_134)
+        self.assertNotIn("ath_mcap_at", entry)
+
 
     def test_retention_only_attributes_tokens_bought_in_wave(self):
         result = scanner.attributed_wave_retention(

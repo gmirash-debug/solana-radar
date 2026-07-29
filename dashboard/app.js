@@ -171,7 +171,7 @@ const TIER_META = {
 
 const TOKEN_MARKET_CONTEXT = {
   HANTAYLiPiQ8d8dkJizcL8gJQHWBKF5ZeL1neeLqwbzc: {
-    source: "Solana Tracker chart",
+    source: "historical chart snapshot",
     launchStartMcapUsd: 2_456,
     launchHighMcapUsd: 394_916,
     day2LowMcapUsd: 91_648,
@@ -475,6 +475,7 @@ function socialLabel(value, reason = "") {
 }
 
 function athSourceLabel(source) {
+  if (source === "gmgn") return "GMGN";
   if (source === "solana_tracker") return "Solana Tracker";
   if (source === "ohlcv_high") return "OHLCV high";
   return "ATH missing";
@@ -482,10 +483,11 @@ function athSourceLabel(source) {
 
 function athStatusLabel(status, error = "") {
   if (status === "ready") return "ready";
+  if (status === "partial") return "market cap ready, date pending";
   if (status === "missing_api_key") return "missing API key";
   if (status === "error") {
-    if (String(error).includes("403")) return "Solana Tracker 403";
-    if (String(error).includes("429")) return "Solana Tracker rate limited";
+    if (String(error).includes("403")) return "GMGN 403";
+    if (String(error).includes("429")) return "GMGN rate limited";
     return "ATH retry pending";
   }
   if (status === "unverified") return "ATH unverified";
@@ -1163,13 +1165,13 @@ function buildTokenSignals() {
         ? Math.max(0, (Date.now() - createdAt.getTime()) / 3_600_000)
         : null;
     token.tokenCreatedAt = createdAt ? createdAt.toISOString() : null;
-    const trustedAth = ["solana_tracker", "ohlcv_high"].includes(latestPool.ath_source) && Number(latestPool.ath_mcap_usd || 0) > 0;
+    const trustedAth = ["gmgn", "solana_tracker", "ohlcv_high"].includes(latestPool.ath_source) && Number(latestPool.ath_mcap_usd || 0) > 0;
     token.athMcapUsd = trustedAth ? Number(latestPool.ath_mcap_usd || 0) : null;
     token.athMcapAt = trustedAth ? latestPool.ath_mcap_at || null : null;
     token.athSource = trustedAth ? latestPool.ath_source : "missing";
-    token.athStatus = trustedAth ? "ready" : latestPool.ath_status || (latestPool.ath_error ? "error" : "pending");
+    token.athStatus = trustedAth ? latestPool.ath_status || "ready" : latestPool.ath_status || (latestPool.ath_error ? "error" : "pending");
     token.athError = latestPool.ath_error || "";
-    token.athLabel = "Solana Tracker ATH";
+    token.athLabel = trustedAth ? `${athSourceLabel(latestPool.ath_source)} ATH` : "GMGN ATH";
     token.scanMcapUsd = Number(latestPool.scan_mcap_usd || latestPool.latest_mcap_usd || latestObservation?.mcap_usd || token.currentMcap || token.firstMcap || 0);
     token.scanMcapAt = latestPool.scan_mcap_at || latestPool.latest_seen_at || latestObservation?.at || token.lastSignalAt || null;
     token.liquidityUsd = Number(latestPool.liquidity_usd || 0);
@@ -1510,12 +1512,12 @@ function renderStatus() {
   const healthReason = (scanHealth.reasons || []).join("; ")
     || (failed ? status.error : "")
     || "No scanner health diagnostics in this report";
-  const athProvider = report.stats?.solana_tracker_ath || {};
+  const athProvider = report.stats?.gmgn_ath || report.stats?.solana_tracker_ath || {};
   const rpcProviders = scanHealth.rpc_providers || report.stats?.rpc_providers || {};
-  const rpcProviderEntries = ["alchemy", "drpc", "helius"]
+  const rpcProviderEntries = ["chainstack", "alchemy", "helius"]
     .filter((name) => rpcProviders[name])
     .map((name) => [name, rpcProviders[name]]);
-  const rpcLabels = { alchemy: "Alchemy", drpc: "dRPC", helius: "Helius" };
+  const rpcLabels = { chainstack: "Chainstack", alchemy: "Alchemy", helius: "Helius" };
   const activeRpcProviders = rpcProviderEntries
     .filter(([, provider]) => ["active", "ready"].includes(provider.status))
     .map(([name]) => rpcLabels[name] || name);
@@ -1542,7 +1544,7 @@ function renderStatus() {
     `<span class="status-pill freshness-${healthTone}" title="${esc(healthReason)}"><span class="dot ${healthTone === "good" ? "" : healthTone}"></span>scan ${esc(healthStatus)}</span>`,
     activeRpcProviders.length ? `<span class="status-pill" title="${esc(rpcTitle)}">RPC ${esc(activeRpcProviders.join(" + "))}</span>` : "",
     blockedRpcProviders.length ? `<span class="status-pill freshness-warn" title="${esc(rpcTitle)}">${esc(blockedRpcProviders.join(" + "))} blocked</span>` : "",
-    athProvider.status && athProvider.status !== "ok" ? `<span class="status-pill freshness-bad" title="${esc(athProvider.error || "Solana Tracker unavailable")}">ATH source ${esc(athProvider.status)}</span>` : "",
+    athProvider.status && athProvider.status !== "ok" ? `<span class="status-pill freshness-bad" title="${esc(athProvider.error || "GMGN unavailable")}">ATH source ${esc(athProvider.status)}</span>` : "",
     `<span class="status-pill">lane ${esc(laneText)}</span>`,
     state.staticMode && state.hiddenTokenKeys.size ? `<button class="status-action" id="syncDeleted" type="button">Sync deleted</button>` : "",
     state.staticExtrasLoadingFor === report.generated_at ? `<span class="status-pill freshness-warn">loading history</span>` : "",
@@ -2239,7 +2241,7 @@ function renderTokenDetail(token) {
     : athStatusLabel(token.athStatus, token.athError);
   const athSub = token.athMcapUsd
     ? `${phase ? `${esc(phase.detail)} / ` : ""}${athSourceLabel(token.athSource)}`
-    : "Solana Tracker ATH not ready";
+    : "GMGN ATH not ready";
   const marketNowSub = [
     `${money(token.liquidityUsd)} liq`,
     token.scanMcapAt ? dateLabel(token.scanMcapAt) : "",
@@ -2276,7 +2278,7 @@ function renderTokenDetail(token) {
       <div class="decision-grid">
         ${detailMetric("Caught", `${esc(dateLabel(token.firstSignalAt))} / ${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)}`, `${pct(token.profitPct)} since caught`, "", pClass(token.profitPct))}
         ${detailMetric("Market now", `${moneyMaybe(token.scanMcapUsd || token.currentMcap)} mcap`, marketNowSub)}
-        ${detailMetric("Solana Tracker ATH", athValue, athSub, token.athMcapUsd ? "" : "bad")}
+        ${detailMetric(token.athLabel, athValue, athSub, token.athMcapUsd ? "" : "bad")}
         ${detailMetric("Noticed flow", sol(token.totalSuspiciousSol), `score ${esc(token.maxScore)} / ${esc(token.uniqueWallets)} wallets`)}
       </div>
       <div class="detail-tabs" role="tablist" aria-label="Token research sections">
