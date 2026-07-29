@@ -1,7 +1,39 @@
 {
-  "error": null,
-  "last_attempt_at": "2026-07-27T18:09:19.628383Z",
+  "error": "unhealthy scan rejected: only 2/55 candidate pools were scanned; pool failure ratio 100% exceeds 25%",
+  "last_attempt_at": "2026-07-29T19:02:08.556624Z",
   "last_success_at": "2026-07-27T18:09:19.628383Z",
-  "scan_health": {},
-  "status": "ok"
+  "scan_health": {
+    "active_live_fetch_pools": 0,
+    "backfill_pending_pools": 0,
+    "candidate_buys": 0,
+    "candidate_pools": 55,
+    "classification_errors": 0,
+    "classified_buys": 0,
+    "failed_pools": 2,
+    "failed_ratio": 1.0,
+    "history_gap_pools": 0,
+    "history_gap_ratio": 0.0,
+    "live_fetch_pools": 0,
+    "parsed_swaps": 0,
+    "partial_live_ratio": 0.0,
+    "partial_live_windows": 0,
+    "reasons": [
+      "only 2/55 candidate pools were scanned",
+      "pool failure ratio 100% exceeds 25%"
+    ],
+    "scan_error_categories": {
+      "helius_rate_limit": 2
+    },
+    "scanned_pools": 2,
+    "solana_tracker_status": "error",
+    "stale_live_pools": 0,
+    "stale_live_ratio": 0.0,
+    "status": "unhealthy",
+    "transactions_scanned": 0,
+    "truncated_pools": 0,
+    "truncated_ratio": 0.0,
+    "zero_parse_pools": 0,
+    "zero_parse_ratio": 0.0
+  },
+  "status": "failed"
 }
