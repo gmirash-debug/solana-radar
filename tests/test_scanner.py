@@ -162,6 +162,26 @@ class ScannerCoreTests(unittest.TestCase):
             10,
         )
 
+    def test_rpc_min_interval_paces_consecutive_calls(self):
+        rpc = scanner.AlchemyRpc(
+            "https://alchemy.invalid",
+            max_retries=0,
+            min_interval_seconds=0.25,
+        )
+        rpc.session.post = mock.Mock(
+            side_effect=[rpc_response("ok"), rpc_response("ok")]
+        )
+
+        with (
+            mock.patch.object(scanner.time, "monotonic", side_effect=[10.0, 10.1]),
+            mock.patch.object(scanner.time, "sleep") as sleep,
+        ):
+            self.assertEqual(rpc.call("getHealth"), "ok")
+            self.assertEqual(rpc.call("getHealth"), "ok")
+
+        sleep.assert_called_once()
+        self.assertAlmostEqual(sleep.call_args.args[0], 0.15)
+
     def test_standard_rpc_prefers_drpc_and_falls_back_to_alchemy(self):
         drpc = scanner.DrpcRpc("https://drpc.invalid", max_retries=0)
         alchemy = scanner.AlchemyRpc("https://alchemy.invalid", max_retries=0)

@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -403,6 +404,7 @@ class SolanaRpcProvider:
         retry_base_seconds=0.75,
         retry_max_seconds=120,
         circuit_failure_threshold=4,
+        min_interval_seconds=0,
     ):
         self.provider_name = str(provider_name)
         self.url = str(url)
@@ -421,6 +423,9 @@ class SolanaRpcProvider:
         self.retry_base_seconds = max(0.0, float(retry_base_seconds))
         self.retry_max_seconds = max(0.1, float(retry_max_seconds))
         self.circuit_failure_threshold = max(2, int(circuit_failure_threshold))
+        self.min_interval_seconds = max(0.0, float(min_interval_seconds))
+        self.last_request_started_at = None
+        self.rate_limit_lock = threading.Lock()
         self.consecutive_failures = 0
         self.failures = Counter()
         self.last_error = None
@@ -435,6 +440,20 @@ class SolanaRpcProvider:
     def retry_delay(self, attempt, retry_after=None):
         delay = retry_after or self.retry_base_seconds * (2**attempt)
         return min(self.retry_max_seconds, max(0.1, float(delay)))
+
+    def wait_for_rate_slot(self):
+        if self.min_interval_seconds <= 0:
+            return
+        with self.rate_limit_lock:
+            now = time.monotonic()
+            if self.last_request_started_at is not None:
+                wait_seconds = (
+                    self.last_request_started_at + self.min_interval_seconds - now
+                )
+                if wait_seconds > 0:
+                    time.sleep(wait_seconds)
+                    now += wait_seconds
+            self.last_request_started_at = now
 
     def credit_cost(self, method, result):
         if self.credit_model == "helius":
@@ -510,6 +529,7 @@ class SolanaRpcProvider:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []}
         retryable_statuses = {429, 500, 502, 503, 504}
         for attempt in range(self.max_retries + 1):
+            self.wait_for_rate_slot()
             self.calls[method] += 1
             try:
                 response = self.session.post(self.url, json=payload, timeout=self.request_timeout(timeout))
@@ -690,6 +710,7 @@ class HeliusRpc(SolanaRpcProvider):
         retry_base_seconds=0.75,
         retry_max_seconds=120,
         circuit_failure_threshold=4,
+        min_interval_seconds=0,
     ):
         super().__init__(
             "helius",
@@ -702,6 +723,7 @@ class HeliusRpc(SolanaRpcProvider):
             retry_base_seconds=retry_base_seconds,
             retry_max_seconds=retry_max_seconds,
             circuit_failure_threshold=circuit_failure_threshold,
+            min_interval_seconds=min_interval_seconds,
         )
 
 
@@ -1067,15 +1089,18 @@ def build_rpc_router(config):
                 transactions_timeout_seconds=int(
                     config.get("alchemy_transactions_timeout_seconds", 35)
                 ),
-                max_retries=int(config.get("alchemy_rpc_max_retries", 1)),
+                max_retries=int(config.get("alchemy_rpc_max_retries", 3)),
                 retry_base_seconds=float(
-                    config.get("alchemy_rpc_retry_base_seconds", 0.5)
+                    config.get("alchemy_rpc_retry_base_seconds", 1)
                 ),
                 retry_max_seconds=float(
                     config.get("alchemy_rpc_retry_max_seconds", 30)
                 ),
                 circuit_failure_threshold=int(
                     config.get("alchemy_rpc_circuit_failure_threshold", 2)
+                ),
+                min_interval_seconds=float(
+                    config.get("alchemy_rpc_min_interval_seconds", 0.22)
                 ),
             )
         )
@@ -1101,6 +1126,9 @@ def build_rpc_router(config):
                 ),
                 circuit_failure_threshold=int(
                     config.get("drpc_rpc_circuit_failure_threshold", 2)
+                ),
+                min_interval_seconds=float(
+                    config.get("drpc_rpc_min_interval_seconds", 0.05)
                 ),
             )
         )
