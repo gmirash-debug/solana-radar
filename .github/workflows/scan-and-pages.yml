@@ -233,6 +233,8 @@ jobs:
           ALCHEMY_SOLANA_RPC_URL: ${{ secrets.ALCHEMY_SOLANA_RPC_URL }}
           ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
           CHAINSTACK_SOLANA_RPC_URL: ${{ secrets.CHAINSTACK_SOLANA_RPC_URL }}
+          DRPC_SOLANA_RPC_URL: ${{ secrets.DRPC_SOLANA_RPC_URL }}
+          PUBLICNODE_SOLANA_RPC_URL: https://solana-rpc.publicnode.com
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
           BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
           CONVEX_URL: https://basic-starfish-944.convex.cloud

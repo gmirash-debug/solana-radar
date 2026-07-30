@@ -11,8 +11,10 @@ onchain work:
 - keep only migrated pump.fun ecosystem pools by default: `pumpfun-amm`, `pumpswap`;
 - retain a rolling registry of known pools and refresh it through free market APIs, so discovery is not limited to current trending pages;
 - rotate scan capacity between high-activity pools and pools that have gone longest without an onchain check;
-- use Chainstack first for recent signature probes, transaction details, and
-  token supply;
+- use Chainstack first for recent transaction details and token supply;
+- use PublicNode for address signatures and token balances, and as the no-key
+  standard-history fallback; use dRPC ahead of it when Solana is enabled on the
+  configured dRPC plan;
 - use Alchemy for paginated full address history and wallet balances, with
   Helius as the enhanced-history fallback;
 - read the newest transaction tail first, then advance a separate bounded
@@ -32,6 +34,8 @@ Create `.env` in the repository root or inside `solana-radar/`:
 HELIUS_API_KEY=...
 ALCHEMY_SOLANA_RPC_URL=...
 CHAINSTACK_SOLANA_RPC_URL=...
+DRPC_SOLANA_RPC_URL=...
+PUBLICNODE_SOLANA_RPC_URL=https://solana-rpc.publicnode.com
 GMGN_API_KEY=...
 BRIGHTDATA_API_KEY=...
 ```
@@ -116,10 +120,11 @@ BRIGHTDATA_API_KEY
 ```
 
 At least one Solana RPC provider is required. For the intended production
-layout, configure all three. `ALCHEMY_SOLANA_RPC_URL` and
-`CHAINSTACK_SOLANA_RPC_URL` should contain the complete HTTPS endpoints copied
-from their dashboards. `ALCHEMY_API_KEY` is also supported as an alternative to
-the full Alchemy endpoint, but complete endpoint URLs are preferred.
+layout, configure Helius, Alchemy, and Chainstack, then keep PublicNode as the
+no-key standard fallback. `DRPC_SOLANA_RPC_URL` is optional and is used ahead of
+PublicNode only when Solana access is enabled on that dRPC plan. Complete
+Alchemy/Chainstack/dRPC endpoint URLs are preferred; `ALCHEMY_API_KEY` is also
+supported as an alternative to the full Alchemy endpoint.
 
 `GMGN_API_KEY` is strongly recommended. It supplies migrated Pump.fun Trenches,
 multi-window trending discovery, token metadata, and ATH market cap/date.
@@ -172,6 +177,8 @@ RPC roles and safeguards:
 
 - Alchemy: enhanced paginated address history.
 - Chainstack: standard transaction and supply calls.
+- dRPC: optional signatures/balance fallback when its plan permits Solana.
+- PublicNode: no-key signatures, balances, and standard-history fallback.
 - Helius: fallback and health coverage.
 - Each provider has a per-scan credit budget. The router fails over before the
   configured budget is exceeded and reports per-method p50/p95 latency.
@@ -222,8 +229,10 @@ limited to dashboard enrichment candidates.
 Onchain buy extraction routes each method to the provider that fits it best.
 Chainstack is first for recent transaction details, token supply, and health
 checks. Alchemy is first for `getTransactionsForAddress` in full/jsonParsed
-mode, `getSignaturesForAddress`, and token-account balances, while Helius is its
-fallback. Chainstack is skipped for `getSignaturesForAddress` and
+mode, while Helius is its enhanced fallback. dRPC, when configured, and then
+PublicNode handle `getSignaturesForAddress` and token-account balances before
+Alchemy, preserving Alchemy credits for paginated history. Chainstack is
+skipped for `getSignaturesForAddress` and
 `getTokenAccountsByOwner`, which are not available on its free Developer plan.
 Pagination cursors are pinned to the provider that created them. If that
 provider fails mid-window, the scanner restarts the same bounded time range on

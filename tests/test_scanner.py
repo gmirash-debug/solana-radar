@@ -162,6 +162,67 @@ class ScannerCoreTests(unittest.TestCase):
             10,
         )
 
+    def test_drpc_uses_flat_solana_compute_unit_cost(self):
+        rpc = scanner.DrpcRpc(
+            "https://drpc.invalid",
+            max_retries=0,
+            credit_budget=40,
+        )
+
+        self.assertEqual(rpc.credit_cost("getHealth", None), 0)
+        self.assertEqual(rpc.credit_cost("getSignaturesForAddress", None), 20)
+        self.assertEqual(rpc.credit_cost("getTransaction", None), 20)
+        self.assertTrue(rpc.can_call("getTransaction"))
+        rpc.estimated_credits = 40
+        self.assertFalse(rpc.can_call("getTransaction"))
+
+    def test_rpc_uses_standard_history_after_enhanced_budget_is_spent(self):
+        alchemy = scanner.AlchemyRpc(
+            "https://alchemy.invalid",
+            max_retries=0,
+            credit_budget=100,
+        )
+        alchemy.estimated_credits = 100
+        drpc = scanner.DrpcRpc(
+            "https://drpc.invalid",
+            max_retries=0,
+            credit_budget=100,
+        )
+        rpc = scanner.RoutedSolanaRpc(
+            [alchemy, drpc],
+            standard_order=["drpc", "alchemy"],
+            enhanced_order=["alchemy"],
+        )
+
+        self.assertEqual(rpc.available_history_mode(), "standard")
+        drpc.estimated_credits = 100
+        self.assertIsNone(rpc.available_history_mode())
+
+    def test_build_rpc_router_accepts_drpc_api_key(self):
+        with mock.patch.dict(
+            scanner.os.environ,
+            {"DRPC_API_KEY": "test-key"},
+            clear=True,
+        ):
+            rpc = scanner.build_rpc_router({})
+
+        self.assertEqual(list(rpc.providers), ["drpc"])
+        self.assertEqual(
+            rpc.providers["drpc"].url,
+            "https://lb.drpc.live/solana/test-key",
+        )
+
+    def test_build_rpc_router_accepts_publicnode_fallback(self):
+        with mock.patch.dict(
+            scanner.os.environ,
+            {"PUBLICNODE_SOLANA_RPC_URL": "https://solana-rpc.publicnode.com"},
+            clear=True,
+        ):
+            rpc = scanner.build_rpc_router({})
+
+        self.assertEqual(list(rpc.providers), ["publicnode"])
+        self.assertEqual(rpc.available_history_mode(), "standard")
+
     def test_rpc_min_interval_paces_consecutive_calls(self):
         rpc = scanner.AlchemyRpc(
             "https://alchemy.invalid",
@@ -807,6 +868,24 @@ class ScannerCoreTests(unittest.TestCase):
             {"scan_health_min_scanned_pools": 5, "scan_health_max_failed_ratio": 0.25},
         )
         self.assertEqual(health["status"], "unhealthy")
+
+    def test_scan_health_marks_rpc_budget_deferral_as_degraded(self):
+        health = scanner.build_scan_health(
+            [
+                {"transactions_scanned": 1, "parsed_swaps": 1}
+                for _ in range(5)
+            ],
+            {
+                "reactivation": {
+                    "universe_pools": 10,
+                    "selection": {"rpc_budget_deferred": 2},
+                }
+            },
+            {"scan_health_min_scanned_pools": 5},
+        )
+
+        self.assertEqual(health["status"], "degraded")
+        self.assertEqual(health["rpc_budget_deferred_pools"], 2)
 
     def test_activity_probe_skips_unchanged_pool(self):
         changed, details = scanner.pool_has_new_activity(
