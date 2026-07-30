@@ -45,10 +45,13 @@
             <label class="field-control">
               <span class="visually-hidden">Signal tier</span>
               <select id="tierFilter" aria-label="Signal tier">
-              <option value="focus">actionable + hot + watch</option>
+              <option value="focus">active signals + tracked theses</option>
               <option value="actionable">actionable only</option>
               <option value="hot_reactivation">hot reactivation</option>
               <option value="watch">watch only</option>
+              <option value="holding">thesis intact</option>
+              <option value="weakening">weakening</option>
+              <option value="recheck_due">recheck due</option>
               <option value="late_chase">late/chase</option>
               <option value="noise">noise</option>
               <option value="inactive">inactive</option>
@@ -82,7 +85,7 @@
       <section id="content" class="content"></section>
     </main>
 
-    <script src="config.js?v=20260730-reactivation-1"></script>
-    <script src="app.js?v=20260730-reactivation-1"></script>
+    <script src="config.js?v=20260730-thesis-lifecycle-2"></script>
+    <script src="app.js?v=20260730-thesis-lifecycle-2"></script>
   </body>
 </html>

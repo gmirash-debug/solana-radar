@@ -135,11 +135,29 @@ const TIER_META = {
     rank: 3,
     summary: "real signal, but needs confirmation or cleaner market setup",
   },
+  holding: {
+    label: "Thesis intact",
+    tone: "good",
+    rank: 3.5,
+    summary: "the original buyer cohort still retains the accumulated tokens",
+  },
+  weakening: {
+    label: "Weakening",
+    tone: "warn",
+    rank: 2.5,
+    summary: "the original buyer cohort is reducing its retained position",
+  },
   late_chase: {
     label: "Late/chase",
     tone: "bad",
     rank: 2,
     summary: "signal exists but it appears after an extended move or crowded volume",
+  },
+  recheck_due: {
+    label: "Recheck due",
+    tone: "warn",
+    rank: 1.5,
+    summary: "the original buyer cohort has not been verified recently enough",
   },
   noise: {
     label: "Noise",
@@ -149,9 +167,9 @@ const TIER_META = {
   },
   inactive: {
     label: "Inactive",
-    tone: "",
+    tone: "bad",
     rank: 0,
-    summary: "historical signal is no longer confirmed by a fresh scanner pass",
+    summary: "the original accumulation thesis was invalidated by confirmed cohort distribution",
   },
 };
 
@@ -721,14 +739,12 @@ function bestTier(tiers = []) {
 function tierMatches(tier) {
   if (state.tier === "all") return true;
   if (state.tier === "focus") {
-    const reportAgeHours = reportFreshness(state.report?.generated_at).ageHours;
-    const scannerUnavailable = state.scanStatus?.status === "failed"
-      || reportAgeHours === null
-      || reportAgeHours > 2;
     return tier === "actionable"
       || tier === "hot_reactivation"
       || tier === "watch"
-      || (scannerUnavailable && tier === "inactive");
+      || tier === "holding"
+      || tier === "weakening"
+      || tier === "recheck_due";
   }
   return tier === state.tier;
 }
@@ -1030,6 +1046,21 @@ function callerPostKeys(caller = {}) {
 function buildTokenSignals() {
   const currentPools = currentPoolsByToken();
   const observationsByToken = poolObservationsByToken();
+  const signalTheses = (state.report?.signal_theses || [])
+    .filter((thesis) => thesis && typeof thesis === "object");
+  const thesesByKey = new Map();
+  signalTheses.forEach((thesis) => {
+    [thesis.token_address, thesis.pool_address].filter(Boolean).forEach((key) => {
+      const existing = thesesByKey.get(key);
+      const thesisTime = new Date(
+        thesis.updated_at || thesis.last_checked_at || thesis.signal_at || 0,
+      ).getTime();
+      const existingTime = new Date(
+        existing?.updated_at || existing?.last_checked_at || existing?.signal_at || 0,
+      ).getTime();
+      if (!existing || thesisTime >= existingTime) thesesByKey.set(key, thesis);
+    });
+  });
   const cleanScannedTokenKeys = new Set(
     (state.report?.summaries || [])
       .filter((summary) => !summary?.error && !summary?.scan_failed)
@@ -1053,6 +1084,52 @@ function buildTokenSignals() {
     }
     groups.get(key).alerts.push(alert);
   });
+  signalTheses.forEach((thesis) => {
+    const key = thesis.token_address || thesis.pool_address;
+    if (!key || groups.has(key)) return;
+    const pool = {
+      token_address: thesis.token_address || "",
+      pool_address: thesis.pool_address || "",
+      symbol: thesis.symbol || "",
+      name: thesis.name || "",
+      dex: thesis.dex || "",
+      url: thesis.url || "",
+      pair_created_at: thesis.pair_created_at || 0,
+      mcap_usd: Number(thesis.signal_mcap_usd || 0),
+      price_usd: Number(thesis.signal_price_usd || 0),
+      liquidity_usd: Number(thesis.signal_liquidity_usd || 0),
+    };
+    groups.set(key, {
+      key,
+      symbol: pool.symbol || pool.name || "Unknown",
+      name: pool.name || "",
+      token_address: pool.token_address,
+      pool_address: pool.pool_address,
+      url: pool.url,
+      alerts: [{
+        lane: "reactivation",
+        first_obs_lane: "reactivation",
+        action_tier: thesis.source_tier || "watch",
+        signal_family: thesis.signal_family,
+        created_at: thesis.signal_at,
+        window_start: thesis.signal_window_start || thesis.signal_at,
+        window_end: thesis.signal_window_end || thesis.signal_at,
+        obs_mcap_usd: Number(thesis.signal_mcap_usd || 0),
+        score: Number(thesis.source_score || 0),
+        suspicious_wallets: Number(
+          thesis.source_wallets || thesis.original_wallets || 0,
+        ),
+        suspicious_sol: Number(thesis.source_flow_sol || 0),
+        hard_wallets: Number(thesis.source_hard_wallets || 0),
+        support_wallets: Number(thesis.source_support_wallets || 0),
+        classes: {},
+        events: [],
+        pool,
+        _scope_source: "thesis",
+        _thesis_only: true,
+      }],
+    });
+  });
 
   const tokens = [...groups.values()].map((token) => {
     token.alerts.sort((a, b) => new Date(a.window_start || a.created_at) - new Date(b.window_start || b.created_at));
@@ -1065,6 +1142,10 @@ function buildTokenSignals() {
     const last = token.alerts[token.alerts.length - 1];
     const marketMeta = marketMetaForToken(token.key);
     const latestPool = mergeMarketMeta(currentPools.get(token.key) || last.pool || first.pool || {}, marketMeta);
+    token.signalThesis = thesesByKey.get(token.key)
+      || thesesByKey.get(latestPool.pool_address)
+      || thesesByKey.get(token.pool_address)
+      || null;
     token.tokenIntel = [...token.alerts].reverse().find((alert) => alert.token_intel)?.token_intel || null;
     token.imageUrl = token.tokenIntel?.dex?.image || "";
     const observations = observationsByToken.get(token.key) || [];
@@ -1244,7 +1325,8 @@ function buildTokenSignals() {
     token.commonExecutors = aggregateCommonEntries(token.alerts, "common_executors", ["executor", "wallet"], "wallets");
     token.alertCount = token.alerts.length;
     token.wallets = wallets;
-    token.uniqueWallets = wallets.length;
+    token.uniqueWallets = wallets.length
+      || Number(token.signalThesis?.original_wallets || 0);
     token.bestWalletPnl = walletPnls.length ? Math.max(...walletPnls) : null;
     token.medianWalletPnl = median(walletPnls);
     const fitsReactivationNow = tokenFitsReactivationBucket(token);
@@ -1280,7 +1362,9 @@ function buildTokenSignals() {
     token.currentScanAlerts = token.alerts.filter((alert) => alert._scope_source === "current");
     token.currentScanAlertCount = token.currentScanAlerts.length;
     token.scannedCleanThisRun = cleanScannedTokenKeys.has(token.key);
-    token.latestUpdateAt = token.lastSignalAt;
+    token.latestUpdateAt = token.signalThesis?.last_checked_at
+      || token.signalThesis?.updated_at
+      || token.lastSignalAt;
     token.hasInferredFilters = token.alerts.some((alert) => alert.filterInferred || alert.filterLane !== alert.baseFilterLane);
     token.alertTiers = token.alerts.map(alertTier);
     token.tierCounts = token.alertTiers.reduce((counts, tier) => {
@@ -1295,16 +1379,27 @@ function buildTokenSignals() {
     const lastSignalAgeHours = token.lastSignalAt
       ? Math.max(0, (Date.now() - new Date(token.lastSignalAt).getTime()) / 3_600_000)
       : Number.POSITIVE_INFINITY;
+    const thesisStatus = token.signalThesis?.status || "missing";
+    const thesisNextCheckAt = token.signalThesis?.next_check_at || null;
+    const thesisGraceMs = Number(
+      state.report?.config?.signal_thesis_recheck_grace_minutes ?? 15,
+    ) * 60_000;
+    const thesisCheckDue = !token.signalThesis
+      || thesisStatus === "unknown"
+      || !thesisNextCheckAt
+      || new Date(thesisNextCheckAt).getTime() + thesisGraceMs <= Date.now();
     if (scannerOperational && token.currentScanAlertCount) {
       token.actionTier = currentTier;
-    } else if (scannerOperational && token.scannedCleanThisRun) {
+    } else if (thesisStatus === "invalidated") {
       token.actionTier = "inactive";
-    } else if (scannerOperational && lastSignalAgeHours <= 6) {
-      token.actionTier = ["actionable", "hot_reactivation"].includes(token.historicalTier)
-        ? "watch"
-        : token.historicalTier;
+    } else if (thesisCheckDue) {
+      token.actionTier = "recheck_due";
+    } else if (thesisStatus === "weakening") {
+      token.actionTier = "weakening";
+    } else if (thesisStatus === "intact") {
+      token.actionTier = "holding";
     } else {
-      token.actionTier = "inactive";
+      token.actionTier = "recheck_due";
     }
     token.signalLifecycle = {
       scannerOperational,
@@ -1312,6 +1407,9 @@ function buildTokenSignals() {
       scannedCleanThisRun: token.scannedCleanThisRun,
       lastSignalAgeHours,
       historicalTier: token.historicalTier,
+      thesisStatus,
+      thesisCheckDue,
+      thesisNextCheckAt,
     };
     token.qualityReasons = aggregateAlertLabels(token.alerts, "quality_reasons");
     token.qualityPenalties = aggregateAlertLabels(token.alerts, "quality_penalties");
@@ -1639,6 +1737,9 @@ function renderMetrics(tokens) {
     metric("Actionable", tierCount("actionable")),
     metric("Hot reactivation", tierCount("hot_reactivation")),
     metric("Watch", tierCount("watch")),
+    metric("Thesis intact", tierCount("holding")),
+    metric("Weakening", tierCount("weakening")),
+    metric("Recheck due", tierCount("recheck_due")),
     metric("Inactive", tierCount("inactive")),
     metric("Universe", stats.universe_pools ?? 0),
     metric("Scanned pools", stats.scanned_pools ?? 0),
@@ -2042,6 +2143,76 @@ function renderSignalTier(token) {
   return `${tierChip(token.actionTier)} ${reasons}${penalties}`;
 }
 
+function thesisTier(thesis) {
+  if (!thesis) return "recheck_due";
+  if (thesis.status === "intact") return "holding";
+  if (thesis.status === "weakening") return "weakening";
+  if (thesis.status === "invalidated") return "inactive";
+  return "recheck_due";
+}
+
+function renderThesisSummary(token) {
+  const thesis = token.signalThesis;
+  if (!thesis) {
+    return `${tierChip("recheck_due")} <span class="muted-inline">original buyer cohort has not been persisted yet</span>`;
+  }
+  const retention = thesis.token_retention_pct === null
+    || thesis.token_retention_pct === undefined
+    ? null
+    : Number(thesis.token_retention_pct);
+  const holders = Number(thesis.holders_remaining || 0);
+  const originalWallets = Number(thesis.original_wallets || 0);
+  const checked = thesis.last_checked_at
+    ? `checked ${dateLabel(thesis.last_checked_at)}`
+    : "not checked";
+  return [
+    tierChip(thesisTier(thesis)),
+    Number.isFinite(retention) ? `${retention.toFixed(0)}% of signal tokens retained` : "",
+    originalWallets ? `${holders}/${originalWallets} tracked wallets still holding` : "",
+    checked,
+  ].filter(Boolean).join(" / ");
+}
+
+function renderThesisDetails(token) {
+  const thesis = token.signalThesis;
+  if (!thesis) {
+    return `<div class="kv"><span>Original cohort</span><span>${renderThesisSummary(token)}</span></div>`;
+  }
+  const retainedSupply = thesis.current_retained_supply_pct === null
+    || thesis.current_retained_supply_pct === undefined
+    ? null
+    : Number(thesis.current_retained_supply_pct);
+  const walletCoverage = thesis.balance_coverage_pct === null
+    || thesis.balance_coverage_pct === undefined
+    ? null
+    : Number(thesis.balance_coverage_pct);
+  const tokenCoverage = thesis.token_balance_coverage_pct === null
+    || thesis.token_balance_coverage_pct === undefined
+    ? null
+    : Number(thesis.token_balance_coverage_pct);
+  const cohortWalletCoverage = thesis.cohort_wallet_coverage_pct === null
+    || thesis.cohort_wallet_coverage_pct === undefined
+    ? null
+    : Number(thesis.cohort_wallet_coverage_pct);
+  const cohortTokenCoverage = thesis.cohort_token_coverage_pct === null
+    || thesis.cohort_token_coverage_pct === undefined
+    ? null
+    : Number(thesis.cohort_token_coverage_pct);
+  const coverage = [
+    Number.isFinite(walletCoverage) ? `${walletCoverage.toFixed(0)}% wallets` : "",
+    Number.isFinite(tokenCoverage) ? `${tokenCoverage.toFixed(0)}% tracked tokens` : "",
+  ].filter(Boolean).join(" / ");
+  const cohortCoverage = [
+    Number.isFinite(cohortWalletCoverage) ? `${cohortWalletCoverage.toFixed(0)}% signal wallets` : "",
+    Number.isFinite(cohortTokenCoverage) ? `${cohortTokenCoverage.toFixed(0)}% signal tokens` : "",
+  ].filter(Boolean).join(" / ");
+  return `
+    <div class="kv"><span>Original cohort</span><span>${renderThesisSummary(token)}</span></div>
+    <div class="kv"><span>Retained supply</span><span>${Number.isFinite(retainedSupply) ? `${retainedSupply.toFixed(2)}%` : "-"}${thesis.reason ? ` <span class="muted-inline">${esc(thesis.reason)}</span>` : ""}</span></div>
+    <div class="kv"><span>Verification</span><span>${esc(coverage || "balance coverage unavailable")}${cohortCoverage ? ` / cohort ${esc(cohortCoverage)}` : ""}${thesis.next_check_at ? ` / next ${esc(dateLabel(thesis.next_check_at))}` : ""}</span></div>
+  `;
+}
+
 function renderWalletCluster(token) {
   const parts = [];
   const classSummary = sortedClassChips(token.walletClassCounts);
@@ -2091,6 +2262,9 @@ function renderTopWalletPreview(token) {
 
 function renderScannerReason(token) {
   const parts = [];
+  if (token.alerts.every((alert) => alert._thesis_only)) {
+    return "Original Reactivation signal is retained from the persisted buyer cohort.";
+  }
   if (token.bestWave) {
     parts.push(
       `market-wide wave: ${sol(token.bestWave.buy_sol)} buys vs ${sol(token.bestWave.sell_sol)} sells, ${sol(token.bestWave.net_buy_sol)} net, ${Number(token.bestWave.sticky_supply_pct || 0).toFixed(1)}% supply still on checked buyers`
@@ -2117,6 +2291,9 @@ function renderRiskFlags(token) {
   const phase = marketPhase(token);
   if (token.actionTier === "late_chase") flags.push(chip("late/chase", "bad"));
   if (token.actionTier === "noise") flags.push(chip("noise", "bad"));
+  if (token.actionTier === "weakening") flags.push(chip("original cohort is distributing", "warn"));
+  if (token.actionTier === "recheck_due") flags.push(chip("cohort recheck due", "warn"));
+  if (token.actionTier === "inactive") flags.push(chip("original accumulation thesis invalidated", "bad"));
   if (phase && ["Upper range", "Near ATH"].includes(phase.label)) flags.push(chip(`${phase.label}: ${phase.detail}`, phase.tone));
   if (!token.hardSignalCount && !token.hasWaveSignal) flags.push(chip("no hard wallets", "warn"));
   if (!token.athMcapUsd) flags.push(chip(athStatusLabel(token.athStatus, token.athError), "warn"));
@@ -2259,6 +2436,7 @@ function renderOverviewTab(token) {
     <section class="detail-block">
       <div class="detail-block-title">Decision</div>
       <div class="kv"><span>Why caught</span><span>${esc(renderScannerReason(token))}</span></div>
+      <div class="kv"><span>Signal thesis</span><span>${renderThesisSummary(token)}</span></div>
       ${renderWaveLine(token)}
       <div class="kv"><span>Market phase</span><span>${renderMarketPhaseLine(token)}</span></div>
       <div class="kv"><span>Risk flags</span><span>${renderRiskFlags(token)}</span></div>
@@ -2279,6 +2457,7 @@ function renderWalletsTab(token) {
     <section class="detail-block">
       <div class="detail-block-title">Wallet signal</div>
       <div class="kv"><span>Signal tier</span><span>${renderSignalTier(token)}</span></div>
+      ${renderThesisDetails(token)}
       <div class="kv"><span>Wallet setup</span><span>${renderWalletCluster(token)}</span></div>
       <div class="kv"><span>Wallet PnL</span><span>${renderWalletSummary(token)}</span></div>
       ${renderTopWalletPreview(token)}
