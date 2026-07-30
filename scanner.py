@@ -9347,6 +9347,18 @@ def render_report(payload):
     REPORT_PATH.write_text("\n".join(lines) + "\n")
 
 
+def ath_filter_log_message(label, kept_pools, input_pools, max_ratio):
+    if max_ratio is None:
+        return (
+            f"{label}: ATH context enriched for {kept_pools}/{input_pools} pools "
+            "(correction gate disabled)"
+        )
+    return (
+        f"{label}: ATH correction filter kept {kept_pools}/{input_pools} pools "
+        f"(max current/ATH {float(max_ratio) * 100:.0f}%)"
+    )
+
+
 def scan_with_config(http, rpc, state, config, base_universe=None):
     label = config.get("lane") or config.get("mode") or "scan"
     if base_universe is None:
@@ -9370,8 +9382,12 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
     ath_filter_stats = config.get("_ath_filter_stats") or {}
     if ath_filter_stats:
         print(
-            f"{label}: ATH correction filter kept {len(universe)}/{before_ath_filter} pools "
-            f"(max current/ATH {float(config['ath_max_current_ratio']) * 100:.0f}%)",
+            ath_filter_log_message(
+                label,
+                len(universe),
+                before_ath_filter,
+                config.get("ath_max_current_ratio"),
+            ),
             flush=True,
         )
     before_deleted_filter = len(universe)

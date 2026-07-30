@@ -2016,6 +2016,16 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(pool.ath_mcap_usd, 1_000_000)
         self.assertEqual(pool.ath_current_ratio, 0.1)
 
+    def test_ath_filter_log_handles_disabled_correction_gate(self):
+        message = scanner.ath_filter_log_message(
+            "reactivation",
+            kept_pools=432,
+            input_pools=432,
+            max_ratio=None,
+        )
+        self.assertIn("correction gate disabled", message)
+        self.assertNotIn("None", message)
+
     def test_brotchen_style_early_wave_is_hot_reactivation_not_late_chase(self):
         base = scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {})
         pool = scanner.Pool(
