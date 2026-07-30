@@ -1129,12 +1129,11 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(thesis["original_retained_tokens"], 1_000)
         self.assertIsNone(thesis["last_checked_at"])
 
-    def test_invalidated_thesis_can_roll_to_a_newer_current_signal(self):
+    def test_newer_signal_is_queued_until_original_thesis_invalidates(self):
         pool_state = {
             "signal_thesis": {
-                "status": "invalidated",
+                "status": "intact",
                 "signal_at": "2026-07-29T12:00:00Z",
-                "invalidated_at": "2026-07-29T13:00:00Z",
             }
         }
         alert = {
@@ -1154,21 +1153,26 @@ class ScannerCoreTests(unittest.TestCase):
                 }
             ],
         }
-        unchanged, captured = scanner.capture_signal_thesis(
+        original, captured = scanner.capture_signal_thesis(
             pool_state,
             [alert],
             {},
         )
         self.assertFalse(captured)
-        self.assertEqual(unchanged["signal_at"], "2026-07-29T12:00:00Z")
+        self.assertEqual(original["signal_at"], "2026-07-29T12:00:00Z")
+        self.assertEqual(
+            pool_state["pending_signal_thesis"]["signal_at"],
+            "2026-07-29T12:30:00Z",
+        )
+        pool_state["signal_thesis"]["status"] = "invalidated"
         replacement, captured = scanner.capture_signal_thesis(
             pool_state,
-            [alert],
+            [],
             {},
-            allow_newer_after_signal=True,
         )
         self.assertTrue(captured)
         self.assertEqual(replacement["signal_at"], "2026-07-29T12:30:00Z")
+        self.assertNotIn("pending_signal_thesis", pool_state)
 
     def test_deleted_token_thesis_is_not_exported(self):
         state = {
@@ -1462,6 +1466,69 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(thesis["token_retention_pct"], 90)
         self.assertEqual(thesis["current_retained_supply_pct"], 9)
         rpc.token_balance.assert_called_once_with("wallet-a", "token")
+
+    def test_due_recheck_promotes_pending_thesis_without_repeat_alert(self):
+        pending = scanner.signal_thesis_from_alert(
+            {
+                "created_at": "2026-07-29T12:30:00Z",
+                "pool": {
+                    "pool_address": "pool",
+                    "token_address": "token",
+                },
+                "events": [
+                    {
+                        "kind": "buy",
+                        "wallet_class": "dormant",
+                        "signer": "wallet-new",
+                        "token_recipient": "wallet-new",
+                        "token_amount": 1_000,
+                        "sol_amount": 4,
+                    }
+                ],
+            },
+            {},
+        )
+        pool_state = {
+            "signal_recheck_due_at": "2026-07-29T12:00:00Z",
+            "signal_thesis": {
+                "status": "weakening",
+                "signal_at": "2026-07-29T11:00:00Z",
+                "last_checked_at": "2026-07-29T12:00:00Z",
+                "invalidation_streak": 1,
+                "original_wallets": 1,
+                "original_retained_tokens": 1_000,
+                "cohort_token_coverage_pct": 100,
+                "cohort_wallet_coverage_pct": 100,
+                "supply": 10_000,
+                "cohort": [
+                    {"owner": "wallet-old", "attributed_tokens": 1_000},
+                ],
+            },
+            "pending_signal_thesis": pending,
+        }
+        rpc = mock.Mock()
+        rpc.token_balance.side_effect = [0, 900]
+        rpc.token_supply.return_value = 10_000
+        with mock.patch.object(
+            scanner.time,
+            "time",
+            return_value=scanner.parse_timestamp("2026-07-29T13:00:00Z"),
+        ):
+            thesis = scanner.refresh_signal_thesis(
+                rpc,
+                scanner.Pool(pool_address="pool", token_address="token"),
+                pool_state,
+                [],
+                {},
+                checked_at="2026-07-29T13:00:00Z",
+            )
+        self.assertEqual(thesis["signal_at"], "2026-07-29T12:30:00Z")
+        self.assertEqual(thesis["status"], "intact")
+        self.assertNotIn("pending_signal_thesis", pool_state)
+        self.assertEqual(
+            [call.args[0] for call in rpc.token_balance.call_args_list],
+            ["wallet-old", "wallet-new"],
+        )
 
     def test_concentrated_wave_is_ranked_as_noise_not_dropped(self):
         pool = scanner.Pool(

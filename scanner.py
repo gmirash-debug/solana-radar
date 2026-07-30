@@ -5342,9 +5342,22 @@ def capture_signal_thesis(
     alerts,
     config,
     captured_at=None,
-    allow_newer_after_signal=False,
 ):
     existing = pool_state.get("signal_thesis")
+    pending = pool_state.get("pending_signal_thesis")
+    promoted = False
+    if (
+        isinstance(existing, dict)
+        and existing.get("status") == "invalidated"
+        and isinstance(pending, dict)
+        and parse_timestamp(pending.get("signal_at"))
+        > parse_timestamp(existing.get("signal_at"))
+    ):
+        pool_state["signal_thesis"] = pending
+        pool_state.pop("pending_signal_thesis", None)
+        existing = pending
+        promoted = True
+
     candidates = []
     for alert in alerts or []:
         incoming = signal_thesis_from_alert(
@@ -5355,7 +5368,7 @@ def capture_signal_thesis(
         if incoming:
             candidates.append((alert_history_timestamp(alert), incoming))
     if not candidates:
-        return existing, False
+        return existing, promoted
     incoming = (
         min(candidates, key=lambda item: item[0])[1]
         if not isinstance(existing, dict)
@@ -5363,19 +5376,34 @@ def capture_signal_thesis(
     )
     replace = not isinstance(existing, dict)
     if isinstance(existing, dict):
-        replacement_cutoff = (
-            existing.get("signal_at")
-            if allow_newer_after_signal
-            else existing.get("invalidated_at")
-        )
         replace = bool(
             existing.get("status") == "invalidated"
             and parse_timestamp(incoming.get("signal_at"))
-            > parse_timestamp(replacement_cutoff)
+            > parse_timestamp(existing.get("signal_at"))
         )
     if replace:
         pool_state["signal_thesis"] = incoming
+        pool_state.pop("pending_signal_thesis", None)
+        if not isinstance(existing, dict):
+            latest = max(candidates, key=lambda item: item[0])[1]
+            if (
+                parse_timestamp(latest.get("signal_at"))
+                > parse_timestamp(incoming.get("signal_at"))
+            ):
+                pool_state["pending_signal_thesis"] = latest
         return incoming, True
+
+    if (
+        parse_timestamp(incoming.get("signal_at"))
+        > parse_timestamp(existing.get("signal_at"))
+    ):
+        current_pending = pool_state.get("pending_signal_thesis")
+        if (
+            not isinstance(current_pending, dict)
+            or parse_timestamp(incoming.get("signal_at"))
+            > parse_timestamp(current_pending.get("signal_at"))
+        ):
+            pool_state["pending_signal_thesis"] = incoming
 
     existing["last_signal_at"] = incoming.get("last_signal_at")
     existing["updated_at"] = captured_at or incoming.get("last_signal_at")
@@ -5707,13 +5735,12 @@ def refresh_signal_thesis(
             config,
             checked_at=checked_at,
         )
-        if thesis.get("status") == "invalidated" and alerts:
+        if thesis.get("status") == "invalidated":
             thesis, replacement_captured = capture_signal_thesis(
                 pool_state,
                 alerts,
                 config,
                 captured_at=checked_at,
-                allow_newer_after_signal=True,
             )
             if replacement_captured:
                 thesis = recheck_signal_thesis(
