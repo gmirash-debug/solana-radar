@@ -162,7 +162,9 @@ jobs:
         if: steps.freshness.outputs.should_scan == 'true'
         uses: actions/cache/restore@v4
         with:
-          path: data/state.json
+          path: |
+            data/state.json
+            data/discovery_status.json
           key: ${{ runner.os }}-solana-radar-state-v3-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-solana-radar-state-v3-
@@ -207,8 +209,18 @@ jobs:
           if ! printf '%s' "$response" | python -c \
             'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("status") == "success" else 1)'
           then
+            logs="$(timeout --signal=TERM 20s npx convex logs --prod --history 40 2>&1 || true)"
+            printf '%s\n' "$logs"
+            if printf '%s' "$logs" | grep -qi "exceeded the free plan limits"; then
+              echo "::warning title=Convex quota exhausted::Dashboard and scanner will use the GitHub snapshot/cache fallback."
+              {
+                echo "### Convex degraded"
+                echo ""
+                echo "The free-plan quota is exhausted. GitHub Pages and the shared Actions cache remain active."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
             echo "::error title=Convex smoke test failed::$response"
-            timeout --signal=TERM 20s npx convex logs --prod --history 40 || true
             exit 1
           fi
           echo "Convex production query is healthy."
@@ -294,7 +306,9 @@ jobs:
         if: steps.freshness.outputs.should_scan == 'true' && steps.run_scanner.outputs.exit_code == '0'
         uses: actions/cache/save@v4
         with:
-          path: data/state.json
+          path: |
+            data/state.json
+            data/discovery_status.json
           key: ${{ runner.os }}-solana-radar-state-v3-${{ github.run_id }}
 
       - name: Build Pages artifact
@@ -304,6 +318,11 @@ jobs:
           mkdir -p .pages/data
           cp dashboard/index.html dashboard/app.js dashboard/styles.css dashboard/config.js .pages/
           cp data/latest_report.json data/latest_report.md data/alerts.jsonl data/scanner_status.json .pages/data/
+          if [ -f data/discovery_status.json ]; then
+            cp data/discovery_status.json .pages/data/
+          else
+            printf '{"status":"warming","last_attempt_at":null,"last_success_at":null,"error":null}\n' > .pages/data/discovery_status.json
+          fi
           if [ -f data/deleted_tokens.json ]; then
             cp data/deleted_tokens.json .pages/data/
           else
