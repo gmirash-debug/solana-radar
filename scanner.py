@@ -786,9 +786,11 @@ class SolanaRpcProvider:
         self.last_request_started_at = None
         self.rate_limit_lock = threading.Lock()
         self.consecutive_failures = 0
+        self.method_consecutive_failures = Counter()
         self.failures = Counter()
         self.last_error = None
         self.circuit_open_reason = None
+        self.method_circuit_open_reasons = {}
         self.last_success_at = None
 
     def request_timeout(self, timeout):
@@ -846,7 +848,11 @@ class SolanaRpcProvider:
         return 1
 
     def can_call(self, method):
-        if self.circuit_open_reason or method in self.unsupported_methods:
+        if (
+            self.circuit_open_reason
+            or method in self.method_circuit_open_reasons
+            or method in self.unsupported_methods
+        ):
             return False
         minimum_cost = self.credit_cost(method, None)
         return not self.credit_budget or (
@@ -883,22 +889,34 @@ class SolanaRpcProvider:
 
     def record_failure(self, error):
         category = getattr(error, "category", "rpc")
+        method = str(getattr(error, "method", "unknown"))
         self.failures[category] += 1
-        self.consecutive_failures += 1
         self.last_error = str(error)
-        if (
-            category in {"auth", "quota", "rate_limit", "provider", "temporary"}
-            and self.consecutive_failures >= self.circuit_failure_threshold
-        ):
-            self.circuit_open_reason = str(error)
+        if category in {"auth", "quota"}:
+            self.consecutive_failures += 1
+            if self.consecutive_failures >= self.circuit_failure_threshold:
+                self.circuit_open_reason = str(error)
+        elif category in {"rate_limit", "provider", "temporary"}:
+            self.method_consecutive_failures[method] += 1
+            if (
+                self.method_consecutive_failures[method]
+                >= self.circuit_failure_threshold
+            ):
+                self.method_circuit_open_reasons[method] = str(error)
 
-    def record_success(self):
+    def record_success(self, method):
         self.consecutive_failures = 0
+        self.method_consecutive_failures[str(method)] = 0
         self.last_success_at = utc_now().isoformat().replace("+00:00", "Z")
 
     def call(self, method, params=None, timeout=None):
         if self.circuit_open_reason and method != "getHealth":
             raise HeliusCircuitOpen(f"{self.provider_name} circuit open: {self.circuit_open_reason}")
+        if method in self.method_circuit_open_reasons:
+            raise HeliusCircuitOpen(
+                f"{self.provider_name} {method} circuit open: "
+                f"{self.method_circuit_open_reasons[method]}"
+            )
         minimum_cost = self.credit_cost(method, None)
         if (
             self.credit_budget
@@ -1005,7 +1023,7 @@ class SolanaRpcProvider:
                 raise rpc_error
             result = body.get("result")
             self.estimated_credits += self.credit_cost(method, result)
-            self.record_success()
+            self.record_success(method)
             return result
         error = HeliusRpcError(
             method,
@@ -1161,11 +1179,14 @@ class DrpcRpc(SolanaRpcProvider):
 
 class PublicNodeRpc(SolanaRpcProvider):
     def __init__(self, url, **kwargs):
+        unsupported_methods = set(kwargs.pop("unsupported_methods", []))
+        unsupported_methods.add("getTokenAccountsByOwner")
         super().__init__(
             "publicnode",
             url,
             enhanced_history=False,
             credit_model="standard",
+            unsupported_methods=unsupported_methods,
             **kwargs,
         )
 
@@ -1269,6 +1290,7 @@ class RoutedSolanaRpc:
                 or name in excluded
                 or name in self.blocked_providers
                 or provider.circuit_open_reason
+                or method in provider.method_circuit_open_reasons
                 or method in self.unsupported_methods.get(name, set())
             ):
                 continue
@@ -1487,6 +1509,8 @@ class RoutedSolanaRpc:
             health = self.health_results.get(name) or {}
             if name in self.blocked_providers or provider.circuit_open_reason:
                 status = "blocked"
+            elif provider.method_circuit_open_reasons:
+                status = "degraded"
             elif (
                 provider.credit_budget
                 and provider.estimated_credits >= provider.credit_budget
@@ -1503,6 +1527,7 @@ class RoutedSolanaRpc:
                 "calls": dict(provider.calls),
                 "retries": dict(provider.retries),
                 "failures": dict(provider.failures),
+                "method_circuits": dict(provider.method_circuit_open_reasons),
                 "estimated_credits": int(provider.estimated_credits),
                 "credit_budget": int(provider.credit_budget),
                 "credit_remaining": (
@@ -1535,6 +1560,7 @@ class RoutedSolanaRpc:
                 "last_error": (
                     self.blocked_providers.get(name)
                     or provider.circuit_open_reason
+                    or "; ".join(provider.method_circuit_open_reasons.values())
                     or provider.last_error
                 ),
             }

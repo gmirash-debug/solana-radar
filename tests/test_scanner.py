@@ -222,6 +222,35 @@ class ScannerCoreTests(unittest.TestCase):
 
         self.assertEqual(list(rpc.providers), ["publicnode"])
         self.assertEqual(rpc.available_history_mode(), "standard")
+        self.assertIn(
+            "getTokenAccountsByOwner",
+            rpc.providers["publicnode"].unsupported_methods,
+        )
+
+    def test_temporary_method_failures_do_not_block_provider_history(self):
+        provider = scanner.SolanaRpcProvider(
+            "fallback",
+            "https://fallback.invalid",
+            max_retries=0,
+            circuit_failure_threshold=2,
+        )
+        balance_error = scanner.HeliusRpcError(
+            "getTokenAccountsByOwner",
+            "temporary",
+            "ReadTimeout",
+            provider="fallback",
+        )
+
+        provider.record_failure(balance_error)
+        provider.record_failure(balance_error)
+
+        self.assertFalse(provider.can_call("getTokenAccountsByOwner"))
+        self.assertTrue(provider.can_call("getSignaturesForAddress"))
+        self.assertIsNone(provider.circuit_open_reason)
+        self.assertIn(
+            "getTokenAccountsByOwner",
+            provider.method_circuit_open_reasons,
+        )
 
     def test_rpc_min_interval_paces_consecutive_calls(self):
         rpc = scanner.AlchemyRpc(
