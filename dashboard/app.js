@@ -2852,11 +2852,60 @@ function compactTierSummary(group) {
   return parts.join("");
 }
 
+function heldSupplyMetric(token) {
+  const currentWave = bestWaveAlert(token.currentScanAlerts || [])?.wave;
+  const currentWavePct = currentWave?.sticky_supply_pct;
+  if (
+    currentWavePct !== null
+    && currentWavePct !== undefined
+    && Number.isFinite(Number(currentWavePct))
+  ) {
+    return {
+      pct: Math.max(0, Number(currentWavePct)),
+      basis: "current wave",
+    };
+  }
+
+  const trackedPct = token.signalThesis?.current_retained_supply_pct;
+  if (
+    trackedPct !== null
+    && trackedPct !== undefined
+    && Number.isFinite(Number(trackedPct))
+  ) {
+    return {
+      pct: Math.max(0, Number(trackedPct)),
+      basis: "tracked cohort",
+    };
+  }
+
+  const caughtWavePct = token.bestWave?.sticky_supply_pct;
+  if (
+    caughtWavePct !== null
+    && caughtWavePct !== undefined
+    && Number.isFinite(Number(caughtWavePct))
+  ) {
+    return {
+      pct: Math.max(0, Number(caughtWavePct)),
+      basis: "caught wave",
+    };
+  }
+
+  return {
+    pct: null,
+    basis: "pending",
+  };
+}
+
 function tokenFilterSubtitle(token) {
   const parts = [];
   if (token.currentScanAlertCount) parts.push(`${token.currentScanAlertCount} latest`);
   if (token.bestWave) {
-    parts.push(`${Number(token.bestWave.sticky_supply_pct || 0).toFixed(1)}% sticky`);
+    const buyers = Number(
+      token.bestWave.effective_unique_buyers
+      || token.bestWave.unique_buyers
+      || 0,
+    );
+    if (buyers) parts.push(`${buyers} buyers`);
   } else if (token.hardSignalCount) {
     parts.push(`${token.hardSignalCount} hard`);
   } else if (token.supportSignalCount) {
@@ -2937,6 +2986,7 @@ function filterGroups(tokens) {
 function renderFilterTokenRows(group) {
   return group.tokens.map((token) => {
     const flow = sumAlertField(token.alerts, "suspicious_sol") || sumEventSol(uniqueAlertEvents(token.alerts));
+    const heldSupply = heldSupplyMetric(token);
     const selected = token.key === state.selectedTokenKey ? " is-selected" : "";
     const hidden = token.hidden ? " is-hidden" : "";
     return `
@@ -2951,15 +3001,19 @@ function renderFilterTokenRows(group) {
             <small>${esc(tokenFilterSubtitle(token) || token.name || token.narrative.primary || "-")}</small>
           </span>
         </span>
-        <span class="filter-token-value">
+        <span class="filter-token-value filter-token-caught">
           <strong>${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)}</strong>
           <small>mcap</small>
         </span>
-        <span class="filter-token-value ${pClass(token.profitPct)}">
+        <span class="filter-token-value filter-token-pnl ${pClass(token.profitPct)}">
           <strong>${pct(token.profitPct)}</strong>
           <small>since catch</small>
         </span>
-        <span class="filter-token-value">
+        <span class="filter-token-value filter-token-held">
+          <strong>${heldSupply.pct === null ? "-" : `${heldSupply.pct.toFixed(1)}%`}</strong>
+          <small>${esc(heldSupply.basis)}</small>
+        </span>
+        <span class="filter-token-value filter-token-flow">
           <strong>${sol(flow)}</strong>
           <small>noticed</small>
         </span>
@@ -2991,9 +3045,10 @@ function renderFilterTokenPanel(group) {
       </div>
       <div class="filter-token-head">
         <span>Token</span>
-        <span>Caught</span>
-        <span>PnL</span>
-        <span>Flow</span>
+        <span class="filter-token-caught">Caught</span>
+        <span class="filter-token-pnl">PnL</span>
+        <span class="filter-token-held">Held supply</span>
+        <span class="filter-token-flow">Flow</span>
       </div>
       <div class="filter-token-list">
         ${renderFilterTokenRows(group)}

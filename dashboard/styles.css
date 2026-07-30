@@ -599,7 +599,7 @@ main {
   align-items: center;
   display: grid;
   gap: 8px;
-  grid-template-columns: minmax(165px, 1fr) 78px 74px 92px;
+  grid-template-columns: minmax(165px, 1fr) 78px 74px 76px 92px;
 }
 
 .filter-token-head {
@@ -1443,11 +1443,10 @@ tr:last-child td {
 
   .filter-token-head,
   .filter-token-row {
-    grid-template-columns: minmax(150px, 1fr) 74px 68px;
+    grid-template-columns: minmax(150px, 1fr) 74px 68px 72px;
   }
 
-  .filter-token-head > :last-child,
-  .filter-token-row > :last-child {
+  .filter-token-flow {
     display: none;
   }
 
@@ -1684,7 +1683,7 @@ tr:last-child td {
 
   .filter-token-head,
   .filter-token-row {
-    grid-template-columns: minmax(125px, 1fr) 72px 68px;
+    grid-template-columns: minmax(125px, 1fr) 72px 68px 68px;
   }
 
   .filter-token-row {
@@ -1821,7 +1820,7 @@ tr:last-child td {
   .filter-token-head,
   .filter-token-row {
     gap: 5px;
-    grid-template-columns: minmax(118px, 1fr) 68px 64px;
+    grid-template-columns: minmax(105px, 1fr) 66px 58px 62px;
   }
 
   .filter-token-copy small {
