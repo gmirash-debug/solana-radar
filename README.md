@@ -158,7 +158,7 @@ CONVEX_INGEST_SECRET=...
 
 Production lane:
 
-- `reactivation`: `30d+`, any positive mcap up to `$5m`, `liq >=3k`, and at least `$100` of reported hourly volume. The market rank combines 5-minute burst velocity with 1-hour activity. Stage-balanced scan capacity prevents `ignition` and `early` pools from being crowded out by larger tokens. A signal still requires distributed net buying and current holder retention. ATH is entry-risk context, not a discovery gate.
+- `reactivation`: `15d+`, any positive mcap up to `$5m`, `liq >=3k`, and at least `$100` of reported hourly volume. The market rank combines 5-minute burst velocity with 1-hour activity. Stage-balanced scan capacity prevents `ignition` and `early` pools from being crowded out by larger tokens. A signal still requires distributed net buying and current holder retention. ATH is entry-risk context, not a discovery gate.
 
 Disabled filters: `micro_sticky`, `cheap_sticky`, `breakout`, `incubation`, and
 `young` are not scanned or shown in the production dashboard. Their old alert

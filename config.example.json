@@ -215,7 +215,7 @@
     },
     "reactivation": {
       "enabled": true,
-      "age_min_hours": 720,
+      "age_min_hours": 360,
       "age_max_hours": null,
       "mcap_min_usd": 0,
       "mcap_max_usd": 5000000,
