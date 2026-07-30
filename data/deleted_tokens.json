@@ -272,6 +272,13 @@
       "symbol": "Stake",
       "name": "Staked Bank",
       "deleted_at": "2026-06-01T19:49:45.662Z"
+    },
+    "CVhWiQ2SBhpTJ3xAR3ekf3uf8Ns2tNzj3mEtzKSpump": {
+      "token_address": "CVhWiQ2SBhpTJ3xAR3ekf3uf8Ns2tNzj3mEtzKSpump",
+      "pool_address": "5Kc5ssFZhTqUe628NY3D5z22ApPt9AU16HMX94JEXaz5",
+      "symbol": "WINGIT",
+      "name": "WINGIT",
+      "deleted_at": "2026-07-30T17:56:06.553Z"
     }
   },
   "pools": [
@@ -280,6 +287,7 @@
     "321v9PmCX3jrm5JxqdL83XMrR7jKQxzejVk76fc5yVwn",
     "3kPF3DzZ9LJ6MWFhTPUZuXNVinH1rALPRPF2KDmKQV4V",
     "52VFGEzYirC8GYVjs7B6YTqLoL5oKSVQbCPpwKqZTKqp",
+    "5Kc5ssFZhTqUe628NY3D5z22ApPt9AU16HMX94JEXaz5",
     "5PL5ShfKKzY2ytKEU8hxFUU67r5CJhUFAZf2W4pu5jVd",
     "6KzFXBzfwU57QBibuBnRVbxnB1KMxyWUGXUDaRaHmHZL",
     "6TB1AwLDFQpT6dC4GdG9QiiT6BTDyxAdn2Dojm73gJrS",
@@ -340,6 +348,7 @@
     "B5xwCQUKfx8BJZsgvuBvW6XgrxtkqLTrDEAYjpLJpump",
     "BiywH8Eq2CbGhwMHKwCnfTiccWJwN7r1Q4Qn9hsypump",
     "Bp4nAhfAUUGVoT8pCVndK9RbmcnjyGXmQtiQdAUppump",
+    "CVhWiQ2SBhpTJ3xAR3ekf3uf8Ns2tNzj3mEtzKSpump",
     "CiFz2Y6QZ3pgzwvLEwT1hgjp2CBwmEDpFaQTRhVnpump",
     "D2bSDzYKpFCePrp98dfN4uuKH1SBnYiiWjwmpYBspump",
     "DsFkoBQJHhgTo54WBJfYbPz6vcybL7CRmTX9QGTEpump",
@@ -356,5 +365,5 @@
     "szGYh9gRqYyf9VXBuQGVttZp86RAuC6RcUhriBUpump",
     "ttgtaonT9ncgPqgsgJxmLe4Ls1VuVaqJyDyvJJfpump"
   ],
-  "updated_at": "2026-06-01T19:49:45.662Z"
+  "updated_at": "2026-07-30T17:56:06.553Z"
 }
