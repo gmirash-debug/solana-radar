@@ -841,7 +841,17 @@ class SolanaRpcProvider:
             }.get(method, 20)
         if self.credit_model == "chainstack":
             return 1
+        if self.credit_model == "drpc":
+            return 0 if method == "getHealth" else 20
         return 1
+
+    def can_call(self, method):
+        if self.circuit_open_reason or method in self.unsupported_methods:
+            return False
+        minimum_cost = self.credit_cost(method, None)
+        return not self.credit_budget or (
+            self.estimated_credits + minimum_cost <= self.credit_budget
+        )
 
     def error_category(self, status=None, code=None, detail=""):
         detail = str(detail or "").lower()
@@ -1138,6 +1148,28 @@ class ChainstackRpc(SolanaRpcProvider):
         )
 
 
+class DrpcRpc(SolanaRpcProvider):
+    def __init__(self, url, **kwargs):
+        super().__init__(
+            "drpc",
+            url,
+            enhanced_history=False,
+            credit_model="drpc",
+            **kwargs,
+        )
+
+
+class PublicNodeRpc(SolanaRpcProvider):
+    def __init__(self, url, **kwargs):
+        super().__init__(
+            "publicnode",
+            url,
+            enhanced_history=False,
+            credit_model="standard",
+            **kwargs,
+        )
+
+
 class RoutedSolanaRpc:
     def __init__(
         self,
@@ -1148,14 +1180,16 @@ class RoutedSolanaRpc:
     ):
         self.providers = {provider.provider_name: provider for provider in providers}
         self.standard_order = self._ordered_names(
-            standard_order or ["chainstack", "alchemy", "helius"]
+            standard_order
+            or ["chainstack", "drpc", "publicnode", "alchemy", "helius"]
         )
         self.enhanced_order = self._ordered_names(
             enhanced_order or ["alchemy", "helius"],
             enhanced_only=True,
         )
         self.balance_order = self._ordered_names(
-            balance_order or ["alchemy", "helius", "chainstack"]
+            balance_order
+            or ["drpc", "publicnode", "alchemy", "helius", "chainstack"]
         )
         self.blocked_providers = {}
         self.unsupported_methods = defaultdict(set)
@@ -1239,6 +1273,29 @@ class RoutedSolanaRpc:
             ):
                 continue
             yield name
+
+    def has_available_provider(self, method, order=None):
+        provider_order = self.standard_order if order is None else order
+        return any(
+            self.providers[name].can_call(method)
+            for name in self._eligible_names(provider_order, method)
+        )
+
+    def available_history_mode(self):
+        if self.has_available_provider(
+            "getTransactionsForAddress",
+            order=self.enhanced_order,
+        ):
+            return "enhanced"
+        if self.has_available_provider(
+            "getSignaturesForAddress",
+            order=self.standard_order,
+        ) and self.has_available_provider(
+            "getTransaction",
+            order=self.standard_order,
+        ):
+            return "standard"
+        return None
 
     def _record_provider_error(self, provider_name, method, exc):
         category = getattr(exc, "category", "")
@@ -1430,6 +1487,11 @@ class RoutedSolanaRpc:
             health = self.health_results.get(name) or {}
             if name in self.blocked_providers or provider.circuit_open_reason:
                 status = "blocked"
+            elif (
+                provider.credit_budget
+                and provider.estimated_credits >= provider.credit_budget
+            ):
+                status = "budget_exhausted"
             elif sum(provider.calls.values()):
                 status = "active"
             else:
@@ -1443,6 +1505,14 @@ class RoutedSolanaRpc:
                 "failures": dict(provider.failures),
                 "estimated_credits": int(provider.estimated_credits),
                 "credit_budget": int(provider.credit_budget),
+                "credit_remaining": (
+                    max(
+                        0,
+                        int(provider.credit_budget - provider.estimated_credits),
+                    )
+                    if provider.credit_budget
+                    else None
+                ),
                 "credit_budget_used_pct": (
                     round(
                         provider.estimated_credits
@@ -1573,16 +1643,78 @@ def build_rpc_router(config):
             )
         )
 
+    drpc_url = os.environ.get("DRPC_SOLANA_RPC_URL")
+    drpc_key = os.environ.get("DRPC_API_KEY")
+    if not drpc_url and drpc_key:
+        drpc_url = f"https://lb.drpc.live/solana/{drpc_key}"
+    if drpc_url:
+        providers.append(
+            DrpcRpc(
+                drpc_url,
+                timeout_seconds=int(config.get("drpc_rpc_timeout_seconds", 15)),
+                transactions_timeout_seconds=int(
+                    config.get("drpc_transactions_timeout_seconds", 20)
+                ),
+                max_retries=int(config.get("drpc_rpc_max_retries", 2)),
+                retry_base_seconds=float(
+                    config.get("drpc_rpc_retry_base_seconds", 0.5)
+                ),
+                retry_max_seconds=float(
+                    config.get("drpc_rpc_retry_max_seconds", 10)
+                ),
+                circuit_failure_threshold=int(
+                    config.get("drpc_rpc_circuit_failure_threshold", 3)
+                ),
+                min_interval_seconds=float(
+                    config.get("drpc_rpc_min_interval_seconds", 0.05)
+                ),
+                credit_budget=int(
+                    config.get("drpc_rpc_credit_budget_per_scan", 100000)
+                ),
+            )
+        )
+
+    publicnode_url = os.environ.get("PUBLICNODE_SOLANA_RPC_URL")
+    if publicnode_url:
+        providers.append(
+            PublicNodeRpc(
+                publicnode_url,
+                timeout_seconds=int(
+                    config.get("publicnode_rpc_timeout_seconds", 15)
+                ),
+                transactions_timeout_seconds=int(
+                    config.get("publicnode_transactions_timeout_seconds", 20)
+                ),
+                max_retries=int(config.get("publicnode_rpc_max_retries", 1)),
+                retry_base_seconds=float(
+                    config.get("publicnode_rpc_retry_base_seconds", 0.5)
+                ),
+                retry_max_seconds=float(
+                    config.get("publicnode_rpc_retry_max_seconds", 5)
+                ),
+                circuit_failure_threshold=int(
+                    config.get("publicnode_rpc_circuit_failure_threshold", 3)
+                ),
+                min_interval_seconds=float(
+                    config.get("publicnode_rpc_min_interval_seconds", 0.2)
+                ),
+                credit_budget=int(
+                    config.get("publicnode_rpc_request_budget_per_scan", 5000)
+                ),
+            )
+        )
+
     if not providers:
         raise SystemExit(
             "No Solana RPC provider is configured. Set HELIUS_API_KEY, "
-            "ALCHEMY_SOLANA_RPC_URL, or CHAINSTACK_SOLANA_RPC_URL."
+            "ALCHEMY_SOLANA_RPC_URL, CHAINSTACK_SOLANA_RPC_URL, or "
+            "DRPC_SOLANA_RPC_URL/PUBLICNODE_SOLANA_RPC_URL."
         )
     return RoutedSolanaRpc(
         providers,
         standard_order=_provider_order(
             config.get("rpc_standard_provider_order"),
-            ["chainstack", "alchemy", "helius"],
+            ["chainstack", "drpc", "publicnode", "alchemy", "helius"],
         ),
         enhanced_order=_provider_order(
             config.get("rpc_enhanced_provider_order"),
@@ -1590,7 +1722,7 @@ def build_rpc_router(config):
         ),
         balance_order=_provider_order(
             config.get("rpc_balance_provider_order"),
-            ["alchemy", "helius", "chainstack"],
+            ["drpc", "publicnode", "alchemy", "helius", "chainstack"],
         ),
     )
 
@@ -8985,6 +9117,10 @@ def apply_market_meta_to_alert(alert, state):
 def build_scan_health(summaries, lane_stats, config):
     scanned = len(summaries)
     candidate_pools = sum(int(item.get("universe_pools") or 0) for item in lane_stats.values())
+    budget_deferred = sum(
+        int((item.get("selection") or {}).get("rpc_budget_deferred") or 0)
+        for item in lane_stats.values()
+    )
     failed = sum(1 for item in summaries if item.get("scan_failed") or item.get("error"))
     truncated = sum(1 for item in summaries if (item.get("trade_fetch") or {}).get("truncated"))
     coverage_fetch_items = [
@@ -9047,7 +9183,17 @@ def build_scan_health(summaries, lane_stats, config):
             continue
         lower_error = error.lower()
         provider = next(
-            (name for name in ("chainstack", "alchemy", "helius") if f"{name}:" in lower_error),
+            (
+                name
+                for name in (
+                    "chainstack",
+                    "drpc",
+                    "publicnode",
+                    "alchemy",
+                    "helius",
+                )
+                if f"{name}:" in lower_error
+            ),
             "rpc",
         )
         if "all rpc providers" in lower_error:
@@ -9132,6 +9278,11 @@ def build_scan_health(summaries, lane_stats, config):
         if config.get("_gmgn_error"):
             status = "degraded"
             reasons.append("GMGN unavailable; registry/fallback discovery and cached ATH only")
+        if budget_deferred:
+            status = "degraded"
+            reasons.append(
+                f"{budget_deferred} pools deferred after the hourly RPC budget was exhausted"
+            )
 
     return {
         "status": status,
@@ -9140,6 +9291,7 @@ def build_scan_health(summaries, lane_stats, config):
         "scanned_pools": scanned,
         "failed_pools": failed,
         "failed_ratio": failed_ratio,
+        "rpc_budget_deferred_pools": budget_deferred,
         "truncated_pools": truncated,
         "truncated_ratio": truncated_ratio,
         "live_fetch_pools": live_fetch_count,
@@ -9414,7 +9566,34 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
     all_alerts = []
     summaries = []
     for index, pool in enumerate(scan_targets, start=1):
-        pool_config = reactivation_stage_config(pool, config)
+        history_mode = rpc.available_history_mode()
+        if not history_mode:
+            deferred_pools = scan_targets[index - 1 :]
+            retry_minutes = max(
+                5.0,
+                float(config.get("signal_data_retry_minutes", 15)),
+            )
+            retry_at = iso(time.time() + retry_minutes * 60)
+            for deferred_pool in deferred_pools:
+                deferred_state = state.setdefault("pools", {}).setdefault(
+                    deferred_pool.pool_address,
+                    {},
+                )
+                deferred_state["signal_recheck_due_at"] = retry_at
+                deferred_state["rpc_budget_deferred_at"] = observed_at
+                deferred_state["force_enhanced_next_scan"] = True
+            selection_stats["rpc_budget_deferred"] = len(deferred_pools)
+            print(
+                f"warn: {label}: deferred {len(deferred_pools)} pools after all "
+                "transaction-history routes reached their scan budget",
+                file=sys.stderr,
+                flush=True,
+            )
+            break
+
+        pool_config = dict(reactivation_stage_config(pool, config))
+        if history_mode == "standard":
+            pool_config["helius_transactions_enabled"] = False
         stage = pool_config.get("reactivation_stage")
         stage_label = f" [{stage}]" if stage else ""
         print(
@@ -9489,6 +9668,7 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
             print(f"{label}: scanned {index}/{len(scan_targets)} pools", flush=True)
         time.sleep(0.05)
 
+    selection_stats["completed"] = len(summaries)
     all_alerts = enrich_alerts_with_social(http, all_alerts, config, state)
     return universe, summaries, all_alerts
 
