@@ -182,11 +182,15 @@ jobs:
           node --check dashboard/app.js
           npx tsc -p convex/tsconfig.json --noEmit
 
-      - name: Deploy Convex functions
+      - name: Configure and deploy Convex
         if: github.event_name == 'push'
         env:
           CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
-        run: npx convex deploy
+          CONVEX_INGEST_SECRET: ${{ secrets.CONVEX_INGEST_SECRET }}
+        run: |
+          printf '%s' "$CONVEX_INGEST_SECRET" | npx convex env set --prod CONVEX_INGEST_SECRET
+          npx convex env list --prod --names-only | grep -qx CONVEX_INGEST_SECRET
+          npx convex deploy
 
       - name: Run scanner
         id: run_scanner
