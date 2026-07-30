@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Solana Radar</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="styles.css?v=20260729-rpc-router-1">
+    <link rel="stylesheet" href="styles.css?v=20260730-reactivation-1">
   </head>
   <body>
     <header class="topbar">
@@ -17,16 +17,6 @@
         </div>
       </div>
       <div class="actions">
-        <label class="field-control compact-control">
-          <span class="visually-hidden">Scan lane</span>
-          <select id="modeSelect" aria-label="Scan lane">
-          <option value="all">all lanes</option>
-          <option value="micro_sticky">micro sticky</option>
-          <option value="cheap_sticky">cheap sticky</option>
-          <option value="breakout">breakout</option>
-          <option value="reactivation">reactivation</option>
-          </select>
-        </label>
         <button id="runScan" type="button">Run scan</button>
         <button id="refresh" type="button">Refresh</button>
       </div>
@@ -77,16 +67,6 @@
               <option value="hot">hot</option>
               </select>
             </label>
-            <label class="field-control">
-              <span class="visually-hidden">Scanner lane</span>
-              <select id="laneFilter" aria-label="Lane">
-              <option value="all">all lanes</option>
-              <option value="micro_sticky">micro sticky</option>
-              <option value="cheap_sticky">cheap sticky</option>
-              <option value="breakout">breakout</option>
-              <option value="reactivation">reactivation</option>
-              </select>
-            </label>
             <label class="score-control">
               <span>Score</span>
               <input id="scoreInput" type="number" min="0" max="100" value="0" aria-label="Minimum score">
@@ -102,7 +82,7 @@
       <section id="content" class="content"></section>
     </main>
 
-    <script src="config.js?v=20260729-rpc-router-1"></script>
-    <script src="app.js?v=20260729-rpc-router-1"></script>
+    <script src="config.js?v=20260730-reactivation-1"></script>
+    <script src="app.js?v=20260730-reactivation-1"></script>
   </body>
 </html>

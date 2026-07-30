@@ -409,7 +409,7 @@ main {
   border-radius: 8px;
   box-shadow: var(--shadow);
   display: grid;
-  grid-template-columns: 250px minmax(430px, 0.83fr) minmax(510px, 1.17fr);
+  grid-template-columns: minmax(430px, 0.82fr) minmax(540px, 1.18fr);
   height: calc(100vh - 234px);
   min-height: 620px;
   overflow: hidden;
@@ -1430,7 +1430,7 @@ tr:last-child td {
 
 @media (max-width: 1380px) {
   .filter-workspace {
-    grid-template-columns: 220px minmax(390px, 0.82fr) minmax(470px, 1.18fr);
+    grid-template-columns: minmax(390px, 0.8fr) minmax(500px, 1.2fr);
   }
 
   .filter-card-criteria {
@@ -1578,7 +1578,7 @@ tr:last-child td {
 
   .actions {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   main {
