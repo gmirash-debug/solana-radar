@@ -5244,6 +5244,19 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
         or captured_at
         or utc_now().isoformat().replace("+00:00", "Z")
     )
+    if wave_signal:
+        for row in cohort:
+            row["current_balance"] = max(
+                0.0,
+                float(row.get("initial_balance") or 0),
+            )
+            row["current_retained_tokens"] = max(
+                0.0,
+                float(row.get("attributed_tokens") or 0),
+            )
+            row["retention_pct"] = 100.0
+            row["is_holder"] = True
+            row["checked_at"] = signal_at
     return {
         "version": 1,
         "cohort_id": "|".join(
@@ -5311,6 +5324,10 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
         ),
         "holders_remaining": len(cohort) if wave_signal else 0,
         "holder_retention_pct": 100.0 if wave_signal else None,
+        "holder_min_pct": max(
+            0.0,
+            float(config.get("signal_thesis_wallet_holder_min_pct", 10)),
+        ),
         "original_retained_tokens": original_tokens,
         "current_retained_tokens": original_tokens if wave_signal else None,
         "token_retention_pct": 100.0 if wave_signal else None,
@@ -5451,6 +5468,7 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
         row["retention_pct"] = (
             retained / attributed * 100 if attributed else 0.0
         )
+        row["is_holder"] = is_holder
         row["checked_at"] = checked_at
         checked.append((row, attributed, retained, is_holder))
 
@@ -5466,6 +5484,7 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
     thesis["balance_coverage_pct"] = balance_coverage_pct
     thesis["token_balance_coverage_pct"] = token_balance_coverage_pct
     thesis["balance_errors"] = errors
+    thesis["holder_min_pct"] = holder_min_pct
     thesis["last_checked_at"] = checked_at
     thesis["updated_at"] = checked_at
     min_coverage = float(
@@ -5663,6 +5682,7 @@ def public_signal_thesis(thesis):
         "cohort_wallet_coverage_pct",
         "holders_remaining",
         "holder_retention_pct",
+        "holder_min_pct",
         "original_retained_tokens",
         "current_retained_tokens",
         "token_retention_pct",
@@ -5675,11 +5695,42 @@ def public_signal_thesis(thesis):
         "invalidation_candidate",
         "invalidation_streak",
     }
-    return {
+    public = {
         key: value
         for key, value in thesis.items()
         if key in public_fields
     }
+    cohort_fields = {
+        "owner",
+        "wallet_class",
+        "attributed_tokens",
+        "buy_sol",
+        "first_buy_time",
+        "current_balance",
+        "current_retained_tokens",
+        "retention_pct",
+        "is_holder",
+        "checked_at",
+    }
+    holder_min_pct = max(
+        0.0,
+        float(thesis.get("holder_min_pct") or 10),
+    )
+    public["cohort_wallets"] = []
+    for row in thesis.get("cohort") or []:
+        if not isinstance(row, dict) or not row.get("owner"):
+            continue
+        public_row = {
+            key: value
+            for key, value in row.items()
+            if key in cohort_fields and value is not None
+        }
+        if "is_holder" not in public_row and row.get("retention_pct") is not None:
+            public_row["is_holder"] = (
+                float(row.get("retention_pct") or 0) >= holder_min_pct
+            )
+        public["cohort_wallets"].append(public_row)
+    return public
 
 
 def signal_thesis_recheck_interval_minutes(thesis, config):
