@@ -165,6 +165,7 @@ jobs:
         with:
           path: |
             data/state.json
+            data/discovery_state.json
             data/discovery_status.json
           key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}
           restore-keys: |
@@ -311,6 +312,7 @@ jobs:
         with:
           path: |
             data/state.json
+            data/discovery_state.json
             data/discovery_status.json
           key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import copy
 import json
 import math
 import os
@@ -28,6 +29,7 @@ REPORT_PATH = DATA_DIR / "latest_report.md"
 REPORT_JSON_PATH = DATA_DIR / "latest_report.json"
 SCANNER_STATUS_PATH = DATA_DIR / "scanner_status.json"
 DISCOVERY_STATUS_PATH = DATA_DIR / "discovery_status.json"
+DISCOVERY_STATE_PATH = DATA_DIR / "discovery_state.json"
 DELETED_TOKENS_PATH = DATA_DIR / "deleted_tokens.json"
 CONFIG_PATH = ROOT / "config.json"
 DEFAULT_CONFIG_PATH = ROOT / "config.example.json"
@@ -248,6 +250,120 @@ def save_runtime_state(state, config, writer, observed_at=None):
     state["_runtime"] = runtime
     save_json(STATE_PATH, state, compact=bool(config.get("state_json_compact", True)))
     return runtime
+
+
+def migrate_scanner_state(state):
+    """Apply lossless state migrations before a scan mutates persisted data."""
+    if not isinstance(state, dict):
+        raise TypeError("scanner runtime state must be a mapping")
+    for pool_state in (state.get("pools") or {}).values():
+        if not isinstance(pool_state, dict):
+            continue
+        for key in ("signal_thesis", "pending_signal_thesis"):
+            thesis = pool_state.get(key)
+            if not isinstance(thesis, dict) or int(thesis.get("version") or 1) >= 2:
+                continue
+            original = max(0.0, float(thesis.get("original_retained_tokens") or 0))
+            thesis.setdefault("original_attributed_tokens", original)
+            thesis.setdefault("source_attributed_tokens", original)
+            thesis["version"] = 2
+    return state
+
+
+def discovery_state_from(state):
+    """Return the sections owned by the discovery pulse, without shared cursors."""
+    state = state if isinstance(state, dict) else {}
+    return {
+        "market": copy.deepcopy(state.get("market") or {}),
+        "activity_baselines": copy.deepcopy(state.get("activity_baselines") or {}),
+        "discovery_queue": copy.deepcopy(state.get("discovery_queue") or []),
+        "convex_discovery_updated_at": copy.deepcopy(
+            state.get("convex_discovery_updated_at") or {}
+        ),
+        "maintenance": {},
+    }
+
+
+def load_discovery_state():
+    if DISCOVERY_STATE_PATH.exists():
+        return migrate_scanner_state(load_json(DISCOVERY_STATE_PATH, {}))
+    return discovery_state_from(migrate_scanner_state(load_json(STATE_PATH, {})))
+
+
+def save_discovery_state(state, config, observed_at=None):
+    runtime = state.get("_runtime")
+    runtime = dict(runtime) if isinstance(runtime, dict) else {}
+    runtime["schema_version"] = STATE_SCHEMA_VERSION
+    runtime["revision"] = max(0, int(runtime.get("revision") or 0)) + 1
+    runtime["writer"] = "discovery_pulse"
+    runtime["updated_at"] = observed_at or utc_now().isoformat().replace("+00:00", "Z")
+    runtime["run_id"] = os.environ.get("GITHUB_RUN_ID") or None
+    state["_runtime"] = runtime
+    save_json(
+        DISCOVERY_STATE_PATH,
+        state,
+        compact=bool(config.get("state_json_compact", True)),
+    )
+    return runtime
+
+
+def merge_discovery_state(state, discovery_state):
+    """Merge only newer discovery-owned records into a deep-scan state snapshot."""
+    if not isinstance(state, dict) or not isinstance(discovery_state, dict):
+        return {"market": 0, "baselines": 0, "queue": 0}
+    market = state.setdefault("market", {})
+    baselines = state.setdefault("activity_baselines", {})
+    merged_market = 0
+    merged_baselines = 0
+    for token, incoming in (discovery_state.get("market") or {}).items():
+        if not isinstance(incoming, dict):
+            continue
+        existing = market.get(token) or {}
+        if parse_timestamp(incoming.get("latest_seen_at")) > parse_timestamp(
+            existing.get("latest_seen_at")
+        ):
+            market[token] = copy.deepcopy(incoming)
+            merged_market += 1
+    for token, incoming in (discovery_state.get("activity_baselines") or {}).items():
+        if not isinstance(incoming, dict):
+            continue
+        existing = baselines.get(token) or {}
+        if int(incoming.get("last_snapshot_at") or 0) > int(
+            existing.get("last_snapshot_at") or 0
+        ):
+            baselines[token] = copy.deepcopy(incoming)
+            merged_baselines += 1
+
+    queue_by_key = {}
+    for item in [*(state.get("discovery_queue") or []), *(discovery_state.get("discovery_queue") or [])]:
+        if not isinstance(item, dict):
+            continue
+        key = item.get("pool_address") or item.get("token_address")
+        if not key:
+            continue
+        existing = queue_by_key.get(key)
+        if not existing or parse_timestamp(item.get("observed_at")) >= parse_timestamp(
+            existing.get("observed_at")
+        ):
+            queue_by_key[key] = copy.deepcopy(item)
+    state["discovery_queue"] = sorted(
+        queue_by_key.values(),
+        key=lambda item: (
+            bool(item.get("reactivation_confirmed")),
+            float(item.get("activity_score") or 0),
+            parse_timestamp(item.get("observed_at")),
+        ),
+        reverse=True,
+    )
+    remote_updates = state.setdefault("convex_discovery_updated_at", {})
+    for token, updated_at in (discovery_state.get("convex_discovery_updated_at") or {}).items():
+        if parse_timestamp(updated_at) > parse_timestamp(remote_updates.get(token)):
+            remote_updates[token] = updated_at
+    return {
+        "market": merged_market,
+        "baselines": merged_baselines,
+        "queue": len(state["discovery_queue"]),
+    }
 
 
 def write_jsonl(path, records):
@@ -4633,7 +4749,13 @@ def sol_sum(events):
 def dedupe_pool_alerts(alerts, limit=5):
     deduped = {}
     for alert in alerts:
-        key = alert["pool"]["pool_address"]
+        pool = alert.get("pool") or {}
+        key = (
+            pool.get("pool_address") or pool.get("token_address") or "pool",
+            alert.get("signal_family") or "classified_wallets",
+            alert.get("window_start") or alert.get("created_at") or "",
+            alert.get("window_end") or "",
+        )
         existing = deduped.get(key)
         if not existing:
             deduped[key] = alert
@@ -5166,6 +5288,30 @@ def attributed_wave_retention(balance, bought_tokens, sold_tokens, min_retention
     }
 
 
+def cohort_retention_totals(cohort):
+    """Return aggregates from exactly the cohort rows exposed to the dashboard."""
+    attributed = 0.0
+    retained = 0.0
+    holders = 0
+    for row in cohort or []:
+        if not isinstance(row, dict):
+            continue
+        row_attributed = max(0.0, float(row.get("attributed_tokens") or 0))
+        row_retained = min(
+            row_attributed,
+            max(0.0, float(row.get("current_retained_tokens") or 0)),
+        )
+        attributed += row_attributed
+        retained += row_retained
+        holders += int(bool(row.get("is_holder")))
+    return {
+        "attributed_tokens": attributed,
+        "retained_tokens": retained,
+        "holders": holders,
+        "retention_pct": retained / attributed * 100 if attributed else 0.0,
+    }
+
+
 def classified_alert_cohort(alert, wallet_limit):
     by_owner = {}
     for event in alert.get("events") or []:
@@ -5221,9 +5367,9 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
     wave_rows = wave.get("top_buyers") or []
     cohort = []
     wallet_limit = max(1, int(config.get("signal_thesis_wallet_limit", 40)))
-    min_wallet_retention_pct = max(
+    holder_min_pct = max(
         0.0,
-        float(config.get("reactivation_wave_min_wallet_retention_pct", 15)),
+        float(config.get("signal_thesis_wallet_holder_min_pct", 10)),
     )
     if wave_rows:
         for row in wave_rows[:wallet_limit]:
@@ -5232,39 +5378,44 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
             owner = str(row.get("owner") or "").strip()
             if not owner:
                 continue
-            row_retention_pct = float(row.get("wave_retention_pct") or 0)
-            if row_retention_pct < min_wallet_retention_pct:
-                continue
             attributed_tokens = max(
                 0.0,
                 float(
-                    row.get("retained_from_wave")
-                    or min(
-                        float(row.get("current_balance") or 0),
-                        max(
-                            0.0,
-                            float(row.get("token_bought") or 0)
-                            - float(row.get("token_sold") or 0),
-                        ),
-                    )
+                    row.get("token_bought")
+                    or row.get("retained_from_wave")
+                    or row.get("current_balance")
                     or 0
                 ),
             )
             if attributed_tokens <= 0:
                 continue
+            current_balance = max(0.0, float(row.get("current_balance") or 0))
+            retained_tokens = min(
+                attributed_tokens,
+                max(
+                    0.0,
+                    float(row.get("retained_from_wave") or current_balance),
+                ),
+            )
+            retention_pct = (
+                retained_tokens / attributed_tokens * 100
+                if attributed_tokens
+                else 0.0
+            )
             cohort.append(
                 {
                     "owner": owner,
                     "attributed_tokens": attributed_tokens,
-                    "initial_balance": max(
-                        0.0,
-                        float(row.get("current_balance") or attributed_tokens),
-                    ),
+                    "initial_balance": current_balance,
                     "buy_sol": max(0.0, float(row.get("buy_sol") or 0)),
                     "first_buy_time": parse_timestamp(
                         row.get("first_buy_time")
                     ),
                     "wallet_class": row.get("wallet_class"),
+                    "current_balance": current_balance,
+                    "current_retained_tokens": retained_tokens,
+                    "retention_pct": retention_pct,
+                    "is_holder": retention_pct >= holder_min_pct,
                 }
             )
     else:
@@ -5276,14 +5427,16 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
     wave_signal = bool(wave_rows)
     pool = alert.get("pool") or {}
     supply = max(0.0, float(wave.get("supply") or 0))
-    source_retained_tokens = max(
+    source_attributed_tokens = max(
         original_tokens,
-        float(wave.get("sticky_tokens") or 0),
+        float(wave.get("checked_bought_tokens") or 0),
     )
     source_signal_wallets = max(
         len(cohort),
         int(
-            wave.get("sticky_wallets")
+            wave.get("checked_wallets")
+            or wave.get("unique_buyers")
+            or wave.get("sticky_wallets")
             or alert.get("suspicious_wallets")
             or len(cohort)
         ),
@@ -5296,19 +5449,17 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
     )
     if wave_signal:
         for row in cohort:
-            row["current_balance"] = max(
-                0.0,
-                float(row.get("initial_balance") or 0),
-            )
-            row["current_retained_tokens"] = max(
-                0.0,
-                float(row.get("attributed_tokens") or 0),
-            )
-            row["retention_pct"] = 100.0
-            row["is_holder"] = True
             row["checked_at"] = signal_at
+    initial_totals = cohort_retention_totals(cohort)
+    initial_balance_coverage = float(
+        wave.get("balance_coverage_pct") or (100.0 if wave_signal else 0.0)
+    )
+    initial_holder_retention_pct = (
+        initial_totals["holders"] / len(cohort) * 100 if cohort else 0.0
+    )
+    initial_status = "intact" if wave_signal and initial_balance_coverage >= 80 else "unknown"
     return {
-        "version": 1,
+        "version": 2,
         "cohort_id": "|".join(
             str(value or "")
             for value in (
@@ -5358,11 +5509,11 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
         "last_signal_at": signal_at,
         "last_checked_at": signal_at if wave_signal else None,
         "updated_at": captured_at or signal_at,
-        "status": "intact" if wave_signal else "unknown",
+        "status": initial_status,
         "status_changed_at": signal_at,
         "reason": (
-            "original accumulation cohort still holds its signal-attributed tokens"
-            if wave_signal
+            "initial retention is calculated from the stored signal cohort"
+            if initial_status == "intact"
             else "original classified-wallet cohort requires a current balance recheck"
         ),
         "original_wallets": len(cohort),
@@ -5372,18 +5523,17 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
             if source_signal_wallets
             else 0.0
         ),
-        "holders_remaining": len(cohort) if wave_signal else 0,
-        "holder_retention_pct": 100.0 if wave_signal else None,
-        "holder_min_pct": max(
-            0.0,
-            float(config.get("signal_thesis_wallet_holder_min_pct", 10)),
-        ),
+        "holders_remaining": initial_totals["holders"] if wave_signal else 0,
+        "holder_retention_pct": initial_holder_retention_pct if wave_signal else None,
+        "holder_min_pct": holder_min_pct,
         "original_retained_tokens": original_tokens,
-        "current_retained_tokens": original_tokens if wave_signal else None,
-        "token_retention_pct": 100.0 if wave_signal else None,
+        "original_attributed_tokens": original_tokens,
+        "source_attributed_tokens": source_attributed_tokens,
+        "current_retained_tokens": initial_totals["retained_tokens"] if wave_signal else None,
+        "token_retention_pct": initial_totals["retention_pct"] if wave_signal else None,
         "cohort_token_coverage_pct": (
-            original_tokens / source_retained_tokens * 100
-            if source_retained_tokens
+            original_tokens / source_attributed_tokens * 100
+            if source_attributed_tokens
             else 0.0
         ),
         "supply": supply,
@@ -5391,14 +5541,11 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
             original_tokens / supply * 100 if supply else None
         ),
         "current_retained_supply_pct": (
-            original_tokens / supply * 100
+            initial_totals["retained_tokens"] / supply * 100
             if supply and wave_signal
             else None
         ),
-        "balance_coverage_pct": float(
-            wave.get("balance_coverage_pct")
-            or (100.0 if wave_signal else 0.0)
-        ),
+        "balance_coverage_pct": initial_balance_coverage,
         "invalidation_streak": 0,
         "cohort": cohort,
     }
@@ -6542,6 +6689,8 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc, state=None):
                 "top_buyer_share": metrics["top_buyer_share"],
                 "top3_buyer_share": metrics["top3_buyer_share"],
                 "checked_wallets": len(checked),
+                "checked_bought_tokens": checked_bought_tokens,
+                "checked_net_tokens": checked_net_tokens,
                 "balance_errors": balance_errors,
                 "balance_coverage_pct": balance_coverage_pct,
                 "hold_age_minutes": max(
@@ -6935,6 +7084,8 @@ def build_sticky_accumulation_alerts(pool, swaps, config, rpc):
                 "top_buyer_share": metrics["top_buyer_share"],
                 "top3_buyer_share": metrics["top3_buyer_share"],
                 "checked_wallets": len(checked),
+                "checked_bought_tokens": checked_bought_tokens,
+                "checked_net_tokens": checked_net_tokens,
                 "balance_errors": balance_errors,
                 "balance_coverage_pct": balance_coverage_pct,
                 "hold_age_minutes": max(
@@ -7905,6 +8056,11 @@ def apply_alert_data_quality(
     if classification_errors:
         partial_reasons.append("wallet classification errors")
 
+    if classified_buys > candidate_buys:
+        raise ValueError(
+            "classification coverage invariant violated: "
+            f"{classified_buys} classified candidates exceeds {candidate_buys} candidates"
+        )
     classification_coverage_pct = (
         classified_buys / candidate_buys * 100 if candidate_buys else 100.0
     )
@@ -8509,6 +8665,7 @@ def alert_history_key(alert):
         str(part)
         for part in (
             pool.get("pool_address") or pool.get("token_address") or "pool",
+            alert.get("signal_family") or "classified_wallets",
             alert.get("window_start") or alert.get("created_at") or "",
             alert.get("window_end") or "",
         )
@@ -8636,15 +8793,22 @@ def compact_alert_history(existing_alerts, new_alerts, config):
 
     token_rank = []
     for token, token_alerts in by_token.items():
-        ranked_alerts = sorted(token_alerts, key=alert_history_sort_key)
+        by_family = defaultdict(list)
+        for alert in token_alerts:
+            by_family[alert.get("signal_family") or "classified_wallets"].append(alert)
         kept = []
-        if ranked_alerts:
-            kept.append(ranked_alerts[0])
-        for alert in reversed(ranked_alerts[1:]):
-            if len(kept) >= max_per_token:
+        for family_alerts in by_family.values():
+            latest = max(family_alerts, key=alert_history_sort_key)
+            kept.append(latest)
+        ranked_alerts = sorted(token_alerts, key=alert_history_sort_key, reverse=True)
+        for alert in ranked_alerts:
+            if max_per_token > 0 and len(kept) >= max_per_token:
                 break
             if alert not in kept:
                 kept.append(alert)
+        if max_per_token > 0 and len(kept) > max_per_token:
+            kept.sort(key=alert_history_sort_key, reverse=True)
+            kept = kept[:max_per_token]
         by_token[token] = kept
         token_rank.append(
             (
@@ -10431,6 +10595,26 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
     }
 
 
+def report_config_for_lanes(config, lane_configs):
+    """Export the actual effective lane config, plus run-time diagnostics."""
+    if len(lane_configs) == 1:
+        report_config = dict(next(iter(lane_configs.values())))
+    else:
+        report_config = dict(config)
+    for key in (
+        "_rpc_retries",
+        "_rpc_failures",
+        "_rpc_failovers",
+        "_rpc_estimated_credits",
+        "_rpc_providers",
+        "_scan_health",
+        "_discovery_stats",
+    ):
+        if key in config:
+            report_config[key] = config[key]
+    return report_config
+
+
 def write_report_json(payload):
     save_json(REPORT_JSON_PATH, payload)
 
@@ -10597,12 +10781,14 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
     if deleted_skipped:
         print(f"{label}: skipped {deleted_skipped} deleted pools before on-chain scan", flush=True)
     attach_reactivation_baselines(universe, state, config, observed_at)
-    config["_discovery_queue_stats"] = update_discovery_queue(
-        state,
-        universe,
-        config,
-        observed_at,
-    )
+    config["_discovery_queue_stats"] = {
+        "queued_tokens": len(state.get("discovery_queue") or []),
+        "confirmed_tokens": sum(
+            1
+            for item in state.get("discovery_queue") or []
+            if isinstance(item, dict) and item.get("reactivation_confirmed")
+        ),
+    }
     existing_pool_addresses = {pool.pool_address for pool in universe}
     thesis_monitor_pools = [
         pool
@@ -10750,7 +10936,13 @@ def run_once(config, lane_name=None):
     if health != "ok":
         raise SystemExit(f"Solana RPC health is not ok: {health}")
 
-    state = load_json(STATE_PATH, {"pools": {}, "wallet_cache": {}})
+    state = migrate_scanner_state(
+        load_json(STATE_PATH, {"pools": {}, "wallet_cache": {}})
+    )
+    config["_discovery_state_merge"] = merge_discovery_state(
+        state,
+        load_discovery_state(),
+    )
     load_convex_discovery_state(state, config)
     config["_signal_thesis_bootstrap"] = bootstrap_signal_theses(
         state,
@@ -10786,8 +10978,11 @@ def run_once(config, lane_name=None):
     summaries = []
     universe = []
     lane_stats = {}
+    lane_configs = {}
     for lane in lane_list:
         lane_config = apply_lane(config, lane) if lane else config
+        lane_key = lane_config.get("lane") or lane_config.get("mode") or "scan"
+        lane_configs[lane_key] = dict(lane_config)
         lane_universe, lane_summaries, lane_alerts = scan_with_config(
             http,
             rpc,
@@ -10801,7 +10996,7 @@ def run_once(config, lane_name=None):
                 config[key] = lane_config[key]
         summaries.extend(lane_summaries)
         universe.extend(lane_universe)
-        lane_stats[lane_config.get("lane") or lane_config.get("mode") or "scan"] = {
+        lane_stats[lane_key] = {
             "universe_pools": len(lane_universe),
             "scanned_pools": len(lane_summaries),
             "alerts": len(lane_alerts),
@@ -10865,7 +11060,16 @@ def run_once(config, lane_name=None):
     compact_state(state, universe, all_alerts, config, generated_at)
     save_runtime_state(state, config, "deep_scan", generated_at)
     write_alerts(all_alerts, config)
-    report_payload = build_report_payload(universe, summaries, all_alerts, rpc.calls, config, generated_at, state)
+    report_config = report_config_for_lanes(config, lane_configs)
+    report_payload = build_report_payload(
+        universe,
+        summaries,
+        all_alerts,
+        rpc.calls,
+        report_config,
+        generated_at,
+        state,
+    )
     report_payload["lane_stats"] = lane_stats
     report_payload["lanes_scanned"] = list(lane_stats)
     write_report_json(report_payload)
@@ -10920,10 +11124,7 @@ def discovery_pulse_config(config):
 def run_discovery_once(config):
     load_env()
     http = Http()
-    state = load_json(
-        STATE_PATH,
-        {"pools": {}, "wallet_cache": {}, "market": {}},
-    )
+    state = load_discovery_state()
     load_convex_discovery_state(state, config)
     lane_config = discovery_pulse_config(config)
     observed_at = utc_now().isoformat().replace("+00:00", "Z")
@@ -10965,7 +11166,7 @@ def run_discovery_once(config):
         observed_at,
     )
     compact_state(state, universe, [], lane_config, observed_at)
-    save_runtime_state(state, lane_config, "discovery_pulse", observed_at)
+    save_discovery_state(state, lane_config, observed_at)
     payload = {
         "generated_at": observed_at,
         "discovered_pools": len(discovered),
