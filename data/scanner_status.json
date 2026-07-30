@@ -1,69 +1,69 @@
 {
   "error": null,
-  "last_attempt_at": "2026-07-30T16:16:59.174458Z",
-  "last_success_at": "2026-07-30T16:16:59.174458Z",
+  "last_attempt_at": "2026-07-30T17:15:41.222232Z",
+  "last_success_at": "2026-07-30T17:15:41.222232Z",
   "scan_health": {
-    "active_live_fetch_pools": 25,
+    "active_live_fetch_pools": 26,
     "backfill_pending_pools": 0,
-    "candidate_buys": 436,
-    "candidate_pools": 476,
+    "candidate_buys": 580,
+    "candidate_pools": 485,
     "classification_errors": 0,
-    "classified_buys": 391,
+    "classified_buys": 476,
     "enhanced_head_fallback_pools": 0,
-    "estimated_rpc_credits": 15844,
+    "estimated_rpc_credits": 18532,
     "failed_pools": 0,
     "failed_ratio": 0.0,
     "gmgn_status": "ok",
-    "history_gap_pools": 28,
-    "history_gap_ratio": 0.875,
+    "history_gap_pools": 27,
+    "history_gap_ratio": 0.7714285714285715,
     "live_fetch_pools": 40,
     "parse_errors": 0,
-    "parsed_swaps": 5302,
-    "partial_live_ratio": 0.625,
-    "partial_live_windows": 25,
+    "parsed_swaps": 6613,
+    "partial_live_ratio": 0.475,
+    "partial_live_windows": 19,
     "reasons": [
-      "live transaction coverage is partial for 62% of scanned pools",
-      "rolling buffer has a history gap for 88% of active pools"
+      "live transaction coverage is partial for 48% of scanned pools",
+      "rolling buffer has a history gap for 77% of active pools"
     ],
-    "rolling_gap_pending_pools": 26,
+    "rolling_gap_pending_pools": 22,
     "rpc_budget_deferred_pools": 0,
     "rpc_providers": {
       "alchemy": {
         "calls": {
           "getHealth": 1,
-          "getSignaturesForAddress": 2,
-          "getTokenAccountsByOwner": 383,
-          "getTransactionsForAddress": 111
+          "getSignaturesForAddress": 4,
+          "getTokenAccountsByOwner": 501,
+          "getTransactionsForAddress": 128
         },
         "credit_budget": 25000,
-        "credit_budget_used_pct": 60.1,
-        "credit_remaining": 9970,
+        "credit_budget_used_pct": 72.0,
+        "credit_remaining": 7010,
         "enhanced_history": true,
-        "estimated_credits": 15030,
+        "estimated_credits": 17990,
         "failures": {},
         "health": "ok",
         "last_error": null,
-        "last_success_at": "2026-07-30T16:15:36.624068Z",
+        "last_success_at": "2026-07-30T17:14:52.562577Z",
         "latency_ms": {
           "getHealth": {
-            "p50": 184.8,
-            "p95": 184.8,
+            "p50": 173.3,
+            "p95": 173.3,
             "samples": 1
           },
           "getSignaturesForAddress": {
-            "p50": 83.8,
-            "p95": 91.5,
-            "samples": 2
+            "p50": 91.1,
+            "p95": 94.0,
+            "samples": 4
           },
           "getTokenAccountsByOwner": {
             "p50": 24.8,
-            "p95": 130.8,
+            "p95": 124.1,
             "samples": 200
           },
           "getTransactionsForAddress": {
-            "p50": 564.3,
-            "p95": 610.9,
-            "samples": 111
+            "p50": 570.1,
+            "p95": 635.9,
+            "samples": 128
           }
         },
         "method_circuits": {},
@@ -73,32 +73,32 @@
       "chainstack": {
         "calls": {
           "getHealth": 1,
-          "getTokenSupply": 13,
-          "getTransaction": 494
+          "getTokenSupply": 11,
+          "getTransaction": 229
         },
         "credit_budget": 10000,
-        "credit_budget_used_pct": 5.1,
-        "credit_remaining": 9492,
+        "credit_budget_used_pct": 2.4,
+        "credit_remaining": 9759,
         "enhanced_history": false,
-        "estimated_credits": 508,
+        "estimated_credits": 241,
         "failures": {},
         "health": "ok",
         "last_error": null,
-        "last_success_at": "2026-07-30T16:15:18.085540Z",
+        "last_success_at": "2026-07-30T17:14:50.171276Z",
         "latency_ms": {
           "getHealth": {
-            "p50": 103.6,
-            "p95": 103.6,
+            "p50": 133.6,
+            "p95": 133.6,
             "samples": 1
           },
           "getTokenSupply": {
-            "p50": 23.1,
-            "p95": 28.3,
-            "samples": 13
+            "p50": 23.7,
+            "p95": 61.8,
+            "samples": 11
           },
           "getTransaction": {
-            "p50": 39.7,
-            "p95": 119.1,
+            "p50": 39.6,
+            "p95": 147.1,
             "samples": 200
           }
         },
@@ -118,11 +118,11 @@
         "failures": {},
         "health": "ok",
         "last_error": null,
-        "last_success_at": "2026-07-30T16:08:04.829194Z",
+        "last_success_at": "2026-07-30T17:07:06.227944Z",
         "latency_ms": {
           "getHealth": {
-            "p50": 189.5,
-            "p95": 189.5,
+            "p50": 127.7,
+            "p95": 127.7,
             "samples": 1
           }
         },
@@ -133,28 +133,28 @@
       "publicnode": {
         "calls": {
           "getHealth": 1,
-          "getSignaturesForAddress": 306
+          "getSignaturesForAddress": 303
         },
         "credit_budget": 5000,
-        "credit_budget_used_pct": 6.1,
-        "credit_remaining": 4695,
+        "credit_budget_used_pct": 6.0,
+        "credit_remaining": 4700,
         "enhanced_history": false,
-        "estimated_credits": 305,
+        "estimated_credits": 300,
         "failures": {
-          "rpc": 2
+          "rpc": 4
         },
         "health": "ok",
-        "last_error": "publicnode:getSignaturesForAddress: rpc: Transaction WzL8ghwa52K1dRATR1MvX8GVtK7VakAAomnTjgDbpewxvUmqSSv6Jhfw4v3Pto8KPDL3XokuRHV2HWkMvCG1qAp not found",
-        "last_success_at": "2026-07-30T16:15:37.135733Z",
+        "last_error": "publicnode:getSignaturesForAddress: rpc: Transaction 5dp6Xqpnij7bhaf8KezhJPWcKhHwhjT9mRUNfiHuJXg5KFH4Fa1WWFn5jdybP3SiU4Rebf2afPSVmTbNLSgKYqEz not found",
+        "last_success_at": "2026-07-30T17:14:51.285564Z",
         "latency_ms": {
           "getHealth": {
-            "p50": 256.3,
-            "p95": 256.3,
+            "p50": 122.7,
+            "p95": 122.7,
             "samples": 1
           },
           "getSignaturesForAddress": {
-            "p50": 198.7,
-            "p95": 322.6,
+            "p50": 218.1,
+            "p95": 376.2,
             "samples": 200
           }
         },
@@ -171,9 +171,9 @@
     "status": "degraded",
     "transaction_error_ratio": 0.0,
     "transaction_errors": 0,
-    "transactions_scanned": 8675,
-    "truncated_pools": 30,
-    "truncated_ratio": 0.75,
+    "transactions_scanned": 8451,
+    "truncated_pools": 24,
+    "truncated_ratio": 0.6,
     "zero_parse_pools": 0,
     "zero_parse_ratio": 0.0
   },
