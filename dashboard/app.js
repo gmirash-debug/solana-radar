@@ -144,10 +144,10 @@ const TIER_META = {
     summary: "the original buyer cohort still retains the accumulated tokens",
   },
   weakening: {
-    label: "Selling pressure",
+    label: "Cohort reduced",
     tone: "warn",
     rank: 2.5,
-    summary: "the original buyer cohort is reducing its retained position",
+    summary: "tokens left original buyer wallets; the balance check does not distinguish a sale from a transfer",
   },
   late_chase: {
     label: "Late entry",
@@ -192,7 +192,7 @@ const WORKFLOW_META = {
     label: "Needs attention",
     tone: "warn",
     rank: 2,
-    summary: "selling, late activity, or a wallet-balance check needs review",
+    summary: "cohort reduction, late activity, or a wallet-balance check needs review",
   },
   closed: {
     label: "Closed",
@@ -1279,34 +1279,157 @@ function buildTokenSignals() {
       row.routed += event.routed ? 1 : 0;
       if (new Date(event.time || alert.window_start) < new Date(row.first_time)) row.first_time = event.time || alert.window_start;
     });
+    const thesisCohortWallets = Array.isArray(token.signalThesis?.cohort_wallets)
+      ? token.signalThesis.cohort_wallets
+      : [];
+    thesisCohortWallets.forEach((cohortWallet) => {
+      const owner = String(cohortWallet?.owner || "").trim();
+      if (!owner) return;
+      if (!walletMap.has(owner)) {
+        walletMap.set(owner, {
+          owner,
+          signer_examples: new Set(),
+          classes: {},
+          buys: 0,
+          sells: 0,
+          sol_in: 0,
+          sol_out: 0,
+          tokens_bought: 0,
+          tokens_sold: 0,
+          retained_tokens: null,
+          routed: 0,
+          first_time: cohortWallet.first_buy_time || token.signalThesis?.signal_at,
+          pnl_basis: "thesis cohort",
+        });
+      }
+      const row = walletMap.get(owner);
+      const walletClass = cohortWallet.wallet_class || "signal_wallet";
+      const holderMinPct = Math.max(
+        0,
+        Number(token.signalThesis?.holder_min_pct ?? 10),
+      );
+      if (!Object.keys(row.classes).length) row.classes[walletClass] = 1;
+      const attributedTokens = Math.max(0, Number(cohortWallet.attributed_tokens || 0));
+      const buySol = Math.max(0, Number(cohortWallet.buy_sol || 0));
+      if (!row.tokens_bought && attributedTokens) row.tokens_bought = attributedTokens;
+      if (!row.sol_in && buySol) row.sol_in = buySol;
+      if (!row.buys && attributedTokens) row.buys = 1;
+      row.thesis_attributed_tokens = attributedTokens || row.tokens_bought;
+      row.retention_checked_at = cohortWallet.checked_at || null;
+      const hasCheckedRetention = Boolean(
+        row.retention_checked_at
+        && cohortWallet.current_retained_tokens !== null
+        && cohortWallet.current_retained_tokens !== undefined
+        && Number.isFinite(Number(cohortWallet.current_retained_tokens)),
+      );
+      if (hasCheckedRetention) {
+        const currentRetained = Math.max(0, Number(cohortWallet.current_retained_tokens));
+        row.retained_tokens = Math.min(
+          currentRetained,
+          row.thesis_attributed_tokens || currentRetained,
+        );
+        row.current_balance = cohortWallet.current_balance === null
+          || cohortWallet.current_balance === undefined
+          ? null
+          : Math.max(0, Number(cohortWallet.current_balance));
+        const calculatedRetentionPct = row.thesis_attributed_tokens
+          ? row.retained_tokens / row.thesis_attributed_tokens * 100
+          : 0;
+        row.is_signal_holder = typeof cohortWallet.is_holder === "boolean"
+          ? cohortWallet.is_holder
+          : calculatedRetentionPct >= holderMinPct;
+        row.retention_unavailable = false;
+        row.pnl_basis = "current balance check";
+      } else {
+        row.retained_tokens = null;
+        row.is_signal_holder = null;
+        row.retention_unavailable = true;
+        row.pnl_basis = "balance check pending";
+      }
+    });
+    if (token.signalThesis?.last_checked_at && !thesisCohortWallets.length) {
+      walletMap.forEach((row) => {
+        row.retained_tokens = null;
+        row.retention_unavailable = true;
+        row.pnl_basis = "per-wallet balance unavailable";
+      });
+    }
     const wallets = [...walletMap.values()].map((row) => {
       row.avg_entry_native = row.tokens_bought ? row.sol_in / row.tokens_bought : null;
-      const soldCost = row.avg_entry_native
-        ? Math.min(row.tokens_sold, row.tokens_bought) * row.avg_entry_native
-        : 0;
-      const retainedCost = row.avg_entry_native
-        ? Math.min(row.retained_tokens, Math.max(0, row.tokens_bought - row.tokens_sold)) * row.avg_entry_native
-        : 0;
-      row.realized_pnl_sol = row.sol_out - soldCost;
-      row.current_value_sol = currentNative && row.retained_tokens
-        ? currentNative * row.retained_tokens
-        : null;
-      row.unrealized_pnl_sol = row.current_value_sol !== null
-        ? row.current_value_sol - retainedCost
-        : null;
-      row.pnl_sol = row.unrealized_pnl_sol !== null
-        ? row.realized_pnl_sol + row.unrealized_pnl_sol
-        : null;
-      row.pnl_pct = row.pnl_sol !== null && row.sol_in
-        ? row.pnl_sol / row.sol_in * 100
-        : null;
-      row.retained_pct = row.tokens_bought
-        ? row.retained_tokens / row.tokens_bought * 100
-        : null;
+      const retentionBasis = Number(row.thesis_attributed_tokens || row.tokens_bought || 0);
+      const hasBalanceCheck = Boolean(
+        row.retention_checked_at
+        && row.retained_tokens !== null
+        && row.retained_tokens !== undefined,
+      );
+      if (row.retention_unavailable) {
+        row.realized_pnl_sol = null;
+        row.current_value_sol = null;
+        row.unrealized_pnl_sol = null;
+        row.pnl_sol = null;
+        row.pnl_pct = null;
+        row.retained_pct = null;
+      } else if (hasBalanceCheck) {
+        row.retained_pct = retentionBasis
+          ? row.retained_tokens / retentionBasis * 100
+          : null;
+        const isOpenHolder = row.is_signal_holder !== false
+          && row.retained_tokens > 0;
+        row.current_value_sol = currentNative !== null && currentNative !== undefined
+          ? currentNative * row.retained_tokens
+          : null;
+        row.unrealized_pnl_sol = row.current_value_sol !== null && row.avg_entry_native
+          ? row.current_value_sol - (row.avg_entry_native * row.retained_tokens)
+          : null;
+        row.realized_pnl_sol = null;
+        row.pnl_sol = isOpenHolder ? row.unrealized_pnl_sol : null;
+        row.pnl_pct = isOpenHolder && row.avg_entry_native && currentNative
+          ? ((currentNative / row.avg_entry_native) - 1) * 100
+          : null;
+        row.pnl_basis = isOpenHolder
+          ? "open position only"
+          : row.retained_tokens > 0
+            ? "dust below holder threshold"
+            : "tokens left tracked wallet";
+      } else {
+        const soldCost = row.avg_entry_native
+          ? Math.min(row.tokens_sold, row.tokens_bought) * row.avg_entry_native
+          : 0;
+        const retainedCost = row.avg_entry_native
+          ? Math.min(row.retained_tokens, Math.max(0, row.tokens_bought - row.tokens_sold)) * row.avg_entry_native
+          : 0;
+        row.realized_pnl_sol = row.sol_out - soldCost;
+        row.current_value_sol = currentNative && row.retained_tokens
+          ? currentNative * row.retained_tokens
+          : null;
+        row.unrealized_pnl_sol = row.current_value_sol !== null
+          ? row.current_value_sol - retainedCost
+          : null;
+        row.pnl_sol = row.unrealized_pnl_sol !== null
+          ? row.realized_pnl_sol + row.unrealized_pnl_sol
+          : null;
+        row.pnl_pct = row.pnl_sol !== null && row.sol_in
+          ? row.pnl_sol / row.sol_in * 100
+          : null;
+        row.retained_pct = row.tokens_bought
+          ? row.retained_tokens / row.tokens_bought * 100
+          : null;
+      }
       row.class_label = Object.entries(row.classes).sort((a, b) => b[1] - a[1]).map(([name, count]) => `${CLASS_LABELS[name] || name} ${count}`).join(", ");
       row.signer_count = row.signer_examples.size;
       return row;
-    }).sort((a, b) => Number(b.sol_in || 0) - Number(a.sol_in || 0));
+    }).sort((a, b) => {
+      const holderRank = (wallet) => {
+        if (wallet.is_signal_holder === true) return 3;
+        if (!wallet.retention_checked_at) return 2;
+        return Number(wallet.retained_tokens || 0) > 0 ? 1 : 0;
+      };
+      const rankDiff = holderRank(b) - holderRank(a);
+      if (rankDiff) return rankDiff;
+      const retentionDiff = Number(b.retained_pct || 0) - Number(a.retained_pct || 0);
+      if (retentionDiff) return retentionDiff;
+      return Number(b.sol_in || 0) - Number(a.sol_in || 0);
+    });
     const walletPnls = wallets.map((row) => row.pnl_pct).filter((value) => Number.isFinite(value));
     token.latestPool = latestPool;
     token.firstSignalAt = first.created_at || first.window_end || first.window_start;
@@ -1859,7 +1982,7 @@ function primaryStatusChip(token, compact = false) {
 
 function attentionReason(token) {
   if (token.currentSignalTier === "late_chase") return "late entry";
-  if (token.lifecycleStatus === "weakening") return "selling pressure";
+  if (token.lifecycleStatus === "weakening") return "cohort reduced";
   if (token.dataStatus === "check_needed") return "wallet check needed";
   if (token.dataStatus === "scanner_stale") return "scanner data is stale";
   if (token.lifecycleStatus === "closed") return "accumulation closed";
@@ -1953,6 +2076,27 @@ function bindTokenHideActions() {
   });
 }
 
+function walletHeldLabel(wallet) {
+  if (wallet.retained_pct === null || wallet.retained_pct === undefined) {
+    return wallet.retention_unavailable ? "not available" : "pending";
+  }
+  const retainedPct = Math.max(0, Number(wallet.retained_pct));
+  if (!retainedPct) return "0% retained";
+  const formatted = retainedPct < 0.1
+    ? "<0.1"
+    : retainedPct < 1
+      ? retainedPct.toFixed(1)
+      : retainedPct.toFixed(0);
+  return wallet.is_signal_holder === false
+    ? `${formatted}% dust`
+    : `${formatted}% held`;
+}
+
+function walletHeldClass(wallet) {
+  if (wallet.retained_pct === null || wallet.retained_pct === undefined) return "";
+  return wallet.is_signal_holder === true ? "good" : "bad";
+}
+
 function renderWalletRows(token) {
   if (!token.wallets.length) return `<div class="empty compact">No wallet events.</div>`;
   return `
@@ -1965,8 +2109,8 @@ function renderWalletRows(token) {
             <th>Buys</th>
             <th>Entry</th>
             <th>Held</th>
-            <th>PnL est.</th>
-            <th>Net est.</th>
+            <th>Open return</th>
+            <th>Open PnL</th>
           </tr>
         </thead>
         <tbody>
@@ -1976,7 +2120,7 @@ function renderWalletRows(token) {
               <td>${esc(wallet.class_label || "-")}${wallet.routed ? ` ${chip(`routed ${wallet.routed}`, "warn")}` : ""}</td>
               <td>${esc(wallet.buys)}</td>
               <td>${sol(wallet.sol_in)}</td>
-              <td>${wallet.retained_pct === null ? "-" : `${Number(wallet.retained_pct).toFixed(0)}%`}</td>
+              <td class="${walletHeldClass(wallet)}" title="${esc(wallet.retention_checked_at ? `balance checked ${dateLabel(wallet.retention_checked_at)}` : wallet.pnl_basis)}">${esc(walletHeldLabel(wallet))}</td>
               <td class="${pClass(wallet.pnl_pct)}">${pct(wallet.pnl_pct)}</td>
               <td class="${pClass(wallet.pnl_sol)}">${wallet.pnl_sol === null ? "-" : sol(wallet.pnl_sol)}</td>
             </tr>
@@ -2422,7 +2566,14 @@ function renderWalletCluster(token) {
 }
 
 function renderWalletSummary(token) {
-  return `${esc(token.uniqueWallets)} wallets / estimated median ${pct(token.medianWalletPnl)} / best ${pct(token.bestWalletPnl)}`;
+  const thesis = token.signalThesis;
+  const retention = thesis && Number.isFinite(Number(thesis.holders_remaining))
+    ? `${Number(thesis.holders_remaining)}/${Number(thesis.original_wallets || token.uniqueWallets)} still holding`
+    : `${token.uniqueWallets} tracked wallets`;
+  const pnl = token.medianWalletPnl === null
+    ? "open return unavailable"
+    : `open median ${pct(token.medianWalletPnl)} / best ${pct(token.bestWalletPnl)}`;
+  return `${esc(retention)} / ${esc(pnl)}`;
 }
 
 function detailMetric(label, value, sub = "", valueClass = "", subClass = "") {
@@ -2444,7 +2595,7 @@ function renderTopWalletPreview(token) {
           <code>${esc(short(wallet.owner))}</code>
           <span>${esc(wallet.class_label || "-")}</span>
           <strong>${sol(wallet.sol_in)}</strong>
-          <strong class="${pClass(wallet.pnl_pct)}">${pct(wallet.pnl_pct)}</strong>
+          <strong class="${walletHeldClass(wallet)}">${esc(walletHeldLabel(wallet))}</strong>
         </div>
       `).join("")}
     </div>

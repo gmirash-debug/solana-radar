@@ -1078,6 +1078,12 @@ class ScannerCoreTests(unittest.TestCase):
             thesis["cohort"][0]["first_buy_time"],
             scanner.parse_timestamp("2026-07-29T11:15:00Z"),
         )
+        self.assertEqual(thesis["cohort"][0]["current_retained_tokens"], 600)
+        self.assertEqual(thesis["cohort"][0]["retention_pct"], 100)
+        self.assertEqual(
+            thesis["cohort"][0]["checked_at"],
+            "2026-07-29T12:00:00Z",
+        )
 
     def test_signal_thesis_tracks_classified_wallet_signal_cohort(self):
         thesis = scanner.signal_thesis_from_alert(
@@ -1192,6 +1198,46 @@ class ScannerCoreTests(unittest.TestCase):
             {"tokens": {"token"}, "pools": set()},
         )
         self.assertEqual(theses, [])
+
+    def test_public_signal_thesis_exports_checked_cohort_balances(self):
+        public = scanner.public_signal_thesis(
+            {
+                "status": "weakening",
+                "token_address": "token",
+                "current_retained_tokens": 200,
+                "cohort": [
+                    {
+                        "owner": "wallet-a",
+                        "wallet_class": "dormant",
+                        "attributed_tokens": 1_000,
+                        "initial_balance": 1_000,
+                        "buy_sol": 4,
+                        "current_balance": 200,
+                        "current_retained_tokens": 200,
+                        "retention_pct": 20,
+                        "checked_at": "2026-07-29T13:00:00Z",
+                    }
+                ],
+            }
+        )
+        self.assertEqual(
+            public["cohort_wallets"],
+            [
+                {
+                    "owner": "wallet-a",
+                    "wallet_class": "dormant",
+                    "attributed_tokens": 1_000,
+                    "buy_sol": 4,
+                    "current_balance": 200,
+                    "current_retained_tokens": 200,
+                    "retention_pct": 20,
+                    "is_holder": True,
+                    "checked_at": "2026-07-29T13:00:00Z",
+                }
+            ],
+        )
+        self.assertNotIn("cohort", public)
+        self.assertNotIn("initial_balance", public["cohort_wallets"][0])
 
     def test_signal_thesis_does_not_invalidate_an_incomplete_saved_cohort(self):
         thesis = scanner.signal_thesis_from_alert(
