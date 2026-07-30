@@ -1463,7 +1463,7 @@ async function loadStaticData() {
 }
 
 async function loadConvexData() {
-  const payload = await fetchConvexQuery("radar:dashboardData", { historyLimit: 120 });
+  const payload = await fetchConvexQuery("radar:dashboardData", { historyLimit: 40 });
   if (!payload?.report?.generated_at) return null;
   return payload;
 }

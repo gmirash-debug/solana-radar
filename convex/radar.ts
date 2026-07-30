@@ -211,7 +211,6 @@ export const dashboardData = query({
   returns: v.any(),
   handler: async (ctx, args) => {
     const reportDoc = await ctx.db.query("stateDocs").withIndex("by_key", (q) => q.eq("key", "latest_report")).first();
-    const marketDoc = await ctx.db.query("stateDocs").withIndex("by_key", (q) => q.eq("key", "market")).first();
     const deletedDoc = await ctx.db.query("stateDocs").withIndex("by_key", (q) => q.eq("key", "deleted_tokens")).first();
     const discoveryStatusDoc = await ctx.db.query("stateDocs").withIndex("by_key", (q) => q.eq("key", "discovery_status")).first();
     const historyLimit = Math.max(1, Math.min(250, Math.floor(args.historyLimit ?? 100)));
@@ -223,11 +222,7 @@ export const dashboardData = query({
       .take(500);
     const report = reportDoc?.payload ?? {};
     const finishedAt = asString(objectField(report, "generated_at"));
-    const market = {
-      ...(marketDoc?.payload && typeof marketDoc.payload === "object"
-        ? marketDoc.payload
-        : {}),
-    } as Record<string, unknown>;
+    const market: Record<string, unknown> = {};
     for (const doc of discoveryDocs) {
       if (doc.market !== undefined) {
         market[doc.tokenKey] = doc.market;
@@ -307,6 +302,13 @@ export const ingestDiscoveryState = mutation({
       { status: "ok", rowsSynced, updatedAt: latestUpdatedAt },
       latestUpdatedAt,
     );
+    const legacyMarketDoc = await ctx.db
+      .query("stateDocs")
+      .withIndex("by_key", (q) => q.eq("key", "market"))
+      .first();
+    if (legacyMarketDoc) {
+      await ctx.db.delete(legacyMarketDoc._id);
+    }
     return { ok: true, rowsSynced };
   },
 });
