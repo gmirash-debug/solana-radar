@@ -1,5 +1,6 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import { paginationOptsValidator } from "convex/server";
 
 declare const process: { env: Record<string, string | undefined> };
 
@@ -160,16 +161,15 @@ export const ingestSnapshot = mutation({
     secret: v.string(),
     report: v.any(),
     history: v.array(v.any()),
-    market: v.any(),
     deletedTokens: v.any(),
   },
+  returns: v.any(),
   handler: async (ctx, args) => {
     requireIngestSecret(args.secret);
     const now = new Date().toISOString();
     const generatedAt = asString(args.report?.generated_at) || now;
 
     await upsertStateDoc(ctx, "latest_report", args.report, now);
-    await upsertStateDoc(ctx, "market", args.market ?? {}, now);
     await upsertStateDoc(ctx, "deleted_tokens", args.deletedTokens ?? DEFAULT_DELETED_TOKENS, now);
     await upsertScanRun(ctx, args.report, now);
 
@@ -191,6 +191,7 @@ export const syncDeletedTokens = mutation({
     secret: v.string(),
     deletedTokens: v.any(),
   },
+  returns: v.any(),
   handler: async (ctx, args) => {
     requireIngestSecret(args.secret);
     const now = new Date().toISOString();
@@ -207,20 +208,38 @@ export const dashboardData = query({
   args: {
     historyLimit: v.optional(v.number()),
   },
+  returns: v.any(),
   handler: async (ctx, args) => {
     const reportDoc = await ctx.db.query("stateDocs").withIndex("by_key", (q) => q.eq("key", "latest_report")).first();
     const marketDoc = await ctx.db.query("stateDocs").withIndex("by_key", (q) => q.eq("key", "market")).first();
     const deletedDoc = await ctx.db.query("stateDocs").withIndex("by_key", (q) => q.eq("key", "deleted_tokens")).first();
+    const discoveryStatusDoc = await ctx.db.query("stateDocs").withIndex("by_key", (q) => q.eq("key", "discovery_status")).first();
     const historyLimit = Math.max(1, Math.min(250, Math.floor(args.historyLimit ?? 100)));
     const alertDocs = await ctx.db.query("alerts").withIndex("by_generated_at").order("desc").take(historyLimit);
+    const discoveryDocs = await ctx.db
+      .query("discoveryState")
+      .withIndex("by_updated_at")
+      .order("desc")
+      .take(500);
     const report = reportDoc?.payload ?? {};
     const finishedAt = asString(objectField(report, "generated_at"));
+    const market = {
+      ...(marketDoc?.payload && typeof marketDoc.payload === "object"
+        ? marketDoc.payload
+        : {}),
+    } as Record<string, unknown>;
+    for (const doc of discoveryDocs) {
+      if (doc.market !== undefined) {
+        market[doc.tokenKey] = doc.market;
+      }
+    }
 
     return {
       report,
       history: alertDocs.map((doc) => doc.payload),
-      market: marketDoc?.payload ?? {},
+      market,
       deleted_tokens: deletedDoc?.payload ?? DEFAULT_DELETED_TOKENS,
+      discovery_status: discoveryStatusDoc?.payload ?? {},
       scan_status: {
         running: false,
         source: "convex",
@@ -229,5 +248,94 @@ export const dashboardData = query({
         returncode: 0,
       },
     };
+  },
+});
+
+export const ingestDiscoveryState = mutation({
+  args: {
+    secret: v.string(),
+    rows: v.array(
+      v.object({
+        tokenKey: v.string(),
+        poolAddress: v.optional(v.union(v.string(), v.null())),
+        market: v.optional(v.any()),
+        baseline: v.optional(v.any()),
+        queue: v.optional(v.any()),
+        outcome: v.optional(v.any()),
+        updatedAt: v.string(),
+      }),
+    ),
+  },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    requireIngestSecret(args.secret);
+    let rowsSynced = 0;
+    let latestUpdatedAt = new Date().toISOString();
+    for (const row of args.rows) {
+      latestUpdatedAt = row.updatedAt;
+      const existing = await ctx.db
+        .query("discoveryState")
+        .withIndex("by_token_key", (q) => q.eq("tokenKey", row.tokenKey))
+        .first();
+      const doc = {
+        tokenKey: row.tokenKey,
+        ...(row.poolAddress ? { poolAddress: row.poolAddress } : {}),
+        ...(row.market !== null && row.market !== undefined
+          ? { market: row.market }
+          : {}),
+        ...(row.baseline !== null && row.baseline !== undefined
+          ? { baseline: row.baseline }
+          : {}),
+        ...(row.queue !== null && row.queue !== undefined
+          ? { queue: row.queue }
+          : {}),
+        ...(row.outcome !== null && row.outcome !== undefined
+          ? { outcome: row.outcome }
+          : {}),
+        updatedAt: row.updatedAt,
+      };
+      if (existing) {
+        await ctx.db.patch(existing._id, doc);
+      } else {
+        await ctx.db.insert("discoveryState", doc);
+      }
+      rowsSynced += 1;
+    }
+    await upsertStateDoc(
+      ctx,
+      "discovery_status",
+      { status: "ok", rowsSynced, updatedAt: latestUpdatedAt },
+      latestUpdatedAt,
+    );
+    return { ok: true, rowsSynced };
+  },
+});
+
+export const ingestDiscoveryStatus = mutation({
+  args: {
+    secret: v.string(),
+    status: v.any(),
+  },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    requireIngestSecret(args.secret);
+    const now = new Date().toISOString();
+    await upsertStateDoc(ctx, "discovery_status", args.status ?? {}, now);
+    return { ok: true, updatedAt: now };
+  },
+});
+
+export const discoveryStatePage = query({
+  args: {
+    secret: v.string(),
+    paginationOpts: paginationOptsValidator,
+  },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    requireIngestSecret(args.secret);
+    return await ctx.db
+      .query("discoveryState")
+      .withIndex("by_token_key")
+      .paginate(args.paginationOpts);
   },
 });

@@ -366,6 +366,81 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(entry["ath_mcap_usd"], 1_270_134)
         self.assertNotIn("ath_mcap_at", entry)
 
+    def test_implausible_gmgn_ath_is_quarantined_from_scoring(self):
+        entry = {
+            "latest_mcap_usd": 500_000,
+            "scan_mcap_usd": 500_000,
+        }
+        accepted = scanner.apply_gmgn_ath(
+            entry,
+            {
+                "highest_market_cap": 1_073_754_389_621_439,
+                "highest_price": 1_000_000,
+                "supply": 1_000_000_000,
+            },
+            "2026-07-29T12:00:00Z",
+            current_mcap=500_000,
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(entry["ath_status"], "suspect")
+        self.assertEqual(entry["ath_candidate_status"], "suspect")
+        self.assertEqual(scanner.trusted_ath_mcap(entry), 0)
+
+    def test_stale_registry_snapshot_does_not_reuse_old_activity(self):
+        pool = scanner.registry_pool_from_market_entry(
+            {
+                "pool_address": "HXFDxwervt35vNJq91y57P8vzfpocK3Qm8dC8kmBLwiH",
+                "token_address": "7bK4jRMa3aY85wJMQEQqWsmY9mmrRT32AFWZ23cBpump",
+                "latest_mcap_usd": 250_000,
+                "latest_liquidity_usd": 20_000,
+                "latest_volume_1h_usd": 100_000,
+                "latest_txns_1h": 2_000,
+                "latest_seen_at": "1970-01-01T00:16:40Z",
+            },
+            now=10_000,
+            activity_max_age_seconds=3_600,
+        )
+
+        self.assertTrue(pool.market_snapshot_stale)
+        self.assertEqual(pool.mcap_usd, 250_000)
+        self.assertEqual(pool.volume_1h_usd, 0)
+        self.assertEqual(pool.txns_1h, 0)
+
+    def test_reactivation_baseline_confirms_break_after_quiet_period(self):
+        now = 2_000_000
+        hourly = [
+            [now - (index + 1) * 3600, 100_000, 10_000, 20, 500, 1, 5]
+            for index in range(12)
+        ]
+        context = scanner.activity_context_from_history(
+            {
+                "hourly": hourly,
+                "quiet_since": now - 8 * 3600,
+                "last_snapshot_at": now - 300,
+            },
+            scanner.Pool(
+                pool_address="pool",
+                token_address="token",
+                volume_5m_usd=2_000,
+                volume_1h_usd=10_000,
+                txns_5m=20,
+                txns_1h=100,
+            ),
+            now,
+            {
+                "reactivation_baseline_min_samples": 12,
+                "reactivation_baseline_min_quiet_hours": 6,
+                "reactivation_baseline_min_volume_ratio": 3,
+                "reactivation_baseline_min_txn_ratio": 3,
+            },
+        )
+
+        self.assertEqual(context["status"], "ready")
+        self.assertTrue(context["reactivation_confirmed"])
+        self.assertEqual(context["quiet_hours"], 8)
+        self.assertGreater(context["volume_1h_ratio"], 10)
+
 
     def test_retention_only_attributes_tokens_bought_in_wave(self):
         result = scanner.attributed_wave_retention(
@@ -433,17 +508,58 @@ class ScannerCoreTests(unittest.TestCase):
     def test_router_accounts_are_not_used_as_wave_wallet_identity(self):
         routed_buy = {
             "kind": "buy",
-            "signer": "buyer",
-            "token_recipient": "router",
+            "signer": "router",
+            "token_recipient": "buyer",
             "routed": True,
+            "recipient_share": 0.98,
+            "owner_resolution": "token_recipient",
+        }
+        unresolved_routed_buy = {
+            "kind": "buy",
+            "signer": "router",
+            "token_recipient": "temporary-vault",
+            "routed": True,
+            "recipient_share": 0.50,
+            "owner_resolution": "unresolved",
         }
         routed_sell = {
             "kind": "sell",
             "signer": "seller",
             "token_sender": "pool-vault",
         }
-        self.assertEqual(scanner.wave_buy_owner(routed_buy), "")
+        self.assertEqual(scanner.wave_buy_owner(routed_buy), "buyer")
+        self.assertEqual(scanner.wave_buy_owner(unresolved_routed_buy), "")
         self.assertEqual(scanner.wave_sell_owner(routed_sell), "seller")
+
+    def test_resolved_routed_buy_contributes_to_reactivation_wave(self):
+        metrics = scanner.reactivation_wave_window_metrics(
+            [
+                {
+                    "kind": "buy",
+                    "signer": "router",
+                    "token_recipient": "buyer",
+                    "routed": True,
+                    "recipient_share": 0.99,
+                    "owner_resolution": "token_recipient",
+                    "sol_amount": 5,
+                    "token_amount": 100,
+                    "block_time": 100,
+                }
+            ],
+            {
+                "reactivation_wave_min_trade_sol": 0.1,
+                "reactivation_wave_min_buy_sol": 1,
+                "reactivation_wave_min_net_buy_sol": 1,
+                "reactivation_wave_min_net_buy_ratio": 0.1,
+                "reactivation_wave_min_unique_buyers": 1,
+                "reactivation_wave_min_large_buyers": 1,
+                "reactivation_wave_large_buy_min_sol": 1,
+            },
+        )
+
+        self.assertEqual(metrics["unique_buyers"], 1)
+        self.assertEqual(metrics["buyers"][0]["owner"], "buyer")
+        self.assertEqual(metrics["owner_resolution_coverage_pct"], 100)
 
     def test_delegated_sell_is_attributed_to_token_sender(self):
         delegated_sell = {
@@ -671,7 +787,11 @@ class ScannerCoreTests(unittest.TestCase):
         }
         stats = scanner.compact_pool_swap_buffers(
             state,
-            {"state_swap_buffer_retention_hours": 1, "state_swap_buffer_max_swaps": 10},
+            {
+                "sticky_accumulation_enabled": True,
+                "state_swap_buffer_retention_hours": 1,
+                "state_swap_buffer_max_swaps": 10,
+            },
             now,
         )
         swaps = state["pool"]["sticky_accumulation_swaps"]
@@ -922,7 +1042,7 @@ class ScannerCoreTests(unittest.TestCase):
                 phase="deep",
             )
 
-        self.assertEqual([item["name"] for item in stats["passes"]], ["live"])
+        self.assertEqual([item["name"] for item in stats["passes"]], ["live_head"])
         self.assertFalse(stats["backfill_pending"])
 
     def test_scan_health_ignores_incomplete_background_backfill(self):
@@ -1007,13 +1127,23 @@ class ScannerCoreTests(unittest.TestCase):
             )
         self.assertTrue(first_stats["live_truncated"])
         self.assertEqual(
-            pool_state["helius_live_cursor"],
-            {"provider": "helius", "token": "older-page"},
+            pool_state["helius_rolling_backlogs"][0]["cursor"],
+            "older-page",
         )
-        self.assertEqual(pool_state["helius_live_pending_signature"], "newest")
+        self.assertEqual(
+            pool_state["helius_rolling_backlogs"][0]["head_signature"],
+            "newest",
+        )
 
         second_rpc = FakeTransactionsRpc(
             [
+                {
+                    "data": [
+                        {"blockTime": now + 55, "transaction": {"signatures": ["fresh"]}},
+                        {"blockTime": now + 50, "transaction": {"signatures": ["fresh-middle"]}},
+                    ],
+                    "paginationToken": "fresh-gap",
+                },
                 {
                     "data": [
                         {"blockTime": now - 20, "transaction": {"signatures": ["oldest"]}},
@@ -1028,11 +1158,16 @@ class ScannerCoreTests(unittest.TestCase):
                 config,
                 pool_state,
                 phase="probe",
-            )
+        )
         self.assertTrue(second_stats["live_resumed"])
-        self.assertFalse(second_stats["live_truncated"])
-        self.assertEqual(second_rpc.calls[0]["pagination_token"], "older-page")
+        self.assertTrue(second_stats["live_truncated"])
+        self.assertEqual(second_rpc.calls[0]["pagination_token"], None)
+        self.assertEqual(second_rpc.calls[1]["pagination_token"], "older-page")
         self.assertEqual(second_stats["live_checkpoint"]["signature"], "newest")
+        self.assertEqual(
+            pool_state["helius_rolling_backlogs"][0]["cursor"],
+            "fresh-gap",
+        )
 
         scanner.update_pool_transaction_state(
             pool_state,
@@ -1042,8 +1177,9 @@ class ScannerCoreTests(unittest.TestCase):
         )
         self.assertEqual(pool_state["helius_latest_signature"], "newest")
         self.assertNotIn("helius_live_cursor", pool_state)
+        self.assertIn("helius_rolling_backlogs", pool_state)
 
-    def test_stale_live_cursor_restarts_from_fresh_transaction_head(self):
+    def test_stale_live_cursor_refreshes_head_without_discarding_backlog(self):
         now = 2_000_000
         rpc = FakeTransactionsRpc(
             [
@@ -1085,17 +1221,13 @@ class ScannerCoreTests(unittest.TestCase):
                 phase="probe",
             )
 
-        self.assertTrue(stats["live_cursor_reset"])
-        self.assertFalse(stats["live_resumed"])
+        self.assertFalse(stats["live_cursor_reset"])
+        self.assertTrue(stats["live_resumed"])
         self.assertEqual(rpc.calls[0]["pagination_token"], None)
-        self.assertEqual(rpc.calls[0]["block_time"], {"gte": now - 3_630})
+        self.assertEqual(rpc.calls[0]["block_time"], {"gte": now - 7_230})
         self.assertEqual(stats["live_head_lag_seconds"], 5)
         self.assertEqual(
             transactions[0]["transaction"]["signatures"][0],
-            "fresh-head",
-        )
-        self.assertEqual(
-            pool_state["helius_live_pending_signature"],
             "fresh-head",
         )
         self.assertNotIn("helius_live_cursor", pool_state)
@@ -1227,16 +1359,33 @@ class ScannerCoreTests(unittest.TestCase):
             )
         )
         alchemy.session.post = mock.Mock(
-            return_value=rpc_response(
-                {
-                    "data": [
+            side_effect=[
+                rpc_response(
+                    {
+                        "data": [
+                            {
+                                "blockTime": now - 5,
+                                "transaction": {"signatures": ["alchemy-head"]},
+                            },
+                            {
+                                "blockTime": now - 10,
+                                "transaction": {"signatures": ["alchemy-middle"]},
+                            },
+                        ],
+                        "paginationToken": "alchemy-head-tail",
+                    }
+                ),
+                rpc_response(
                         {
-                            "blockTime": now - 5,
-                            "transaction": {"signatures": ["alchemy-head"]},
+                            "data": [
+                                {
+                                    "blockTime": now - 20,
+                                    "transaction": {"signatures": ["alchemy-old"]},
+                                }
+                            ]
                         }
-                    ]
-                }
-            )
+                ),
+            ]
         )
         rpc = scanner.RoutedSolanaRpc(
             [alchemy, helius],
@@ -1268,16 +1417,23 @@ class ScannerCoreTests(unittest.TestCase):
             )
 
         helius_payload = helius.session.post.call_args.kwargs["json"]
-        alchemy_payload = alchemy.session.post.call_args.kwargs["json"]
+        alchemy_payloads = [
+            call.kwargs["json"] for call in alchemy.session.post.call_args_list
+        ]
         self.assertEqual(
             helius_payload["params"][1]["paginationToken"],
             "helius-only-token",
         )
-        self.assertNotIn("paginationToken", alchemy_payload["params"][1])
-        self.assertEqual(transactions[0]["transaction"]["signatures"][0], "alchemy-head")
+        self.assertNotIn("paginationToken", alchemy_payloads[0]["params"][1])
+        self.assertNotIn("paginationToken", alchemy_payloads[1]["params"][1])
+        self.assertEqual(
+            transactions[-1]["transaction"]["signatures"][0],
+            "alchemy-head",
+        )
         self.assertEqual(stats["providers_used"], ["alchemy"])
         self.assertEqual(stats["provider_failovers"][0]["to"], "alchemy")
         self.assertNotIn("helius_live_cursor", pool_state)
+        self.assertIn("helius_rolling_backlogs", pool_state)
 
     def test_mid_page_failover_restarts_window_and_deduplicates_signatures(self):
         now = 2_000_000
@@ -2008,6 +2164,289 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertIn(("1m", "volume"), query_pairs)
         self.assertIn(("1m", "swaps"), query_pairs)
         self.assertIn(("1h", "change1h"), query_pairs)
+
+    def test_wave_wallet_graph_merges_overlapping_funder_and_executor_links(self):
+        buyers = [
+            {
+                "owner": "wallet-a",
+                "buy_sol": 4,
+                "top_buy": {
+                    "signature": "sig-a",
+                    "block_time": 100,
+                    "routed": False,
+                    "signer": "wallet-a",
+                },
+            },
+            {
+                "owner": "wallet-b",
+                "buy_sol": 3,
+                "top_buy": {
+                    "signature": "sig-b",
+                    "block_time": 101,
+                    "routed": True,
+                    "signer": "executor",
+                },
+            },
+            {
+                "owner": "wallet-c",
+                "buy_sol": 3,
+                "top_buy": {
+                    "signature": "sig-c",
+                    "block_time": 102,
+                    "routed": True,
+                    "signer": "executor",
+                },
+            },
+        ]
+        classifications = {
+            "wallet-a": {"wallet_class": "fresh", "funding_source": "funder"},
+            "wallet-b": {"wallet_class": "freshish", "funding_source": "funder"},
+            "wallet-c": {"wallet_class": "normal", "funding_source": None},
+        }
+
+        def classify(_rpc, wallet, *_args):
+            return classifications[wallet]
+
+        with mock.patch.object(scanner, "classify_wallet", side_effect=classify):
+            graph = scanner.analyze_wave_wallet_graph(
+                mock.Mock(),
+                buyers,
+                {
+                    "reactivation_wallet_graph_enabled": True,
+                    "reactivation_wallet_graph_limit": 12,
+                },
+                {},
+            )
+
+        self.assertEqual(graph["effective_wallets"], 1)
+        self.assertEqual(graph["max_cluster_share"], 1)
+        self.assertEqual(graph["clusters"][0]["wallets"], 3)
+        self.assertEqual(graph["common_funders"][0]["wallets"], 2)
+        self.assertEqual(graph["common_executors"][0]["wallets"], 2)
+
+    def test_linked_wallet_concentration_cannot_be_actionable(self):
+        config = scanner.apply_lane(
+            scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {}),
+            "reactivation",
+        )
+        pool = scanner.Pool(
+            pool_address="pool",
+            token_address="token",
+            mcap_usd=100_000,
+            volume_1h_usd=4_000,
+        )
+        pool.ath_mcap_usd = 1_000_000
+        pool.ath_current_ratio = 0.1
+        alert = {
+            "score": 90,
+            "signal_family": "reactivation_wave",
+            "reactivation_baseline": {
+                "status": "ready",
+                "reactivation_confirmed": True,
+            },
+            "wave": {
+                "net_buy_sol": 50,
+                "unique_buyers": 20,
+                "effective_unique_buyers": 5,
+                "sticky_wallets": 12,
+                "sticky_supply_pct": 10,
+                "sticky_bought_pct": 80,
+                "net_token_retention_pct": 90,
+                "top_buyer_share": 0.2,
+                "top3_buyer_share": 0.5,
+                "max_linked_cluster_share": 0.8,
+                "balance_coverage_pct": 100,
+                "hold_age_minutes": 120,
+                "min_hold_minutes": 30,
+            },
+        }
+        tier, _reasons, penalties, quality = scanner.classify_alert_tier(
+            pool,
+            alert,
+            {
+                "hard_wallets": 0,
+                "support_wallets": 0,
+                "hard_sol": 0,
+                "hard_classes": {},
+                "support_only": False,
+            },
+            config,
+        )
+        self.assertEqual(tier, "noise")
+        self.assertIn("linked wallet concentration", penalties)
+        self.assertEqual(quality["effective_unique_buyers"], 5)
+
+    def test_signal_outcomes_capture_horizons_and_preserve_peak(self):
+        token = "11111111111111111111111111111111"
+        caught = 1_800_000_000
+        state = {
+            "market": {
+                token: {
+                    "latest_seen_at": scanner.iso(caught + 25 * 3600),
+                    "latest_mcap_usd": 200_000,
+                    "latest_price_usd": 0.002,
+                    "latest_liquidity_usd": 20_000,
+                }
+            }
+        }
+        alert = {
+            "created_at": scanner.iso(caught),
+            "obs_mcap_at": scanner.iso(caught),
+            "obs_mcap_usd": 100_000,
+            "obs_price_usd": 0.001,
+            "score": 80,
+            "action_tier": "actionable",
+            "signal_family": "reactivation_wave",
+            "pool": {
+                "pool_address": "pool",
+                "token_address": token,
+                "symbol": "TEST",
+            },
+        }
+        config = {
+            "signal_outcomes_enabled": True,
+            "signal_outcomes_retention_days": 0,
+            "signal_outcomes_max_tokens": 10,
+        }
+        scanner.update_signal_outcomes(
+            state,
+            [alert],
+            scanner.iso(caught + 25 * 3600),
+            config,
+        )
+        outcome = state["signal_outcomes"][token]
+        self.assertEqual(outcome["horizons"]["24h"]["return_pct"], 100)
+        self.assertEqual(outcome["max_favorable"]["return_pct"], 100)
+
+        state["market"][token].update(
+            {
+                "latest_seen_at": scanner.iso(caught + 73 * 3600),
+                "latest_mcap_usd": 50_000,
+                "latest_price_usd": 0.0005,
+            }
+        )
+        scanner.update_signal_outcomes(
+            state,
+            [],
+            scanner.iso(caught + 73 * 3600),
+            config,
+        )
+        outcome = state["signal_outcomes"][token]
+        self.assertEqual(outcome["horizons"]["72h"]["return_pct"], -50)
+        self.assertEqual(outcome["max_favorable"]["return_pct"], 100)
+        self.assertEqual(outcome["max_adverse"]["return_pct"], -50)
+
+    def test_wallet_classification_cache_reuses_same_time_bucket(self):
+        rpc = mock.Mock()
+        rpc.signatures_for_address.return_value = []
+        state = {}
+        config = {
+            "wallet_cache_bucket_hours": 6,
+            "freshish_max_previous_txs": 3,
+            "dormant_gap_days": 14,
+            "low_tx_max_previous_txs": 10,
+        }
+        first = scanner.classify_wallet(
+            rpc,
+            "wallet",
+            "sig-1",
+            10_000,
+            config,
+            state,
+        )
+        second = scanner.classify_wallet(
+            rpc,
+            "wallet",
+            "sig-2",
+            10_100,
+            config,
+            state,
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(rpc.signatures_for_address.call_count, 1)
+        self.assertEqual(len(state["wallet_cache"]), 1)
+
+    def test_rpc_credit_budget_fails_over_before_overspend(self):
+        alchemy = scanner.AlchemyRpc(
+            "https://alchemy.invalid",
+            max_retries=0,
+            credit_budget=5,
+        )
+        chainstack = scanner.ChainstackRpc(
+            "https://chainstack.invalid",
+            max_retries=0,
+            credit_budget=10,
+        )
+        alchemy.session.post = mock.Mock()
+        chainstack.session.post = mock.Mock(return_value=rpc_response(123))
+        rpc = scanner.RoutedSolanaRpc(
+            [alchemy, chainstack],
+            standard_order=["alchemy", "chainstack"],
+        )
+        result = rpc.call("getBalance", ["wallet"])
+        self.assertEqual(result, 123)
+        self.assertEqual(alchemy.session.post.call_count, 0)
+        self.assertEqual(chainstack.session.post.call_count, 1)
+        self.assertIn("alchemy", rpc.blocked_providers)
+        self.assertEqual(rpc.route_failovers["getBalance"], 1)
+
+    def test_discovery_pulse_uses_small_fast_market_query_set(self):
+        config = scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {})
+        pulse = scanner.discovery_pulse_config(config)
+        self.assertEqual(pulse["registry_refresh_max_tokens"], 120)
+        self.assertEqual(pulse["gecko_pages"], 1)
+        self.assertEqual(
+            pulse["gmgn_trenches_queries"],
+            [
+                {"sort_by": "swaps_1h", "direction": "desc"},
+                {"sort_by": "usd_market_cap", "direction": "asc"},
+            ],
+        )
+        self.assertEqual(
+            pulse["gmgn_trending_queries"],
+            [
+                {"order_by": "volume", "intervals": ["1m", "5m"]},
+                {"order_by": "swaps", "intervals": ["1m", "5m"]},
+            ],
+        )
+
+    def test_scan_selection_reserves_gap_repair_capacity(self):
+        pools = [
+            scanner.Pool(
+                pool_address=f"pool-{index}",
+                token_address=f"token-{index}",
+                mcap_usd=100_000 + index,
+                liquidity_usd=10_000,
+                volume_1h_usd=1_000 - index,
+            )
+            for index in range(6)
+        ]
+        state = {
+            "pools": {
+                pool.pool_address: {
+                    "last_scanned_at": scanner.iso(1_700_000_000 + index),
+                }
+                for index, pool in enumerate(pools)
+            }
+        }
+        state["pools"]["pool-5"]["helius_rolling_backlogs"] = [
+            {"from_timestamp": 1_600_000_000}
+        ]
+        with mock.patch.object(scanner.time, "time", return_value=1_800_000_000):
+            selected, stats = scanner.select_scan_targets(
+                pools,
+                state,
+                {
+                    "active_pool_limit": 4,
+                    "signal_monitor_share": 0,
+                    "scan_priority_share": 0.75,
+                    "scan_gap_repair_share": 0.25,
+                    "scan_rotation_min_share": 0.25,
+                },
+            )
+        self.assertIn("pool-5", [pool.pool_address for pool in selected])
+        self.assertEqual(stats["gap_repairs"], 1)
+        self.assertEqual(stats["rotation_reserve"], 1)
 
 
 if __name__ == "__main__":

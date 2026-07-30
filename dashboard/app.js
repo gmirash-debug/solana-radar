@@ -59,6 +59,7 @@ const state = {
   history: [],
   market: {},
   scanStatus: {},
+  discoveryStatus: {},
   tab: "filters",
   query: "",
   tier: "focus",
@@ -1088,6 +1089,34 @@ function buildTokenSignals() {
     const solUsd = median(nativeRatios);
     const currentNative = solUsd && currentPriceUsd ? currentPriceUsd / solUsd : null;
     const walletMap = new Map();
+    token.alerts.forEach((alert) => {
+      const observedAt = alert.created_at || alert.window_end || alert.window_start || "";
+      (alert.wave?.top_buyers || []).forEach((buyer) => {
+        const owner = buyer.owner;
+        if (!owner) return;
+        const existing = walletMap.get(owner);
+        if (existing?.aggregate_at && new Date(existing.aggregate_at) > new Date(observedAt)) return;
+        walletMap.set(owner, {
+          owner,
+          signer_examples: existing?.signer_examples || new Set(),
+          classes: {
+            [buyer.wallet_class || "wave_buyer"]: 1,
+          },
+          buys: Number(buyer.buy_count || 0),
+          sells: Number(buyer.sell_count || 0),
+          sol_in: Number(buyer.buy_sol || 0),
+          sol_out: Number(buyer.sell_sol || 0),
+          tokens_bought: Number(buyer.token_bought || 0),
+          tokens_sold: Number(buyer.token_sold || 0),
+          retained_tokens: Number(buyer.retained_from_wave || 0),
+          current_balance: Number(buyer.current_balance || 0),
+          routed: 0,
+          first_time: buyer.first_buy_time || alert.window_start,
+          aggregate_at: observedAt,
+          pnl_basis: "wave aggregate",
+        });
+      });
+    });
     uniqueEvents.forEach((event) => {
       const alert = event._alert || {};
       const owner = eventOwner(event);
@@ -1098,26 +1127,55 @@ function buildTokenSignals() {
           signer_examples: new Set(),
           classes: {},
           buys: 0,
+          sells: 0,
           sol_in: 0,
-          tokens: 0,
+          sol_out: 0,
+          tokens_bought: 0,
+          tokens_sold: 0,
+          retained_tokens: 0,
           routed: 0,
           first_time: event.time || alert.window_start,
+          pnl_basis: "buy events only",
         });
       }
       const row = walletMap.get(owner);
       if (event.signer) row.signer_examples.add(event.signer);
       row.classes[event.wallet_class || "unknown"] = (row.classes[event.wallet_class || "unknown"] || 0) + 1;
+      if (row.aggregate_at) {
+        row.routed += event.routed ? 1 : 0;
+        return;
+      }
       row.buys += 1;
       row.sol_in += Number(event.sol_amount || 0);
-      row.tokens += Number(event.token_amount || event.token_recipient_amount || 0);
+      row.tokens_bought += Number(event.token_amount || event.token_recipient_amount || 0);
+      row.retained_tokens = row.tokens_bought;
       row.routed += event.routed ? 1 : 0;
       if (new Date(event.time || alert.window_start) < new Date(row.first_time)) row.first_time = event.time || alert.window_start;
     });
     const wallets = [...walletMap.values()].map((row) => {
-      row.avg_entry_native = row.tokens ? row.sol_in / row.tokens : null;
-      row.pnl_pct = currentNative && row.avg_entry_native ? ((currentNative / row.avg_entry_native) - 1) * 100 : null;
-      row.current_value_sol = currentNative && row.tokens ? currentNative * row.tokens : null;
-      row.pnl_sol = row.current_value_sol !== null ? row.current_value_sol - row.sol_in : null;
+      row.avg_entry_native = row.tokens_bought ? row.sol_in / row.tokens_bought : null;
+      const soldCost = row.avg_entry_native
+        ? Math.min(row.tokens_sold, row.tokens_bought) * row.avg_entry_native
+        : 0;
+      const retainedCost = row.avg_entry_native
+        ? Math.min(row.retained_tokens, Math.max(0, row.tokens_bought - row.tokens_sold)) * row.avg_entry_native
+        : 0;
+      row.realized_pnl_sol = row.sol_out - soldCost;
+      row.current_value_sol = currentNative && row.retained_tokens
+        ? currentNative * row.retained_tokens
+        : null;
+      row.unrealized_pnl_sol = row.current_value_sol !== null
+        ? row.current_value_sol - retainedCost
+        : null;
+      row.pnl_sol = row.unrealized_pnl_sol !== null
+        ? row.realized_pnl_sol + row.unrealized_pnl_sol
+        : null;
+      row.pnl_pct = row.pnl_sol !== null && row.sol_in
+        ? row.pnl_sol / row.sol_in * 100
+        : null;
+      row.retained_pct = row.tokens_bought
+        ? row.retained_tokens / row.tokens_bought * 100
+        : null;
       row.class_label = Object.entries(row.classes).sort((a, b) => b[1] - a[1]).map(([name, count]) => `${CLASS_LABELS[name] || name} ${count}`).join(", ");
       row.signer_count = row.signer_examples.size;
       return row;
@@ -1183,6 +1241,7 @@ function buildTokenSignals() {
     token.routedBuyCount = uniqueEvents.filter((event) => event.routed).length;
     token.commonFunders = aggregateCommonEntries(token.alerts, "common_funders", ["source", "funder", "wallet"], "wallets");
     token.commonRecipients = aggregateCommonEntries(token.alerts, "common_recipients", ["recipient", "wallet"], "txs");
+    token.commonExecutors = aggregateCommonEntries(token.alerts, "common_executors", ["executor", "wallet"], "wallets");
     token.alertCount = token.alerts.length;
     token.wallets = wallets;
     token.uniqueWallets = wallets.length;
@@ -1405,7 +1464,7 @@ async function loadStaticData() {
 
 async function loadConvexData() {
   const payload = await fetchConvexQuery("radar:dashboardData", { historyLimit: 120 });
-  if (!payload) return null;
+  if (!payload?.report?.generated_at) return null;
   return payload;
 }
 
@@ -1477,6 +1536,7 @@ async function loadData() {
     state.market = payload.market || {};
   }
   state.scanStatus = payload.scan_status || {};
+  state.discoveryStatus = payload.discovery_status || {};
   const tokens = buildTokenSignals();
   const visibleTokens = filteredTokens(tokens);
   if (!state.selectedTokenKey && visibleTokens.length) state.selectedTokenKey = visibleTokens[0].key;
@@ -1494,6 +1554,7 @@ async function loadData() {
 function renderStatus() {
   const report = state.report || {};
   const status = state.scanStatus || {};
+  const discoveryStatus = state.discoveryStatus || {};
   const running = Boolean(status.running);
   const failed = status.status === "failed";
   const freshness = reportFreshness(report.generated_at);
@@ -1526,6 +1587,13 @@ function renderStatus() {
   if (els.tierFilter) els.tierFilter.value = state.tier;
   const reportLanes = (report.lanes_scanned || []).filter((name) => FILTER_ORDER.includes(name) && name !== "legacy");
   const laneText = status.lane || status.mode || (reportLanes.length > 1 ? `${reportLanes.length} lanes` : reportLanes[0]) || report.mode || "-";
+  const discoveryAt = discoveryStatus.last_success_at
+    || discoveryStatus.last_attempt_at
+    || discoveryStatus.updatedAt;
+  const discoveryFreshness = discoveryAt
+    ? reportFreshness(discoveryAt)
+    : null;
+  const discoveryFailed = discoveryStatus.status === "failed";
   els.subtitle.textContent = report.generated_at
     ? `Latest successful scan ${dateLabel(report.generated_at)} - ${report.profile || report.lane || report.mode || "unknown"}`
     : "No scan report yet";
@@ -1536,6 +1604,11 @@ function renderStatus() {
     failed ? `<span class="status-pill freshness-bad" title="${esc(status.error || "Scanner failed")}"><span class="dot bad"></span>last attempt failed ${esc(dateLabel(status.last_attempt_at))}</span>` : "",
     `<span class="status-pill freshness-${freshness.tone}"><span class="dot ${freshness.tone === "good" ? "" : freshness.tone}"></span>${esc(freshness.label)}</span>`,
     `<span class="status-pill freshness-${healthTone}" title="${esc(healthReason)}"><span class="dot ${healthTone === "good" ? "" : healthTone}"></span>scan ${esc(healthStatus)}</span>`,
+    discoveryFailed
+      ? `<span class="status-pill freshness-bad" title="${esc(discoveryStatus.error || "Discovery pulse failed")}"><span class="dot bad"></span>discovery failed</span>`
+      : discoveryFreshness
+        ? `<span class="status-pill freshness-${discoveryFreshness.tone}" title="${esc(dateLabel(discoveryAt))}">discovery ${esc(discoveryFreshness.label)}</span>`
+        : "",
     activeRpcProviders.length ? `<span class="status-pill" title="${esc(rpcTitle)}">RPC ${esc(activeRpcProviders.join(" + "))}</span>` : "",
     blockedRpcProviders.length ? `<span class="status-pill freshness-warn" title="${esc(rpcTitle)}">${esc(blockedRpcProviders.join(" + "))} blocked</span>` : "",
     athProvider.status && athProvider.status !== "ok" ? `<span class="status-pill freshness-bad" title="${esc(athProvider.error || "GMGN unavailable")}">ATH source ${esc(athProvider.status)}</span>` : "",
@@ -1556,6 +1629,10 @@ function renderMetrics(tokens) {
   const stats = report.stats || {};
   const baseTokens = buildTokenSignals().filter(tokenMatchesBaseFilters);
   const tierCount = (tier) => baseTokens.filter((token) => token.actionTier === tier).length;
+  const outcomes = stats.signal_outcomes || {};
+  const outcomeSamples = Number(outcomes.with_24h || 0);
+  const outcomeMedian = outcomes.median_return_24h_pct;
+  const outcomePositive = outcomes.positive_24h_pct;
   els.metrics.innerHTML = [
     metric("Actionable", tierCount("actionable")),
     metric("Hot reactivation", tierCount("hot_reactivation")),
@@ -1563,6 +1640,18 @@ function renderMetrics(tokens) {
     metric("Inactive", tierCount("inactive")),
     metric("Universe", stats.universe_pools ?? 0),
     metric("Scanned pools", stats.scanned_pools ?? 0),
+    metric(
+      "24h median",
+      outcomeSamples && outcomeMedian !== null && outcomeMedian !== undefined
+        ? pct(outcomeMedian)
+        : "warming",
+    ),
+    metric(
+      "24h positive",
+      outcomeSamples && outcomePositive !== null && outcomePositive !== undefined
+        ? `${Number(outcomePositive).toFixed(0)}% / ${outcomeSamples}`
+        : "warming",
+    ),
     metric("Data age", reportFreshness(report.generated_at).label),
   ].join("");
 }
@@ -1614,7 +1703,7 @@ function renderTokenRow(token) {
       </div>
       <div class="token-numbers">
         <span class="${pClass(token.medianWalletPnl)}">${pct(token.medianWalletPnl)}</span>
-        <small>median wallet pnl</small>
+        <small>wallet PnL est.</small>
       </div>
       <div class="token-numbers">
         <span>${sol(token.totalSuspiciousSol)}</span>
@@ -1662,8 +1751,9 @@ function renderWalletRows(token) {
             <th>Class</th>
             <th>Buys</th>
             <th>Entry</th>
-            <th>PnL</th>
-            <th>Profit</th>
+            <th>Held</th>
+            <th>PnL est.</th>
+            <th>Net est.</th>
           </tr>
         </thead>
         <tbody>
@@ -1673,6 +1763,7 @@ function renderWalletRows(token) {
               <td>${esc(wallet.class_label || "-")}${wallet.routed ? ` ${chip(`routed ${wallet.routed}`, "warn")}` : ""}</td>
               <td>${esc(wallet.buys)}</td>
               <td>${sol(wallet.sol_in)}</td>
+              <td>${wallet.retained_pct === null ? "-" : `${Number(wallet.retained_pct).toFixed(0)}%`}</td>
               <td class="${pClass(wallet.pnl_pct)}">${pct(wallet.pnl_pct)}</td>
               <td class="${pClass(wallet.pnl_sol)}">${wallet.pnl_sol === null ? "-" : sol(wallet.pnl_sol)}</td>
             </tr>
@@ -1959,12 +2050,15 @@ function renderWalletCluster(token) {
   token.commonRecipients.forEach((item) => {
     parts.push(chip(`common recipient ${short(item.key)} <- ${item.count} txs`, "warn"));
   });
+  token.commonExecutors.forEach((item) => {
+    parts.push(chip(`common executor ${short(item.key)} -> ${item.count} wallets`, "warn"));
+  });
   if (token.routedBuyCount) parts.push(chip(`routed buys ${token.routedBuyCount}`, "warn"));
   return parts.length ? parts.join(" ") : "-";
 }
 
 function renderWalletSummary(token) {
-  return `${esc(token.uniqueWallets)} unique wallets / median ${pct(token.medianWalletPnl)} / best ${pct(token.bestWalletPnl)}`;
+  return `${esc(token.uniqueWallets)} wallets / estimated median ${pct(token.medianWalletPnl)} / best ${pct(token.bestWalletPnl)}`;
 }
 
 function detailMetric(label, value, sub = "", valueClass = "", subClass = "") {
@@ -2006,7 +2100,10 @@ function renderScannerReason(token) {
   if (token.supportSignalCount || token.supportFlowSol) {
     parts.push(`${token.supportSignalCount} support wallets bought ${sol(token.supportFlowSol)}`);
   }
-  const linkCount = token.commonFunders.length + token.commonRecipients.length + Number(token.routedBuyCount || 0);
+  const linkCount = token.commonFunders.length
+    + token.commonRecipients.length
+    + token.commonExecutors.length
+    + Number(token.routedBuyCount || 0);
   if (linkCount) parts.push(`${linkCount} wallet-link flag${linkCount === 1 ? "" : "s"}`);
   if (token.currentScanAlertCount) parts.push(`${token.currentScanAlertCount} update${token.currentScanAlertCount === 1 ? "" : "s"} in latest scan`);
   if (!parts.length) return "Scanner caught this from score-based evidence, but hard wallet evidence is thin.";
@@ -2092,8 +2189,12 @@ function renderWaveLine(token) {
       <span>Buy wave</span>
       <span>
         ${sol(wave.buy_sol)} buys / ${sol(wave.sell_sol)} sells / ${sol(wave.net_buy_sol)} net;
-        ${esc(wave.unique_buyers || 0)} buyers, ${esc(wave.large_buyers || 0)} large;
+        ${esc(wave.effective_unique_buyers || wave.unique_buyers || 0)} effective buyers
+        (${esc(wave.unique_buyers || 0)} addresses), ${esc(wave.large_buyers || 0)} large;
         ${Number(wave.sticky_supply_pct || 0).toFixed(1)}% supply sticky
+        ${Number(wave.max_linked_cluster_share || 0) > 0
+          ? `; ${(Number(wave.max_linked_cluster_share) * 100).toFixed(0)}% largest linked cluster`
+          : ""}
       </span>
     </div>
   `;

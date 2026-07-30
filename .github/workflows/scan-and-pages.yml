@@ -23,7 +23,6 @@ on:
       - "requirements.txt"
       - "tests/**"
       - "dashboard/**"
-      - "data/**"
       - "NARRATIVE_PROTOCOL.md"
 
 concurrency:
@@ -159,11 +158,21 @@ jobs:
         run: |
           echo "Skipping scanner because latest report is still fresh: ${{ steps.freshness.outputs.reason }}"
 
+      - name: Restore scanner runtime state
+        if: steps.freshness.outputs.should_scan == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: data/state.json
+          key: ${{ runner.os }}-solana-radar-state-v3-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-solana-radar-state-v3-
+
       - name: Install dependencies
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
         run: |
           python -m pip install -r requirements.txt
-          npm install -g gmgn-cli
+          npm ci
+          npm install -g gmgn-cli@1.5.4
 
       - name: Validate scanner and dashboard
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
@@ -171,6 +180,13 @@ jobs:
           python -m unittest discover -s tests -v
           python -m json.tool config.example.json > /dev/null
           node --check dashboard/app.js
+          npx tsc -p convex/tsconfig.json --noEmit
+
+      - name: Deploy Convex functions
+        if: github.event_name == 'push'
+        env:
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+        run: npx convex deploy
 
       - name: Run scanner
         id: run_scanner
@@ -182,6 +198,11 @@ jobs:
           CHAINSTACK_SOLANA_RPC_URL: ${{ secrets.CHAINSTACK_SOLANA_RPC_URL }}
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
           BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
+          CONVEX_URL: https://basic-starfish-944.convex.cloud
+          CONVEX_INGEST_SECRET: ${{ secrets.CONVEX_INGEST_SECRET }}
+          # The Actions cache and static Pages snapshot keep the hourly scan
+          # operational during a temporary Convex outage.
+          CONVEX_SYNC_REQUIRED: "false"
         run: |
           set +e
           timeout --signal=TERM --kill-after=30s 25m python scanner.py --once --lane reactivation
@@ -214,14 +235,16 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp data/state.json /tmp/solana-radar-runtime-state.json
+          git restore --worktree -- data/state.json
           if [ "${{ steps.run_scanner.outputs.exit_code }}" != "0" ]; then
             cp data/scanner_status.json /tmp/scanner_status.json
-            git restore --worktree -- data/latest_report.json data/latest_report.md data/alerts.jsonl data/state.json data/deleted_tokens.json
+            git restore --worktree -- data/latest_report.json data/latest_report.md data/alerts.jsonl data/deleted_tokens.json
             cp /tmp/scanner_status.json data/scanner_status.json
           fi
           git add data/scanner_status.json
           if [ "${{ steps.run_scanner.outputs.exit_code }}" = "0" ]; then
-            git add data/latest_report.json data/latest_report.md data/alerts.jsonl data/state.json data/deleted_tokens.json
+            git add data/latest_report.json data/latest_report.md data/alerts.jsonl data/deleted_tokens.json
           fi
           if ! git diff --cached --quiet; then
             if [ "${{ steps.run_scanner.outputs.exit_code }}" = "0" ]; then
@@ -240,6 +263,14 @@ jobs:
               sleep 5
             done
           fi
+          cp /tmp/solana-radar-runtime-state.json data/state.json
+
+      - name: Save scanner runtime state
+        if: steps.freshness.outputs.should_scan == 'true' && steps.run_scanner.outputs.exit_code == '0'
+        uses: actions/cache/save@v4
+        with:
+          path: data/state.json
+          key: ${{ runner.os }}-solana-radar-state-v3-${{ github.run_id }}
 
       - name: Build Pages artifact
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
