@@ -826,7 +826,7 @@ class ScannerCoreTests(unittest.TestCase):
             [("reactivation", "react-token")],
         )
 
-    def test_due_signal_recheck_preempts_recent_signal_monitor(self):
+    def test_discovery_queue_reserves_capacity_before_due_rechecks(self):
         now = scanner.parse_timestamp("2026-07-29T13:00:00Z")
         pools = [
             scanner.Pool(pool_address=f"pool-{index}", token_address=f"token-{index}")
@@ -862,9 +862,11 @@ class ScannerCoreTests(unittest.TestCase):
                     "signal_monitor_max_age_hours": 48,
                 },
             )
-        self.assertEqual(selected[0].pool_address, "pool-4")
+        self.assertEqual(selected[0].pool_address, "pool-5")
         self.assertEqual(stats["due_rechecks"], 1)
-        self.assertEqual(stats["discovery_queue"], 0)
+        self.assertEqual(stats["discovery_queue"], 1)
+        self.assertEqual(state["pools"]["pool-5"]["last_selection_reason"], "discovery_queue")
+        self.assertEqual(state["pools"]["pool-4"]["last_selection_reason"], "due_recheck")
 
     def test_due_signal_thesis_is_restored_to_monitor_universe(self):
         now = scanner.parse_timestamp("2026-07-29T13:00:00Z")

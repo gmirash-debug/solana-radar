@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "python3 -m unittest discover -s tests -v && node --check dashboard/app.js && tsc -p convex/tsconfig.json --noEmit",
     "convex:dev": "CONVEX_AGENT_MODE=anonymous convex dev",
     "convex:deploy": "convex deploy",
     "convex:codegen": "convex codegen"

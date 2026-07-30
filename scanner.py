@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import Counter, defaultdict
@@ -30,6 +31,7 @@ DISCOVERY_STATUS_PATH = DATA_DIR / "discovery_status.json"
 DELETED_TOKENS_PATH = DATA_DIR / "deleted_tokens.json"
 CONFIG_PATH = ROOT / "config.json"
 DEFAULT_CONFIG_PATH = ROOT / "config.example.json"
+STATE_SCHEMA_VERSION = 1
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
 SOLANA_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
@@ -202,11 +204,57 @@ def selected_lanes(config, lane_name=None):
 
 
 def save_json(path, value, compact=False):
+    serialized = (
+        json.dumps(value, separators=(",", ":"), sort_keys=True)
+        if compact
+        else json.dumps(value, indent=2, sort_keys=True)
+    )
+    atomic_write_text(path, serialized + "\n")
+
+
+def atomic_write_text(path, text):
+    """Replace a persisted scanner artifact only after its full payload is durable."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    if compact:
-        path.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n")
-    else:
-        path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        temporary_path = Path(handle.name)
+        try:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise
+    os.replace(temporary_path, path)
+
+
+def save_runtime_state(state, config, writer, observed_at=None):
+    """Persist a versioned state revision so concurrent writers are observable."""
+    if not isinstance(state, dict):
+        raise TypeError("scanner runtime state must be a mapping")
+    runtime = state.get("_runtime")
+    runtime = dict(runtime) if isinstance(runtime, dict) else {}
+    runtime["schema_version"] = STATE_SCHEMA_VERSION
+    runtime["revision"] = max(0, int(runtime.get("revision") or 0)) + 1
+    runtime["writer"] = writer
+    runtime["updated_at"] = observed_at or utc_now().isoformat().replace("+00:00", "Z")
+    runtime["run_id"] = os.environ.get("GITHUB_RUN_ID") or None
+    state["_runtime"] = runtime
+    save_json(STATE_PATH, state, compact=bool(config.get("state_json_compact", True)))
+    return runtime
+
+
+def write_jsonl(path, records):
+    atomic_write_text(
+        path,
+        "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records),
+    )
 
 
 def write_scanner_status(status, error=None, scan_health=None):
@@ -3036,73 +3084,6 @@ def select_scan_targets(universe, state, config):
             "reactivation_stages": reactivation_stage_counts(universe, config),
         }
 
-    monitor_share = min(0.5, max(0.0, float(config.get("signal_monitor_share", 0.25))))
-    monitor_limit = (
-        min(limit, max(1, int(round(limit * monitor_share))))
-        if monitor_share
-        else 0
-    )
-    monitor_max_age = float(config.get("signal_monitor_max_age_hours", 48))
-    monitor_cutoff = int(time.time() - monitor_max_age * 3600) if monitor_max_age > 0 else 0
-    universe_by_key = {}
-    for pool in universe:
-        for key in (pool.pool_address, pool.token_address):
-            if key:
-                universe_by_key[key] = pool
-    monitored = []
-    monitored_keys = set()
-    pulse_selected = 0
-    due_rechecks = []
-    pools_state = state.get("pools") if isinstance(state, dict) else {}
-    pools_state = pools_state if isinstance(pools_state, dict) else {}
-    for pool in universe:
-        due_at = parse_timestamp(
-            (pools_state.get(pool.pool_address) or {}).get("signal_recheck_due_at")
-        )
-        if due_at and due_at <= now:
-            due_rechecks.append((due_at, pool))
-    due_rechecks.sort(key=lambda item: (item[0], item[1].pool_address))
-    for _due_at, pool in due_rechecks:
-        if pool.pool_address in monitored_keys:
-            continue
-        monitored.append(pool)
-        monitored_keys.add(pool.pool_address)
-        if len(monitored) >= monitor_limit:
-            break
-
-    for item in state.get("discovery_queue", []) or []:
-        if len(monitored) >= monitor_limit:
-            break
-        if not isinstance(item, dict):
-            continue
-        if parse_timestamp(item.get("expires_at")) <= now:
-            continue
-        pool = universe_by_key.get(item.get("pool_address")) or universe_by_key.get(
-            item.get("token_address")
-        )
-        if not pool or pool.pool_address in monitored_keys:
-            continue
-        monitored.append(pool)
-        monitored_keys.add(pool.pool_address)
-        pulse_selected += 1
-
-    active_lane = config.get("lane")
-    for alert in sorted(load_alert_history(), key=alert_history_sort_key, reverse=True):
-        if len(monitored) >= monitor_limit:
-            break
-        if active_lane and alert.get("lane") != active_lane:
-            continue
-        if monitor_cutoff and alert_history_timestamp(alert) < monitor_cutoff:
-            continue
-        alert_pool = alert.get("pool") or {}
-        pool = universe_by_key.get(alert_pool.get("pool_address")) or universe_by_key.get(
-            alert_pool.get("token_address")
-        )
-        if not pool or pool.pool_address in monitored_keys:
-            continue
-        monitored.append(pool)
-        monitored_keys.add(pool.pool_address)
-
     priority_share = min(1.0, max(0.0, float(config.get("scan_priority_share", 0.6))))
     rotation_share = min(
         0.5,
@@ -3117,21 +3098,85 @@ def select_scan_targets(universe, state, config):
         max(0, limit - rotation_reserve),
         max(1, int(round(limit * priority_share))),
     )
-    gap_share = min(
-        0.5,
-        max(0.0, float(config.get("scan_gap_repair_share", 0.1))),
-    )
-    gap_limit = (
-        min(
-            max(0, priority_count - len(monitored)),
-            max(1, int(round(limit * gap_share))),
+
+    def reserved_slots(setting, fallback):
+        share = min(1.0, max(0.0, float(config.get(setting, fallback))))
+        return min(priority_count, max(1, int(math.ceil(limit * share)))) if share else 0
+
+    discovery_limit = reserved_slots("discovery_queue_min_share", 0.40)
+    due_recheck_limit = reserved_slots("due_recheck_max_share", 0.25)
+    gap_limit = reserved_slots("scan_gap_repair_share", 0.10)
+    monitor_limit = reserved_slots("signal_monitor_share", 0.25)
+    monitor_max_age = float(config.get("signal_monitor_max_age_hours", 48))
+    monitor_cutoff = int(time.time() - monitor_max_age * 3600) if monitor_max_age > 0 else 0
+    universe_by_key = {}
+    for pool in universe:
+        for key in (pool.pool_address, pool.token_address):
+            if key:
+                universe_by_key[key] = pool
+    priority = []
+    priority_keys = set()
+    selection_reasons = {}
+
+    def select(pool, reason):
+        if pool.pool_address in priority_keys or len(priority) >= priority_count:
+            return False
+        priority.append(pool)
+        priority_keys.add(pool.pool_address)
+        selection_reasons[pool.pool_address] = reason
+        return True
+
+    pulse_selected = 0
+    for item in state.get("discovery_queue", []) or []:
+        if pulse_selected >= discovery_limit or len(priority) >= priority_count:
+            break
+        if not isinstance(item, dict) or parse_timestamp(item.get("expires_at")) <= now:
+            continue
+        pool = universe_by_key.get(item.get("pool_address")) or universe_by_key.get(
+            item.get("token_address")
         )
-        if gap_share
-        else 0
-    )
+        if pool and select(pool, "discovery_queue"):
+            pulse_selected += 1
+
+    due_rechecks = []
+    pools_state = state.get("pools") if isinstance(state, dict) else {}
+    if not isinstance(pools_state, dict):
+        pools_state = {}
+    if isinstance(state, dict):
+        state["pools"] = pools_state
+    for pool in universe:
+        due_at = parse_timestamp(
+            (pools_state.get(pool.pool_address) or {}).get("signal_recheck_due_at")
+        )
+        if due_at and due_at <= now:
+            due_rechecks.append((due_at, pool))
+    due_rechecks.sort(key=lambda item: (item[0], item[1].pool_address))
+    due_selected = 0
+    for _due_at, pool in due_rechecks:
+        if due_selected >= due_recheck_limit or len(priority) >= priority_count:
+            break
+        if select(pool, "due_recheck"):
+            due_selected += 1
+
+    active_lane = config.get("lane")
+    recent_monitor_selected = 0
+    for alert in sorted(load_alert_history(), key=alert_history_sort_key, reverse=True):
+        if recent_monitor_selected >= monitor_limit or len(priority) >= priority_count:
+            break
+        if active_lane and alert.get("lane") != active_lane:
+            continue
+        if monitor_cutoff and alert_history_timestamp(alert) < monitor_cutoff:
+            continue
+        alert_pool = alert.get("pool") or {}
+        pool = universe_by_key.get(alert_pool.get("pool_address")) or universe_by_key.get(
+            alert_pool.get("token_address")
+        )
+        if pool and select(pool, "recent_signal_monitor"):
+            recent_monitor_selected += 1
+
     gap_candidates = []
     for pool in universe:
-        if pool.pool_address in monitored_keys:
+        if pool.pool_address in priority_keys:
             continue
         pool_state = pools_state.get(pool.pool_address) or {}
         backlogs = pool_state.get("helius_rolling_backlogs") or []
@@ -3147,17 +3192,20 @@ def select_scan_targets(universe, state, config):
         )
         gap_candidates.append((oldest_gap, pool_last_scanned_at(state, pool), pool))
     gap_candidates.sort(key=lambda item: (item[0], item[1], item[2].pool_address))
-    gap_repairs = [item[2] for item in gap_candidates[:gap_limit]]
-    gap_keys = {pool.pool_address for pool in gap_repairs}
+    gap_repairs = []
+    for _oldest_gap, _last_scanned_at, pool in gap_candidates:
+        if len(gap_repairs) >= gap_limit or len(priority) >= priority_count:
+            break
+        if select(pool, "history_gap_repair"):
+            gap_repairs.append(pool)
     market_priority_limit = max(
         0,
-        priority_count - len(monitored) - len(gap_repairs),
+        priority_count - len(priority),
     )
     market_candidates = [
         pool
         for pool in universe
-        if pool.pool_address not in monitored_keys
-        and pool.pool_address not in gap_keys
+        if pool.pool_address not in priority_keys
     ]
     unsuppressed_candidates = [
         pool
@@ -3178,8 +3226,8 @@ def select_scan_targets(universe, state, config):
         market_priority.extend(
             suppressed_candidates[: market_priority_limit - len(market_priority)]
         )
-    priority = [*monitored, *gap_repairs, *market_priority]
-    priority_keys = {pool.pool_address for pool in priority}
+    for pool in market_priority:
+        select(pool, "market_priority")
     rotation_candidates = [pool for pool in universe if pool.pool_address not in priority_keys]
     rotation_candidates.sort(
         key=lambda pool: (
@@ -3189,21 +3237,23 @@ def select_scan_targets(universe, state, config):
         )
     )
     rotation = rotation_candidates[: max(0, limit - len(priority))]
+    for pool in rotation:
+        selection_reasons[pool.pool_address] = "rotation"
+    selected_at = iso(now)
+    for pool in [*priority, *rotation]:
+        pool_state = pools_state.setdefault(pool.pool_address, {})
+        pool_state["last_selection_reason"] = selection_reasons.get(pool.pool_address)
+        pool_state["last_selected_at"] = selected_at
     selected = [*priority, *rotation]
     return selected, {
         "candidates": len(universe),
         "priority": len(priority),
-        "signal_monitor": len(monitored),
+        "signal_monitor": due_selected + recent_monitor_selected,
         "discovery_queue": pulse_selected,
-        "due_rechecks": sum(
-            1
-            for pool in monitored
-            if 0
-            < parse_timestamp(
-                (pools_state.get(pool.pool_address) or {}).get("signal_recheck_due_at")
-            )
-            <= now
-        ),
+        "discovery_queue_reserved": discovery_limit,
+        "due_rechecks": due_selected,
+        "due_recheck_reserved": due_recheck_limit,
+        "recent_signal_monitor": recent_monitor_selected,
         "gap_repairs": len(gap_repairs),
         "gap_repair_candidates": len(gap_candidates),
         "rotation": len(rotation),
@@ -8616,11 +8666,8 @@ def compact_alert_history(existing_alerts, new_alerts, config):
 
 
 def write_alerts(alerts, config):
-    ALERTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     history = compact_alert_history(load_alert_history(), alerts, config)
-    with ALERTS_PATH.open("w") as handle:
-        for alert in history:
-            handle.write(json.dumps(alert, separators=(",", ":")) + "\n")
+    write_jsonl(ALERTS_PATH, history)
 
 
 def recent_alert_token_addresses(limit=250, lanes=None):
@@ -10385,8 +10432,7 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
 
 
 def write_report_json(payload):
-    REPORT_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_JSON_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    save_json(REPORT_JSON_PATH, payload)
 
 
 def render_report(payload):
@@ -10498,8 +10544,7 @@ def render_report(payload):
             f"classes={summary['classes']}, mcap=${pool.get('mcap_usd'):.0f}, "
             f"pool={pool['pool_address']}"
         )
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text("\n".join(lines) + "\n")
+    atomic_write_text(REPORT_PATH, "\n".join(lines) + "\n")
 
 
 def ath_filter_log_message(label, kept_pools, input_pools, max_ratio):
@@ -10818,7 +10863,7 @@ def run_once(config, lane_name=None):
     config["_scan_health"] = build_scan_health(summaries, lane_stats, config)
     prune_wallet_cache(state, config)
     compact_state(state, universe, all_alerts, config, generated_at)
-    save_json(STATE_PATH, state, compact=bool(config.get("state_json_compact", True)))
+    save_runtime_state(state, config, "deep_scan", generated_at)
     write_alerts(all_alerts, config)
     report_payload = build_report_payload(universe, summaries, all_alerts, rpc.calls, config, generated_at, state)
     report_payload["lane_stats"] = lane_stats
@@ -10920,11 +10965,7 @@ def run_discovery_once(config):
         observed_at,
     )
     compact_state(state, universe, [], lane_config, observed_at)
-    save_json(
-        STATE_PATH,
-        state,
-        compact=bool(lane_config.get("state_json_compact", True)),
-    )
+    save_runtime_state(state, lane_config, "discovery_pulse", observed_at)
     payload = {
         "generated_at": observed_at,
         "discovered_pools": len(discovered),

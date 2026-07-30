@@ -6,8 +6,9 @@ on:
     - cron: "*/5 * * * *"
 
 concurrency:
-  group: solana-radar-discovery-pulse
-  cancel-in-progress: true
+  # Shared lock with the hourly deep scan: never overwrite a newer state cache.
+  group: solana-radar-state-writer
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -32,9 +33,9 @@ jobs:
           path: |
             data/state.json
             data/discovery_status.json
-          key: ${{ runner.os }}-solana-radar-state-v3-${{ github.run_id }}
+          key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}
           restore-keys: |
-            ${{ runner.os }}-solana-radar-state-v3-
+            ${{ runner.os }}-solana-radar-state-v4-
 
       - name: Install discovery dependencies
         run: |
@@ -62,4 +63,4 @@ jobs:
           path: |
             data/state.json
             data/discovery_status.json
-          key: ${{ runner.os }}-solana-radar-state-v3-${{ github.run_id }}
+          key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}
