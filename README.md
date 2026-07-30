@@ -204,7 +204,7 @@ Signal lifecycle:
   automatically instead of losing the newer Reactivation setup.
 - The scanner rechecks that same cohort on a reserved hourly monitor queue.
   Due cohort rechecks take priority over new discovery-queue candidates.
-- `Thesis intact` means the tracked cohort still retains the original
+- `Accumulation intact` means the tracked cohort still retains the original
   accumulation, while `Weakening` means it has distributed a material share.
 - `Recheck due` is used when the scan is stale or wallet coverage is
   insufficient. Missing data never invalidates a signal.
