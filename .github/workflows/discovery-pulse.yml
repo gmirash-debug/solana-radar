@@ -26,22 +26,40 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Restore shared scanner state
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/state.json
+            data/discovery_status.json
+          key: ${{ runner.os }}-solana-radar-state-v3-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-solana-radar-state-v3-
+
       - name: Install discovery dependencies
         run: |
           python -m pip install -r requirements.txt
           npm install -g gmgn-cli@1.5.4
 
       - name: Refresh discovery baselines
+        id: discovery_pulse
         env:
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
-          CONVEX_URL: https://basic-starfish-944.convex.cloud
-          CONVEX_INGEST_SECRET: ${{ secrets.CONVEX_INGEST_SECRET }}
-          CONVEX_SYNC_REQUIRED: "true"
         run: |
           set +e
           timeout --signal=TERM --kill-after=15s 6m python scanner.py --discovery-only
           status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
           if [ "$status" -ne 0 ]; then
             echo "::warning title=Discovery pulse failed::Exit code $status. The hourly scanner will continue with the last persisted baseline."
           fi
           exit 0
+
+      - name: Save shared scanner state
+        if: steps.discovery_pulse.outputs.exit_code == '0'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/state.json
+            data/discovery_status.json
+          key: ${{ runner.os }}-solana-radar-state-v3-${{ github.run_id }}

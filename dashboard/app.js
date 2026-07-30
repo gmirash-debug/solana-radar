@@ -1440,10 +1440,11 @@ function parseJsonl(text) {
 }
 
 async function loadStaticData() {
-  const [report, deletedTokens, scannerStatus] = await Promise.all([
+  const [report, deletedTokens, scannerStatus, discoveryStatus] = await Promise.all([
     fetchJson("data/latest_report.json"),
     fetchJson("data/deleted_tokens.json", true),
     fetchJson("data/scanner_status.json", true),
+    fetchJson("data/discovery_status.json", true),
   ]);
   applyDeletedTokenList(deletedTokens || {});
   const extrasReady = state.staticExtrasLoadedFor === report.generated_at;
@@ -1459,6 +1460,7 @@ async function loadStaticData() {
       finished_at: scannerStatus?.last_attempt_at || report.generated_at,
       returncode: scannerStatus?.status === "failed" ? 1 : 0,
     },
+    discovery_status: discoveryStatus || {},
   };
 }
 
