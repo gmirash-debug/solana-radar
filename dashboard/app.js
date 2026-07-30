@@ -136,7 +136,7 @@ const TIER_META = {
     summary: "real signal, but needs confirmation or cleaner market setup",
   },
   holding: {
-    label: "Thesis intact",
+    label: "Accumulation intact",
     tone: "good",
     rank: 3.5,
     summary: "the original buyer cohort still retains the accumulated tokens",
@@ -1132,7 +1132,10 @@ function buildTokenSignals() {
   });
 
   const tokens = [...groups.values()].map((token) => {
-    token.alerts.sort((a, b) => new Date(a.window_start || a.created_at) - new Date(b.window_start || b.created_at));
+    token.alerts.sort((a, b) => (
+      new Date(a.created_at || a.window_end || a.window_start)
+      - new Date(b.created_at || b.window_end || b.window_start)
+    ));
     token.alerts.forEach((alert) => {
       alert.baseFilterLane = baseAlertLane(alert);
       alert.filterLane = alert.baseFilterLane;
@@ -1263,8 +1266,8 @@ function buildTokenSignals() {
     }).sort((a, b) => Number(b.sol_in || 0) - Number(a.sol_in || 0));
     const walletPnls = wallets.map((row) => row.pnl_pct).filter((value) => Number.isFinite(value));
     token.latestPool = latestPool;
-    token.firstSignalAt = first.window_start || first.created_at;
-    token.lastSignalAt = last.window_start || last.created_at;
+    token.firstSignalAt = first.created_at || first.window_end || first.window_start;
+    token.lastSignalAt = last.created_at || last.window_end || last.window_start;
     token.firstPriceUsd = firstPriceUsd;
     token.currentPriceUsd = currentPriceUsd;
     token.profitPct = profitPct;
@@ -1282,8 +1285,9 @@ function buildTokenSignals() {
       || first.obs_mcap_at
       || firstPool.first_obs_mcap_at
       || latestPool.first_obs_mcap_at
-      || first.window_start
       || first.created_at
+      || first.window_end
+      || first.window_start
       || null;
     const createdAt = poolCreatedAt(latestPool) || poolCreatedAt(firstPool);
     const reportedAge = latestPool.age_hours ?? firstPool.age_hours;
@@ -1737,7 +1741,7 @@ function renderMetrics(tokens) {
     metric("Actionable", tierCount("actionable")),
     metric("Hot reactivation", tierCount("hot_reactivation")),
     metric("Watch", tierCount("watch")),
-    metric("Thesis intact", tierCount("holding")),
+    metric("Accumulation intact", tierCount("holding")),
     metric("Weakening", tierCount("weakening")),
     metric("Recheck due", tierCount("recheck_due")),
     metric("Inactive", tierCount("inactive")),
@@ -2151,6 +2155,58 @@ function thesisTier(thesis) {
   return "recheck_due";
 }
 
+function originalSignalTier(token) {
+  const sourceTier = token.signalThesis?.source_tier;
+  if (sourceTier && TIER_META[sourceTier]) return sourceTier;
+  const originalAlert = token.alerts?.[0];
+  return originalAlert ? alertTier(originalAlert) : "watch";
+}
+
+function renderCaughtSignal(token) {
+  const thesis = token.signalThesis;
+  const originalAlert = token.alerts?.[0] || {};
+  const tier = originalSignalTier(token);
+  const caughtAt = thesis?.signal_at
+    || originalAlert.created_at
+    || originalAlert.window_end
+    || originalAlert.window_start
+    || token.firstSignalAt;
+  const mcap = Number(
+    thesis?.signal_mcap_usd
+    || originalAlert.obs_mcap_usd
+    || originalAlert.pool?.mcap_usd
+    || token.firstObsMcapUsd
+    || 0,
+  );
+  const score = Number(
+    thesis?.source_score
+    ?? originalAlert.score
+    ?? Number.NaN,
+  );
+  const flow = Number(
+    thesis?.source_flow_sol
+    ?? originalAlert.suspicious_sol
+    ?? Number.NaN,
+  );
+  const wallets = Number(
+    thesis?.source_wallets
+    ?? originalAlert.suspicious_wallets
+    ?? Number.NaN,
+  );
+  const metrics = [
+    caughtAt ? dateLabel(caughtAt) : "",
+    mcap > 0 ? `${money(mcap)} mcap` : "",
+    Number.isFinite(score) ? `score ${score.toFixed(0)}` : "",
+    Number.isFinite(flow) ? `${sol(flow)} flow` : "",
+    Number.isFinite(wallets) ? `${wallets.toFixed(0)} wallets` : "",
+  ].filter(Boolean).map(esc).join(" / ");
+  return [
+    tierChip(tier),
+    metrics,
+    `<span class="muted-inline">${esc(tierMeta(tier).summary)}</span>`,
+  ].filter(Boolean).join(" ");
+}
+
 function renderThesisSummary(token) {
   const thesis = token.signalThesis;
   if (!thesis) {
@@ -2263,7 +2319,19 @@ function renderTopWalletPreview(token) {
 function renderScannerReason(token) {
   const parts = [];
   if (token.alerts.every((alert) => alert._thesis_only)) {
-    return "Original Reactivation signal is retained from the persisted buyer cohort.";
+    const thesis = token.signalThesis || {};
+    const wallets = Number(thesis.source_wallets || thesis.original_wallets || 0);
+    const flow = Number(thesis.source_flow_sol || 0);
+    const mcap = Number(thesis.signal_mcap_usd || 0);
+    const source = thesis.signal_family === "reactivation_wave"
+      ? "formed a retained market-wide buy wave"
+      : "formed a classified-wallet accumulation cluster";
+    return [
+      wallets ? `${wallets} buyers ${source}` : `Buyers ${source}`,
+      flow ? `${sol(flow)} net flow` : "",
+      mcap ? `at ${money(mcap)} mcap` : "",
+      Number.isFinite(Number(thesis.source_score)) ? `source score ${Number(thesis.source_score).toFixed(0)}` : "",
+    ].filter(Boolean).join(" / ");
   }
   if (token.bestWave) {
     parts.push(
@@ -2413,7 +2481,7 @@ function renderTimeline(token) {
     <div class="timeline">
       ${[...token.alerts].reverse().map((alert) => `
         <div class="timeline-item">
-          <strong>${esc(dateLabel(alert.window_start))} ${tierChip(alertTier(alert))}${alert._scope_source === "current" ? ` ${chip("latest scan", "good")}` : ""}</strong>
+          <strong>${esc(dateLabel(alert.created_at || alert.window_end || alert.window_start))} ${tierChip(alertTier(alert))}${alert._scope_source === "current" ? ` ${chip("latest scan", "good")}` : ""}</strong>
           <span>OBS ${moneyMaybe(alert.obs_mcap_usd || alert.pool?.mcap_usd)} / score ${esc(alert.score)} / hard ${sol(alert.hard_sol || 0)} / support ${sol(alert.support_sol || 0)} / ${esc(alert.filterLane || effectiveAlertLane(alert))}</span>
         </div>
       `).join("")}
@@ -2435,8 +2503,9 @@ function renderOverviewTab(token) {
   return `
     <section class="detail-block">
       <div class="detail-block-title">Decision</div>
+      <div class="kv"><span>Caught as</span><span>${renderCaughtSignal(token)}</span></div>
       <div class="kv"><span>Why caught</span><span>${esc(renderScannerReason(token))}</span></div>
-      <div class="kv"><span>Signal thesis</span><span>${renderThesisSummary(token)}</span></div>
+      <div class="kv"><span>Cohort now</span><span>${renderThesisSummary(token)}</span></div>
       ${renderWaveLine(token)}
       <div class="kv"><span>Market phase</span><span>${renderMarketPhaseLine(token)}</span></div>
       <div class="kv"><span>Risk flags</span><span>${renderRiskFlags(token)}</span></div>
@@ -2456,7 +2525,7 @@ function renderWalletsTab(token) {
   return `
     <section class="detail-block">
       <div class="detail-block-title">Wallet signal</div>
-      <div class="kv"><span>Signal tier</span><span>${renderSignalTier(token)}</span></div>
+      <div class="kv"><span>Current lifecycle</span><span>${renderSignalTier(token)}</span></div>
       ${renderThesisDetails(token)}
       <div class="kv"><span>Wallet setup</span><span>${renderWalletCluster(token)}</span></div>
       <div class="kv"><span>Wallet PnL</span><span>${renderWalletSummary(token)}</span></div>
