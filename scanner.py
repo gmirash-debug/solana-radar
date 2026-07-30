@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -25,6 +26,7 @@ ALERTS_PATH = DATA_DIR / "alerts.jsonl"
 REPORT_PATH = DATA_DIR / "latest_report.md"
 REPORT_JSON_PATH = DATA_DIR / "latest_report.json"
 SCANNER_STATUS_PATH = DATA_DIR / "scanner_status.json"
+DISCOVERY_STATUS_PATH = DATA_DIR / "discovery_status.json"
 DELETED_TOKENS_PATH = DATA_DIR / "deleted_tokens.json"
 CONFIG_PATH = ROOT / "config.json"
 DEFAULT_CONFIG_PATH = ROOT / "config.example.json"
@@ -223,6 +225,22 @@ def write_scanner_status(status, error=None, scan_health=None):
     return payload
 
 
+def write_discovery_status(status, payload=None, error=None):
+    previous = load_json(DISCOVERY_STATUS_PATH, {})
+    now = utc_now().isoformat().replace("+00:00", "Z")
+    body = {
+        "status": status,
+        "last_attempt_at": now,
+        "last_success_at": previous.get("last_success_at"),
+        "error": str(error or "")[:500] or None,
+        **(payload or {}),
+    }
+    if status == "ok":
+        body["last_success_at"] = now
+    save_json(DISCOVERY_STATUS_PATH, body)
+    return body
+
+
 def convex_url_from_env():
     for key in ("CONVEX_URL", "NEXT_PUBLIC_CONVEX_URL", "VITE_CONVEX_URL"):
         value = os.environ.get(key)
@@ -236,6 +254,51 @@ def convex_sync_required(config):
     if raw is None:
         raw = config.get("convex_sync_required", False)
     return str(raw).strip().lower() in {"1", "true", "yes", "required"}
+
+
+def compact_report_for_convex(report):
+    pool_fields = {
+        "pool_address",
+        "token_address",
+        "symbol",
+        "name",
+        "dex",
+        "url",
+        "mcap_usd",
+        "price_usd",
+        "liquidity_usd",
+        "volume_5m_usd",
+        "volume_1h_usd",
+        "txns_5m",
+        "txns_1h",
+        "pair_created_at",
+        "age_hours",
+    }
+
+    def compact_pool(pool):
+        return {
+            key: value
+            for key, value in (pool or {}).items()
+            if key in pool_fields
+        }
+
+    compact = {
+        key: value
+        for key, value in report.items()
+        if key not in {"universe", "active_pools", "summaries"}
+    }
+    compact["universe"] = []
+    compact["active_pools"] = []
+    compact["summaries"] = [
+        {
+            "pool": compact_pool(summary.get("pool") or {}),
+            "error": summary.get("error"),
+            "scan_failed": bool(summary.get("scan_failed")),
+        }
+        for summary in report.get("summaries", [])
+    ]
+    compact["convex_compact"] = True
+    return compact
 
 
 def sync_convex_snapshot(report_payload, state, config):
@@ -260,9 +323,8 @@ def sync_convex_snapshot(report_payload, state, config):
         "path": "radar:ingestSnapshot",
         "args": {
             "secret": secret,
-            "report": report_payload,
+            "report": compact_report_for_convex(report_payload),
             "history": history,
-            "market": state.get("market", {}),
             "deletedTokens": deleted_tokens,
         },
         "format": "json",
@@ -284,6 +346,268 @@ def sync_convex_snapshot(report_payload, state, config):
         if convex_sync_required(config):
             raise
         print(f"Convex sync failed: {exc}", file=sys.stderr)
+
+
+def convex_api_call(kind, path, args, config):
+    convex_url = convex_url_from_env()
+    if not convex_url:
+        raise RuntimeError("CONVEX_URL is missing")
+    response = requests.post(
+        f"{convex_url}/api/{kind}",
+        headers={"Content-Type": "application/json", "accept": "application/json"},
+        json={"path": path, "args": args, "format": "json"},
+        timeout=int(config.get("convex_sync_timeout_seconds", 25)),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("status") != "success":
+        raise RuntimeError(
+            payload.get("errorMessage")
+            or f"unexpected Convex response: {payload}"
+        )
+    return payload.get("value")
+
+
+def sync_convex_discovery_status(status, config):
+    secret = os.environ.get("CONVEX_INGEST_SECRET")
+    if not convex_url_from_env() or not secret:
+        return {}
+    try:
+        return convex_api_call(
+            "mutation",
+            "radar:ingestDiscoveryStatus",
+            {"secret": secret, "status": status},
+            config,
+        ) or {}
+    except Exception as exc:
+        print(f"Convex discovery status sync failed: {exc}", file=sys.stderr)
+        return {"ok": False, "error": str(exc)[:300]}
+
+
+def load_convex_discovery_state(state, config):
+    if not config.get("convex_discovery_state_enabled", True):
+        return {}
+    secret = os.environ.get("CONVEX_INGEST_SECRET")
+    if not convex_url_from_env() or not secret:
+        return {}
+    rows = []
+    cursor = None
+    max_pages = max(
+        1,
+        int(config.get("convex_discovery_load_max_pages", 10)),
+    )
+    page_size = max(
+        1,
+        min(100, int(config.get("convex_discovery_page_size", 50))),
+    )
+    try:
+        for _page in range(max_pages):
+            result = convex_api_call(
+                "query",
+                "radar:discoveryStatePage",
+                {
+                    "secret": secret,
+                    "paginationOpts": {
+                        "numItems": page_size,
+                        "cursor": cursor,
+                    },
+                },
+                config,
+            ) or {}
+            rows.extend(result.get("page") or [])
+            if result.get("isDone"):
+                break
+            cursor = result.get("continueCursor")
+            if not cursor:
+                break
+    except Exception as exc:
+        if convex_sync_required(config):
+            raise
+        print(f"Convex discovery load failed: {exc}", file=sys.stderr)
+        return {"status": "error", "error": str(exc)[:300]}
+
+    market = state.setdefault("market", {})
+    baselines = state.setdefault("activity_baselines", {})
+    outcomes = state.setdefault("signal_outcomes", {})
+    queue_by_token = {
+        item.get("token_address"): item
+        for item in state.get("discovery_queue", []) or []
+        if isinstance(item, dict) and item.get("token_address")
+    }
+    remote_updates = state.setdefault("convex_discovery_updated_at", {})
+    merged_market = 0
+    merged_baselines = 0
+    merged_queue = 0
+    merged_outcomes = 0
+    now = int(time.time())
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        token = clean_solana_address(row.get("tokenKey"))
+        if not token:
+            continue
+        if row.get("updatedAt"):
+            remote_updates[token] = row.get("updatedAt")
+        remote_market = row.get("market")
+        if isinstance(remote_market, dict):
+            local_market = market.get(token) or {}
+            if parse_timestamp(remote_market.get("latest_seen_at")) > parse_timestamp(
+                local_market.get("latest_seen_at")
+            ):
+                market[token] = remote_market
+                merged_market += 1
+        remote_baseline = row.get("baseline")
+        if isinstance(remote_baseline, dict):
+            local_baseline = baselines.get(token) or {}
+            if int(remote_baseline.get("last_snapshot_at") or 0) > int(
+                local_baseline.get("last_snapshot_at") or 0
+            ):
+                baselines[token] = remote_baseline
+                merged_baselines += 1
+        remote_queue = row.get("queue")
+        if (
+            isinstance(remote_queue, dict)
+            and parse_timestamp(remote_queue.get("expires_at")) > now
+        ):
+            existing = queue_by_token.get(token) or {}
+            if parse_timestamp(remote_queue.get("detected_at")) >= parse_timestamp(
+                existing.get("detected_at")
+            ):
+                queue_by_token[token] = remote_queue
+                merged_queue += 1
+        remote_outcome = row.get("outcome")
+        if isinstance(remote_outcome, dict):
+            local_outcome = outcomes.get(token) or {}
+            if parse_timestamp(remote_outcome.get("updated_at")) > parse_timestamp(
+                local_outcome.get("updated_at")
+            ):
+                outcomes[token] = remote_outcome
+                merged_outcomes += 1
+    state["discovery_queue"] = sorted(
+        queue_by_token.values(),
+        key=lambda item: (
+            float(item.get("score") or 0),
+            parse_timestamp(item.get("detected_at")),
+        ),
+        reverse=True,
+    )[: int(config.get("discovery_queue_max_tokens", 250))]
+    stats = {
+        "status": "ok",
+        "rows": len(rows),
+        "market_merged": merged_market,
+        "baselines_merged": merged_baselines,
+        "queue_merged": merged_queue,
+        "outcomes_merged": merged_outcomes,
+    }
+    state.setdefault("maintenance", {})["convex_discovery_load"] = stats
+    return stats
+
+
+def sync_convex_discovery_state(state, pools, config, observed_at):
+    if not config.get("convex_discovery_state_enabled", True):
+        return {}
+    secret = os.environ.get("CONVEX_INGEST_SECRET")
+    if not convex_url_from_env() or not secret:
+        return {}
+    market = state.get("market") or {}
+    baselines = state.get("activity_baselines") or {}
+    outcomes = state.get("signal_outcomes") or {}
+    queue_by_token = {
+        item.get("token_address"): item
+        for item in state.get("discovery_queue", []) or []
+        if isinstance(item, dict) and item.get("token_address")
+    }
+    remote_updates = state.setdefault("convex_discovery_updated_at", {})
+    now = parse_timestamp(observed_at) or int(time.time())
+    full_sync_interval = max(
+        300,
+        int(
+            float(
+                config.get(
+                    "convex_discovery_full_sync_interval_minutes",
+                    60,
+                )
+            )
+            * 60
+        ),
+    )
+    hot_volume = float(
+        config.get(
+            "convex_discovery_hot_volume_5m_usd",
+            config.get("discovery_queue_min_volume_5m_usd", 500),
+        )
+    )
+    hot_txns = int(
+        config.get(
+            "convex_discovery_hot_txns_5m",
+            config.get("discovery_queue_min_txns_5m", 5),
+        )
+    )
+    rows = []
+    seen = set()
+    for pool in pools or []:
+        token = clean_solana_address(pool.token_address or pool.pool_address)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        baseline = baselines.get(token) or {}
+        outcome = outcomes.get(token) or {}
+        queue = queue_by_token.get(token)
+        remote_updated_at = parse_timestamp(remote_updates.get(token))
+        full_sync_due = (
+            not remote_updated_at
+            or now - remote_updated_at >= full_sync_interval
+        )
+        hot = bool(
+            queue
+            or baseline.get("reactivation_confirmed")
+            or float(pool.volume_5m_usd or 0) >= hot_volume
+            or int(pool.txns_5m or 0) >= hot_txns
+        )
+        outcome_updated = parse_timestamp(outcome.get("updated_at"))
+        if not full_sync_due and not hot and outcome_updated < now - 60:
+            continue
+        rows.append(
+            {
+                "tokenKey": token,
+                "poolAddress": pool.pool_address or None,
+                "market": market.get(token) or None,
+                "baseline": baseline or None,
+                "queue": queue or None,
+                "outcome": outcome or None,
+                "updatedAt": observed_at,
+            }
+        )
+    batch_size = max(
+        1,
+        min(50, int(config.get("convex_discovery_sync_batch_size", 20))),
+    )
+    synced = 0
+    try:
+        for batch in chunked(rows, batch_size):
+            result = convex_api_call(
+                "mutation",
+                "radar:ingestDiscoveryState",
+                {"secret": secret, "rows": batch},
+                config,
+            ) or {}
+            synced += int(result.get("rowsSynced") or len(batch))
+            for row in batch:
+                remote_updates[row["tokenKey"]] = observed_at
+    except Exception as exc:
+        if convex_sync_required(config):
+            raise
+        print(f"Convex discovery sync failed: {exc}", file=sys.stderr)
+        return {"status": "error", "error": str(exc)[:300], "rows_synced": synced}
+    stats = {
+        "status": "ok",
+        "rows_synced": synced,
+        "rows": len(rows),
+        "candidate_rows": len(seen),
+        "full_sync_interval_minutes": full_sync_interval // 60,
+    }
+    state.setdefault("maintenance", {})["convex_discovery_sync"] = stats
+    return stats
 
 
 def to_float(value, default=0.0):
@@ -330,6 +654,8 @@ class Pool:
     txns_5m: int = 0
     txns_1h: int = 0
     pair_created_at: int = 0
+    market_snapshot_at: int = 0
+    market_snapshot_stale: bool = False
 
     def key(self):
         return self.pool_address
@@ -341,7 +667,7 @@ class Pool:
 
     def as_dict(self):
         age_hours = self.age_hours()
-        return {
+        payload = {
             "pool_address": self.pool_address,
             "token_address": self.token_address,
             "symbol": self.symbol,
@@ -360,7 +686,14 @@ class Pool:
             "pair_created_at": self.pair_created_at,
             "pair_created_at_iso": iso(self.pair_created_at),
             "age_hours": age_hours,
+            "market_snapshot_at": self.market_snapshot_at,
+            "market_snapshot_at_iso": iso(self.market_snapshot_at),
+            "market_snapshot_stale": self.market_snapshot_stale,
         }
+        baseline = getattr(self, "reactivation_baseline", None)
+        if baseline:
+            payload["reactivation_baseline"] = baseline
+        return payload
 
 
 class Http:
@@ -421,6 +754,7 @@ class SolanaRpcProvider:
         min_interval_seconds=0,
         method_min_interval_seconds=None,
         unsupported_methods=None,
+        credit_budget=0,
     ):
         self.provider_name = str(provider_name)
         self.url = str(url)
@@ -431,6 +765,8 @@ class SolanaRpcProvider:
         self.calls = Counter()
         self.retries = Counter()
         self.estimated_credits = 0
+        self.credit_budget = max(0, int(credit_budget or 0))
+        self.latency_seconds = defaultdict(list)
         self.token_supply_cache = {}
         self.token_balance_cache = {}
         self.timeout_seconds = int(timeout_seconds)
@@ -553,14 +889,30 @@ class SolanaRpcProvider:
     def call(self, method, params=None, timeout=None):
         if self.circuit_open_reason and method != "getHealth":
             raise HeliusCircuitOpen(f"{self.provider_name} circuit open: {self.circuit_open_reason}")
+        minimum_cost = self.credit_cost(method, None)
+        if (
+            self.credit_budget
+            and self.estimated_credits + minimum_cost > self.credit_budget
+        ):
+            raise HeliusRpcError(
+                method,
+                "quota",
+                f"local per-scan credit budget {self.credit_budget} reached",
+                provider=self.provider_name,
+            )
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []}
         retryable_statuses = {429, 500, 502, 503, 504}
         for attempt in range(self.max_retries + 1):
             self.wait_for_rate_slot(method)
             self.calls[method] += 1
+            request_started = time.perf_counter()
             try:
                 response = self.session.post(self.url, json=payload, timeout=self.request_timeout(timeout))
             except requests.RequestException as exc:
+                self.latency_seconds[method].append(
+                    time.perf_counter() - request_started
+                )
+                self.latency_seconds[method] = self.latency_seconds[method][-200:]
                 if attempt >= self.max_retries:
                     error = HeliusRpcError(
                         method,
@@ -573,6 +925,8 @@ class SolanaRpcProvider:
                 self.retries[method] += 1
                 time.sleep(self.retry_delay(attempt))
                 continue
+            self.latency_seconds[method].append(time.perf_counter() - request_started)
+            self.latency_seconds[method] = self.latency_seconds[method][-200:]
             response_detail = (response.text or response.reason or "").lower()
             usage_exhausted = any(
                 marker in response_detail
@@ -739,6 +1093,7 @@ class HeliusRpc(SolanaRpcProvider):
         circuit_failure_threshold=4,
         min_interval_seconds=0,
         method_min_interval_seconds=None,
+        credit_budget=0,
     ):
         super().__init__(
             "helius",
@@ -753,6 +1108,7 @@ class HeliusRpc(SolanaRpcProvider):
             circuit_failure_threshold=circuit_failure_threshold,
             min_interval_seconds=min_interval_seconds,
             method_min_interval_seconds=method_min_interval_seconds,
+            credit_budget=credit_budget,
         )
 
 
@@ -1062,6 +1418,13 @@ class RoutedSolanaRpc:
         return total
 
     def provider_stats(self):
+        def percentile(values, ratio):
+            if not values:
+                return None
+            ordered = sorted(float(value) for value in values)
+            index = min(len(ordered) - 1, max(0, int(math.ceil(len(ordered) * ratio) - 1)))
+            return round(ordered[index] * 1000, 1)
+
         stats = {}
         for name, provider in self.providers.items():
             health = self.health_results.get(name) or {}
@@ -1079,6 +1442,25 @@ class RoutedSolanaRpc:
                 "retries": dict(provider.retries),
                 "failures": dict(provider.failures),
                 "estimated_credits": int(provider.estimated_credits),
+                "credit_budget": int(provider.credit_budget),
+                "credit_budget_used_pct": (
+                    round(
+                        provider.estimated_credits
+                        / provider.credit_budget
+                        * 100,
+                        1,
+                    )
+                    if provider.credit_budget
+                    else None
+                ),
+                "latency_ms": {
+                    method: {
+                        "p50": percentile(values, 0.50),
+                        "p95": percentile(values, 0.95),
+                        "samples": len(values),
+                    }
+                    for method, values in provider.latency_seconds.items()
+                },
                 "last_success_at": provider.last_success_at,
                 "last_error": (
                     self.blocked_providers.get(name)
@@ -1118,6 +1500,9 @@ def build_rpc_router(config):
                 circuit_failure_threshold=int(
                     config.get("helius_rpc_circuit_failure_threshold", 4)
                 ),
+                credit_budget=int(
+                    config.get("helius_rpc_credit_budget_per_scan", 5000)
+                ),
             )
         )
 
@@ -1154,6 +1539,9 @@ def build_rpc_router(config):
                         )
                     )
                 },
+                credit_budget=int(
+                    config.get("alchemy_rpc_credit_budget_per_scan", 25000)
+                ),
             )
         )
 
@@ -1178,6 +1566,9 @@ def build_rpc_router(config):
                 ),
                 min_interval_seconds=float(
                     config.get("chainstack_rpc_min_interval_seconds", 0.22)
+                ),
+                credit_budget=int(
+                    config.get("chainstack_rpc_credit_budget_per_scan", 10000)
                 ),
             )
         )
@@ -1230,6 +1621,7 @@ def gecko_pool_from_item(item, source):
         txns_5m=int(to_float(tx_m5.get("buys")) + to_float(tx_m5.get("sells"))),
         txns_1h=int(to_float(tx_h1.get("buys")) + to_float(tx_h1.get("sells"))),
         pair_created_at=parse_timestamp(attrs.get("pool_created_at") or attrs.get("created_at")),
+        market_snapshot_at=int(time.time()),
     )
 
 
@@ -1256,6 +1648,7 @@ def dexscreener_pool_from_pair(pair, source):
         txns_5m=int(to_float(tx_m5.get("buys")) + to_float(tx_m5.get("sells"))),
         txns_1h=int(to_float(tx_h1.get("buys")) + to_float(tx_h1.get("sells"))),
         pair_created_at=parse_timestamp(pair.get("pairCreatedAt")),
+        market_snapshot_at=int(time.time()),
     )
 
 
@@ -1289,6 +1682,7 @@ def gmgn_pool_from_trenches_item(item):
             or item.get("open_timestamp")
             or item.get("complete_timestamp")
         ),
+        market_snapshot_at=int(time.time()),
     )
 
 
@@ -1405,44 +1799,66 @@ def fetch_gmgn_trenches_universe(config):
         return {}
     if not os.environ.get("GMGN_API_KEY"):
         return {}
-    arguments = [
-        "market",
-        "trenches",
-        "--chain",
-        "sol",
-        "--type",
-        "completed",
-        "--limit",
-        str(min(80, int(config.get("gmgn_trenches_limit", 80)))),
-        "--sort-by",
-        str(config.get("gmgn_trenches_sort_by", "volume_1h")),
-        "--direction",
-        "desc",
-        "--min-marketcap",
-        str(config["mcap_min_usd"]),
-        "--max-marketcap",
-        str(config["mcap_max_usd"]),
-        "--min-liquidity",
-        str(config["liquidity_min_usd"]),
-    ]
-    for platform in config.get("gmgn_launchpad_platforms") or ["Pump.fun"]:
-        arguments.extend(["--launchpad-platform", str(platform)])
-    try:
-        data = run_gmgn_cli(config, arguments, "gmgn trenches")
-    except Exception as exc:
-        config["_gmgn_error"] = str(exc)
-        print(f"warn: gmgn trenches failed: {exc}", file=sys.stderr)
-        return {}
     pools = {}
-    for item in (data or {}).get("completed", []) or []:
-        if not isinstance(item, dict):
+    queries = config.get("gmgn_trenches_queries") or [
+        {
+            "sort_by": config.get("gmgn_trenches_sort_by", "volume_1h"),
+            "direction": "desc",
+        }
+    ]
+    errors = []
+    for query in queries:
+        if not isinstance(query, dict):
             continue
-        pool = gmgn_pool_from_trenches_item(item)
-        if pool.pool_address and pool.token_address:
-            pools[pool.key()] = pool
+        sort_by = str(query.get("sort_by") or "volume_1h")
+        direction = str(query.get("direction") or "desc")
+        arguments = [
+            "market",
+            "trenches",
+            "--chain",
+            "sol",
+            "--type",
+            "completed",
+            "--limit",
+            str(min(80, int(config.get("gmgn_trenches_limit", 80)))),
+            "--sort-by",
+            sort_by,
+            "--direction",
+            direction,
+            "--min-marketcap",
+            str(config["mcap_min_usd"]),
+            "--max-marketcap",
+            str(config["mcap_max_usd"]),
+            "--min-liquidity",
+            str(config["liquidity_min_usd"]),
+        ]
+        for platform in config.get("gmgn_launchpad_platforms") or ["Pump.fun"]:
+            arguments.extend(["--launchpad-platform", str(platform)])
+        try:
+            data = run_gmgn_cli(
+                config,
+                arguments,
+                f"gmgn trenches {sort_by}/{direction}",
+            )
+        except Exception as exc:
+            errors.append(str(exc))
+            print(
+                f"warn: gmgn trenches {sort_by}/{direction} failed: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        for item in (data or {}).get("completed", []) or []:
+            if not isinstance(item, dict):
+                continue
+            pool = gmgn_pool_from_trenches_item(item)
+            if pool.pool_address and pool.token_address:
+                pools[pool.key()] = pool
+        time.sleep(float(config.get("gmgn_request_delay_seconds", 0.25)))
     if pools:
         config.pop("_gmgn_error", None)
         print(f"GMGN trenches: {len(pools)} migrated Pump.fun pools", flush=True)
+    elif errors:
+        config["_gmgn_error"] = errors[-1]
     return pools
 
 
@@ -1540,13 +1956,24 @@ def pool_dex_allowed(pool, config):
     return normalize_dex_name(pool.dex) in allowlist
 
 
-def registry_pool_from_market_entry(entry):
+def registry_pool_from_market_entry(entry, now=None, activity_max_age_seconds=5_400):
     if not isinstance(entry, dict):
         return None
     pool_address = clean_solana_address(entry.get("pool_address"))
     token_address = clean_solana_address(entry.get("token_address"))
     if not pool_address or not token_address:
         return None
+    now = int(now or time.time())
+    snapshot_at = parse_timestamp(
+        entry.get("market_snapshot_at")
+        or entry.get("latest_seen_at")
+        or entry.get("scan_mcap_at")
+    )
+    activity_stale = bool(
+        snapshot_at
+        and activity_max_age_seconds > 0
+        and now - snapshot_at > int(activity_max_age_seconds)
+    )
     return Pool(
         pool_address=pool_address,
         token_address=token_address,
@@ -1557,13 +1984,15 @@ def registry_pool_from_market_entry(entry):
         url=clean_social_text(entry.get("url")),
         mcap_usd=to_float(entry.get("latest_mcap_usd") or entry.get("scan_mcap_usd")),
         liquidity_usd=to_float(entry.get("latest_liquidity_usd") or entry.get("scan_liquidity_usd")),
-        volume_5m_usd=to_float(entry.get("latest_volume_5m_usd")),
-        volume_1h_usd=to_float(entry.get("latest_volume_1h_usd")),
-        volume_24h_usd=to_float(entry.get("latest_volume_24h_usd")),
+        volume_5m_usd=0.0 if activity_stale else to_float(entry.get("latest_volume_5m_usd")),
+        volume_1h_usd=0.0 if activity_stale else to_float(entry.get("latest_volume_1h_usd")),
+        volume_24h_usd=0.0 if activity_stale else to_float(entry.get("latest_volume_24h_usd")),
         price_usd=to_float(entry.get("latest_price_usd") or entry.get("scan_price_usd")),
-        txns_5m=int(to_float(entry.get("latest_txns_5m"))),
-        txns_1h=int(to_float(entry.get("latest_txns_1h"))),
+        txns_5m=0 if activity_stale else int(to_float(entry.get("latest_txns_5m"))),
+        txns_1h=0 if activity_stale else int(to_float(entry.get("latest_txns_1h"))),
         pair_created_at=parse_timestamp(entry.get("pair_created_at")),
+        market_snapshot_at=snapshot_at,
+        market_snapshot_stale=activity_stale,
     )
 
 
@@ -1581,7 +2010,14 @@ def known_market_pools(state, config, observed_at=None):
         last_seen = parse_timestamp(entry.get("latest_seen_at") or entry.get("scan_mcap_at"))
         if cutoff and last_seen and last_seen < cutoff:
             continue
-        pool = registry_pool_from_market_entry(entry)
+        pool = registry_pool_from_market_entry(
+            entry,
+            now=now,
+            activity_max_age_seconds=max(
+                0,
+                int(float(config.get("registry_activity_max_age_minutes", 90)) * 60),
+            ),
+        )
         if not pool:
             continue
         if pool.dex:
@@ -1764,6 +2200,7 @@ def reactivation_activity_score(pool):
         + min(5.0, txns_5m / 8.0)
         + burst_to_mcap * 12.0
         + burst_acceleration * 1.5
+        + float(getattr(pool, "reactivation_baseline_score", 0) or 0)
     )
 
 
@@ -1774,6 +2211,308 @@ def market_activity_fingerprint(pool):
         "volume_1h_usd": round(float(pool.volume_1h_usd or 0), 2),
         "txns_5m": int(pool.txns_5m or 0),
         "txns_1h": int(pool.txns_1h or 0),
+    }
+
+
+def median_value(values):
+    ordered = sorted(float(value) for value in values if value is not None)
+    if not ordered:
+        return 0.0
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def compact_activity_bucket(pool, bucket_at):
+    return [
+        int(bucket_at),
+        round(float(pool.mcap_usd or 0), 2),
+        round(float(pool.liquidity_usd or 0), 2),
+        round(float(pool.volume_5m_usd or 0), 2),
+        round(float(pool.volume_1h_usd or 0), 2),
+        int(pool.txns_5m or 0),
+        int(pool.txns_1h or 0),
+    ]
+
+
+def upsert_compact_bucket(rows, bucket, cutoff, limit):
+    rows = [
+        list(item)
+        for item in rows or []
+        if isinstance(item, (list, tuple))
+        and len(item) >= 7
+        and int(item[0] or 0) >= cutoff
+    ]
+    if rows and int(rows[-1][0]) == int(bucket[0]):
+        rows[-1] = bucket
+    else:
+        rows.append(bucket)
+    rows.sort(key=lambda item: int(item[0] or 0))
+    if limit > 0 and len(rows) > limit:
+        rows = rows[-limit:]
+    return rows
+
+
+def baseline_history_stats(rows, now):
+    rows = [
+        item
+        for item in rows or []
+        if isinstance(item, (list, tuple)) and len(item) >= 7
+    ]
+    rows_24h = [item for item in rows if int(item[0] or 0) >= now - 24 * 3600]
+    sample = rows_24h or rows
+    return {
+        "sample_count": len(rows),
+        "sample_count_24h": len(rows_24h),
+        "median_volume_1h_24h": median_value(item[4] for item in sample),
+        "median_txns_1h_24h": median_value(item[6] for item in sample),
+        "median_volume_1h_7d": median_value(item[4] for item in rows),
+        "median_txns_1h_7d": median_value(item[6] for item in rows),
+    }
+
+
+def activity_context_from_history(entry, pool, now, config):
+    stats = baseline_history_stats(entry.get("hourly"), now)
+    median_volume = max(
+        float(config.get("reactivation_baseline_volume_floor_usd", 250)),
+        float(stats["median_volume_1h_24h"] or stats["median_volume_1h_7d"] or 0),
+    )
+    median_txns = max(
+        float(config.get("reactivation_baseline_txn_floor", 3)),
+        float(stats["median_txns_1h_24h"] or stats["median_txns_1h_7d"] or 0),
+    )
+    volume_ratio = float(pool.volume_1h_usd or 0) / median_volume
+    txns_ratio = float(pool.txns_1h or 0) / median_txns
+    burst_acceleration = (
+        float(pool.volume_5m_usd or 0) * 12
+        / max(1.0, float(pool.volume_1h_usd or 0))
+    )
+    last_snapshot_at = int(entry.get("last_snapshot_at") or 0)
+    quiet_since = int(entry.get("quiet_since") or 0)
+    if not quiet_since and last_snapshot_at and now - last_snapshot_at > 3600:
+        quiet_since = last_snapshot_at + 3600
+    quiet_hours = max(0.0, (now - quiet_since) / 3600) if quiet_since else 0.0
+    min_samples = max(
+        1,
+        int(config.get("reactivation_baseline_min_samples", 12)),
+    )
+    ready = int(stats["sample_count"]) >= min_samples
+    min_quiet_hours = float(
+        config.get("reactivation_baseline_min_quiet_hours", 6)
+    )
+    confirmed = bool(
+        ready
+        and quiet_hours >= min_quiet_hours
+        and (
+            volume_ratio
+            >= float(config.get("reactivation_baseline_min_volume_ratio", 3))
+            or txns_ratio
+            >= float(config.get("reactivation_baseline_min_txn_ratio", 3))
+        )
+        and (
+            burst_acceleration
+            >= float(
+                config.get(
+                    "reactivation_baseline_min_burst_acceleration",
+                    1.25,
+                )
+            )
+            or float(pool.volume_5m_usd or 0)
+            >= float(config.get("reactivation_baseline_min_volume_5m_usd", 250))
+        )
+    )
+    result = {
+        **stats,
+        "status": "ready" if ready else "warming",
+        "observed_at": iso(now),
+        "quiet_since": iso(quiet_since),
+        "quiet_hours": quiet_hours,
+        "volume_1h_ratio": volume_ratio,
+        "txns_1h_ratio": txns_ratio,
+        "burst_acceleration": burst_acceleration,
+        "reactivation_confirmed": confirmed,
+    }
+    previous_context = entry.get("latest_context") or {}
+    previous_context_at = parse_timestamp(previous_context.get("observed_at"))
+    memory_seconds = int(
+        float(
+            config.get(
+                "reactivation_baseline_activation_memory_minutes",
+                60,
+            )
+        )
+        * 60
+    )
+    if (
+        not result["reactivation_confirmed"]
+        and previous_context.get("reactivation_confirmed")
+        and previous_context_at
+        and now - previous_context_at <= memory_seconds
+    ):
+        result["reactivation_confirmed"] = True
+        result["quiet_hours"] = max(
+            result["quiet_hours"],
+            float(previous_context.get("quiet_hours") or 0),
+        )
+        result["activation_observed_at"] = previous_context.get("observed_at")
+    return result
+
+
+def record_market_activity_baselines(state, pools, observed_at, config):
+    if not config.get("reactivation_baseline_enabled", True):
+        return {}
+    now = parse_timestamp(observed_at) or int(time.time())
+    section = state.setdefault("activity_baselines", {})
+    five_minute_cutoff = now - int(
+        float(config.get("reactivation_baseline_five_minute_retention_hours", 48))
+        * 3600
+    )
+    hourly_cutoff = now - int(
+        float(config.get("reactivation_baseline_hourly_retention_days", 7))
+        * 86400
+    )
+    updated = 0
+    confirmed = 0
+    for pool in pools or []:
+        token = pool.token_address or pool.pool_address
+        if not token or pool.market_snapshot_stale:
+            continue
+        entry = section.setdefault(token, {})
+        context = activity_context_from_history(entry, pool, now, config)
+        if context["reactivation_confirmed"]:
+            confirmed += 1
+
+        quiet_volume_limit = max(
+            float(config.get("reactivation_baseline_quiet_volume_floor_usd", 750)),
+            float(context.get("median_volume_1h_24h") or 0)
+            * float(config.get("reactivation_baseline_quiet_ratio", 1.25)),
+        )
+        quiet_txn_limit = max(
+            float(config.get("reactivation_baseline_quiet_txn_floor", 8)),
+            float(context.get("median_txns_1h_24h") or 0)
+            * float(config.get("reactivation_baseline_quiet_ratio", 1.25)),
+        )
+        is_quiet = bool(
+            float(pool.volume_1h_usd or 0) <= quiet_volume_limit
+            and float(pool.txns_1h or 0) <= quiet_txn_limit
+        )
+        if is_quiet:
+            entry["quiet_since"] = int(entry.get("quiet_since") or now)
+        else:
+            entry["quiet_since"] = 0
+
+        five_bucket_at = now - now % 300
+        hour_bucket_at = now - now % 3600
+        bucket = compact_activity_bucket(pool, five_bucket_at)
+        entry["five_minute"] = upsert_compact_bucket(
+            entry.get("five_minute"),
+            bucket,
+            five_minute_cutoff,
+            int(config.get("reactivation_baseline_max_five_minute_buckets", 576)),
+        )
+        hourly_bucket = compact_activity_bucket(pool, hour_bucket_at)
+        entry["hourly"] = upsert_compact_bucket(
+            entry.get("hourly"),
+            hourly_bucket,
+            hourly_cutoff,
+            int(config.get("reactivation_baseline_max_hourly_buckets", 168)),
+        )
+        entry["last_snapshot_at"] = now
+        entry["latest_context"] = context
+        updated += 1
+
+    stats = {
+        "updated_at": observed_at,
+        "tokens_updated": updated,
+        "confirmed_reactivations": confirmed,
+        "tracked_tokens": len(section),
+    }
+    state.setdefault("maintenance", {})["activity_baselines"] = stats
+    return stats
+
+
+def attach_reactivation_baselines(pools, state, config, observed_at=None):
+    now = parse_timestamp(observed_at) or int(time.time())
+    section = state.get("activity_baselines") if isinstance(state, dict) else {}
+    section = section if isinstance(section, dict) else {}
+    for pool in pools or []:
+        token = pool.token_address or pool.pool_address
+        entry = section.get(token) or {}
+        context = activity_context_from_history(entry, pool, now, config)
+        pool.reactivation_baseline = context
+        score = 0.0
+        if context.get("reactivation_confirmed"):
+            score += 20.0
+        score += min(8.0, max(0.0, float(context.get("volume_1h_ratio") or 0) - 1))
+        score += min(8.0, max(0.0, float(context.get("txns_1h_ratio") or 0) - 1))
+        score += min(4.0, float(context.get("quiet_hours") or 0) / 6)
+        pool.reactivation_baseline_score = score
+    return pools
+
+
+def update_discovery_queue(state, pools, config, observed_at):
+    now = parse_timestamp(observed_at) or int(time.time())
+    ttl_seconds = int(
+        float(config.get("discovery_queue_ttl_minutes", 90)) * 60
+    )
+    queue = {
+        str(item.get("pool_address") or item.get("token_address")): dict(item)
+        for item in state.get("discovery_queue", [])
+        if isinstance(item, dict)
+        and parse_timestamp(item.get("expires_at")) > now
+        and (item.get("pool_address") or item.get("token_address"))
+    }
+    min_score = float(config.get("discovery_queue_min_activity_score", 12))
+    for pool in pools or []:
+        baseline = getattr(pool, "reactivation_baseline", {}) or {}
+        activity_score = reactivation_activity_score(pool)
+        burst_candidate = bool(
+            int(pool.txns_5m or 0)
+            >= int(config.get("discovery_queue_min_txns_5m", 5))
+            or float(pool.volume_5m_usd or 0)
+            >= float(config.get("discovery_queue_min_volume_5m_usd", 500))
+        )
+        if (
+            activity_score < min_score
+            and not baseline.get("reactivation_confirmed")
+            and not burst_candidate
+        ):
+            continue
+        key = pool.pool_address or pool.token_address
+        queue[key] = {
+            "pool_address": pool.pool_address,
+            "token_address": pool.token_address,
+            "symbol": pool.symbol,
+            "observed_at": observed_at,
+            "expires_at": iso(now + ttl_seconds),
+            "activity_score": activity_score,
+            "reactivation_confirmed": bool(
+                baseline.get("reactivation_confirmed")
+            ),
+            "quiet_hours": float(baseline.get("quiet_hours") or 0),
+            "volume_1h_ratio": float(baseline.get("volume_1h_ratio") or 0),
+            "txns_1h_ratio": float(baseline.get("txns_1h_ratio") or 0),
+            "mcap_usd": float(pool.mcap_usd or 0),
+        }
+    ordered = sorted(
+        queue.values(),
+        key=lambda item: (
+            bool(item.get("reactivation_confirmed")),
+            float(item.get("activity_score") or 0),
+            parse_timestamp(item.get("observed_at")),
+        ),
+        reverse=True,
+    )
+    limit = max(1, int(config.get("discovery_queue_max_tokens", 250)))
+    state["discovery_queue"] = ordered[:limit]
+    return {
+        "queued_tokens": len(state["discovery_queue"]),
+        "confirmed_tokens": sum(
+            1
+            for item in state["discovery_queue"]
+            if item.get("reactivation_confirmed")
+        ),
     }
 
 
@@ -1904,6 +2643,7 @@ def market_activity_priority_suppressed(pool, state, config, now=None):
 def pool_priority_sort_key(pool, config):
     if (config.get("lane") or config.get("mode")) == "reactivation":
         return (
+            0 if pool.market_snapshot_stale else 1,
             reactivation_activity_score(pool),
             int(pool.txns_5m or 0),
             float(pool.volume_5m_usd or 0),
@@ -1931,7 +2671,17 @@ def filter_universe_pools(pools, config):
         if not current:
             by_token[key] = pool
             continue
-        if (pool.volume_1h_usd, pool.liquidity_usd) > (current.volume_1h_usd, current.liquidity_usd):
+        if (
+            0 if pool.market_snapshot_stale else 1,
+            int(pool.market_snapshot_at or 0),
+            pool.volume_1h_usd,
+            pool.liquidity_usd,
+        ) > (
+            0 if current.market_snapshot_stale else 1,
+            int(current.market_snapshot_at or 0),
+            current.volume_1h_usd,
+            current.liquidity_usd,
+        ):
             by_token[key] = pool
 
     filtered = list(by_token.values())
@@ -2062,6 +2812,22 @@ def select_scan_targets(universe, state, config):
                 universe_by_key[key] = pool
     monitored = []
     monitored_keys = set()
+    pulse_selected = 0
+    for item in state.get("discovery_queue", []) or []:
+        if len(monitored) >= monitor_limit:
+            break
+        if not isinstance(item, dict):
+            continue
+        if parse_timestamp(item.get("expires_at")) <= now:
+            continue
+        pool = universe_by_key.get(item.get("pool_address")) or universe_by_key.get(
+            item.get("token_address")
+        )
+        if not pool or pool.pool_address in monitored_keys:
+            continue
+        monitored.append(pool)
+        monitored_keys.add(pool.pool_address)
+        pulse_selected += 1
     due_rechecks = []
     pools_state = state.get("pools") if isinstance(state, dict) else {}
     pools_state = pools_state if isinstance(pools_state, dict) else {}
@@ -2098,10 +2864,60 @@ def select_scan_targets(universe, state, config):
         monitored_keys.add(pool.pool_address)
 
     priority_share = min(1.0, max(0.0, float(config.get("scan_priority_share", 0.6))))
-    priority_count = min(limit, max(1, int(round(limit * priority_share))))
-    market_priority_limit = max(0, priority_count - len(monitored))
+    rotation_share = min(
+        0.5,
+        max(0.0, float(config.get("scan_rotation_min_share", 0.1))),
+    )
+    rotation_reserve = (
+        min(limit, max(1, int(round(limit * rotation_share))))
+        if rotation_share and len(universe) > limit
+        else 0
+    )
+    priority_count = min(
+        max(0, limit - rotation_reserve),
+        max(1, int(round(limit * priority_share))),
+    )
+    gap_share = min(
+        0.5,
+        max(0.0, float(config.get("scan_gap_repair_share", 0.1))),
+    )
+    gap_limit = (
+        min(
+            max(0, priority_count - len(monitored)),
+            max(1, int(round(limit * gap_share))),
+        )
+        if gap_share
+        else 0
+    )
+    gap_candidates = []
+    for pool in universe:
+        if pool.pool_address in monitored_keys:
+            continue
+        pool_state = pools_state.get(pool.pool_address) or {}
+        backlogs = pool_state.get("helius_rolling_backlogs") or []
+        if not backlogs and not pool_state.get("force_enhanced_next_scan"):
+            continue
+        oldest_gap = min(
+            (
+                int(item.get("from_timestamp") or 0)
+                for item in backlogs
+                if isinstance(item, dict)
+            ),
+            default=0,
+        )
+        gap_candidates.append((oldest_gap, pool_last_scanned_at(state, pool), pool))
+    gap_candidates.sort(key=lambda item: (item[0], item[1], item[2].pool_address))
+    gap_repairs = [item[2] for item in gap_candidates[:gap_limit]]
+    gap_keys = {pool.pool_address for pool in gap_repairs}
+    market_priority_limit = max(
+        0,
+        priority_count - len(monitored) - len(gap_repairs),
+    )
     market_candidates = [
-        pool for pool in universe if pool.pool_address not in monitored_keys
+        pool
+        for pool in universe
+        if pool.pool_address not in monitored_keys
+        and pool.pool_address not in gap_keys
     ]
     unsuppressed_candidates = [
         pool
@@ -2122,7 +2938,7 @@ def select_scan_targets(universe, state, config):
         market_priority.extend(
             suppressed_candidates[: market_priority_limit - len(market_priority)]
         )
-    priority = [*monitored, *market_priority]
+    priority = [*monitored, *gap_repairs, *market_priority]
     priority_keys = {pool.pool_address for pool in priority}
     rotation_candidates = [pool for pool in universe if pool.pool_address not in priority_keys]
     rotation_candidates.sort(
@@ -2138,6 +2954,7 @@ def select_scan_targets(universe, state, config):
         "candidates": len(universe),
         "priority": len(priority),
         "signal_monitor": len(monitored),
+        "discovery_queue": pulse_selected,
         "due_rechecks": sum(
             1
             for pool in monitored
@@ -2147,7 +2964,10 @@ def select_scan_targets(universe, state, config):
             )
             <= now
         ),
+        "gap_repairs": len(gap_repairs),
+        "gap_repair_candidates": len(gap_candidates),
         "rotation": len(rotation),
+        "rotation_reserve": rotation_reserve,
         "never_scanned": sum(1 for pool in selected if not pool_last_scanned_at(state, pool)),
         "market_stale_suppressed": len(suppressed_pool_keys),
         "market_stale_selected": sum(
@@ -3388,6 +4208,14 @@ def parse_pool_swap(tx, pool):
     token_sender_amount = negative_token_owners[0][1] if negative_token_owners else max(0.0, -signer_token_delta)
     routed = kind == "buy" and token_recipient != signer
     recipient_share = token_recipient_amount / token_amount_value if token_amount_value else 0.0
+    if kind != "buy":
+        owner_resolution = "not_applicable"
+    elif token_recipient == signer:
+        owner_resolution = "signer"
+    elif token_recipient and recipient_share >= 0.80:
+        owner_resolution = "token_recipient"
+    else:
+        owner_resolution = "unresolved"
 
     return {
         "signature": tx.get("transaction", {}).get("signatures", [""])[0],
@@ -3404,18 +4232,27 @@ def parse_pool_swap(tx, pool):
         "token_sender_amount": token_sender_amount,
         "recipient_share": recipient_share,
         "routed": routed,
+        "owner_resolution": owner_resolution,
         "sol_amount": sol_amount,
         "token_amount": token_amount_value,
         "price_native": sol_amount / token_amount_value if token_amount_value else 0.0,
     }
 
 
-def wallet_cache_key(wallet, before_signature):
+def wallet_cache_key(wallet, before_signature, buy_time=None, bucket_hours=6):
+    if buy_time and bucket_hours:
+        bucket_seconds = max(1, int(float(bucket_hours) * 3600))
+        return f"{wallet}:t{int(buy_time) // bucket_seconds}"
     return f"{wallet}:{before_signature}"
 
 
 def classify_wallet(rpc, wallet, before_signature, buy_time, config, state):
-    cache_key = wallet_cache_key(wallet, before_signature)
+    cache_key = wallet_cache_key(
+        wallet,
+        before_signature,
+        buy_time,
+        config.get("wallet_cache_bucket_hours", 6),
+    )
     wallet_cache = state.setdefault("wallet_cache", {})
     if cache_key in wallet_cache:
         return wallet_cache[cache_key]
@@ -3444,6 +4281,10 @@ def classify_wallet(rpc, wallet, before_signature, buy_time, config, state):
         funding_source, funding_sol = extract_funding_source(rpc, prev.get("signature"), wallet)
 
     result = {
+        "wallet": wallet,
+        "cached_at": int(time.time()),
+        "as_of_signature": before_signature,
+        "as_of_time": int(buy_time or 0),
         "wallet_class": wallet_class,
         "previous_tx_count_50": count,
         "previous_gap_seconds": gap,
@@ -3595,6 +4436,12 @@ def is_hot_reactivation_signal(pool, alert, config):
     if alert.get("signal_family") != "reactivation_wave":
         return False
     wave = alert.get("wave") or {}
+    baseline = alert.get("reactivation_baseline") or {}
+    baseline_allows_hot = bool(
+        baseline.get("status") != "ready"
+        or baseline.get("reactivation_confirmed")
+        or not config.get("reactivation_baseline_required_for_actionable", True)
+    )
     mcap = float(getattr(pool, "mcap_usd", 0) or 0)
     balance_coverage = float(wave.get("balance_coverage_pct") or 0)
     return bool(
@@ -3605,6 +4452,12 @@ def is_hot_reactivation_signal(pool, alert, config):
         >= float(config.get("reactivation_hot_min_net_buy_sol", 25))
         and int(wave.get("unique_buyers") or 0)
         >= int(config.get("reactivation_hot_min_unique_buyers", 15))
+        and int(
+            wave.get("effective_unique_buyers")
+            or wave.get("unique_buyers")
+            or 0
+        )
+        >= int(config.get("reactivation_wallet_graph_min_effective_buyers", 6))
         and int(wave.get("sticky_wallets") or 0)
         >= int(config.get("reactivation_hot_min_sticky_wallets", 8))
         and float(wave.get("sticky_supply_pct") or 0)
@@ -3617,8 +4470,16 @@ def is_hot_reactivation_signal(pool, alert, config):
         <= float(config.get("reactivation_hot_max_top_buyer_share", 0.35))
         and float(wave.get("top3_buyer_share") or 0)
         <= float(config.get("reactivation_hot_max_top3_buyer_share", 0.6))
+        and float(wave.get("max_linked_cluster_share") or 0)
+        <= float(
+            config.get(
+                "reactivation_wallet_graph_actionable_max_cluster_share",
+                0.5,
+            )
+        )
         and balance_coverage
         >= float(config.get("actionable_min_balance_coverage_pct", 80))
+        and baseline_allows_hot
     )
 
 
@@ -3642,7 +4503,11 @@ def classify_alert_tier(pool, alert, evidence, config):
     support_wallets = int(evidence.get("support_wallets") or 0)
     hard_sol = float(evidence.get("hard_sol") or 0)
     hard_classes = evidence.get("hard_classes") or {}
-    coordination = bool(alert.get("common_funders") or alert.get("common_recipients"))
+    coordination = bool(
+        alert.get("common_funders")
+        or alert.get("common_recipients")
+        or alert.get("common_executors")
+    )
     hard_cluster = hard_wallets >= min_wallets
     hard_flow = hard_sol >= min_sol
     dormant = bool(hard_classes.get("dormant"))
@@ -3655,6 +4520,12 @@ def classify_alert_tier(pool, alert, evidence, config):
     sticky_net_sol = float(wave.get("sticky_net_sol") or 0)
     top_buyer_share = float(wave.get("top_buyer_share") or 0)
     top3_buyer_share = float(wave.get("top3_buyer_share") or 0)
+    effective_unique_buyers = int(
+        wave.get("effective_unique_buyers")
+        or wave.get("unique_buyers")
+        or 0
+    )
+    max_linked_cluster_share = float(wave.get("max_linked_cluster_share") or 0)
     hold_age_minutes = float(wave.get("hold_age_minutes") or 0)
     min_hold_minutes = float(wave.get("min_hold_minutes") or 0)
     retention_seasoned = not wave_signal or hold_age_minutes >= min_hold_minutes
@@ -3667,7 +4538,20 @@ def classify_alert_tier(pool, alert, evidence, config):
         wave_signal
         and (top_buyer_share > max_top_buyer_share or top3_buyer_share > max_top3_buyer_share)
     )
+    linked_concentration = bool(
+        wave_signal
+        and max_linked_cluster_share
+        > float(config.get("reactivation_wallet_graph_actionable_max_cluster_share", 0.5))
+    )
+    linked_noise = bool(
+        wave_signal
+        and max_linked_cluster_share
+        > float(config.get("reactivation_wallet_graph_noise_cluster_share", 0.75))
+    )
     hot_reactivation = is_hot_reactivation_signal(pool, alert, config)
+    baseline = alert.get("reactivation_baseline") or {}
+    baseline_ready = baseline.get("status") == "ready"
+    baseline_confirmed = bool(baseline.get("reactivation_confirmed"))
 
     if hard_cluster:
         reasons.append("hard wallet cluster")
@@ -3688,15 +4572,26 @@ def classify_alert_tier(pool, alert, evidence, config):
             reasons.append("sticky buyers")
     if hot_reactivation:
         reasons.append("early reactivation ignition")
+    if baseline_confirmed:
+        reasons.append("quiet-regime break")
 
     if support_only:
         penalties.append("low_tx only")
     if concentrated_wave:
         penalties.append("concentrated buyer flow")
+    if linked_concentration:
+        penalties.append("linked wallet concentration")
     if wave_signal and not retention_seasoned:
         penalties.append("retention not seasoned")
     if wave_signal and balance_coverage_pct < float(config.get("actionable_min_balance_coverage_pct", 80)):
         penalties.append("partial balance coverage")
+    if (
+        lane == "reactivation"
+        and baseline_ready
+        and not baseline_confirmed
+        and config.get("reactivation_baseline_required_for_actionable", True)
+    ):
+        penalties.append("no confirmed quiet-regime break")
     if actionable_mcap and mcap > actionable_mcap:
         penalties.append("above actionable mcap")
     if watch_mcap and mcap > watch_mcap:
@@ -3731,9 +4626,12 @@ def classify_alert_tier(pool, alert, evidence, config):
         and sticky_supply_pct >= float(config.get("reactivation_wave_actionable_sticky_supply_pct", 5.0))
         and sticky_bought_pct >= float(config.get("reactivation_wave_actionable_sticky_bought_pct", 50.0))
         and net_retention_pct >= float(config.get("reactivation_wave_actionable_net_token_retention_pct", 75.0))
+        and effective_unique_buyers
+        >= int(config.get("reactivation_wallet_graph_min_effective_buyers", 6))
+        and not linked_concentration
     )
     hard_signal = hard_cluster or hard_flow or dormant or coordination or wave_signal
-    if concentrated_wave:
+    if concentrated_wave or linked_noise:
         tier = "noise"
     elif not hard_signal:
         tier = "noise" if support_only else "watch"
@@ -3748,7 +4646,18 @@ def classify_alert_tier(pool, alert, evidence, config):
             and "ath unverified" not in penalties
         )
         classic_actionable = coordination and (hard_cluster or hard_flow or dormant)
-        tier = "actionable" if clean_ath and (classic_actionable or wave_actionable) else "watch"
+        baseline_allows_actionable = (
+            not baseline_ready
+            or baseline_confirmed
+            or not config.get("reactivation_baseline_required_for_actionable", True)
+        )
+        tier = (
+            "actionable"
+            if clean_ath
+            and baseline_allows_actionable
+            and (classic_actionable or wave_actionable)
+            else "watch"
+        )
     elif lane in ("micro_sticky", "cheap_sticky"):
         sticky_actionable = (
             wave_signal
@@ -3774,11 +4683,18 @@ def classify_alert_tier(pool, alert, evidence, config):
         "ath_current_ratio": ath_ratio,
         "top_buyer_share": top_buyer_share,
         "top3_buyer_share": top3_buyer_share,
+        "effective_unique_buyers": effective_unique_buyers,
+        "max_linked_cluster_share": max_linked_cluster_share,
         "hold_age_minutes": hold_age_minutes,
         "min_hold_minutes": min_hold_minutes,
         "balance_coverage_pct": balance_coverage_pct,
         "hot_reactivation": hot_reactivation,
         "reactivation_stage": config.get("reactivation_stage"),
+        "reactivation_baseline_status": baseline.get("status"),
+        "reactivation_baseline_confirmed": baseline_confirmed,
+        "reactivation_quiet_hours": float(baseline.get("quiet_hours") or 0),
+        "reactivation_volume_ratio": float(baseline.get("volume_1h_ratio") or 0),
+        "reactivation_txn_ratio": float(baseline.get("txns_1h_ratio") or 0),
     }
 
 
@@ -3817,6 +4733,11 @@ def build_alerts(pool, events, config):
             "created_at": created_at,
             "score": score,
             "lane": config.get("lane") or config.get("mode"),
+            "reactivation_baseline": getattr(
+                pool,
+                "reactivation_baseline",
+                {"status": "warming", "reactivation_confirmed": False},
+            ),
             "pool": pool.as_dict(),
             "obs_mcap_usd": pool.mcap_usd,
             "obs_price_usd": pool.price_usd,
@@ -3860,7 +4781,9 @@ WAVE_SWAP_FIELDS = (
     "token_recipient_amount",
     "token_sender",
     "token_sender_amount",
+    "recipient_share",
     "routed",
+    "owner_resolution",
     "sol_amount",
     "token_amount",
     "price_native",
@@ -3913,9 +4836,15 @@ def merge_reactivation_wave_swaps(pool_state, swaps, config):
 
 
 def wave_buy_owner(swap):
-    if swap.get("routed"):
-        return ""
-    return swap.get("token_recipient") or swap.get("signer") or ""
+    recipient = swap.get("token_recipient") or ""
+    signer = swap.get("signer") or ""
+    if not swap.get("routed"):
+        return recipient or signer
+    resolution = swap.get("owner_resolution")
+    recipient_share = float(swap.get("recipient_share") or 0)
+    if resolution == "token_recipient" or (recipient and recipient_share >= 0.80):
+        return recipient
+    return ""
 
 
 def wave_sell_owner(swap, known_owners=None):
@@ -3975,7 +4904,7 @@ def wave_quality_score(alert, config):
         full_ratio=4,
     )
     score += scaled_score(
-        wave.get("unique_buyers"),
+        wave.get("effective_unique_buyers") or wave.get("unique_buyers"),
         config.get(f"{prefix}_min_unique_buyers", 5),
         10,
         full_ratio=5,
@@ -4021,6 +4950,15 @@ def wave_quality_score(alert, config):
         score -= 10
     if top3_buyers > float(config.get(f"{prefix}_max_top3_buyer_share", 1.0)):
         score -= 10
+    linked_cluster_share = float(wave.get("max_linked_cluster_share") or 0)
+    if linked_cluster_share > float(
+        config.get("reactivation_wallet_graph_actionable_max_cluster_share", 0.5)
+    ):
+        score -= 10
+    if linked_cluster_share > float(
+        config.get("reactivation_wallet_graph_noise_cluster_share", 0.75)
+    ):
+        score -= 15
     if float(wave.get("balance_coverage_pct") or 0) < float(
         config.get("actionable_min_balance_coverage_pct", 80)
     ):
@@ -4069,14 +5007,17 @@ def owner_activity_since(swaps, start_time, owners):
 
 def reactivation_wave_window_metrics(window_swaps, config, relaxed=False):
     min_trade_sol = float(config.get("reactivation_wave_min_trade_sol", 0.25))
-    buy_swaps = [
+    observed_buy_swaps = [
         swap
         for swap in window_swaps
         if (
             swap.get("kind") == "buy"
             and float(swap.get("sol_amount") or 0) >= min_trade_sol
-            and wave_buy_owner(swap)
         )
+    ]
+    buy_swaps = [swap for swap in observed_buy_swaps if wave_buy_owner(swap)]
+    unresolved_buy_swaps = [
+        swap for swap in observed_buy_swaps if not wave_buy_owner(swap)
     ]
     sell_swaps = [
         swap
@@ -4084,6 +5025,9 @@ def reactivation_wave_window_metrics(window_swaps, config, relaxed=False):
         if swap.get("kind") == "sell" and float(swap.get("sol_amount") or 0) >= min_trade_sol
     ]
     buy_sol = sum(float(swap.get("sol_amount") or 0) for swap in buy_swaps)
+    unresolved_buy_sol = sum(
+        float(swap.get("sol_amount") or 0) for swap in unresolved_buy_swaps
+    )
     sell_sol = sum(float(swap.get("sol_amount") or 0) for swap in sell_swaps)
     net_buy_sol = buy_sol - sell_sol
     if buy_sol <= 0 or net_buy_sol <= 0:
@@ -4165,6 +5109,13 @@ def reactivation_wave_window_metrics(window_swaps, config, relaxed=False):
         "buyers": sorted(buyers, key=lambda row: row["buy_sol"], reverse=True),
         "buy_count": len(buy_swaps),
         "sell_count": len(sell_swaps),
+        "unresolved_buy_count": len(unresolved_buy_swaps),
+        "unresolved_buy_sol": unresolved_buy_sol,
+        "owner_resolution_coverage_pct": (
+            buy_sol / (buy_sol + unresolved_buy_sol) * 100
+            if buy_sol + unresolved_buy_sol
+            else 100.0
+        ),
     }
 
 
@@ -4202,7 +5153,133 @@ def reactivation_wave_precheck(swaps, config):
     return bool(reactivation_wave_window_candidates(swaps, config, relaxed=True))
 
 
-def build_reactivation_wave_alerts(pool, swaps, config, rpc):
+def analyze_wave_wallet_graph(rpc, buyers, config, state):
+    if not config.get("reactivation_wallet_graph_enabled", True) or state is None:
+        return {
+            "checked_wallets": 0,
+            "errors": 0,
+            "classes": {},
+            "common_funders": [],
+            "common_executors": [],
+            "effective_wallets": len(buyers or []),
+            "max_cluster_share": 0.0,
+            "wallets": {},
+        }
+    limit = max(0, int(config.get("reactivation_wallet_graph_limit", 12)))
+    classifications = {}
+    errors = 0
+    funding_groups = defaultdict(list)
+    executor_groups = defaultdict(list)
+    buyer_sol = {
+        row.get("owner"): float(row.get("buy_sol") or 0)
+        for row in buyers or []
+        if row.get("owner")
+    }
+    for row in (buyers or [])[:limit]:
+        owner = row.get("owner")
+        top_buy = row.get("top_buy") or {}
+        signature = top_buy.get("signature")
+        if not owner or not signature:
+            continue
+        try:
+            result = classify_wallet(
+                rpc,
+                owner,
+                signature,
+                int(top_buy.get("block_time") or 0),
+                config,
+                state,
+            )
+        except Exception as exc:
+            errors += 1
+            classifications[owner] = {"error": str(exc)[:200]}
+            continue
+        classifications[owner] = result
+        funder = result.get("funding_source")
+        if funder:
+            funding_groups[funder].append(owner)
+        if top_buy.get("routed") and top_buy.get("signer"):
+            executor_groups[top_buy["signer"]].append(owner)
+
+    common_funders = [
+        {
+            "source": funder,
+            "wallets": len(set(wallets)),
+            "members": sorted(set(wallets)),
+        }
+        for funder, wallets in funding_groups.items()
+        if len(set(wallets)) >= 2
+    ]
+    common_executors = [
+        {
+            "executor": executor,
+            "wallets": len(set(wallets)),
+            "members": sorted(set(wallets)),
+        }
+        for executor, wallets in executor_groups.items()
+        if len(set(wallets)) >= 2
+    ]
+    parents = {owner: owner for owner in buyer_sol}
+
+    def find(owner):
+        while parents[owner] != owner:
+            parents[owner] = parents[parents[owner]]
+            owner = parents[owner]
+        return owner
+
+    def union(left, right):
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    for group in [*common_funders, *common_executors]:
+        members = [owner for owner in group["members"] if owner in parents]
+        for owner in members[1:]:
+            union(members[0], owner)
+
+    clusters = defaultdict(list)
+    for owner in buyer_sol:
+        clusters[find(owner)].append(owner)
+    cluster_rows = sorted(
+        (
+            {
+                "wallets": len(members),
+                "members": sorted(members),
+                "buy_sol": sum(buyer_sol.get(owner, 0.0) for owner in members),
+            }
+            for members in clusters.values()
+        ),
+        key=lambda row: row["buy_sol"],
+        reverse=True,
+    )
+    total_sol = sum(buyer_sol.values())
+    for row in cluster_rows:
+        row["buy_share"] = row["buy_sol"] / total_sol if total_sol else 0.0
+    max_cluster_share = max(
+        (row["buy_share"] for row in cluster_rows if row["wallets"] > 1),
+        default=0.0,
+    )
+    effective_wallets = len(cluster_rows)
+    classes = Counter(
+        item.get("wallet_class")
+        for item in classifications.values()
+        if item.get("wallet_class")
+    )
+    return {
+        "checked_wallets": len(classifications),
+        "errors": errors,
+        "classes": dict(classes),
+        "common_funders": common_funders,
+        "common_executors": common_executors,
+        "effective_wallets": effective_wallets,
+        "max_cluster_share": max_cluster_share,
+        "clusters": [row for row in cluster_rows if row["wallets"] > 1],
+        "wallets": classifications,
+    }
+
+
+def build_reactivation_wave_alerts(pool, swaps, config, rpc, state=None):
     if not reactivation_wave_enabled(config) or not pool.token_address:
         return []
     candidates = reactivation_wave_window_candidates(swaps, config, relaxed=False)
@@ -4234,6 +5311,12 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
     for candidate in candidates[:max_candidates]:
         metrics = candidate["metrics"]
         buyers = metrics["buyers"][:balance_limit]
+        wallet_graph = analyze_wave_wallet_graph(
+            rpc,
+            buyers,
+            config,
+            state,
+        )
         owner_activity = owner_activity_since(swaps, candidate["start"], [row.get("owner") for row in buyers])
         checked = []
         sticky_tokens = 0.0
@@ -4287,6 +5370,16 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
                     "buy_count": row["buy_count"],
                     "sell_count": row["sell_count"],
                     "first_buy_time": row["first_buy_time"],
+                    "wallet_class": (
+                        wallet_graph.get("wallets", {})
+                        .get(owner, {})
+                        .get("wallet_class")
+                    ),
+                    "funding_source": (
+                        wallet_graph.get("wallets", {})
+                        .get(owner, {})
+                        .get("funding_source")
+                    ),
                 }
             )
 
@@ -4325,6 +5418,11 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
             "score": 0,
             "lane": "reactivation",
             "reactivation_stage": config.get("reactivation_stage") or "mature",
+            "reactivation_baseline": getattr(
+                pool,
+                "reactivation_baseline",
+                {"status": "warming", "reactivation_confirmed": False},
+            ),
             "signal_family": "reactivation_wave",
             "pool": pool.as_dict(),
             "obs_mcap_usd": pool.mcap_usd,
@@ -4342,8 +5440,10 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
             "classes": {"market_wave": sticky_wallets},
             "hard_classes": {},
             "support_classes": {},
-            "common_funders": [],
+            "common_funders": wallet_graph.get("common_funders") or [],
             "common_recipients": [],
+            "common_executors": wallet_graph.get("common_executors") or [],
+            "wallet_graph": wallet_graph,
             "routed_buys": sum(1 for item in events if item.get("routed")),
             "wave": {
                 "buy_sol": metrics["buy_sol"],
@@ -4352,7 +5452,20 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc):
                 "net_buy_ratio": metrics["net_buy_ratio"],
                 "buy_count": metrics["buy_count"],
                 "sell_count": metrics["sell_count"],
+                "unresolved_buy_count": metrics["unresolved_buy_count"],
+                "unresolved_buy_sol": metrics["unresolved_buy_sol"],
+                "owner_resolution_coverage_pct": metrics[
+                    "owner_resolution_coverage_pct"
+                ],
                 "unique_buyers": metrics["unique_buyers"],
+                "effective_unique_buyers": wallet_graph.get(
+                    "effective_wallets",
+                    metrics["unique_buyers"],
+                ),
+                "max_linked_cluster_share": wallet_graph.get(
+                    "max_cluster_share",
+                    0.0,
+                ),
                 "large_buyers": metrics["large_buyers"],
                 "top_buyer_share": metrics["top_buyer_share"],
                 "top3_buyer_share": metrics["top3_buyer_share"],
@@ -4894,50 +6007,48 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
     live_cursor_record = pool_state.get("helius_live_cursor")
     live_cursor_provider, live_cursor = decode_provider_cursor(live_cursor_record)
     pending_signature_record = pool_state.get("helius_live_pending_signature")
-    pending_block_time_record = int(
-        pool_state.get("helius_live_pending_block_time") or 0
+    pending_block_time_record = int(pool_state.get("helius_live_pending_block_time") or 0)
+    rolling_backlogs = [
+        dict(item)
+        for item in pool_state.get("helius_rolling_backlogs", [])
+        if isinstance(item, dict) and item.get("cursor")
+    ]
+    if live_cursor:
+        rolling_backlogs.append(
+            {
+                "provider": live_cursor_provider,
+                "cursor": live_cursor,
+                "from": int(pool_state.get("helius_live_from") or live_from),
+                "head_signature": pending_signature_record,
+                "head_block_time": pending_block_time_record,
+                "created_at": pool_state.get("helius_live_cursor_created_at")
+                or iso(now),
+            }
+        )
+    rolling_backlogs.sort(
+        key=lambda item: (
+            int(item.get("head_block_time") or 0),
+            int(item.get("from") or 0),
+        )
     )
+    had_rolling_backlog = bool(rolling_backlogs)
     cursor_head_age_seconds = (
         max(0, now - pending_block_time_record)
         if pending_block_time_record
         else 0
     )
-    cursor_refresh_seconds = max(
-        0,
-        int(config.get("helius_live_cursor_head_refresh_seconds", 600)),
-    )
-    live_cursor_reset = bool(
-        live_cursor
-        and pending_block_time_record
-        and cursor_refresh_seconds
-        and cursor_head_age_seconds >= cursor_refresh_seconds
-    )
-    if live_cursor:
-        live_from = int(pool_state.get("helius_live_from") or live_from)
-        live_budget_kind = "incremental" if previous_time else "recent"
-    if live_cursor_reset:
-        live_cursor_provider = None
-        live_cursor = None
-        live_from = max(
-            recent_from,
-            pending_block_time_record
-            - int(config.get("helius_incremental_overlap_seconds", 30)),
-        )
-        live_budget_kind = "incremental"
     transactions = []
     seen = set()
     staged_updates = {}
-    staged_deletes = set()
-    if live_cursor_reset:
-        staged_deletes.update(
-            {
-                "helius_live_cursor",
-                "helius_live_cursor_complete",
-                "helius_live_pending_signature",
-                "helius_live_pending_block_time",
-                "helius_live_from",
-            }
-        )
+    staged_deletes = {
+        "helius_live_cursor",
+        "helius_live_cursor_complete",
+        "helius_live_pending_signature",
+        "helius_live_pending_block_time",
+        "helius_live_from",
+        "helius_live_cursor_created_at",
+        "helius_live_cursor_created_at",
+    }
     stats = {
         "source": "enhanced_transactions",
         "phase": phase or "full",
@@ -4949,9 +6060,11 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         "backfill_pending": False,
         "had_previous_state": bool(previous_time),
         "live_from": live_from,
-        "live_resumed": bool(live_cursor),
-        "live_cursor_reset": live_cursor_reset,
+        "live_resumed": had_rolling_backlog,
+        "live_cursor_reset": False,
+        "live_head_refreshed": had_rolling_backlog,
         "live_cursor_head_age_seconds": cursor_head_age_seconds,
+        "rolling_backlog_segments_before": len(rolling_backlogs),
         "providers_used": [],
         "provider_failovers": [],
         "history_gap_seconds": max(0, live_from - previous_time) if previous_time else 0,
@@ -5088,45 +6201,156 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
                 cursor = None
                 pages = 0
         pass_stats["pagination_remaining"] = bool(cursor)
+        pass_stats["pagination_token"] = cursor
+        pass_stats["pagination_provider"] = provider_name
         if target_from is not None:
             pass_stats["coverage_complete"] = not bool(cursor)
         stats["passes"].append(pass_stats)
         return pass_stats
 
+    head_page_budget = helius_page_budget(
+        pool,
+        config,
+        live_budget_kind,
+        phase=phase,
+    )
+    if rolling_backlogs:
+        head_page_budget = min(
+            head_page_budget,
+            max(
+                1,
+                int(
+                    config.get(
+                        f"helius_{phase}_rolling_head_pages" if phase else "helius_rolling_head_pages",
+                        config.get("helius_rolling_head_pages", 2),
+                    )
+                ),
+            ),
+        )
     live_pass = run_pass(
-        "live",
+        "live_head",
         "desc",
-        helius_page_budget(pool, config, live_budget_kind, phase=phase),
+        head_page_budget,
         block_time={"gte": live_from},
-        pagination_token=live_cursor,
-        pagination_provider=live_cursor_provider,
-        save_cursor_key="helius_live_cursor",
         target_from=live_from,
     )
-    pending_signature = None if live_cursor_reset else pending_signature_record
-    pending_block_time = 0 if live_cursor_reset else pending_block_time_record
-    if not pending_signature and transactions:
-        newest_live = max(
+    newest_head = (
+        max(
             transactions,
-            key=lambda tx: (int(tx.get("blockTime") or 0), int(tx.get("transactionIndex") or 0)),
+            key=lambda tx: (
+                int(tx.get("blockTime") or 0),
+                int(tx.get("transactionIndex") or 0),
+            ),
         )
-        newest_signature = (newest_live.get("transaction") or {}).get("signatures", [""])[0]
-        if newest_signature:
-            pending_signature = newest_signature
-            pending_block_time = int(newest_live.get("blockTime") or 0)
-            staged_updates["helius_live_pending_signature"] = pending_signature
-            staged_updates["helius_live_pending_block_time"] = pending_block_time
-            staged_updates["helius_live_from"] = live_from
-    stats["live_truncated"] = bool(live_pass.get("pagination_remaining"))
-    stats["live_oldest_block_time"] = live_pass.get("oldest_block_time")
-    stats["live_newest_block_time"] = pending_block_time or live_pass.get("newest_block_time")
-    if stats.get("live_newest_block_time"):
-        stats["live_head_lag_seconds"] = max(0, now - int(stats["live_newest_block_time"]))
-    if not stats["live_truncated"] and pending_signature:
-        stats["live_checkpoint"] = {
+        if transactions
+        else None
+    )
+    pending_signature = (
+        (newest_head.get("transaction") or {}).get("signatures", [""])[0]
+        if newest_head
+        else None
+    )
+    pending_block_time = int((newest_head or {}).get("blockTime") or 0)
+    completed_checkpoint = None
+
+    if live_pass.get("pagination_remaining"):
+        segment = {
+            "provider": live_pass.get("pagination_provider"),
+            "cursor": live_pass.get("pagination_token"),
+            "from": live_from,
+            "head_signature": pending_signature,
+            "head_block_time": pending_block_time,
+            "created_at": iso(now),
+        }
+        if segment["cursor"] and not any(
+            item.get("cursor") == segment["cursor"]
+            and item.get("provider") == segment["provider"]
+            for item in rolling_backlogs
+        ):
+            rolling_backlogs.append(segment)
+            rolling_backlogs.sort(
+                key=lambda item: (
+                    int(item.get("head_block_time") or 0),
+                    int(item.get("from") or 0),
+                )
+            )
+    elif pending_signature:
+        completed_checkpoint = {
             "signature": pending_signature,
             "block_time": pending_block_time,
         }
+        rolling_backlogs = []
+
+    if had_rolling_backlog and rolling_backlogs:
+        backlog = rolling_backlogs[0]
+        backlog_pages = max(
+            1,
+            int(
+                config.get(
+                    f"helius_{phase}_rolling_backlog_pages" if phase else "helius_rolling_backlog_pages",
+                    config.get("helius_rolling_backlog_pages", 2),
+                )
+            ),
+        )
+        backlog_pass = run_pass(
+            "rolling_backlog",
+            "desc",
+            backlog_pages,
+            block_time={"gte": int(backlog.get("from") or live_from)},
+            pagination_token=backlog.get("cursor"),
+            pagination_provider=backlog.get("provider"),
+            target_from=int(backlog.get("from") or live_from),
+        )
+        if backlog_pass.get("pagination_remaining"):
+            backlog["cursor"] = backlog_pass.get("pagination_token")
+            backlog["provider"] = backlog_pass.get("pagination_provider")
+        else:
+            completed_head_time = int(backlog.get("head_block_time") or 0)
+            completed_head_signature = backlog.get("head_signature")
+            if completed_head_time and completed_head_signature:
+                completed_checkpoint = {
+                    "signature": completed_head_signature,
+                    "block_time": completed_head_time,
+                }
+            rolling_backlogs = [
+                item
+                for item in rolling_backlogs[1:]
+                if int(item.get("head_block_time") or 0) > completed_head_time
+            ]
+
+    max_segments = max(1, int(config.get("helius_rolling_backlog_max_segments", 12)))
+    if len(rolling_backlogs) > max_segments:
+        rolling_backlogs = rolling_backlogs[-max_segments:]
+        stats["rolling_backlog_segments_dropped"] = True
+    if rolling_backlogs:
+        staged_updates["helius_rolling_backlogs"] = rolling_backlogs
+    else:
+        staged_deletes.add("helius_rolling_backlogs")
+
+    pass_oldest = [
+        int(item.get("oldest_block_time") or 0)
+        for item in stats["passes"]
+        if item.get("oldest_block_time")
+    ]
+    pass_newest = [
+        int(item.get("newest_block_time") or 0)
+        for item in stats["passes"]
+        if item.get("newest_block_time")
+    ]
+    stats["rolling_backlog_segments_after"] = len(rolling_backlogs)
+    stats["rolling_gap_pending"] = bool(rolling_backlogs)
+    stats["live_truncated"] = bool(rolling_backlogs)
+    stats["live_oldest_block_time"] = min(pass_oldest) if pass_oldest else None
+    stats["live_newest_block_time"] = max(pass_newest) if pass_newest else pending_block_time
+    if stats.get("live_newest_block_time"):
+        stats["live_head_lag_seconds"] = max(0, now - int(stats["live_newest_block_time"]))
+    if completed_checkpoint:
+        stats["live_checkpoint"] = completed_checkpoint
+    if rolling_backlogs:
+        stats["history_gap_seconds"] = max(
+            int(stats.get("history_gap_seconds") or 0),
+            max(0, now - int(previous_time or live_from)),
+        )
 
     market_head = None
     if market_activity_requires_head_check(pool, config):
@@ -5378,7 +6602,12 @@ def classify_buy_swaps(rpc, swaps, config, state, classification_budget):
     events = []
     classification_errors = 0
     for swap in selected:
-        cache_key = wallet_cache_key(swap["signer"], swap["signature"])
+        cache_key = wallet_cache_key(
+            swap["signer"],
+            swap["signature"],
+            swap.get("block_time"),
+            config.get("wallet_cache_bucket_hours", 6),
+        )
         cache_hit = cache_key in state.setdefault("wallet_cache", {})
         if not cache_hit and classification_budget["remaining"] <= 0:
             break
@@ -5512,6 +6741,14 @@ def combine_fetch_stats(probe_stats, deep_stats):
     combined["backfill_pending"] = bool(
         probe_stats.get("backfill_pending") or deep_stats.get("backfill_pending")
     )
+    combined["rolling_gap_pending"] = bool(
+        probe_stats.get("rolling_gap_pending")
+        or deep_stats.get("rolling_gap_pending")
+    )
+    combined["rolling_backlog_segments_after"] = max(
+        int(probe_stats.get("rolling_backlog_segments_after") or 0),
+        int(deep_stats.get("rolling_backlog_segments_after") or 0),
+    )
     combined["live_cursor_reset"] = bool(
         probe_stats.get("live_cursor_reset") or deep_stats.get("live_cursor_reset")
     )
@@ -5608,6 +6845,13 @@ def apply_alert_data_quality(
             config.get("actionable_min_balance_coverage_pct", 80)
         ):
             reasons.append("partial balance coverage")
+        owner_resolution_coverage_pct = float(
+            wave.get("owner_resolution_coverage_pct", 100.0)
+        )
+        if owner_resolution_coverage_pct < float(
+            config.get("actionable_min_owner_resolution_coverage_pct", 80)
+        ):
+            reasons.append("partial routed buyer attribution")
         reasons = list(dict.fromkeys(reasons))
         alert["data_quality"] = {
             "status": "partial" if reasons else "complete",
@@ -5619,6 +6863,7 @@ def apply_alert_data_quality(
             "wave_buffer_truncated": bool(fetch_stats.get("wave_buffer_truncated")),
             "classification_coverage_pct": classification_coverage_pct,
             "balance_coverage_pct": balance_coverage_pct,
+            "owner_resolution_coverage_pct": owner_resolution_coverage_pct,
         }
         if reasons and alert.get("action_tier") in ("actionable", "hot_reactivation"):
             alert["action_tier"] = "watch"
@@ -5847,7 +7092,13 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
         or pool_state.get("sticky_accumulation_buffer_truncated")
     )
     classic_alerts = build_alerts(pool, events, config) if config.get("classic_alerts_enabled", True) else []
-    wave_alerts = build_reactivation_wave_alerts(pool, wave_swaps, config, rpc)
+    wave_alerts = build_reactivation_wave_alerts(
+        pool,
+        wave_swaps,
+        config,
+        rpc,
+        state,
+    )
     sticky_alerts = build_sticky_accumulation_alerts(pool, sticky_swaps, config, rpc)
     alerts = dedupe_pool_alerts([*classic_alerts, *wave_alerts, *sticky_alerts])
     alerts = apply_alert_data_quality(
@@ -6007,7 +7258,13 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
     wave_swaps = merge_reactivation_wave_swaps(pool_state, swaps, config)
     sticky_swaps = merge_sticky_accumulation_swaps(pool_state, swaps, config)
     classic_alerts = build_alerts(pool, events, config) if classify_wallets else []
-    wave_alerts = build_reactivation_wave_alerts(pool, wave_swaps, config, rpc)
+    wave_alerts = build_reactivation_wave_alerts(
+        pool,
+        wave_swaps,
+        config,
+        rpc,
+        state,
+    )
     sticky_alerts = build_sticky_accumulation_alerts(pool, sticky_swaps, config, rpc)
     fetch_stats = {
         "source": "pool_signatures",
@@ -6057,6 +7314,8 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
                 "helius_live_pending_signature",
                 "helius_live_pending_block_time",
                 "helius_live_from",
+                "helius_live_cursor_created_at",
+                "helius_rolling_backlogs",
             ):
                 pool_state.pop(key, None)
     elif live_truncated or transaction_errors or parse_errors:
@@ -6436,6 +7695,7 @@ def fetch_gmgn_ath(config, token_address, include_timestamp=True):
     ath = {
         "highest_market_cap": ath_mcap,
         "highest_price": ath_price,
+        "supply": supply,
         "pool_id": data.get("biggest_pool_address") or data.get("migrated_pool"),
     }
     if include_timestamp:
@@ -6451,8 +7711,67 @@ def fetch_gmgn_ath(config, token_address, include_timestamp=True):
     return ath
 
 
-def apply_gmgn_ath(entry, ath, observed_at):
+def validate_ath_candidate(entry, ath, current_mcap=0, config=None):
+    config = config or {}
+    ath_mcap = to_float(ath.get("highest_market_cap"))
+    if not math.isfinite(ath_mcap) or ath_mcap <= 0:
+        return False, "ATH market cap is not a positive finite number"
+
+    max_ath_usd = float(config.get("ath_validation_max_usd", 100_000_000_000))
+    if max_ath_usd > 0 and ath_mcap > max_ath_usd:
+        return False, f"ATH market cap exceeds ${max_ath_usd:.0f} plausibility limit"
+
+    current = max(
+        float(current_mcap or 0),
+        to_float(entry.get("latest_mcap_usd")),
+        to_float(entry.get("scan_mcap_usd")),
+        to_float(entry.get("first_obs_mcap_usd")),
+    )
+    min_current_ratio = float(config.get("ath_validation_min_current_ratio", 0.90))
+    if current > 0 and ath_mcap < current * min_current_ratio:
+        return False, "ATH market cap is below the observed current/local high"
+
+    max_current_multiple = float(
+        config.get("ath_validation_max_current_multiple", 10_000)
+    )
+    if (
+        current > 0
+        and max_current_multiple > 0
+        and ath_mcap / current > max_current_multiple
+    ):
+        return False, "ATH/current market-cap multiple is implausibly large"
+
+    ath_price = to_float(ath.get("highest_price"))
+    supply = to_float(ath.get("supply"))
+    derived_mcap = ath_price * supply if ath_price > 0 and supply > 0 else 0.0
+    max_derived_ratio = float(config.get("ath_validation_max_derived_ratio", 5))
+    if derived_mcap > 0 and max_derived_ratio > 1:
+        ratio = max(ath_mcap, derived_mcap) / max(1.0, min(ath_mcap, derived_mcap))
+        if ratio > max_derived_ratio:
+            return False, "ATH market cap conflicts with ATH price multiplied by supply"
+    return True, None
+
+
+def apply_gmgn_ath(entry, ath, observed_at, current_mcap=0, config=None):
     previous_source = entry.get("ath_source")
+    valid, validation_error = validate_ath_candidate(
+        entry,
+        ath,
+        current_mcap=current_mcap,
+        config=config,
+    )
+    if not valid:
+        entry["ath_candidate_mcap_usd"] = to_float(ath.get("highest_market_cap"))
+        entry["ath_candidate_price_usd"] = to_float(ath.get("highest_price"))
+        entry["ath_candidate_source"] = "gmgn"
+        entry["ath_candidate_status"] = "suspect"
+        entry["ath_candidate_error"] = validation_error
+        entry["ath_latest_checked_at"] = observed_at
+        if not trusted_ath_mcap(entry):
+            entry["ath_source"] = "gmgn"
+            entry["ath_status"] = "suspect"
+        return False
+
     if ath.get("highest_market_cap") is not None:
         entry["ath_mcap_usd"] = to_float(ath.get("highest_market_cap"))
     if ath.get("highest_price") is not None:
@@ -6468,6 +7787,7 @@ def apply_gmgn_ath(entry, ath, observed_at):
         entry["ath_pool_address"] = ath.get("pool_id")
     entry["ath_source"] = "gmgn"
     entry["ath_status"] = "ready" if entry.get("ath_mcap_at") else "partial"
+    entry["ath_validation_status"] = "valid"
     entry["ath_latest_checked_at"] = observed_at
     if ath.get("timestamp_error"):
         entry["ath_timestamp_error"] = ath.get("timestamp_error")
@@ -6476,6 +7796,15 @@ def apply_gmgn_ath(entry, ath, observed_at):
     entry.pop("ath_error", None)
     entry.pop("ath_error_checked_at", None)
     entry.pop("ath_error_source", None)
+    for key in (
+        "ath_candidate_mcap_usd",
+        "ath_candidate_price_usd",
+        "ath_candidate_source",
+        "ath_candidate_status",
+        "ath_candidate_error",
+    ):
+        entry.pop(key, None)
+    return True
 
 
 def trusted_ath_mcap(entry):
@@ -6483,7 +7812,19 @@ def trusted_ath_mcap(entry):
         return 0.0
     if entry.get("ath_source") not in ("gmgn", "solana_tracker", "ohlcv_high"):
         return 0.0
-    return to_float(entry.get("ath_mcap_usd"))
+    if entry.get("ath_status") == "suspect":
+        return 0.0
+    value = to_float(entry.get("ath_mcap_usd"))
+    if not math.isfinite(value) or value <= 0 or value > 100_000_000_000:
+        return 0.0
+    current = max(
+        to_float(entry.get("latest_mcap_usd")),
+        to_float(entry.get("scan_mcap_usd")),
+        to_float(entry.get("first_obs_mcap_usd")),
+    )
+    if current > 0 and (value < current * 0.90 or value / current > 10_000):
+        return 0.0
+    return value
 
 
 def filter_reactivation_by_ath(http, state, pools, config, observed_at):
@@ -6492,14 +7833,60 @@ def filter_reactivation_by_ath(http, state, pools, config, observed_at):
         return pools
     if max_ratio is None:
         market = state.get("market") if isinstance(state, dict) else {}
+        preload_limit = max(
+            0,
+            int(config.get("reactivation_ath_preload_max_tokens_per_scan", 16)),
+        )
+        api_key = os.environ.get("GMGN_API_KEY")
+        fetched = 0
+        stats = Counter()
         for pool in pools:
             token = pool.token_address or pool.pool_address
             entry = market.get(token) if isinstance(market, dict) else None
             ath_mcap = trusted_ath_mcap(entry)
+            if (
+                not ath_mcap
+                and api_key
+                and fetched < preload_limit
+                and isinstance(market, dict)
+            ):
+                entry = market.setdefault(token, {"token_address": token})
+                try:
+                    ath = fetch_gmgn_ath(config, token, include_timestamp=False)
+                    fetched += 1
+                    if ath and not ath.get("error"):
+                        apply_gmgn_ath(
+                            entry,
+                            ath,
+                            observed_at,
+                            current_mcap=pool.mcap_usd,
+                            config=config,
+                        )
+                        ath_mcap = trusted_ath_mcap(entry)
+                    else:
+                        entry["ath_status"] = "error"
+                        entry["ath_error"] = (
+                            (ath or {}).get("error") or "empty_ath_response"
+                        )
+                        entry["ath_error_checked_at"] = int(time.time())
+                        entry["ath_error_source"] = "gmgn"
+                    time.sleep(float(config.get("ath_request_delay_seconds", 0.25)))
+                except Exception as exc:
+                    fetched += 1
+                    entry["ath_status"] = "error"
+                    entry["ath_error"] = str(exc)[:500]
+                    entry["ath_error_checked_at"] = int(time.time())
+                    entry["ath_error_source"] = "gmgn"
             if not ath_mcap or pool.mcap_usd <= 0:
+                stats["missing_or_suspect_ath"] += 1
                 continue
             pool.ath_mcap_usd = ath_mcap
             pool.ath_current_ratio = pool.mcap_usd / ath_mcap
+            stats["trusted_ath"] += 1
+        stats["input_pools"] = len(pools)
+        stats["kept_pools"] = len(pools)
+        stats["ath_fetches"] = fetched
+        config["_ath_filter_stats"] = dict(stats)
         return pools
 
     max_ratio = float(max_ratio)
@@ -6536,7 +7923,13 @@ def filter_reactivation_by_ath(http, state, pools, config, observed_at):
                     fetched += 1
                     if ath and not ath.get("error"):
                         entry["ath_checked_at"] = now
-                        apply_gmgn_ath(entry, ath, observed_at)
+                        apply_gmgn_ath(
+                            entry,
+                            ath,
+                            observed_at,
+                            current_mcap=pool.mcap_usd,
+                            config=config,
+                        )
                         ath_mcap = trusted_ath_mcap(entry)
                     elif ath and ath.get("error"):
                         entry["ath_error"] = ath.get("error")
@@ -6700,7 +8093,13 @@ def enrich_market_ath(http, state, pools, alerts, config, observed_at):
             broad_fetched += 1
         if ath and not ath.get("error"):
             entry["ath_checked_at"] = now
-            apply_gmgn_ath(entry, ath, observed_at)
+            apply_gmgn_ath(
+                entry,
+                ath,
+                observed_at,
+                current_mcap=to_float(entry.get("latest_mcap_usd")),
+                config=config,
+            )
         elif ath and ath.get("error"):
             entry["ath_error"] = ath.get("error")
             entry["ath_error_checked_at"] = now
@@ -6746,11 +8145,13 @@ def record_market_observations(state, pools, observed_at):
                 "latest_txns_5m": pool.txns_5m,
                 "latest_txns_1h": pool.txns_1h,
                 "latest_seen_at": observed_at,
+                "market_snapshot_at": observed_at,
+                "market_source": pool.source,
                 "scan_mcap_usd": pool.mcap_usd,
                 "scan_price_usd": pool.price_usd,
                 "scan_liquidity_usd": pool.liquidity_usd,
                 "scan_mcap_at": observed_at,
-                "scan_source": "scanner_snapshot",
+                "scan_source": pool.source or "scanner_snapshot",
             }
         )
         if pool.pair_created_at and (
@@ -6855,6 +8256,292 @@ def record_alert_observations(state, alerts):
         )
 
 
+SIGNAL_OUTCOME_HORIZONS = {
+    "1h": 3600,
+    "6h": 6 * 3600,
+    "24h": 24 * 3600,
+    "72h": 72 * 3600,
+}
+
+
+def outcome_market_snapshot(entry, observed_at):
+    if not isinstance(entry, dict):
+        return None
+    at = (
+        entry.get("latest_seen_at")
+        or entry.get("market_snapshot_at")
+        or observed_at
+    )
+    mcap = to_float(entry.get("latest_mcap_usd"))
+    price = to_float(entry.get("latest_price_usd"))
+    liquidity = to_float(entry.get("latest_liquidity_usd"))
+    if mcap <= 0 and price <= 0:
+        return None
+    return {
+        "at": at,
+        "mcap_usd": mcap,
+        "price_usd": price,
+        "liquidity_usd": liquidity,
+    }
+
+
+def outcome_return_pct(outcome, snapshot):
+    caught_mcap = to_float(outcome.get("caught_mcap_usd"))
+    current_mcap = to_float(snapshot.get("mcap_usd"))
+    if caught_mcap > 0 and current_mcap > 0:
+        return (current_mcap / caught_mcap - 1) * 100
+    caught_price = to_float(outcome.get("caught_price_usd"))
+    current_price = to_float(snapshot.get("price_usd"))
+    if caught_price > 0 and current_price > 0:
+        return (current_price / caught_price - 1) * 100
+    return None
+
+
+def summarize_signal_outcomes(outcomes):
+    rows = list((outcomes or {}).values())
+
+    def metrics(group):
+        returns_24h = [
+            to_float((row.get("horizons") or {}).get("24h", {}).get("return_pct"))
+            for row in group
+            if (row.get("horizons") or {}).get("24h", {}).get("return_pct")
+            is not None
+        ]
+        returns_72h = [
+            to_float((row.get("horizons") or {}).get("72h", {}).get("return_pct"))
+            for row in group
+            if (row.get("horizons") or {}).get("72h", {}).get("return_pct")
+            is not None
+        ]
+        return {
+            "tracked": len(group),
+            "with_24h": len(returns_24h),
+            "with_72h": len(returns_72h),
+            "median_return_24h_pct": (
+                median_value(returns_24h) if returns_24h else None
+            ),
+            "positive_24h_pct": (
+                sum(value > 0 for value in returns_24h)
+                / len(returns_24h)
+                * 100
+                if returns_24h
+                else None
+            ),
+            "loss_30pct_24h_pct": (
+                sum(value <= -30 for value in returns_24h)
+                / len(returns_24h)
+                * 100
+                if returns_24h
+                else None
+            ),
+            "double_72h_pct": (
+                sum(value >= 100 for value in returns_72h)
+                / len(returns_72h)
+                * 100
+                if returns_72h
+                else None
+            ),
+        }
+
+    summary = {
+        "tracked": len(rows),
+        "with_1h": 0,
+        "with_6h": 0,
+        "with_24h": 0,
+        "with_72h": 0,
+        "median_return_24h_pct": None,
+        "positive_24h_pct": None,
+        "double_72h_pct": None,
+    }
+    for horizon in SIGNAL_OUTCOME_HORIZONS:
+        summary[f"with_{horizon}"] = sum(
+            1
+            for row in rows
+            if (row.get("horizons") or {}).get(horizon)
+        )
+    overall = metrics(rows)
+    summary.update(
+        {
+            key: value
+            for key, value in overall.items()
+            if key not in {"tracked", "with_24h", "with_72h"}
+        }
+    )
+    by_tier = defaultdict(list)
+    by_stage = defaultdict(list)
+    for row in rows:
+        by_tier[row.get("caught_tier") or "unknown"].append(row)
+        by_stage[row.get("caught_stage") or "unknown"].append(row)
+    summary["by_tier"] = {
+        key: metrics(group)
+        for key, group in sorted(by_tier.items())
+    }
+    summary["by_stage"] = {
+        key: metrics(group)
+        for key, group in sorted(by_stage.items())
+    }
+    return summary
+
+
+def update_signal_outcomes(state, alerts, observed_at, config):
+    if not config.get("signal_outcomes_enabled", True):
+        return {}
+    outcomes = state.setdefault("signal_outcomes", {})
+    market = state.get("market") or {}
+    now = parse_timestamp(observed_at) or int(time.time())
+
+    for alert in sorted(alerts or [], key=alert_history_sort_key):
+        pool = alert.get("pool") or {}
+        token = clean_solana_address(
+            pool.get("token_address") or pool.get("pool_address")
+        )
+        if not token:
+            continue
+        caught_at = (
+            alert.get("obs_mcap_at")
+            or alert.get("created_at")
+            or alert.get("window_start")
+            or observed_at
+        )
+        caught_ts = parse_timestamp(caught_at)
+        existing = outcomes.get(token)
+        if existing and parse_timestamp(existing.get("caught_at")) <= caught_ts:
+            continue
+        outcomes[token] = {
+            "token_address": pool.get("token_address"),
+            "pool_address": pool.get("pool_address"),
+            "symbol": pool.get("symbol"),
+            "caught_at": caught_at,
+            "caught_mcap_usd": to_float(
+                alert.get("obs_mcap_usd") or pool.get("mcap_usd")
+            ),
+            "caught_price_usd": to_float(
+                alert.get("obs_price_usd") or pool.get("price_usd")
+            ),
+            "caught_liquidity_usd": to_float(
+                alert.get("obs_liquidity_usd") or pool.get("liquidity_usd")
+            ),
+            "caught_tier": alert.get("action_tier"),
+            "caught_stage": alert.get("reactivation_stage"),
+            "caught_score": int(alert.get("score") or 0),
+            "signal_family": alert.get("signal_family"),
+            "horizons": {},
+        }
+
+    for token, outcome in list(outcomes.items()):
+        entry = market.get(token) or {}
+        snapshot = outcome_market_snapshot(entry, observed_at)
+        if not snapshot:
+            continue
+        caught_ts = parse_timestamp(outcome.get("caught_at"))
+        snapshot_ts = parse_timestamp(snapshot.get("at"))
+        if not caught_ts or snapshot_ts < caught_ts:
+            continue
+        snapshot["return_pct"] = outcome_return_pct(outcome, snapshot)
+        outcome["latest"] = snapshot
+        outcome["updated_at"] = observed_at
+        current_return = snapshot.get("return_pct")
+        if current_return is not None:
+            peak = outcome.get("max_favorable")
+            if not peak or current_return > to_float(peak.get("return_pct")):
+                outcome["max_favorable"] = dict(snapshot)
+            trough = outcome.get("max_adverse")
+            if not trough or current_return < to_float(trough.get("return_pct")):
+                outcome["max_adverse"] = dict(snapshot)
+        horizons = outcome.setdefault("horizons", {})
+        for name, seconds in SIGNAL_OUTCOME_HORIZONS.items():
+            if name in horizons or snapshot_ts < caught_ts + seconds:
+                continue
+            horizons[name] = {
+                **snapshot,
+                "target_at": iso(caught_ts + seconds),
+                "delay_seconds": max(0, snapshot_ts - caught_ts - seconds),
+            }
+
+    retention_days = float(config.get("signal_outcomes_retention_days", 180))
+    cutoff = now - int(retention_days * 86400) if retention_days > 0 else 0
+    max_tokens = max(0, int(config.get("signal_outcomes_max_tokens", 500)))
+    ordered = sorted(
+        (
+            (token, row)
+            for token, row in outcomes.items()
+            if not cutoff or parse_timestamp(row.get("caught_at")) >= cutoff
+        ),
+        key=lambda item: parse_timestamp(item[1].get("caught_at")),
+        reverse=True,
+    )
+    if max_tokens:
+        ordered = ordered[:max_tokens]
+    state["signal_outcomes"] = dict(ordered)
+    stats = summarize_signal_outcomes(state["signal_outcomes"])
+    stats["updated_at"] = observed_at
+    state.setdefault("maintenance", {})["signal_outcomes"] = stats
+    return stats
+
+
+def refresh_alert_tiers_with_market_ath(state, alerts, config):
+    market = state.get("market") if isinstance(state, dict) else {}
+    if not isinstance(market, dict):
+        return alerts
+    lanes = config.get("lanes") or {}
+    for alert in alerts or []:
+        pool_payload = alert.get("pool") or {}
+        token = pool_payload.get("token_address") or pool_payload.get("pool_address")
+        entry = market.get(token) or {}
+        ath_mcap = trusted_ath_mcap(entry)
+        if not ath_mcap:
+            continue
+        pool = Pool(
+            **{
+                key: value
+                for key, value in pool_payload.items()
+                if key in Pool.__dataclass_fields__
+            }
+        )
+        pool.ath_mcap_usd = ath_mcap
+        pool.ath_current_ratio = (
+            float(pool.mcap_usd or alert.get("obs_mcap_usd") or 0) / ath_mcap
+            if ath_mcap
+            else None
+        )
+        lane_name = alert.get("lane")
+        lane_config = apply_lane(config, lane_name) if lane_name in lanes else dict(config)
+        pool_config = reactivation_stage_config(pool, lane_config)
+        evidence = {
+            "hard_wallets": int(alert.get("hard_wallets") or 0),
+            "support_wallets": int(alert.get("support_wallets") or 0),
+            "hard_sol": float(alert.get("hard_sol") or 0),
+            "support_sol": float(alert.get("support_sol") or 0),
+            "hard_classes": alert.get("hard_classes") or {},
+            "support_classes": alert.get("support_classes") or {},
+            "support_only": bool(
+                alert.get("support_wallets")
+                and not alert.get("hard_wallets")
+                and not alert.get("common_funders")
+                and not alert.get("common_recipients")
+            ),
+        }
+        tier, reasons, penalties, quality_metrics = classify_alert_tier(
+            pool,
+            alert,
+            evidence,
+            pool_config,
+        )
+        if (
+            (alert.get("data_quality") or {}).get("status") == "partial"
+            and tier in ("actionable", "hot_reactivation")
+        ):
+            tier = "watch"
+            if "partial onchain coverage" not in penalties:
+                penalties.append("partial onchain coverage")
+        alert["action_tier"] = tier
+        alert["quality_reasons"] = reasons
+        alert["quality_penalties"] = penalties
+        alert["quality_metrics"] = quality_metrics
+        alert["ath_recalculated_in_scan"] = True
+    return alerts
+
+
 def prune_wallet_cache(state, config):
     wallet_cache = state.get("wallet_cache")
     if not isinstance(wallet_cache, dict):
@@ -6863,15 +8550,55 @@ def prune_wallet_cache(state, config):
     normal_limit = int(config.get("wallet_cache_normal_limit", 20000))
     if normal_limit < 0:
         return None
+    now = int(time.time())
+    retention_days = float(config.get("wallet_cache_retention_days", 30))
+    cutoff = now - int(retention_days * 86400) if retention_days > 0 else 0
+    max_versions = max(1, int(config.get("wallet_cache_max_versions_per_wallet", 4)))
+    version_buckets = defaultdict(list)
+    for key, value in wallet_cache.items():
+        if not isinstance(value, dict):
+            continue
+        wallet = value.get("wallet") or key.split(":", 1)[0]
+        version_buckets[wallet].append((key, value))
+    allowed_version_keys = set()
+    for entries in version_buckets.values():
+        entries.sort(
+            key=lambda item: max(
+                int(item[1].get("cached_at") or 0),
+                int(item[1].get("as_of_time") or 0),
+                parse_timestamp(item[1].get("previous_time")),
+            ),
+            reverse=True,
+        )
+        allowed_version_keys.update(key for key, _ in entries[:max_versions])
 
     keep_classes = set(config.get("wallet_cache_keep_classes") or ["fresh", "freshish", "dormant", "low_tx"])
     class_limits = config.get("wallet_cache_class_limits") or {}
     normal_keys = [
         key
         for key, value in wallet_cache.items()
-        if isinstance(value, dict) and value.get("wallet_class") == "normal"
+        if (
+            isinstance(value, dict)
+            and value.get("wallet_class") == "normal"
+            and key in allowed_version_keys
+            and (
+                not cutoff
+                or max(
+                    int(value.get("cached_at") or 0),
+                    int(value.get("as_of_time") or 0),
+                )
+                >= cutoff
+            )
+        )
     ]
-    keep_normal_keys = set(normal_keys[-normal_limit:]) if normal_limit else set()
+    normal_keys.sort(
+        key=lambda key: max(
+            int(wallet_cache[key].get("cached_at") or 0),
+            int(wallet_cache[key].get("as_of_time") or 0),
+        ),
+        reverse=True,
+    )
+    keep_normal_keys = set(normal_keys[:normal_limit]) if normal_limit else set()
     before = len(wallet_cache)
     pruned = {}
     class_counts = Counter()
@@ -6879,6 +8606,13 @@ def prune_wallet_cache(state, config):
     class_buckets = defaultdict(list)
     for key, value in wallet_cache.items():
         if not isinstance(value, dict):
+            continue
+        if key not in allowed_version_keys:
+            continue
+        if cutoff and max(
+            int(value.get("cached_at") or 0),
+            int(value.get("as_of_time") or 0),
+        ) < cutoff:
             continue
         wallet_class = value.get("wallet_class") or "unknown"
         class_buckets[wallet_class].append((key, value))
@@ -6894,12 +8628,21 @@ def prune_wallet_cache(state, config):
             key=lambda item: max(
                 parse_timestamp(item[1].get("previous_time")),
                 parse_timestamp(item[1].get("funding_time")),
+                int(item[1].get("cached_at") or 0),
+                int(item[1].get("as_of_time") or 0),
             ),
             reverse=True,
         )
         keep_class_keys.update(key for key, _ in entries[:limit])
 
     for key, value in wallet_cache.items():
+        if key not in allowed_version_keys:
+            continue
+        if cutoff and max(
+            int(value.get("cached_at") or 0),
+            int(value.get("as_of_time") or 0),
+        ) < cutoff:
+            continue
         wallet_class = value.get("wallet_class") if isinstance(value, dict) else None
         if wallet_class == "normal" and key not in keep_normal_keys:
             continue
@@ -6919,6 +8662,8 @@ def prune_wallet_cache(state, config):
         "after_entries": len(pruned),
         "removed_entries": before - len(pruned),
         "normal_limit": normal_limit,
+        "retention_days": retention_days,
+        "max_versions_per_wallet": max_versions,
         "class_limits": class_limits,
         "kept_classes": sorted(keep_classes),
         "after_class_counts": dict(class_counts),
@@ -6947,6 +8692,26 @@ def compact_pool_swap_buffers(pools_state, config, now):
     before = 0
     after = 0
     pools_with_buffers = 0
+    lanes = config.get("lanes") or {}
+    enabled_lane_configs = [
+        lane
+        for lane in lanes.values()
+        if isinstance(lane, dict) and lane.get("enabled", True)
+    ]
+    sticky_enabled = bool(
+        config.get("sticky_accumulation_enabled", False)
+        or any(
+            lane.get("sticky_accumulation_enabled", False)
+            for lane in enabled_lane_configs
+        )
+    )
+    reactivation_enabled = bool(
+        config.get("reactivation_wave_enabled", False)
+        or any(
+            lane.get("reactivation_wave_enabled", False)
+            for lane in enabled_lane_configs
+        )
+    )
     for pool_state in pools_state.values():
         if not isinstance(pool_state, dict):
             continue
@@ -6957,6 +8722,12 @@ def compact_pool_swap_buffers(pools_state, config, now):
                 continue
             pool_has_buffer = True
             before += len(raw)
+            if (
+                (key == "sticky_accumulation_swaps" and not sticky_enabled)
+                or (key == "reactivation_wave_swaps" and not reactivation_enabled)
+            ):
+                pool_state.pop(key, None)
+                continue
             compacted = []
             for item in raw:
                 if not isinstance(item, dict):
@@ -7059,6 +8830,52 @@ def compact_state(state, pools, alerts, config, observed_at):
         stats["pools_before"] = before
         stats["pools_after"] = len(pruned_pools)
 
+    baselines = state.get("activity_baselines")
+    if isinstance(baselines, dict):
+        before = len(baselines)
+        retention_days = float(
+            config.get("reactivation_baseline_state_retention_days", 120)
+        )
+        cutoff = now - int(retention_days * 86400) if retention_days > 0 else 0
+        five_cutoff = now - int(
+            float(
+                config.get(
+                    "reactivation_baseline_five_minute_retention_hours",
+                    48,
+                )
+            )
+            * 3600
+        )
+        hourly_cutoff = now - int(
+            float(config.get("reactivation_baseline_hourly_retention_days", 7))
+            * 86400
+        )
+        pruned_baselines = {}
+        for key, value in baselines.items():
+            if not isinstance(value, dict):
+                continue
+            last_snapshot = int(value.get("last_snapshot_at") or 0)
+            if cutoff and last_snapshot and last_snapshot < cutoff and key not in token_keys:
+                continue
+            value["five_minute"] = [
+                item
+                for item in value.get("five_minute", [])
+                if isinstance(item, list)
+                and item
+                and int(item[0] or 0) >= five_cutoff
+            ][-int(config.get("reactivation_baseline_max_five_minute_buckets", 576)) :]
+            value["hourly"] = [
+                item
+                for item in value.get("hourly", [])
+                if isinstance(item, list)
+                and item
+                and int(item[0] or 0) >= hourly_cutoff
+            ][-int(config.get("reactivation_baseline_max_hourly_buckets", 168)) :]
+            pruned_baselines[key] = value
+        state["activity_baselines"] = pruned_baselines
+        stats["activity_baselines_before"] = before
+        stats["activity_baselines_after"] = len(pruned_baselines)
+
     cutoff = now - int(enrichment_ttl * 3600) if enrichment_ttl > 0 else 0
     for section in ("social_cache", "token_intel_cache"):
         cache = state.get(section)
@@ -7072,6 +8889,26 @@ def compact_state(state, pools, alerts, config, observed_at):
         }
         stats[f"{section}_before"] = before
         stats[f"{section}_after"] = len(state[section])
+
+    remote_updates = state.get("convex_discovery_updated_at")
+    if isinstance(remote_updates, dict):
+        before = len(remote_updates)
+        remote_cutoff = now - int(
+            float(config.get("reactivation_baseline_state_retention_days", 120))
+            * 86400
+        )
+        retained_tokens = set(state.get("market") or {}) | set(
+            state.get("activity_baselines") or {}
+        ) | set(state.get("signal_outcomes") or {})
+        state["convex_discovery_updated_at"] = {
+            key: value
+            for key, value in remote_updates.items()
+            if key in retained_tokens or parse_timestamp(value) >= remote_cutoff
+        }
+        stats["convex_discovery_updates_before"] = before
+        stats["convex_discovery_updates_after"] = len(
+            state["convex_discovery_updated_at"]
+        )
 
     maintenance["state_compaction"] = stats
     return stats
@@ -7092,6 +8929,12 @@ def apply_market_meta(pool_dict, state):
         "ath_pool_address",
         "ath_source",
         "ath_status",
+        "ath_validation_status",
+        "ath_candidate_mcap_usd",
+        "ath_candidate_price_usd",
+        "ath_candidate_source",
+        "ath_candidate_status",
+        "ath_candidate_error",
         "ath_error",
         "ath_error_checked_at",
         "ath_current_ratio",
@@ -7101,6 +8944,8 @@ def apply_market_meta(pool_dict, state):
         "latest_price_usd",
         "latest_liquidity_usd",
         "latest_seen_at",
+        "market_snapshot_at",
+        "market_source",
         "scan_mcap_usd",
         "scan_price_usd",
         "scan_liquidity_usd",
@@ -7156,6 +9001,9 @@ def build_scan_health(summaries, lane_stats, config):
     live_fetches = [fetch for _item, fetch in coverage_fetch_items]
     live_truncated = sum(1 for fetch in live_fetches if fetch.get("live_truncated"))
     backfill_pending = sum(1 for fetch in live_fetches if fetch.get("backfill_pending"))
+    rolling_gap_pending = sum(
+        1 for fetch in live_fetches if fetch.get("rolling_gap_pending")
+    )
     history_gap = sum(1 for fetch in live_fetches if int(fetch.get("history_gap_seconds") or 0) > 60)
     stale_market_snapshots = sum(
         1 for fetch in live_fetches if fetch.get("market_activity_stale")
@@ -7299,6 +9147,7 @@ def build_scan_health(summaries, lane_stats, config):
         "partial_live_windows": live_truncated,
         "partial_live_ratio": live_truncated_ratio,
         "backfill_pending_pools": backfill_pending,
+        "rolling_gap_pending_pools": rolling_gap_pending,
         "history_gap_pools": history_gap,
         "history_gap_ratio": history_gap_ratio,
         "stale_market_snapshot_pools": stale_market_snapshots,
@@ -7367,6 +9216,7 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "discovery": config.get("_discovery_stats", {}),
             "gmgn_ath": (state.get("maintenance") or {}).get("gmgn_ath", {}),
             "caught_market_refresh": (state.get("maintenance") or {}).get("caught_market_refresh", {}),
+            "signal_outcomes": (state.get("maintenance") or {}).get("signal_outcomes", {}),
             "deleted_tokens": {
                 "tokens": len(deleted_tokens["tokens"]),
                 "pools": len(deleted_tokens["pools"]),
@@ -7530,6 +9380,13 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
     config["_deleted_tokens_skipped"] = deleted_skipped
     if deleted_skipped:
         print(f"{label}: skipped {deleted_skipped} deleted pools before on-chain scan", flush=True)
+    attach_reactivation_baselines(universe, state, config, observed_at)
+    config["_discovery_queue_stats"] = update_discovery_queue(
+        state,
+        universe,
+        config,
+        observed_at,
+    )
     scan_targets, selection_stats = select_scan_targets(universe, state, config)
     config["_selection_stats"] = selection_stats
     print(f"{label}: universe {len(universe)} pools, scanning {len(scan_targets)}", flush=True)
@@ -7634,6 +9491,7 @@ def run_once(config, lane_name=None):
         raise SystemExit(f"Solana RPC health is not ok: {health}")
 
     state = load_json(STATE_PATH, {"pools": {}, "wallet_cache": {}})
+    load_convex_discovery_state(state, config)
     lane_list = selected_lanes(config, lane_name) if config.get("lanes") else []
     if not lane_list:
         lane_list = [None]
@@ -7673,7 +9531,7 @@ def run_once(config, lane_name=None):
             base_universe=shared_universe,
         )
         all_alerts.extend(lane_alerts)
-        for key in ("_gmgn_error",):
+        for key in ("_gmgn_error", "_discovery_stats"):
             if lane_config.get(key):
                 config[key] = lane_config[key]
         summaries.extend(lane_summaries)
@@ -7715,9 +9573,28 @@ def run_once(config, lane_name=None):
 
     generated_at = utc_now().isoformat().replace("+00:00", "Z")
     record_market_observations(state, universe, generated_at)
-    record_alert_observations(state, all_alerts)
     refreshed_caught_pools = refresh_caught_market_observations(http, state, all_alerts, config, generated_at)
     enrich_market_ath(http, state, [*universe, *refreshed_caught_pools], all_alerts, config, generated_at)
+    refresh_alert_tiers_with_market_ath(state, all_alerts, config)
+    record_alert_observations(state, all_alerts)
+    outcome_alerts = compact_alert_history(
+        load_alert_history(),
+        all_alerts,
+        config,
+    )
+    update_signal_outcomes(state, outcome_alerts, generated_at, config)
+    record_market_activity_baselines(
+        state,
+        [*universe, *refreshed_caught_pools],
+        generated_at,
+        config,
+    )
+    sync_convex_discovery_state(
+        state,
+        [*universe, *refreshed_caught_pools],
+        config,
+        generated_at,
+    )
     config["_scan_health"] = build_scan_health(summaries, lane_stats, config)
     prune_wallet_cache(state, config)
     compact_state(state, universe, all_alerts, config, generated_at)
@@ -7740,10 +9617,124 @@ def run_once(config, lane_name=None):
     print(f"RPC calls: {dict(rpc.calls)}")
 
 
+def discovery_pulse_config(config):
+    lane_config = (
+        apply_lane(config, "reactivation")
+        if "reactivation" in (config.get("lanes") or {})
+        else dict(config)
+    )
+    lane_config["registry_refresh_max_tokens"] = int(
+        config.get(
+            "discovery_pulse_registry_refresh_max_tokens",
+            lane_config.get("registry_refresh_max_tokens", 300),
+        )
+    )
+    lane_config["gecko_pages"] = int(
+        config.get(
+            "discovery_pulse_gecko_pages",
+            min(1, int(lane_config.get("gecko_pages", 1))),
+        )
+    )
+    lane_config["gmgn_trenches_queries"] = config.get(
+        "discovery_pulse_gmgn_trenches_queries",
+        [
+            {"sort_by": "swaps_1h", "direction": "desc"},
+            {"sort_by": "usd_market_cap", "direction": "asc"},
+        ],
+    )
+    lane_config["gmgn_trending_queries"] = config.get(
+        "discovery_pulse_gmgn_trending_queries",
+        [
+            {"order_by": "volume", "intervals": ["1m", "5m"]},
+            {"order_by": "swaps", "intervals": ["1m", "5m"]},
+        ],
+    )
+    return lane_config
+
+
+def run_discovery_once(config):
+    load_env()
+    http = Http()
+    state = load_json(
+        STATE_PATH,
+        {"pools": {}, "wallet_cache": {}, "market": {}},
+    )
+    load_convex_discovery_state(state, config)
+    lane_config = discovery_pulse_config(config)
+    observed_at = utc_now().isoformat().replace("+00:00", "Z")
+    discovered = discover_market_pools(http, lane_config)
+    registry, registry_stats = refresh_known_market_pools(
+        http,
+        state,
+        lane_config,
+    )
+    universe = filter_universe_pools(
+        merge_market_pools(registry, discovered),
+        lane_config,
+    )
+    deleted = load_deleted_tokens()
+    universe = [pool for pool in universe if not pool_is_deleted(pool, deleted)]
+    attach_reactivation_baselines(
+        universe,
+        state,
+        lane_config,
+        observed_at,
+    )
+    queue_stats = update_discovery_queue(
+        state,
+        universe,
+        lane_config,
+        observed_at,
+    )
+    record_market_observations(state, universe, observed_at)
+    baseline_stats = record_market_activity_baselines(
+        state,
+        universe,
+        observed_at,
+        lane_config,
+    )
+    convex_stats = sync_convex_discovery_state(
+        state,
+        universe,
+        lane_config,
+        observed_at,
+    )
+    compact_state(state, universe, [], lane_config, observed_at)
+    save_json(
+        STATE_PATH,
+        state,
+        compact=bool(lane_config.get("state_json_compact", True)),
+    )
+    payload = {
+        "generated_at": observed_at,
+        "discovered_pools": len(discovered),
+        "registry_pools": len(registry),
+        "universe_pools": len(universe),
+        "registry_refresh": registry_stats,
+        "queue": queue_stats,
+        "baselines": baseline_stats,
+        "convex": convex_stats,
+        "gmgn_status": "error" if lane_config.get("_gmgn_error") else "ok",
+    }
+    status = write_discovery_status("ok", payload)
+    sync_convex_discovery_status(status, lane_config)
+    print(
+        "Discovery pulse: "
+        f"{len(discovered)} live, {len(registry)} registry, "
+        f"{len(universe)} eligible, {queue_stats['queued_tokens']} queued"
+    )
+    return payload
+
+
 def main():
     parser = argparse.ArgumentParser(description="Solana token reactivation radar.")
     parser.add_argument("--once", action="store_true", help="Run one scan and exit.")
     parser.add_argument("--watch", action="store_true", help="Run forever on scan_interval_seconds.")
+    parser.add_argument(
+        "--discovery-only",
+        action="store_true",
+        help="Refresh market baselines and the priority queue without RPC scanning.",
+    )
     parser.add_argument("--mode", choices=["aggressive", "balanced", "conservative"], help="Scan profile.")
     parser.add_argument(
         "--lane",
@@ -7760,6 +9751,15 @@ def main():
         config.pop("lane", None)
     else:
         config["lane"] = args.lane or config.get("lane") or "all"
+    if args.discovery_only:
+        write_discovery_status("running")
+        try:
+            run_discovery_once(config)
+        except (Exception, SystemExit) as exc:
+            status = write_discovery_status("failed", error=exc)
+            sync_convex_discovery_status(status, config)
+            raise
+        return
     if not args.once and not args.watch:
         args.once = True
 

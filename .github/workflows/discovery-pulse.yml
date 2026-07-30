@@ -1,0 +1,47 @@
+name: Reactivation discovery pulse
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+concurrency:
+  group: solana-radar-discovery-pulse
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  discovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install discovery dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          npm install -g gmgn-cli@1.5.4
+
+      - name: Refresh discovery baselines
+        env:
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+          CONVEX_URL: https://basic-starfish-944.convex.cloud
+          CONVEX_INGEST_SECRET: ${{ secrets.CONVEX_INGEST_SECRET }}
+          CONVEX_SYNC_REQUIRED: "true"
+        run: |
+          set +e
+          timeout --signal=TERM --kill-after=15s 6m python scanner.py --discovery-only
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::warning title=Discovery pulse failed::Exit code $status. The hourly scanner will continue with the last persisted baseline."
+          fi
+          exit 0

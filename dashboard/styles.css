@@ -1785,6 +1785,14 @@ tr:last-child td {
 }
 
 @media (max-width: 430px) {
+  .metric {
+    padding-inline: 9px;
+  }
+
+  .metric-value {
+    font-size: 15px;
+  }
+
   .brand-mark {
     flex-basis: 34px;
     height: 34px;

@@ -52,4 +52,16 @@ export default defineSchema({
   })
     .index("by_key", ["key"])
     .index("by_active", ["active"]),
+
+  discoveryState: defineTable({
+    tokenKey: v.string(),
+    poolAddress: v.optional(v.string()),
+    market: v.optional(v.any()),
+    baseline: v.optional(v.any()),
+    queue: v.optional(v.any()),
+    outcome: v.optional(v.any()),
+    updatedAt: v.string(),
+  })
+    .index("by_token_key", ["tokenKey"])
+    .index("by_updated_at", ["updatedAt"]),
 });

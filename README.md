@@ -91,13 +91,13 @@ python3 solana-radar/scanner.py --watch --lane reactivation
 
 The repository includes `.github/workflows/scan-and-pages.yml`.
 
-It runs the scanner at most once per hour, commits updated `data/` snapshots,
-and deploys the static dashboard to GitHub Pages. Hourly triggers share a
+It runs the scanner at most once per hour, commits compact report/alert
+snapshots, and deploys the static dashboard to GitHub Pages. Hourly triggers share a
 50-minute freshness guard: fresh reports are skipped before paid API work, while
 stale reports trigger the full scan. Already running scans are not cancelled.
-Pushes to `data/` redeploy Pages from the new snapshot without forcing another
-scanner pass. Scanner failures are logged as workflow warnings and the previous
-dashboard snapshot is preserved. A completed report separately exposes data
+Scanner data commits do not retrigger the workflow, which prevents a
+scan-commit-scan loop. Scanner failures are logged as workflow warnings and the
+previous dashboard snapshot is preserved. A completed report separately exposes data
 freshness and scan health (`healthy`, `degraded`, or `unhealthy`). The dashboard reads:
 
 - `data/latest_report.json`
@@ -125,14 +125,23 @@ the full Alchemy endpoint, but complete endpoint URLs are preferred.
 multi-window trending discovery, token metadata, and ATH market cap/date.
 `BRIGHTDATA_API_KEY` can be empty if social enrichment should be disabled.
 
-The production dashboard uses the versioned GitHub Pages snapshot directly.
-This is intentional: the report, market history, and alert history already have
-one source of truth in Git, while the Cloudflare worker writes token deletions
-back to the same repository. The experimental Convex code remains in `convex/`
-for future server-side features, but it is not part of the production read path
-or hourly scanner job.
+Production uses two scan layers:
 
-Optional Convex development setup:
+- `Reactivation discovery pulse` runs every 5 minutes without Solana RPC calls.
+  It uses a narrow low-cost GMGN set (`1m`/`5m` volume and swaps plus two
+  Trenches rankings), updates current market snapshots, quiet-regime baselines,
+  and the priority queue in Convex.
+- `Scan and deploy dashboard` runs the deep onchain pass hourly. It restores raw
+  cursors and swap buffers from GitHub Actions Cache, loads the latest discovery
+  context from Convex, scans selected pools, and publishes the dashboard.
+
+Convex is the primary dashboard read path. GitHub Pages keeps the latest static
+report as a fallback. Market/baseline/outcome data is stored one row per token;
+the full growing market is not stored in a single Convex document. A temporary
+Convex outage does not stop the hourly scan: it continues from Actions Cache and
+publishes the static Pages snapshot.
+
+Convex production setup:
 
 ```bash
 # GitHub Actions variable, public client/backend URL
@@ -143,13 +152,12 @@ CONVEX_DEPLOY_KEY=...
 CONVEX_INGEST_SECRET=...
 ```
 
-These variables are only used when running or deploying Convex manually. The
-GitHub Actions production workflow does not send the large scanner snapshot to
-Convex.
+The workflow deploys Convex functions on code pushes and syncs a compact report,
+alert history, token market rows, discovery baselines, queues, and signal
+outcomes. Raw transaction buffers and wallet cache never go to Convex.
 
-The Cloudflare delete worker writes Delete/Restore actions to GitHub without
-Convex. Its Convex variables are optional and should only be set for backend
-experiments:
+The Cloudflare delete worker writes Delete/Restore actions to GitHub and mirrors
+the deletion index to Convex:
 
 ```bash
 CONVEX_URL=https://your-deployment.convex.cloud
@@ -159,6 +167,26 @@ CONVEX_INGEST_SECRET=...
 Production lane:
 
 - `reactivation`: `15d+`, any positive mcap up to `$5m`, `liq >=3k`, and at least `$100` of reported hourly volume. The market rank combines 5-minute burst velocity with 1-hour activity. Stage-balanced scan capacity prevents `ignition` and `early` pools from being crowded out by larger tokens. A signal still requires distributed net buying and current holder retention. ATH is entry-risk context, not a discovery gate.
+
+RPC roles and safeguards:
+
+- Alchemy: enhanced paginated address history.
+- Chainstack: standard transaction and supply calls.
+- Helius: fallback and health coverage.
+- Each provider has a per-scan credit budget. The router fails over before the
+  configured budget is exceeded and reports per-method p50/p95 latency.
+- Every scan reserves capacity for live discovery, unresolved history gaps, due
+  signal rechecks, and oldest-pool rotation.
+
+Signal quality:
+
+- Routed swaps are attributed to the final token recipient only when ownership
+  resolution is high-confidence.
+- Top wave buyers are checked for common funders and common routed executors.
+  Connected addresses count as one effective buyer cluster.
+- A ready quiet-regime baseline is required for actionable Reactivation.
+- First-catch outcomes are tracked at 1h, 6h, 24h, and 72h, including maximum
+  favorable and adverse movement.
 
 Disabled filters: `micro_sticky`, `cheap_sticky`, `breakout`, `incubation`, and
 `young` are not scanned or shown in the production dashboard. Their old alert
@@ -170,7 +198,8 @@ pools are excluded before onchain analysis.
 
 ## Outputs
 
-- `solana-radar/data/state.json` - provider-aware transaction cursors, pool state, and wallet cache.
+- `solana-radar/data/state.json` - compact bootstrap state. The live copy is
+  persisted in GitHub Actions Cache and is no longer committed hourly.
 - `solana-radar/data/alerts.jsonl` - machine-readable alerts.
 - `solana-radar/data/latest_report.md` - human-readable latest scan.
 - `solana-radar/data/latest_report.json` - structured dashboard data.
