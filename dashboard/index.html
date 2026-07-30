@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Solana Radar</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="styles.css?v=20260730-reactivation-1">
+    <link rel="stylesheet" href="styles.css?v=20260730-workflow-model-1">
   </head>
   <body>
     <header class="topbar">
@@ -43,25 +43,28 @@
           <button class="filter-toggle" id="filterToggle" type="button" aria-expanded="false">Filters</button>
           <div class="advanced-filters" id="advancedFilters">
             <label class="field-control">
-              <span class="visually-hidden">Signal tier</span>
-              <select id="tierFilter" aria-label="Signal tier">
-              <option value="focus">active signals + tracked theses</option>
-              <option value="actionable">actionable only</option>
-              <option value="hot_reactivation">hot reactivation</option>
-              <option value="watch">watch only</option>
-              <option value="holding">accumulation intact</option>
-              <option value="weakening">weakening</option>
-              <option value="recheck_due">recheck due</option>
-              <option value="late_chase">late/chase</option>
-              <option value="noise">noise</option>
-              <option value="inactive">inactive</option>
-              <option value="all">all tiers</option>
+              <span class="visually-hidden">Workflow</span>
+              <select id="workflowFilter" aria-label="Workflow">
+              <option value="new_signals">new signals</option>
+              <option value="holding">holding</option>
+              <option value="needs_attention">needs attention</option>
+              <option value="closed">closed</option>
+              <option value="all">all</option>
               </select>
             </label>
-            <label class="field-control">
-              <span class="visually-hidden">Social heat</span>
-              <select id="heatFilter" aria-label="Social heat">
-              <option value="all">all social</option>
+            <label class="field-control current-signal-control">
+              <span class="visually-hidden">Current signal strength</span>
+              <select id="signalFilter" aria-label="Current signal strength">
+              <option value="all">all signal strength</option>
+              <option value="actionable">strong signal</option>
+              <option value="hot_reactivation">fast move</option>
+              <option value="watch">watch</option>
+              </select>
+            </label>
+            <label class="field-control current-signal-control">
+              <span class="visually-hidden">Current social heat</span>
+              <select id="heatFilter" aria-label="Current social heat">
+              <option value="all">all current social</option>
               <option value="unchecked">not checked</option>
               <option value="disabled">disabled</option>
               <option value="none">no mentions</option>
@@ -70,9 +73,9 @@
               <option value="hot">hot</option>
               </select>
             </label>
-            <label class="score-control">
-              <span>Score</span>
-              <input id="scoreInput" type="number" min="0" max="100" value="0" aria-label="Minimum score">
+            <label class="score-control current-signal-control">
+              <span>Current score</span>
+              <input id="scoreInput" type="number" min="0" max="100" value="0" aria-label="Minimum current score">
             </label>
             <label class="toggle-filter">
               <input id="showHiddenInput" type="checkbox">
@@ -85,7 +88,7 @@
       <section id="content" class="content"></section>
     </main>
 
-    <script src="config.js?v=20260730-held-supply-1"></script>
-    <script src="app.js?v=20260730-held-supply-1"></script>
+    <script src="config.js?v=20260730-workflow-model-1"></script>
+    <script src="app.js?v=20260730-workflow-model-1"></script>
   </body>
 </html>
