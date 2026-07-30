@@ -264,6 +264,7 @@ def compact_report_for_convex(report):
         "name",
         "dex",
         "url",
+        "pair_created_at",
         "mcap_usd",
         "price_usd",
         "liquidity_usd",
@@ -271,7 +272,6 @@ def compact_report_for_convex(report):
         "volume_1h_usd",
         "txns_5m",
         "txns_1h",
-        "pair_created_at",
         "age_hours",
     }
 
@@ -2926,6 +2926,87 @@ def select_reactivation_priority(candidates, limit, config):
     return selected
 
 
+def due_signal_thesis_monitor_pools(state, config, now=None):
+    now = int(now or time.time())
+    latest_alert_pool = {}
+    for alert in load_alert_history():
+        pool = alert.get("pool") or {}
+        pool_address = pool.get("pool_address")
+        if not pool_address:
+            continue
+        existing = latest_alert_pool.get(pool_address)
+        if (
+            not existing
+            or alert_history_timestamp(alert)
+            >= existing[0]
+        ):
+            latest_alert_pool[pool_address] = (
+                alert_history_timestamp(alert),
+                pool,
+            )
+
+    monitor_pools = []
+    for pool_address, pool_state in (state.get("pools") or {}).items():
+        if not isinstance(pool_state, dict):
+            continue
+        thesis = pool_state.get("signal_thesis")
+        due_at = parse_timestamp(pool_state.get("signal_recheck_due_at"))
+        if (
+            not isinstance(thesis, dict)
+            or thesis.get("status") == "invalidated"
+            or not due_at
+            or due_at > now
+        ):
+            continue
+        pool_payload = dict(
+            (latest_alert_pool.get(pool_address) or (0, {}))[1]
+        )
+        pool_payload.update(
+            {
+                key: thesis.get(key)
+                for key in (
+                    "pool_address",
+                    "token_address",
+                    "symbol",
+                    "name",
+                    "dex",
+                    "url",
+                    "pair_created_at",
+                )
+                if thesis.get(key)
+            }
+        )
+        pool_payload = apply_market_meta(pool_payload, state)
+        if pool_payload.get("latest_mcap_usd") is not None:
+            pool_payload["mcap_usd"] = pool_payload["latest_mcap_usd"]
+        if pool_payload.get("latest_liquidity_usd") is not None:
+            pool_payload["liquidity_usd"] = pool_payload[
+                "latest_liquidity_usd"
+            ]
+        if pool_payload.get("latest_price_usd") is not None:
+            pool_payload["price_usd"] = pool_payload["latest_price_usd"]
+        if pool_payload.get("latest_seen_at"):
+            pool_payload["market_snapshot_at"] = parse_timestamp(
+                pool_payload["latest_seen_at"]
+            )
+        pool = Pool(
+            **{
+                key: value
+                for key, value in pool_payload.items()
+                if key in Pool.__dataclass_fields__
+            }
+        )
+        if (
+            not pool.pool_address
+            or not pool.token_address
+            or not pool_dex_allowed(pool, config)
+        ):
+            continue
+        pool.source = "signal_thesis_monitor"
+        monitor_pools.append(pool)
+    return monitor_pools
+
+
 def select_scan_targets(universe, state, config):
     limit = max(0, int(config.get("active_pool_limit", 0)))
     if not limit or not universe:
@@ -2971,21 +3052,6 @@ def select_scan_targets(universe, state, config):
     monitored = []
     monitored_keys = set()
     pulse_selected = 0
-    for item in state.get("discovery_queue", []) or []:
-        if len(monitored) >= monitor_limit:
-            break
-        if not isinstance(item, dict):
-            continue
-        if parse_timestamp(item.get("expires_at")) <= now:
-            continue
-        pool = universe_by_key.get(item.get("pool_address")) or universe_by_key.get(
-            item.get("token_address")
-        )
-        if not pool or pool.pool_address in monitored_keys:
-            continue
-        monitored.append(pool)
-        monitored_keys.add(pool.pool_address)
-        pulse_selected += 1
     due_rechecks = []
     pools_state = state.get("pools") if isinstance(state, dict) else {}
     pools_state = pools_state if isinstance(pools_state, dict) else {}
@@ -3003,6 +3069,22 @@ def select_scan_targets(universe, state, config):
         monitored_keys.add(pool.pool_address)
         if len(monitored) >= monitor_limit:
             break
+
+    for item in state.get("discovery_queue", []) or []:
+        if len(monitored) >= monitor_limit:
+            break
+        if not isinstance(item, dict):
+            continue
+        if parse_timestamp(item.get("expires_at")) <= now:
+            continue
+        pool = universe_by_key.get(item.get("pool_address")) or universe_by_key.get(
+            item.get("token_address")
+        )
+        if not pool or pool.pool_address in monitored_keys:
+            continue
+        monitored.append(pool)
+        monitored_keys.add(pool.pool_address)
+        pulse_selected += 1
 
     active_lane = config.get("lane")
     for alert in sorted(load_alert_history(), key=alert_history_sort_key, reverse=True):
@@ -5034,6 +5116,710 @@ def attributed_wave_retention(balance, bought_tokens, sold_tokens, min_retention
     }
 
 
+def classified_alert_cohort(alert, wallet_limit):
+    by_owner = {}
+    for event in alert.get("events") or []:
+        if (
+            not isinstance(event, dict)
+            or event.get("kind") != "buy"
+            or event.get("wallet_class")
+            not in HARD_WALLET_CLASSES | SUPPORT_WALLET_CLASSES
+        ):
+            continue
+        owner = wave_buy_owner(event)
+        attributed_tokens = max(
+            0.0,
+            float(
+                event.get("token_amount")
+                or event.get("token_recipient_amount")
+                or 0
+            ),
+        )
+        if not owner or attributed_tokens <= 0:
+            continue
+        row = by_owner.setdefault(
+            owner,
+            {
+                "owner": owner,
+                "attributed_tokens": 0.0,
+                "initial_balance": 0.0,
+                "buy_sol": 0.0,
+                "first_buy_time": 0,
+                "wallet_class": event.get("wallet_class"),
+            },
+        )
+        row["attributed_tokens"] += attributed_tokens
+        row["initial_balance"] += attributed_tokens
+        row["buy_sol"] += max(0.0, float(event.get("sol_amount") or 0))
+        event_time = parse_timestamp(event.get("block_time") or event.get("time"))
+        if event_time and (
+            not row["first_buy_time"]
+            or event_time < row["first_buy_time"]
+        ):
+            row["first_buy_time"] = event_time
+    return sorted(
+        by_owner.values(),
+        key=lambda row: (row["buy_sol"], row["attributed_tokens"]),
+        reverse=True,
+    )[:wallet_limit]
+
+
+def signal_thesis_from_alert(alert, config, captured_at=None):
+    if not isinstance(alert, dict):
+        return None
+    wave = alert.get("wave") or {}
+    wave_rows = wave.get("top_buyers") or []
+    cohort = []
+    wallet_limit = max(1, int(config.get("signal_thesis_wallet_limit", 40)))
+    min_wallet_retention_pct = max(
+        0.0,
+        float(config.get("reactivation_wave_min_wallet_retention_pct", 15)),
+    )
+    if wave_rows:
+        for row in wave_rows[:wallet_limit]:
+            if not isinstance(row, dict):
+                continue
+            owner = str(row.get("owner") or "").strip()
+            if not owner:
+                continue
+            row_retention_pct = float(row.get("wave_retention_pct") or 0)
+            if row_retention_pct < min_wallet_retention_pct:
+                continue
+            attributed_tokens = max(
+                0.0,
+                float(
+                    row.get("retained_from_wave")
+                    or min(
+                        float(row.get("current_balance") or 0),
+                        max(
+                            0.0,
+                            float(row.get("token_bought") or 0)
+                            - float(row.get("token_sold") or 0),
+                        ),
+                    )
+                    or 0
+                ),
+            )
+            if attributed_tokens <= 0:
+                continue
+            cohort.append(
+                {
+                    "owner": owner,
+                    "attributed_tokens": attributed_tokens,
+                    "initial_balance": max(
+                        0.0,
+                        float(row.get("current_balance") or attributed_tokens),
+                    ),
+                    "buy_sol": max(0.0, float(row.get("buy_sol") or 0)),
+                    "first_buy_time": parse_timestamp(
+                        row.get("first_buy_time")
+                    ),
+                    "wallet_class": row.get("wallet_class"),
+                }
+            )
+    else:
+        cohort = classified_alert_cohort(alert, wallet_limit)
+    original_tokens = sum(row["attributed_tokens"] for row in cohort)
+    if not cohort or original_tokens <= 0:
+        return None
+
+    wave_signal = bool(wave_rows)
+    pool = alert.get("pool") or {}
+    supply = max(0.0, float(wave.get("supply") or 0))
+    source_retained_tokens = max(
+        original_tokens,
+        float(wave.get("sticky_tokens") or 0),
+    )
+    source_signal_wallets = max(
+        len(cohort),
+        int(
+            wave.get("sticky_wallets")
+            or alert.get("suspicious_wallets")
+            or len(cohort)
+        ),
+    )
+    signal_at = (
+        alert.get("created_at")
+        or alert.get("window_end")
+        or captured_at
+        or utc_now().isoformat().replace("+00:00", "Z")
+    )
+    return {
+        "version": 1,
+        "cohort_id": "|".join(
+            str(value or "")
+            for value in (
+                pool.get("token_address") or pool.get("pool_address"),
+                alert.get("window_start"),
+                alert.get("window_end"),
+            )
+        ),
+        "pool_address": pool.get("pool_address"),
+        "token_address": pool.get("token_address"),
+        "symbol": pool.get("symbol"),
+        "name": pool.get("name"),
+        "dex": pool.get("dex"),
+        "url": pool.get("url"),
+        "pair_created_at": parse_timestamp(
+            pool.get("pair_created_at")
+            or pool.get("pair_created_at_iso")
+        ),
+        "signal_mcap_usd": float(
+            alert.get("obs_mcap_usd")
+            or pool.get("mcap_usd")
+            or pool.get("fdv_usd")
+            or 0
+        ),
+        "signal_price_usd": float(pool.get("price_usd") or 0),
+        "signal_liquidity_usd": float(pool.get("liquidity_usd") or 0),
+        "signal_family": alert.get("signal_family") or "classified_wallets",
+        "source_tier": alert.get("action_tier"),
+        "source_score": float(alert.get("score") or 0),
+        "source_flow_sol": float(
+            alert.get("suspicious_sol")
+            or wave.get("net_buy_sol")
+            or 0
+        ),
+        "source_wallets": int(
+            alert.get("suspicious_wallets")
+            or wave.get("effective_unique_buyers")
+            or wave.get("unique_buyers")
+            or len(cohort)
+        ),
+        "source_hard_wallets": int(alert.get("hard_wallets") or 0),
+        "source_support_wallets": int(alert.get("support_wallets") or 0),
+        "signal_at": signal_at,
+        "signal_window_start": alert.get("window_start"),
+        "signal_window_end": alert.get("window_end"),
+        "captured_at": captured_at or signal_at,
+        "last_signal_at": signal_at,
+        "last_checked_at": signal_at if wave_signal else None,
+        "updated_at": captured_at or signal_at,
+        "status": "intact" if wave_signal else "unknown",
+        "status_changed_at": signal_at,
+        "reason": (
+            "original accumulation cohort still holds its signal-attributed tokens"
+            if wave_signal
+            else "original classified-wallet cohort requires a current balance recheck"
+        ),
+        "original_wallets": len(cohort),
+        "source_signal_wallets": source_signal_wallets,
+        "cohort_wallet_coverage_pct": (
+            len(cohort) / source_signal_wallets * 100
+            if source_signal_wallets
+            else 0.0
+        ),
+        "holders_remaining": len(cohort) if wave_signal else 0,
+        "holder_retention_pct": 100.0 if wave_signal else None,
+        "original_retained_tokens": original_tokens,
+        "current_retained_tokens": original_tokens if wave_signal else None,
+        "token_retention_pct": 100.0 if wave_signal else None,
+        "cohort_token_coverage_pct": (
+            original_tokens / source_retained_tokens * 100
+            if source_retained_tokens
+            else 0.0
+        ),
+        "supply": supply,
+        "original_retained_supply_pct": (
+            original_tokens / supply * 100 if supply else None
+        ),
+        "current_retained_supply_pct": (
+            original_tokens / supply * 100
+            if supply and wave_signal
+            else None
+        ),
+        "balance_coverage_pct": float(
+            wave.get("balance_coverage_pct")
+            or (100.0 if wave_signal else 0.0)
+        ),
+        "invalidation_streak": 0,
+        "cohort": cohort,
+    }
+
+
+def capture_signal_thesis(
+    pool_state,
+    alerts,
+    config,
+    captured_at=None,
+    allow_newer_after_signal=False,
+):
+    existing = pool_state.get("signal_thesis")
+    candidates = []
+    for alert in alerts or []:
+        incoming = signal_thesis_from_alert(
+            alert,
+            config,
+            captured_at=captured_at,
+        )
+        if incoming:
+            candidates.append((alert_history_timestamp(alert), incoming))
+    if not candidates:
+        return existing, False
+    incoming = (
+        min(candidates, key=lambda item: item[0])[1]
+        if not isinstance(existing, dict)
+        else max(candidates, key=lambda item: item[0])[1]
+    )
+    replace = not isinstance(existing, dict)
+    if isinstance(existing, dict):
+        replacement_cutoff = (
+            existing.get("signal_at")
+            if allow_newer_after_signal
+            else existing.get("invalidated_at")
+        )
+        replace = bool(
+            existing.get("status") == "invalidated"
+            and parse_timestamp(incoming.get("signal_at"))
+            > parse_timestamp(replacement_cutoff)
+        )
+    if replace:
+        pool_state["signal_thesis"] = incoming
+        return incoming, True
+
+    existing["last_signal_at"] = incoming.get("last_signal_at")
+    existing["updated_at"] = captured_at or incoming.get("last_signal_at")
+    existing["source_tier"] = incoming.get("source_tier") or existing.get(
+        "source_tier"
+    )
+    return existing, False
+
+
+def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
+    thesis = pool_state.get("signal_thesis")
+    if not isinstance(thesis, dict) or thesis.get("status") == "invalidated":
+        return thesis
+    cohort = [
+        row
+        for row in thesis.get("cohort") or []
+        if isinstance(row, dict) and row.get("owner")
+    ]
+    if not cohort or not pool.token_address:
+        return thesis
+
+    checked_at = checked_at or utc_now().isoformat().replace("+00:00", "Z")
+    checked = []
+    errors = 0
+    holder_min_pct = max(
+        0.0,
+        float(config.get("signal_thesis_wallet_holder_min_pct", 10)),
+    )
+    for row in cohort:
+        attributed = max(0.0, float(row.get("attributed_tokens") or 0))
+        try:
+            balance = max(
+                0.0,
+                float(rpc.token_balance(row["owner"], pool.token_address) or 0),
+            )
+        except Exception:
+            errors += 1
+            continue
+        retained = min(balance, attributed)
+        is_holder = bool(
+            attributed > 0 and retained / attributed * 100 >= holder_min_pct
+        )
+        row["current_balance"] = balance
+        row["current_retained_tokens"] = retained
+        row["retention_pct"] = (
+            retained / attributed * 100 if attributed else 0.0
+        )
+        row["checked_at"] = checked_at
+        checked.append((row, attributed, retained, is_holder))
+
+    balance_coverage_pct = len(checked) / len(cohort) * 100 if cohort else 0.0
+    original_tokens = max(
+        0.0,
+        float(thesis.get("original_retained_tokens") or 0),
+    )
+    checked_original = sum(item[1] for item in checked)
+    token_balance_coverage_pct = (
+        checked_original / original_tokens * 100 if original_tokens else 0.0
+    )
+    thesis["balance_coverage_pct"] = balance_coverage_pct
+    thesis["token_balance_coverage_pct"] = token_balance_coverage_pct
+    thesis["balance_errors"] = errors
+    thesis["last_checked_at"] = checked_at
+    thesis["updated_at"] = checked_at
+    min_coverage = float(
+        config.get("signal_thesis_min_balance_coverage_pct", 80)
+    )
+    min_token_coverage = float(
+        config.get("signal_thesis_min_token_balance_coverage_pct", 80)
+    )
+    if (
+        not checked
+        or balance_coverage_pct < min_coverage
+        or token_balance_coverage_pct < min_token_coverage
+    ):
+        previous_status = thesis.get("status")
+        thesis["status"] = "unknown"
+        thesis["invalidation_streak"] = 0
+        thesis["reason"] = (
+            f"wallet balance coverage is {balance_coverage_pct:.0f}% and "
+            f"tracked-token coverage is {token_balance_coverage_pct:.0f}%; "
+            "the original accumulation thesis cannot be invalidated"
+        )
+        if previous_status != thesis["status"]:
+            thesis["status_changed_at"] = checked_at
+        return thesis
+
+    current_retained = sum(item[2] for item in checked)
+    retention_pct = (
+        current_retained / original_tokens * 100 if original_tokens else 0.0
+    )
+    holders_remaining = sum(1 for item in checked if item[3])
+    holder_retention_pct = holders_remaining / len(cohort) * 100
+    supply = max(0.0, float(thesis.get("supply") or 0))
+    if not supply:
+        try:
+            supply = max(
+                0.0,
+                float(rpc.token_supply(pool.token_address) or 0),
+            )
+        except Exception:
+            supply = 0.0
+        if supply:
+            thesis["supply"] = supply
+            thesis["original_retained_supply_pct"] = (
+                original_tokens / supply * 100
+            )
+    intact_min_retention = float(
+        config.get("signal_thesis_intact_min_retention_pct", 60)
+    )
+    intact_min_holders = float(
+        config.get("signal_thesis_intact_min_holder_pct", 50)
+    )
+    invalidated_max_retention = float(
+        config.get("signal_thesis_invalidated_max_retention_pct", 20)
+    )
+    invalidated_max_holders = float(
+        config.get("signal_thesis_invalidated_max_holder_pct", 25)
+    )
+    min_cohort_coverage = float(
+        config.get("signal_thesis_min_cohort_token_coverage_pct", 70)
+    )
+    min_cohort_wallet_coverage = float(
+        config.get("signal_thesis_min_cohort_wallet_coverage_pct", 70)
+    )
+    cohort_coverage = float(thesis.get("cohort_token_coverage_pct") or 0)
+    cohort_wallet_coverage_value = thesis.get("cohort_wallet_coverage_pct")
+    cohort_wallet_coverage = (
+        100.0
+        if cohort_wallet_coverage_value is None
+        else float(cohort_wallet_coverage_value)
+    )
+    confirmations_required = max(
+        1,
+        int(
+            config.get(
+                "signal_thesis_invalidation_confirmations_required",
+                2,
+            )
+        ),
+    )
+    previous_status = thesis.get("status")
+    can_invalidate = (
+        cohort_coverage >= min_cohort_coverage
+        and cohort_wallet_coverage >= min_cohort_wallet_coverage
+    )
+    invalidation_candidate = bool(
+        can_invalidate
+        and retention_pct <= invalidated_max_retention
+        and holder_retention_pct <= invalidated_max_holders
+    )
+    invalidation_streak = (
+        int(thesis.get("invalidation_streak") or 0) + 1
+        if invalidation_candidate
+        else 0
+    )
+    if (
+        invalidation_candidate
+        and invalidation_streak >= confirmations_required
+    ):
+        status = "invalidated"
+        reason = (
+            f"the original cohort retains only {retention_pct:.0f}% of its "
+            f"signal-attributed tokens across {holder_retention_pct:.0f}% of wallets "
+            f"on {invalidation_streak} consecutive complete checks"
+        )
+    elif (
+        retention_pct >= intact_min_retention
+        and holder_retention_pct >= intact_min_holders
+    ):
+        status = "intact"
+        reason = (
+            f"the original cohort still retains {retention_pct:.0f}% of its "
+            f"signal-attributed tokens across {holder_retention_pct:.0f}% of wallets"
+        )
+    elif invalidation_candidate:
+        status = "weakening"
+        reason = (
+            f"possible thesis invalidation is awaiting confirmation "
+            f"({invalidation_streak}/{confirmations_required} complete checks); "
+            f"{retention_pct:.0f}% of signal tokens remain across "
+            f"{holder_retention_pct:.0f}% of wallets"
+        )
+    elif can_invalidate:
+        status = "weakening"
+        reason = (
+            f"the original cohort retains {retention_pct:.0f}% of its "
+            f"signal-attributed tokens across {holder_retention_pct:.0f}% of wallets"
+        )
+    else:
+        status = "unknown"
+        reason = (
+            f"the stored cohort covers {cohort_coverage:.0f}% of the original "
+            f"retained tokens and {cohort_wallet_coverage:.0f}% of signal wallets; "
+            "the thesis cannot be invalidated safely"
+        )
+
+    thesis.update(
+        {
+            "status": status,
+            "reason": reason,
+            "holders_remaining": holders_remaining,
+            "holder_retention_pct": holder_retention_pct,
+            "current_retained_tokens": current_retained,
+            "token_retention_pct": retention_pct,
+            "invalidation_candidate": invalidation_candidate,
+            "invalidation_streak": invalidation_streak,
+            "current_retained_supply_pct": (
+                current_retained / supply * 100 if supply else None
+            ),
+        }
+    )
+    if previous_status != status:
+        thesis["status_changed_at"] = checked_at
+    if status == "invalidated":
+        thesis["invalidated_at"] = checked_at
+    return thesis
+
+
+def public_signal_thesis(thesis):
+    if not isinstance(thesis, dict):
+        return None
+    public_fields = {
+        "version",
+        "cohort_id",
+        "pool_address",
+        "token_address",
+        "symbol",
+        "name",
+        "dex",
+        "url",
+        "pair_created_at",
+        "signal_mcap_usd",
+        "signal_price_usd",
+        "signal_liquidity_usd",
+        "signal_family",
+        "source_tier",
+        "source_score",
+        "source_flow_sol",
+        "source_wallets",
+        "source_hard_wallets",
+        "source_support_wallets",
+        "signal_at",
+        "signal_window_start",
+        "signal_window_end",
+        "captured_at",
+        "last_signal_at",
+        "last_checked_at",
+        "updated_at",
+        "next_check_at",
+        "status",
+        "status_changed_at",
+        "invalidated_at",
+        "reason",
+        "original_wallets",
+        "source_signal_wallets",
+        "cohort_wallet_coverage_pct",
+        "holders_remaining",
+        "holder_retention_pct",
+        "original_retained_tokens",
+        "current_retained_tokens",
+        "token_retention_pct",
+        "cohort_token_coverage_pct",
+        "token_balance_coverage_pct",
+        "original_retained_supply_pct",
+        "current_retained_supply_pct",
+        "balance_coverage_pct",
+        "balance_errors",
+        "invalidation_candidate",
+        "invalidation_streak",
+    }
+    return {
+        key: value
+        for key, value in thesis.items()
+        if key in public_fields
+    }
+
+
+def signal_thesis_recheck_interval_minutes(thesis, config):
+    status = (thesis or {}).get("status")
+    if status in ("weakening", "unknown"):
+        return max(
+            5.0,
+            float(
+                config.get(
+                    "signal_thesis_priority_recheck_minutes",
+                    config.get("signal_thesis_recheck_minutes", 60),
+                )
+            ),
+        )
+    return max(
+        5.0,
+        float(config.get("signal_thesis_recheck_minutes", 60)),
+    )
+
+
+def refresh_signal_thesis(
+    rpc,
+    pool,
+    pool_state,
+    alerts,
+    config,
+    checked_at=None,
+):
+    if not config.get("signal_thesis_tracking_enabled", True):
+        return None
+    checked_at = checked_at or utc_now().isoformat().replace("+00:00", "Z")
+    thesis, captured = capture_signal_thesis(
+        pool_state,
+        alerts,
+        config,
+        captured_at=checked_at,
+    )
+    due_at = parse_timestamp(pool_state.get("signal_recheck_due_at"))
+    should_recheck = bool(
+        isinstance(thesis, dict)
+        and (
+            captured
+            or bool(alerts)
+            or not thesis.get("last_checked_at")
+            or (due_at and due_at <= int(time.time()))
+        )
+    )
+    if should_recheck:
+        thesis = recheck_signal_thesis(
+            rpc,
+            pool,
+            pool_state,
+            config,
+            checked_at=checked_at,
+        )
+        if thesis.get("status") == "invalidated" and alerts:
+            thesis, replacement_captured = capture_signal_thesis(
+                pool_state,
+                alerts,
+                config,
+                captured_at=checked_at,
+                allow_newer_after_signal=True,
+            )
+            if replacement_captured:
+                thesis = recheck_signal_thesis(
+                    rpc,
+                    pool,
+                    pool_state,
+                    config,
+                    checked_at=checked_at,
+                )
+        schedule_signal_recheck(pool_state, alerts, config)
+    elif not isinstance(thesis, dict):
+        schedule_signal_recheck(pool_state, alerts, config)
+    return public_signal_thesis(thesis)
+
+
+def bootstrap_signal_theses(state, alerts, config, now=None):
+    if not config.get("signal_thesis_tracking_enabled", True):
+        return {"created": 0, "tracked": 0}
+    now = int(now or time.time())
+    grouped = defaultdict(list)
+    deleted = load_deleted_tokens()
+    for alert in alerts or []:
+        if (
+            not isinstance(alert, dict)
+            or (
+                alert.get("lane")
+                and alert.get("lane") != "reactivation"
+            )
+            or alert_is_deleted(alert, deleted)
+        ):
+            continue
+        pool = alert.get("pool") or {}
+        pool_address = pool.get("pool_address")
+        if pool_address:
+            grouped[pool_address].append(alert)
+
+    created = 0
+    pools_state = state.setdefault("pools", {})
+    for pool_address, pool_alerts in grouped.items():
+        pool_state = pools_state.setdefault(pool_address, {})
+        thesis, was_created = capture_signal_thesis(
+            pool_state,
+            pool_alerts,
+            config,
+            captured_at=iso(now),
+        )
+        if not isinstance(thesis, dict):
+            continue
+        created += int(was_created)
+        if thesis.get("status") == "invalidated":
+            pool_state.pop("signal_recheck_due_at", None)
+            thesis.pop("next_check_at", None)
+            continue
+        if pool_state.get("signal_recheck_due_at"):
+            continue
+        interval = signal_thesis_recheck_interval_minutes(thesis, config)
+        last_checked = parse_timestamp(
+            thesis.get("last_checked_at") or thesis.get("signal_at")
+        )
+        due_at = min(
+            now,
+            last_checked + int(interval * 60) if last_checked else now,
+        )
+        pool_state["signal_recheck_due_at"] = iso(due_at)
+        thesis["next_check_at"] = iso(due_at)
+    return {
+        "created": created,
+        "tracked": sum(
+            1
+            for value in pools_state.values()
+            if isinstance(value, dict)
+            and isinstance(value.get("signal_thesis"), dict)
+        ),
+    }
+
+
+def signal_theses_for_report(state, deleted=None):
+    deleted = deleted or {"tokens": set(), "pools": set()}
+    theses = []
+    for pool_state in (state.get("pools") or {}).values():
+        private_thesis = (
+            pool_state.get("signal_thesis")
+            if isinstance(pool_state, dict)
+            else None
+        )
+        if not isinstance(private_thesis, dict):
+            continue
+        if (
+            private_thesis.get("token_address") in deleted.get("tokens", set())
+            or private_thesis.get("pool_address") in deleted.get("pools", set())
+        ):
+            continue
+        thesis = public_signal_thesis(private_thesis)
+        if thesis:
+            theses.append(thesis)
+    return sorted(
+        theses,
+        key=lambda item: parse_timestamp(
+            item.get("updated_at")
+            or item.get("last_checked_at")
+            or item.get("signal_at")
+        ),
+        reverse=True,
+    )
+
+
 def buyer_concentration(buyers):
     buy_sol = sorted((max(0.0, float(row.get("buy_sol") or 0)) for row in buyers), reverse=True)
     total = sum(buy_sol)
@@ -5641,7 +6427,12 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc, state=None):
                 "sticky_bought_pct": sticky_bought_pct,
                 "net_token_retention_pct": net_retention_pct,
                 "supply": supply,
-                "top_buyers": checked[: min(20, len(checked))],
+                "top_buyers": checked[
+                    : min(
+                        int(config.get("signal_thesis_wallet_limit", 40)),
+                        len(checked),
+                    )
+                ],
             },
             "events": events,
         }
@@ -7033,6 +7824,21 @@ def apply_alert_data_quality(
 
 
 def schedule_signal_recheck(pool_state, alerts, config):
+    thesis = pool_state.get("signal_thesis")
+    if (
+        config.get("signal_thesis_tracking_enabled", True)
+        and isinstance(thesis, dict)
+    ):
+        if thesis.get("status") == "invalidated":
+            pool_state.pop("signal_recheck_due_at", None)
+            thesis.pop("next_check_at", None)
+            return None
+        interval = signal_thesis_recheck_interval_minutes(thesis, config)
+        due_at = int(time.time() + interval * 60)
+        pool_state["signal_recheck_due_at"] = iso(due_at)
+        thesis["next_check_at"] = iso(due_at)
+        return due_at
+
     wave_alerts = [alert for alert in alerts or [] if alert.get("wave")]
     if not wave_alerts:
         pool_state.pop("signal_recheck_due_at", None)
@@ -7070,8 +7876,9 @@ def pool_backfill_pending(pool, pool_state, config):
 
 def pool_has_new_activity(rpc, pool, pool_state, config):
     recheck_due = parse_timestamp(pool_state.get("signal_recheck_due_at"))
-    if recheck_due and int(time.time()) >= recheck_due:
-        return True, {"reason": "signal_retention_recheck"}
+    thesis_recheck_due = bool(
+        recheck_due and int(time.time()) >= recheck_due
+    )
     previous_signature = (
         pool_state.get("rpc_latest_signature")
         or pool_state.get("helius_latest_signature")
@@ -7103,6 +7910,11 @@ def pool_has_new_activity(rpc, pool, pool_state, config):
         pool_state["last_activity_signature"] = latest_successful
     if not latest_successful:
         return True, {"reason": "probe_empty"}
+    if latest_successful == previous_signature and thesis_recheck_due:
+        return False, {
+            "reason": "signal_thesis_recheck",
+            "latest_signature": latest_successful,
+        }
     return latest_successful != previous_signature, {
         "reason": "new_signature" if latest_successful != previous_signature else "unchanged",
         "latest_signature": latest_successful,
@@ -7113,6 +7925,13 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
     pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
     has_new_activity, activity_probe = pool_has_new_activity(rpc, pool, pool_state, config)
     if not has_new_activity:
+        signal_thesis = refresh_signal_thesis(
+            rpc,
+            pool,
+            pool_state,
+            [],
+            config,
+        )
         return [], {
             "pool": pool.as_dict(),
             "lane": config.get("lane") or config.get("mode"),
@@ -7129,6 +7948,7 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
             "wave_sticky_supply_pct": 0.0,
             "parse_errors": 0,
             "classification_errors": 0,
+            "signal_thesis": signal_thesis,
             "activity_probe": activity_probe,
             "trade_fetch": {
                 "source": "helius_activity_probe",
@@ -7152,6 +7972,13 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
         if config.get("helius_probe_enabled", True):
             probe_txs, probe_fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="probe")
             if probe_fetch_stats.get("market_activity_stale"):
+                signal_thesis = refresh_signal_thesis(
+                    rpc,
+                    pool,
+                    pool_state,
+                    [],
+                    config,
+                )
                 return [], {
                     "pool": pool.as_dict(),
                     "lane": config.get("lane") or config.get("mode"),
@@ -7168,6 +7995,7 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
                     "wave_sticky_supply_pct": 0.0,
                     "parse_errors": 0,
                     "classification_errors": 0,
+                    "signal_thesis": signal_thesis,
                     "market_snapshot_suppressed": True,
                     "trade_fetch": probe_fetch_stats,
                 }
@@ -7277,7 +8105,13 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
         elif not fetch_stats.get("live_truncated"):
             update_pool_transaction_state(pool_state, pool, txs)
             pool_state.pop("force_enhanced_next_scan", None)
-    schedule_signal_recheck(pool_state, alerts, config)
+    signal_thesis = refresh_signal_thesis(
+        rpc,
+        pool,
+        pool_state,
+        alerts,
+        config,
+    )
     return alerts, {
         "pool": pool.as_dict(),
         "lane": config.get("lane") or config.get("mode"),
@@ -7296,6 +8130,7 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
         ),
         "parse_errors": parse_errors,
         "classification_errors": classification_errors,
+        "signal_thesis": signal_thesis,
         "trade_fetch": fetch_stats,
     }
 
@@ -7336,6 +8171,13 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
             config,
         )
         if market_head.get("status") == "stale":
+            signal_thesis = refresh_signal_thesis(
+                rpc,
+                pool,
+                pool_state,
+                [],
+                config,
+            )
             fetch_stats = {
                 "source": "pool_signatures",
                 "phase": "market_activity_check",
@@ -7364,6 +8206,7 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
                 "wave_sticky_supply_pct": 0.0,
                 "classification_errors": 0,
                 "parse_errors": 0,
+                "signal_thesis": signal_thesis,
                 "market_snapshot_suppressed": True,
                 "trade_fetch": fetch_stats,
             }
@@ -7479,7 +8322,13 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
     elif live_truncated or transaction_errors or parse_errors:
         pool_state["force_enhanced_next_scan"] = True
 
-    schedule_signal_recheck(pool_state, alerts, config)
+    signal_thesis = refresh_signal_thesis(
+        rpc,
+        pool,
+        pool_state,
+        alerts,
+        config,
+    )
 
     summary = {
         "pool": pool.as_dict(),
@@ -7503,6 +8352,7 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
         ),
         "classification_errors": classification_errors,
         "parse_errors": parse_errors,
+        "signal_thesis": signal_thesis,
         "trade_fetch": fetch_stats,
     }
     if fallback_error:
@@ -8970,6 +9820,14 @@ def compact_state(state, pools, alerts, config, observed_at):
         stats["swap_buffers"] = compact_pool_swap_buffers(pools_state, config, now)
         before = len(pools_state)
         cutoff = now - int(pool_ttl * 3600) if pool_ttl > 0 else 0
+        thesis_retention_days = float(
+            config.get("signal_thesis_state_retention_days", 30)
+        )
+        thesis_cutoff = (
+            now - int(thesis_retention_days * 86400)
+            if thesis_retention_days > 0
+            else 0
+        )
         pruned_pools = {}
         for key, value in pools_state.items():
             last_seen = dict_item_timestamp(
@@ -8982,7 +9840,28 @@ def compact_state(state, pools, alerts, config, observed_at):
                     "helius_deep_scanned_at",
                 ),
             )
-            if key in pool_keys or (cutoff and last_seen >= cutoff):
+            thesis = (
+                value.get("signal_thesis")
+                if isinstance(value, dict)
+                else None
+            )
+            thesis_seen = dict_item_timestamp(
+                thesis,
+                (
+                    "updated_at",
+                    "last_checked_at",
+                    "last_signal_at",
+                    "signal_at",
+                ),
+            )
+            keep_thesis = bool(
+                isinstance(thesis, dict)
+                and (
+                    not thesis_cutoff
+                    or thesis_seen >= thesis_cutoff
+                )
+            )
+            if key in pool_keys or (cutoff and last_seen >= cutoff) or keep_thesis:
                 pruned_pools[key] = value
         state["pools"] = pruned_pools
         stats["pools_before"] = before
@@ -9379,6 +10258,22 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "reactivation_wave_min_net_buy_sol": config.get("reactivation_wave_min_net_buy_sol"),
             "reactivation_wave_min_unique_buyers": config.get("reactivation_wave_min_unique_buyers"),
             "reactivation_wave_min_sticky_supply_pct": config.get("reactivation_wave_min_sticky_supply_pct"),
+            "signal_thesis_tracking_enabled": config.get(
+                "signal_thesis_tracking_enabled",
+                True,
+            ),
+            "signal_thesis_recheck_minutes": config.get(
+                "signal_thesis_recheck_minutes",
+                60,
+            ),
+            "signal_thesis_recheck_grace_minutes": config.get(
+                "signal_thesis_recheck_grace_minutes",
+                15,
+            ),
+            "signal_thesis_invalidation_confirmations_required": config.get(
+                "signal_thesis_invalidation_confirmations_required",
+                2,
+            ),
         },
         "stats": {
             "universe_pools": len(universe),
@@ -9401,6 +10296,10 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             },
         },
         "alerts": enriched_alerts,
+        "signal_theses": signal_theses_for_report(
+            state,
+            deleted_tokens,
+        ),
         "active_pools": active[:100],
         "universe": [apply_market_meta(pool.as_dict(), state) for pool in universe[:250]],
         "summaries": enriched_summaries[:250],
@@ -9581,7 +10480,23 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
         config,
         observed_at,
     )
+    existing_pool_addresses = {pool.pool_address for pool in universe}
+    thesis_monitor_pools = [
+        pool
+        for pool in due_signal_thesis_monitor_pools(state, config)
+        if pool.pool_address not in existing_pool_addresses
+        and not pool_is_deleted(pool, deleted_tokens)
+    ]
+    if thesis_monitor_pools:
+        attach_reactivation_baselines(
+            thesis_monitor_pools,
+            state,
+            config,
+            observed_at,
+        )
+        universe.extend(thesis_monitor_pools)
     scan_targets, selection_stats = select_scan_targets(universe, state, config)
+    selection_stats["thesis_monitor_universe"] = len(thesis_monitor_pools)
     config["_selection_stats"] = selection_stats
     print(f"{label}: universe {len(universe)} pools, scanning {len(scan_targets)}", flush=True)
     classification_budget = {
@@ -9714,6 +10629,11 @@ def run_once(config, lane_name=None):
 
     state = load_json(STATE_PATH, {"pools": {}, "wallet_cache": {}})
     load_convex_discovery_state(state, config)
+    config["_signal_thesis_bootstrap"] = bootstrap_signal_theses(
+        state,
+        load_alert_history(),
+        config,
+    )
     lane_list = selected_lanes(config, lane_name) if config.get("lanes") else []
     if not lane_list:
         lane_list = [None]

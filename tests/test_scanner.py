@@ -840,7 +840,13 @@ class ScannerCoreTests(unittest.TestCase):
         state = {
             "pools": {
                 "pool-4": {"signal_recheck_due_at": "2026-07-29T12:00:00Z"},
-            }
+            },
+            "discovery_queue": [
+                {
+                    "pool_address": "pool-5",
+                    "expires_at": "2026-07-29T15:00:00Z",
+                }
+            ],
         }
         with (
             mock.patch.object(scanner, "load_alert_history", return_value=[recent_alert]),
@@ -858,6 +864,42 @@ class ScannerCoreTests(unittest.TestCase):
             )
         self.assertEqual(selected[0].pool_address, "pool-4")
         self.assertEqual(stats["due_rechecks"], 1)
+        self.assertEqual(stats["discovery_queue"], 0)
+
+    def test_due_signal_thesis_is_restored_to_monitor_universe(self):
+        now = scanner.parse_timestamp("2026-07-29T13:00:00Z")
+        state = {
+            "pools": {
+                "pool": {
+                    "signal_recheck_due_at": "2026-07-29T12:00:00Z",
+                    "signal_thesis": {
+                        "status": "intact",
+                        "pool_address": "pool",
+                        "token_address": "token",
+                        "symbol": "TEST",
+                        "dex": "pumpswap",
+                    },
+                }
+            },
+            "market": {
+                "token": {
+                    "latest_mcap_usd": 42_000,
+                    "latest_liquidity_usd": 6_000,
+                    "latest_price_usd": 0.000042,
+                    "latest_seen_at": "2026-07-29T12:45:00Z",
+                }
+            },
+        }
+        with mock.patch.object(scanner, "load_alert_history", return_value=[]):
+            pools = scanner.due_signal_thesis_monitor_pools(
+                state,
+                {"dex_allowlist": ["pumpswap"]},
+                now=now,
+            )
+        self.assertEqual(len(pools), 1)
+        self.assertEqual(pools[0].pool_address, "pool")
+        self.assertEqual(pools[0].mcap_usd, 42_000)
+        self.assertEqual(pools[0].source, "signal_thesis_monitor")
 
     def test_swap_buffer_compaction_drops_old_and_redundant_data(self):
         now = 1_000_000
@@ -926,6 +968,20 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual(details["reason"], "unchanged")
 
+    def test_activity_probe_routes_due_thesis_to_balance_only_recheck(self):
+        with mock.patch.object(scanner.time, "time", return_value=1_000_000):
+            changed, details = scanner.pool_has_new_activity(
+                FakeRpc([{"signature": "same", "err": None}]),
+                scanner.Pool(pool_address="pool", token_address="token"),
+                {
+                    "helius_latest_signature": "same",
+                    "signal_recheck_due_at": scanner.iso(999_000),
+                },
+                {"helius_activity_probe_enabled": True},
+            )
+        self.assertFalse(changed)
+        self.assertEqual(details["reason"], "signal_thesis_recheck")
+
     def test_market_activity_avoids_redundant_signature_probe(self):
         rpc = mock.Mock()
         changed, details = scanner.pool_has_new_activity(
@@ -962,6 +1018,450 @@ class ScannerCoreTests(unittest.TestCase):
             )
         self.assertEqual(due_at, 1_003_600)
         self.assertEqual(scanner.parse_timestamp(pool_state["signal_recheck_due_at"]), due_at)
+
+    def test_signal_thesis_captures_original_accumulation_cohort(self):
+        thesis = scanner.signal_thesis_from_alert(
+            {
+                "created_at": "2026-07-29T12:00:00Z",
+                "window_start": "2026-07-29T11:00:00Z",
+                "window_end": "2026-07-29T12:00:00Z",
+                "signal_family": "reactivation_wave",
+                "action_tier": "actionable",
+                "score": 88,
+                "suspicious_sol": 24,
+                "suspicious_wallets": 2,
+                "pool": {
+                    "pool_address": "pool",
+                    "token_address": "token",
+                    "symbol": "TEST",
+                },
+                "wave": {
+                    "supply": 10_000,
+                    "sticky_tokens": 1_000,
+                    "sticky_wallets": 2,
+                    "top_buyers": [
+                        {
+                            "owner": "wallet-a",
+                            "retained_from_wave": 600,
+                            "current_balance": 600,
+                            "wave_retention_pct": 80,
+                            "first_buy_time": "2026-07-29T11:15:00Z",
+                        },
+                        {
+                            "owner": "wallet-b",
+                            "retained_from_wave": 400,
+                            "current_balance": 400,
+                            "wave_retention_pct": 70,
+                        },
+                        {
+                            "owner": "wallet-not-sticky",
+                            "retained_from_wave": 50,
+                            "current_balance": 50,
+                            "wave_retention_pct": 5,
+                        },
+                    ],
+                },
+            },
+            {
+                "signal_thesis_wallet_limit": 40,
+                "reactivation_wave_min_wallet_retention_pct": 15,
+            },
+        )
+        self.assertEqual(thesis["status"], "intact")
+        self.assertEqual(thesis["original_wallets"], 2)
+        self.assertEqual(thesis["original_retained_tokens"], 1_000)
+        self.assertEqual(thesis["cohort_token_coverage_pct"], 100)
+        self.assertEqual(thesis["source_score"], 88)
+        self.assertEqual(thesis["source_flow_sol"], 24)
+        self.assertEqual(thesis["source_wallets"], 2)
+        self.assertEqual(
+            thesis["cohort"][0]["first_buy_time"],
+            scanner.parse_timestamp("2026-07-29T11:15:00Z"),
+        )
+
+    def test_signal_thesis_tracks_classified_wallet_signal_cohort(self):
+        thesis = scanner.signal_thesis_from_alert(
+            {
+                "created_at": "2026-07-29T12:00:00Z",
+                "window_start": "2026-07-29T11:00:00Z",
+                "window_end": "2026-07-29T12:00:00Z",
+                "action_tier": "watch",
+                "pool": {
+                    "pool_address": "pool",
+                    "token_address": "token",
+                    "symbol": "TEST",
+                },
+                "events": [
+                    {
+                        "kind": "buy",
+                        "wallet_class": "dormant",
+                        "signer": "wallet-a",
+                        "token_recipient": "wallet-a",
+                        "token_amount": 600,
+                        "sol_amount": 4,
+                        "block_time": 1_700_000_000,
+                    },
+                    {
+                        "kind": "buy",
+                        "wallet_class": "dormant",
+                        "signer": "wallet-a",
+                        "token_recipient": "wallet-a",
+                        "token_amount": 400,
+                        "sol_amount": 3,
+                        "block_time": 1_700_000_100,
+                    },
+                    {
+                        "kind": "buy",
+                        "wallet_class": "normal",
+                        "signer": "wallet-b",
+                        "token_recipient": "wallet-b",
+                        "token_amount": 2_000,
+                        "sol_amount": 10,
+                        "block_time": 1_700_000_200,
+                    },
+                ],
+            },
+            {"signal_thesis_wallet_limit": 40},
+        )
+        self.assertEqual(thesis["signal_family"], "classified_wallets")
+        self.assertEqual(thesis["status"], "unknown")
+        self.assertEqual(thesis["original_wallets"], 1)
+        self.assertEqual(thesis["original_retained_tokens"], 1_000)
+        self.assertIsNone(thesis["last_checked_at"])
+
+    def test_invalidated_thesis_can_roll_to_a_newer_current_signal(self):
+        pool_state = {
+            "signal_thesis": {
+                "status": "invalidated",
+                "signal_at": "2026-07-29T12:00:00Z",
+                "invalidated_at": "2026-07-29T13:00:00Z",
+            }
+        }
+        alert = {
+            "created_at": "2026-07-29T12:30:00Z",
+            "pool": {
+                "pool_address": "pool",
+                "token_address": "token",
+            },
+            "events": [
+                {
+                    "kind": "buy",
+                    "wallet_class": "dormant",
+                    "signer": "wallet-a",
+                    "token_recipient": "wallet-a",
+                    "token_amount": 1_000,
+                    "sol_amount": 4,
+                }
+            ],
+        }
+        unchanged, captured = scanner.capture_signal_thesis(
+            pool_state,
+            [alert],
+            {},
+        )
+        self.assertFalse(captured)
+        self.assertEqual(unchanged["signal_at"], "2026-07-29T12:00:00Z")
+        replacement, captured = scanner.capture_signal_thesis(
+            pool_state,
+            [alert],
+            {},
+            allow_newer_after_signal=True,
+        )
+        self.assertTrue(captured)
+        self.assertEqual(replacement["signal_at"], "2026-07-29T12:30:00Z")
+
+    def test_deleted_token_thesis_is_not_exported(self):
+        state = {
+            "pools": {
+                "pool": {
+                    "signal_thesis": {
+                        "status": "intact",
+                        "pool_address": "pool",
+                        "token_address": "token",
+                        "signal_at": "2026-07-29T12:00:00Z",
+                    }
+                }
+            }
+        }
+        theses = scanner.signal_theses_for_report(
+            state,
+            {"tokens": {"token"}, "pools": set()},
+        )
+        self.assertEqual(theses, [])
+
+    def test_signal_thesis_does_not_invalidate_an_incomplete_saved_cohort(self):
+        thesis = scanner.signal_thesis_from_alert(
+            {
+                "created_at": "2026-07-29T12:00:00Z",
+                "suspicious_wallets": 10,
+                "pool": {
+                    "pool_address": "pool",
+                    "token_address": "token",
+                },
+                "events": [
+                    {
+                        "kind": "buy",
+                        "wallet_class": "dormant",
+                        "signer": "wallet-a",
+                        "token_recipient": "wallet-a",
+                        "token_amount": 1_000,
+                        "sol_amount": 4,
+                    }
+                ],
+            },
+            {},
+        )
+        pool_state = {"signal_thesis": thesis}
+        rpc = mock.Mock()
+        rpc.token_balance.return_value = 0
+        checked = scanner.recheck_signal_thesis(
+            rpc,
+            scanner.Pool(pool_address="pool", token_address="token"),
+            pool_state,
+            {},
+            checked_at="2026-07-29T13:00:00Z",
+        )
+        self.assertEqual(thesis["cohort_wallet_coverage_pct"], 10)
+        self.assertEqual(checked["status"], "unknown")
+
+    def test_signal_thesis_stays_intact_while_original_wallets_hold(self):
+        pool_state = {
+            "signal_thesis": {
+                "status": "intact",
+                "original_wallets": 2,
+                "original_retained_tokens": 1_000,
+                "cohort_token_coverage_pct": 100,
+                "supply": 10_000,
+                "cohort": [
+                    {"owner": "wallet-a", "attributed_tokens": 600},
+                    {"owner": "wallet-b", "attributed_tokens": 400},
+                ],
+            }
+        }
+        rpc = mock.Mock()
+        rpc.token_balance.side_effect = [500, 300]
+        thesis = scanner.recheck_signal_thesis(
+            rpc,
+            scanner.Pool(pool_address="pool", token_address="token"),
+            pool_state,
+            {},
+            checked_at="2026-07-29T13:00:00Z",
+        )
+        self.assertEqual(thesis["status"], "intact")
+        self.assertEqual(thesis["token_retention_pct"], 80)
+        self.assertEqual(thesis["holder_retention_pct"], 100)
+
+    def test_signal_thesis_becomes_inactive_only_after_confirmed_distribution(self):
+        pool_state = {
+            "signal_thesis": {
+                "status": "intact",
+                "original_wallets": 2,
+                "original_retained_tokens": 1_000,
+                "cohort_token_coverage_pct": 100,
+                "supply": 10_000,
+                "cohort": [
+                    {"owner": "wallet-a", "attributed_tokens": 600},
+                    {"owner": "wallet-b", "attributed_tokens": 400},
+                ],
+            }
+        }
+        rpc = mock.Mock()
+        rpc.token_balance.side_effect = [0, 0, 0, 0]
+        first_check = scanner.recheck_signal_thesis(
+            rpc,
+            scanner.Pool(pool_address="pool", token_address="token"),
+            pool_state,
+            {},
+            checked_at="2026-07-29T13:00:00Z",
+        )
+        self.assertEqual(first_check["status"], "weakening")
+        self.assertEqual(first_check["invalidation_streak"], 1)
+        thesis = scanner.recheck_signal_thesis(
+            rpc,
+            scanner.Pool(pool_address="pool", token_address="token"),
+            pool_state,
+            {},
+            checked_at="2026-07-29T14:00:00Z",
+        )
+        self.assertEqual(thesis["status"], "invalidated")
+        self.assertEqual(thesis["invalidation_streak"], 2)
+        self.assertEqual(thesis["token_retention_pct"], 0)
+        self.assertEqual(thesis["holders_remaining"], 0)
+
+    def test_signal_thesis_stays_weak_when_breadth_remains(self):
+        pool_state = {
+            "signal_thesis": {
+                "status": "intact",
+                "original_wallets": 2,
+                "original_retained_tokens": 1_000,
+                "cohort_token_coverage_pct": 100,
+                "cohort_wallet_coverage_pct": 100,
+                "supply": 10_000,
+                "cohort": [
+                    {"owner": "wallet-a", "attributed_tokens": 600},
+                    {"owner": "wallet-b", "attributed_tokens": 400},
+                ],
+            }
+        }
+        rpc = mock.Mock()
+        rpc.token_balance.side_effect = [90, 60]
+        thesis = scanner.recheck_signal_thesis(
+            rpc,
+            scanner.Pool(pool_address="pool", token_address="token"),
+            pool_state,
+            {},
+            checked_at="2026-07-29T13:00:00Z",
+        )
+        self.assertEqual(thesis["status"], "weakening")
+        self.assertEqual(thesis["token_retention_pct"], 15)
+        self.assertEqual(thesis["holder_retention_pct"], 100)
+        self.assertFalse(thesis["invalidation_candidate"])
+
+    def test_signal_thesis_marks_partial_distribution_as_weakening(self):
+        pool_state = {
+            "signal_thesis": {
+                "status": "intact",
+                "original_wallets": 2,
+                "original_retained_tokens": 1_000,
+                "cohort_token_coverage_pct": 100,
+                "supply": 10_000,
+                "cohort": [
+                    {"owner": "wallet-a", "attributed_tokens": 600},
+                    {"owner": "wallet-b", "attributed_tokens": 400},
+                ],
+            }
+        }
+        rpc = mock.Mock()
+        rpc.token_balance.side_effect = [400, 0]
+        thesis = scanner.recheck_signal_thesis(
+            rpc,
+            scanner.Pool(pool_address="pool", token_address="token"),
+            pool_state,
+            {},
+            checked_at="2026-07-29T13:00:00Z",
+        )
+        self.assertEqual(thesis["status"], "weakening")
+        self.assertEqual(thesis["token_retention_pct"], 40)
+        self.assertEqual(thesis["holder_retention_pct"], 50)
+
+    def test_signal_thesis_never_invalidates_with_partial_balance_coverage(self):
+        pool_state = {
+            "signal_thesis": {
+                "status": "intact",
+                "original_wallets": 2,
+                "original_retained_tokens": 1_000,
+                "cohort_token_coverage_pct": 100,
+                "supply": 10_000,
+                "cohort": [
+                    {"owner": "wallet-a", "attributed_tokens": 600},
+                    {"owner": "wallet-b", "attributed_tokens": 400},
+                ],
+            }
+        }
+        rpc = mock.Mock()
+        rpc.token_balance.side_effect = [0, RuntimeError("rate limited")]
+        thesis = scanner.recheck_signal_thesis(
+            rpc,
+            scanner.Pool(pool_address="pool", token_address="token"),
+            pool_state,
+            {},
+            checked_at="2026-07-29T13:00:00Z",
+        )
+        self.assertEqual(thesis["status"], "unknown")
+        self.assertEqual(thesis["balance_coverage_pct"], 50)
+
+    def test_signal_thesis_recheck_is_not_cleared_without_a_new_alert(self):
+        pool_state = {
+            "signal_thesis": {
+                "status": "intact",
+            }
+        }
+        with mock.patch.object(scanner.time, "time", return_value=1_000_000):
+            due_at = scanner.schedule_signal_recheck(
+                pool_state,
+                [],
+                {
+                    "signal_thesis_tracking_enabled": True,
+                    "signal_thesis_recheck_minutes": 60,
+                },
+            )
+        self.assertEqual(due_at, 1_003_600)
+        self.assertEqual(
+            scanner.parse_timestamp(pool_state["signal_recheck_due_at"]),
+            due_at,
+        )
+
+    def test_signal_thesis_refresh_waits_until_recheck_is_due(self):
+        pool_state = {
+            "signal_recheck_due_at": "2026-07-29T14:00:00Z",
+            "signal_thesis": {
+                "status": "intact",
+                "last_checked_at": "2026-07-29T13:00:00Z",
+                "original_wallets": 1,
+                "original_retained_tokens": 1_000,
+                "cohort_token_coverage_pct": 100,
+                "cohort_wallet_coverage_pct": 100,
+                "cohort": [
+                    {"owner": "wallet-a", "attributed_tokens": 1_000},
+                ],
+            },
+        }
+        rpc = mock.Mock()
+        with mock.patch.object(
+            scanner.time,
+            "time",
+            return_value=scanner.parse_timestamp("2026-07-29T13:00:00Z"),
+        ):
+            thesis = scanner.refresh_signal_thesis(
+                rpc,
+                scanner.Pool(pool_address="pool", token_address="token"),
+                pool_state,
+                [],
+                {},
+                checked_at="2026-07-29T13:00:00Z",
+            )
+        self.assertEqual(thesis["status"], "intact")
+        rpc.token_balance.assert_not_called()
+        self.assertEqual(
+            pool_state["signal_recheck_due_at"],
+            "2026-07-29T14:00:00Z",
+        )
+
+    def test_signal_thesis_refresh_rechecks_without_a_new_alert_when_due(self):
+        pool_state = {
+            "signal_recheck_due_at": "2026-07-29T12:00:00Z",
+            "signal_thesis": {
+                "status": "intact",
+                "last_checked_at": "2026-07-29T11:00:00Z",
+                "original_wallets": 1,
+                "original_retained_tokens": 1_000,
+                "cohort_token_coverage_pct": 100,
+                "cohort_wallet_coverage_pct": 100,
+                "cohort": [
+                    {"owner": "wallet-a", "attributed_tokens": 1_000},
+                ],
+            },
+        }
+        rpc = mock.Mock()
+        rpc.token_balance.return_value = 900
+        rpc.token_supply.return_value = 10_000
+        with mock.patch.object(
+            scanner.time,
+            "time",
+            return_value=scanner.parse_timestamp("2026-07-29T13:00:00Z"),
+        ):
+            thesis = scanner.refresh_signal_thesis(
+                rpc,
+                scanner.Pool(pool_address="pool", token_address="token"),
+                pool_state,
+                [],
+                {},
+                checked_at="2026-07-29T13:00:00Z",
+            )
+        self.assertEqual(thesis["status"], "intact")
+        self.assertEqual(thesis["token_retention_pct"], 90)
+        self.assertEqual(thesis["current_retained_supply_pct"], 9)
+        rpc.token_balance.assert_called_once_with("wallet-a", "token")
 
     def test_concentrated_wave_is_ranked_as_noise_not_dropped(self):
         pool = scanner.Pool(

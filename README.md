@@ -195,6 +195,21 @@ Signal quality:
 - First-catch outcomes are tracked at 1h, 6h, 24h, and 72h, including maximum
   favorable and adverse movement.
 
+Signal lifecycle:
+
+- The first Reactivation alert persists its qualifying buyer cohort and the
+  number of signal-attributed tokens each wallet retained.
+- The scanner rechecks that same cohort on a reserved hourly monitor queue.
+  Due cohort rechecks take priority over new discovery-queue candidates.
+- `Thesis intact` means the tracked cohort still retains the original
+  accumulation, while `Weakening` means it has distributed a material share.
+- `Recheck due` is used when the scan is stale or wallet coverage is
+  insufficient. Missing data never invalidates a signal.
+- `Inactive` is assigned only after sufficient wallet and token coverage
+  confirms on two consecutive checks that both the retained token amount and
+  the breadth of original holders have collapsed. A low balance alone or a
+  single incomplete check cannot invalidate the signal.
+
 Disabled filters: `micro_sticky`, `cheap_sticky`, `breakout`, `incubation`, and
 `young` are not scanned or shown in the production dashboard. Their old alert
 records remain in Git history but cannot consume Reactivation monitor capacity.
