@@ -199,6 +199,9 @@ Signal lifecycle:
 
 - The first Reactivation alert persists its qualifying buyer cohort and the
   number of signal-attributed tokens each wallet retained.
+- A later qualifying alert is retained as a pending cohort. If the original
+  thesis is eventually invalidated, the latest pending cohort is promoted
+  automatically instead of losing the newer Reactivation setup.
 - The scanner rechecks that same cohort on a reserved hourly monitor queue.
   Due cohort rechecks take priority over new discovery-queue candidates.
 - `Thesis intact` means the tracked cohort still retains the original
