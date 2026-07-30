@@ -62,7 +62,8 @@ const state = {
   discoveryStatus: {},
   tab: "filters",
   query: "",
-  tier: "focus",
+  workflow: "new_signals",
+  signal: "all",
   heat: "all",
   lane: "reactivation",
   minScore: 0,
@@ -89,7 +90,8 @@ const els = {
   refresh: document.querySelector("#refresh"),
   runScan: document.querySelector("#runScan"),
   searchInput: document.querySelector("#searchInput"),
-  tierFilter: document.querySelector("#tierFilter"),
+  workflowFilter: document.querySelector("#workflowFilter"),
+  signalFilter: document.querySelector("#signalFilter"),
   heatFilter: document.querySelector("#heatFilter"),
   scoreInput: document.querySelector("#scoreInput"),
   showHiddenInput: document.querySelector("#showHiddenInput"),
@@ -118,13 +120,13 @@ const CLASS_LABELS = {
 };
 const TIER_META = {
   actionable: {
-    label: "Actionable",
+    label: "Strong signal",
     tone: "good",
     rank: 5,
     summary: "hard onchain evidence before the move looks fully crowded",
   },
   hot_reactivation: {
-    label: "Hot Reactivation",
+    label: "Fast move",
     tone: "warn",
     rank: 4,
     summary: "strong early reactivation with high velocity or incomplete ATH confirmation",
@@ -136,40 +138,73 @@ const TIER_META = {
     summary: "real signal, but needs confirmation or cleaner market setup",
   },
   holding: {
-    label: "Accumulation intact",
+    label: "Holding",
     tone: "good",
     rank: 3.5,
     summary: "the original buyer cohort still retains the accumulated tokens",
   },
   weakening: {
-    label: "Weakening",
+    label: "Selling pressure",
     tone: "warn",
     rank: 2.5,
     summary: "the original buyer cohort is reducing its retained position",
   },
   late_chase: {
-    label: "Late/chase",
+    label: "Late entry",
     tone: "bad",
     rank: 2,
     summary: "signal exists but it appears after an extended move or crowded volume",
   },
   recheck_due: {
-    label: "Recheck due",
+    label: "Data check needed",
     tone: "warn",
     rank: 1.5,
     summary: "the original buyer cohort has not been verified recently enough",
   },
   noise: {
-    label: "Noise",
+    label: "Low confidence",
     tone: "",
     rank: 1,
     summary: "weak or support-only evidence",
   },
   inactive: {
-    label: "Inactive",
+    label: "Closed",
     tone: "bad",
     rank: 0,
     summary: "the original accumulation thesis was invalidated by confirmed cohort distribution",
+  },
+};
+
+const WORKFLOW_META = {
+  new_signals: {
+    label: "New signals",
+    tone: "good",
+    rank: 4,
+    summary: "fresh onchain activity found in the latest successful scan",
+  },
+  holding: {
+    label: "Holding",
+    tone: "good",
+    rank: 3,
+    summary: "the original accumulation cohort still holds",
+  },
+  needs_attention: {
+    label: "Needs attention",
+    tone: "warn",
+    rank: 2,
+    summary: "selling, late activity, or a wallet-balance check needs review",
+  },
+  closed: {
+    label: "Closed",
+    tone: "bad",
+    rank: 1,
+    summary: "the original accumulation thesis was invalidated",
+  },
+  events_only: {
+    label: "Events only",
+    tone: "",
+    rank: 0,
+    summary: "low-confidence activity is kept in Events, not the working radar",
   },
 };
 
@@ -636,6 +671,15 @@ function tierChip(tier) {
   return chip(meta.label, meta.tone);
 }
 
+function workflowMeta(workflow) {
+  return WORKFLOW_META[workflow] || WORKFLOW_META.needs_attention;
+}
+
+function workflowChip(workflow) {
+  const meta = workflowMeta(workflow);
+  return chip(meta.label, meta.tone);
+}
+
 function alertEvidence(alert = {}) {
   const classes = alert.classes || {};
   const wave = alert.wave || {};
@@ -736,17 +780,16 @@ function bestTier(tiers = []) {
   }, "noise");
 }
 
-function tierMatches(tier) {
-  if (state.tier === "all") return true;
-  if (state.tier === "focus") {
-    return tier === "actionable"
-      || tier === "hot_reactivation"
-      || tier === "watch"
-      || tier === "holding"
-      || tier === "weakening"
-      || tier === "recheck_due";
+function workflowMatches(token, includeEventsOnly = false) {
+  if (token.workflowStatus === "events_only") {
+    return includeEventsOnly && state.workflow === "all";
   }
-  return tier === state.tier;
+  return state.workflow === "all" || token.workflowStatus === state.workflow;
+}
+
+function signalMatches(token) {
+  if (state.signal === "all") return true;
+  return token.currentSignalTier === state.signal;
 }
 
 function aggregateAlertLabels(alerts = [], field) {
@@ -1307,7 +1350,12 @@ function buildTokenSignals() {
     token.scanMcapUsd = Number(latestPool.scan_mcap_usd || latestPool.latest_mcap_usd || latestObservation?.mcap_usd || token.currentMcap || token.firstMcap || 0);
     token.scanMcapAt = latestPool.scan_mcap_at || latestPool.latest_seen_at || latestObservation?.at || token.lastSignalAt || null;
     token.liquidityUsd = Number(latestPool.liquidity_usd || 0);
-    token.maxScore = Math.max(...token.alerts.map((alert) => Number(alert.score || 0)));
+    token.historicalMaxScore = Math.max(...token.alerts.map((alert) => Number(alert.score || 0)));
+    token.caughtScore = Number(
+      token.signalThesis?.source_score
+      ?? first.score
+      ?? 0,
+    );
     token.uniqueEvents = uniqueEvents;
     token.rawEventCount = rawEvents;
     token.uniqueEventCount = uniqueEvents.length;
@@ -1371,15 +1419,17 @@ function buildTokenSignals() {
       || token.lastSignalAt;
     token.hasInferredFilters = token.alerts.some((alert) => alert.filterInferred || alert.filterLane !== alert.baseFilterLane);
     token.alertTiers = token.alerts.map(alertTier);
-    token.tierCounts = token.alertTiers.reduce((counts, tier) => {
-      counts[tier] = (counts[tier] || 0) + 1;
-      return counts;
-    }, {});
     token.historicalTier = bestTier(token.alertTiers);
     const reportAgeHours = reportFreshness(state.report?.generated_at).ageHours;
     const scannerFailed = state.scanStatus?.status === "failed";
     const scannerOperational = !scannerFailed && reportAgeHours !== null && reportAgeHours <= 2;
-    const currentTier = bestTier(token.currentScanAlerts.map(alertTier));
+    token.currentSignalAlerts = scannerOperational ? token.currentScanAlerts : [];
+    token.currentSignalTier = token.currentSignalAlerts.length
+      ? bestTier(token.currentSignalAlerts.map(alertTier))
+      : null;
+    token.currentScore = token.currentSignalAlerts.length
+      ? Math.max(...token.currentSignalAlerts.map((alert) => Number(alert.score || 0)))
+      : null;
     const lastSignalAgeHours = token.lastSignalAt
       ? Math.max(0, (Date.now() - new Date(token.lastSignalAt).getTime()) / 3_600_000)
       : Number.POSITIVE_INFINITY;
@@ -1392,56 +1442,74 @@ function buildTokenSignals() {
       || thesisStatus === "unknown"
       || !thesisNextCheckAt
       || new Date(thesisNextCheckAt).getTime() + thesisGraceMs <= Date.now();
-    if (scannerOperational && token.currentScanAlertCount) {
-      token.actionTier = currentTier;
-    } else if (thesisStatus === "invalidated") {
-      token.actionTier = "inactive";
-    } else if (thesisCheckDue) {
-      token.actionTier = "recheck_due";
-    } else if (thesisStatus === "weakening") {
-      token.actionTier = "weakening";
-    } else if (thesisStatus === "intact") {
-      token.actionTier = "holding";
+    token.lifecycleStatus = thesisStatus === "invalidated"
+      ? "closed"
+      : thesisStatus === "weakening"
+        ? "weakening"
+        : thesisStatus === "intact"
+          ? "holding"
+          : "pending";
+    token.dataStatus = !scannerOperational
+      ? "scanner_stale"
+      : thesisCheckDue
+        ? "check_needed"
+        : "current";
+    const currentWorkingSignal = ["actionable", "hot_reactivation", "watch"].includes(token.currentSignalTier);
+    if (token.lifecycleStatus === "closed") {
+      token.workflowStatus = "closed";
+    } else if (token.lifecycleStatus === "weakening" || token.currentSignalTier === "late_chase") {
+      token.workflowStatus = "needs_attention";
+    } else if (currentWorkingSignal) {
+      token.workflowStatus = "new_signals";
+    } else if (token.dataStatus === "check_needed") {
+      token.workflowStatus = "needs_attention";
+    } else if (token.lifecycleStatus === "holding") {
+      token.workflowStatus = "holding";
     } else {
-      token.actionTier = "recheck_due";
+      token.workflowStatus = token.currentSignalTier === "noise"
+        ? "events_only"
+        : "needs_attention";
     }
     token.signalLifecycle = {
       scannerOperational,
-      currentConfirmed: scannerOperational && token.currentScanAlertCount > 0,
+      currentConfirmed: token.currentSignalAlerts.length > 0,
       scannedCleanThisRun: token.scannedCleanThisRun,
       lastSignalAgeHours,
       historicalTier: token.historicalTier,
+      currentSignalTier: token.currentSignalTier,
+      workflowStatus: token.workflowStatus,
       thesisStatus,
       thesisCheckDue,
       thesisNextCheckAt,
+      dataStatus: token.dataStatus,
     };
-    token.qualityReasons = aggregateAlertLabels(token.alerts, "quality_reasons");
-    token.qualityPenalties = aggregateAlertLabels(token.alerts, "quality_penalties");
-    const heats = token.alerts.map(socialHeat);
-    const disabledSocial = token.alerts.map((alert) => alert.social).find((social) => social?.enabled === false);
-    token.socialHeat = heats.includes("hot")
+    token.currentQualityReasons = aggregateAlertLabels(token.currentSignalAlerts, "quality_reasons");
+    token.currentQualityPenalties = aggregateAlertLabels(token.currentSignalAlerts, "quality_penalties");
+    token.historicalQualityReasons = aggregateAlertLabels(token.alerts, "quality_reasons");
+    token.historicalQualityPenalties = aggregateAlertLabels(token.alerts, "quality_penalties");
+    const currentHeats = token.currentSignalAlerts.map(socialHeat);
+    const disabledSocial = token.currentSignalAlerts
+      .map((alert) => alert.social)
+      .find((social) => social?.enabled === false);
+    token.currentSocialHeat = currentHeats.includes("hot")
       ? "hot"
-      : heats.includes("warming")
+      : currentHeats.includes("warming")
         ? "warming"
-        : heats.includes("quiet")
+        : currentHeats.includes("quiet")
           ? "quiet"
-          : heats.includes("disabled")
+          : currentHeats.includes("disabled")
             ? "disabled"
-            : heats.includes("none")
+            : currentHeats.includes("none")
               ? "none"
               : "unchecked";
-    token.socialReason = disabledSocial?.reason || "";
+    token.currentSocialReason = disabledSocial?.reason || "";
     token.narrative = choosePrimaryNarrative(token);
     token.narratives = [token.narrative.primary];
     token.hidden = isTokenHidden(token);
     return token;
   });
 
-  return tokens.sort((a, b) => {
-    const aScore = tierMeta(a.actionTier).rank * 1000 + Number(a.maxScore || 0) + Math.max(0, Number(a.profitPct || 0)) / 10 + Number(a.totalSuspiciousSol || 0) / 5;
-    const bScore = tierMeta(b.actionTier).rank * 1000 + Number(b.maxScore || 0) + Math.max(0, Number(b.profitPct || 0)) / 10 + Number(b.totalSuspiciousSol || 0) / 5;
-    return bScore - aScore;
-  });
+  return tokens.sort(compareFilterTokens);
 }
 
 function tokenMatchesBaseFilters(token) {
@@ -1456,14 +1524,18 @@ function tokenMatchesBaseFilters(token) {
     token.wallets.map((wallet) => wallet.owner).join(" "),
   ].join(" ").toLowerCase();
   if (query && !text.includes(query)) return false;
-  if (state.heat !== "all" && token.socialHeat !== state.heat) return false;
+  if (state.heat !== "all" && token.currentSocialHeat !== state.heat) return false;
   if (state.lane !== "all" && !token.filterCategories.includes(state.lane)) return false;
-  if (Number(token.maxScore || 0) < state.minScore) return false;
+  if (state.minScore > 0 && Number(token.currentScore ?? -1) < state.minScore) return false;
   return true;
 }
 
 function filteredTokens(tokens) {
-  return tokens.filter((token) => tokenMatchesBaseFilters(token) && tierMatches(token.actionTier));
+  return tokens.filter((token) => (
+    tokenMatchesBaseFilters(token)
+    && workflowMatches(token)
+    && signalMatches(token)
+  ));
 }
 
 function metric(label, value) {
@@ -1688,7 +1760,17 @@ function renderStatus() {
     return `${rpcLabels[name] || name}: ${provider.status || "unknown"}, ${calls} calls`;
   }).join("; ");
   if (els.showHiddenInput) els.showHiddenInput.checked = state.showHidden;
-  if (els.tierFilter) els.tierFilter.value = state.tier;
+  if (els.workflowFilter) els.workflowFilter.value = state.workflow;
+  const signalRelevant = state.workflow === "new_signals" || state.workflow === "all";
+  if (els.signalFilter) {
+    els.signalFilter.value = state.signal;
+    els.signalFilter.disabled = !signalRelevant;
+  }
+  if (els.heatFilter) els.heatFilter.disabled = !signalRelevant;
+  if (els.scoreInput) els.scoreInput.disabled = !signalRelevant;
+  document.querySelectorAll(".current-signal-control").forEach((control) => {
+    control.classList.toggle("is-disabled", !signalRelevant);
+  });
   const reportLanes = (report.lanes_scanned || []).filter((name) => FILTER_ORDER.includes(name) && name !== "legacy");
   const laneText = status.lane || status.mode || (reportLanes.length > 1 ? `${reportLanes.length} lanes` : reportLanes[0]) || report.mode || "-";
   const discoveryAt = discoveryStatus.last_success_at
@@ -1732,19 +1814,16 @@ function renderMetrics(tokens) {
   const report = state.report || {};
   const stats = report.stats || {};
   const baseTokens = buildTokenSignals().filter(tokenMatchesBaseFilters);
-  const tierCount = (tier) => baseTokens.filter((token) => token.actionTier === tier).length;
+  const workflowCount = (workflow) => baseTokens.filter((token) => token.workflowStatus === workflow).length;
   const outcomes = stats.signal_outcomes || {};
   const outcomeSamples = Number(outcomes.with_24h || 0);
   const outcomeMedian = outcomes.median_return_24h_pct;
   const outcomePositive = outcomes.positive_24h_pct;
   els.metrics.innerHTML = [
-    metric("Actionable", tierCount("actionable")),
-    metric("Hot reactivation", tierCount("hot_reactivation")),
-    metric("Watch", tierCount("watch")),
-    metric("Accumulation intact", tierCount("holding")),
-    metric("Weakening", tierCount("weakening")),
-    metric("Recheck due", tierCount("recheck_due")),
-    metric("Inactive", tierCount("inactive")),
+    metric("New signals", workflowCount("new_signals")),
+    metric("Holding", workflowCount("holding")),
+    metric("Needs attention", workflowCount("needs_attention")),
+    metric("Closed", workflowCount("closed")),
     metric("Universe", stats.universe_pools ?? 0),
     metric("Scanned pools", stats.scanned_pools ?? 0),
     metric(
@@ -1763,6 +1842,35 @@ function renderMetrics(tokens) {
   ].join("");
 }
 
+function currentSignalChip(token) {
+  if (!token.currentSignalTier || token.currentSignalTier === "noise") return "";
+  return tierChip(token.currentSignalTier);
+}
+
+function primaryStatusChip(token, compact = false) {
+  if (token.workflowStatus === "new_signals" && token.currentSignalTier) {
+    return tierChip(token.currentSignalTier);
+  }
+  if (compact && token.workflowStatus === "needs_attention") {
+    return chip("Review", "warn");
+  }
+  return workflowChip(token.workflowStatus);
+}
+
+function attentionReason(token) {
+  if (token.currentSignalTier === "late_chase") return "late entry";
+  if (token.lifecycleStatus === "weakening") return "selling pressure";
+  if (token.dataStatus === "check_needed") return "wallet check needed";
+  if (token.dataStatus === "scanner_stale") return "scanner data is stale";
+  if (token.lifecycleStatus === "closed") return "accumulation closed";
+  return "";
+}
+
+function positiveSocialChip(token) {
+  if (!["warming", "hot"].includes(token.currentSocialHeat)) return "";
+  return chip(socialLabel(token.currentSocialHeat, token.currentSocialReason), "good");
+}
+
 function renderTokenRow(token) {
   const selected = token.key === state.selectedTokenKey ? " is-selected" : "";
   const hidden = token.hidden ? " is-hidden" : "";
@@ -1770,7 +1878,6 @@ function renderTokenRow(token) {
     ? `${token.athLabel} ${money(token.athMcapUsd)}`
     : `${token.athLabel} ${athStatusLabel(token.athStatus)}`;
   const gmgnUrl = gmgnTokenUrl(token);
-  const phase = marketPhase(token);
   return `
     <article class="token-row${selected}${hidden}" data-token-key="${esc(token.key)}">
       <div class="token-main">
@@ -1793,13 +1900,12 @@ function renderTokenRow(token) {
           </div>
         </div>
         <div class="chips">
-          ${tierChip(token.actionTier)}
+          ${workflowChip(token.workflowStatus)}
+          ${currentSignalChip(token)}
           ${chip(`${token.narrative.primary} - ${token.narrative.tilt}`, narrativeTone(token.narrative))}
           ${token.narrative.secondary.slice(0, 1).map((name) => chip(`${name} flavor`)).join("")}
-          ${chip(`now ${filterMeta(token.currentFilter).label}`)}
           ${token.hasFilterDrift ? chip(`caught ${filterMeta(token.caughtFilter).label}`, "warn") : ""}
-          ${phase && phase.label !== "Mid-range" ? chip(phase.label, phase.tone) : ""}
-          ${chip(socialLabel(token.socialHeat, token.socialReason), token.socialHeat === "disabled" ? "warn" : "")}
+          ${positiveSocialChip(token)}
           ${gmgnUrl ? `<a class="chip token-terminal-link" href="${esc(gmgnUrl)}" target="_blank" rel="noreferrer">GMGN</a>` : ""}
           ${renderHiddenAction(token, true)}
         </div>
@@ -2070,28 +2176,24 @@ function renderEvidenceLine(token) {
   const basisChips = basis.length
     ? basis.map((item) => chip(item)).join(" ")
     : chip(token.narrative.source === "scanner_token_intel" ? "scanner token-intel" : "token intel missing", "warn");
-  return `${basisChips} ${chip(socialLabel(token.socialHeat, token.socialReason), token.socialHeat === "disabled" ? "warn" : "")}`;
+  return basisChips;
 }
 
 function renderFilterLine(token) {
   const caught = token.caughtFilter || token.primaryFilter || "legacy";
   const current = token.currentFilter || caught;
-  const chips = [
-    chip(`now ${filterMeta(current).label}`),
-    current === "reactivation" && token.reactivationStage
-      ? chip(`phase ${token.reactivationStage}`, token.actionTier === "hot_reactivation" ? "warn" : "")
-      : "",
-    current !== caught ? chip(`caught ${filterMeta(caught).label}`, "warn") : "",
-  ].filter(Boolean).join(" ");
+  const chips = current !== caught
+    ? chip("historical lane remapped", "warn")
+    : "";
   const inferred = token.hasInferredFilters ? ` ${chip("inferred from snapshot", "warn")}` : "";
   const primary = filterMeta(current);
   return `${chips}${inferred} <span class="muted-inline">${esc(primary.criteria)}</span>`;
 }
 
 function signalRankScore(token) {
-  return Math.max(0, Number(token.profitPct || 0))
-    + Number(token.totalSuspiciousSol || 0) / 5
-    + Number(token.maxScore || 0);
+  return Number(token.currentScore || 0) * 10
+    + Number(token.totalSuspiciousSol || 0)
+    + Math.max(0, Number(token.profitPct || 0)) / 10;
 }
 
 function tokenFreshnessMs(token) {
@@ -2105,8 +2207,31 @@ function tokenFreshnessMs(token) {
 }
 
 function compareFilterTokens(a, b) {
-  const latestScanDiff = Number(b.currentScanAlertCount > 0) - Number(a.currentScanAlertCount > 0);
-  if (latestScanDiff) return latestScanDiff;
+  const workflowDiff = workflowMeta(b.workflowStatus).rank - workflowMeta(a.workflowStatus).rank;
+  if (workflowDiff) return workflowDiff;
+
+  if (a.workflowStatus === "new_signals" && b.workflowStatus === "new_signals") {
+    const tierDiff = tierMeta(b.currentSignalTier).rank - tierMeta(a.currentSignalTier).rank;
+    if (tierDiff) return tierDiff;
+    const scoreDiff = Number(b.currentScore || 0) - Number(a.currentScore || 0);
+    if (scoreDiff) return scoreDiff;
+  }
+
+  if (a.workflowStatus === "needs_attention" && b.workflowStatus === "needs_attention") {
+    const attentionPriority = (token) => {
+      if (token.currentSignalTier === "late_chase") return 3;
+      if (token.lifecycleStatus === "weakening") return 2;
+      if (token.dataStatus === "check_needed") return 1;
+      return 0;
+    };
+    const attentionDiff = attentionPriority(b) - attentionPriority(a);
+    if (attentionDiff) return attentionDiff;
+  }
+
+  if (a.workflowStatus === "holding" && b.workflowStatus === "holding") {
+    const heldDiff = Number(heldSupplyMetric(b).pct || 0) - Number(heldSupplyMetric(a).pct || 0);
+    if (heldDiff) return heldDiff;
+  }
 
   const freshnessDiff = tokenFreshnessMs(b) - tokenFreshnessMs(a);
   if (freshnessDiff) return freshnessDiff;
@@ -2121,30 +2246,40 @@ function renderSignalQuality(token) {
   const duplicateChip = token.duplicateEventCount
     ? ` ${chip(`${token.duplicateEventCount} duplicate rows collapsed`, "warn")}`
     : "";
-  if (token.bestWave) {
+  const currentWave = bestWaveAlert(token.currentSignalAlerts || [])?.wave;
+  if (token.currentSignalTier && currentWave) {
     return [
-      `max score ${esc(token.maxScore)}`,
-      `wave net ${sol(token.bestWave.net_buy_sol)}`,
-      `${esc(token.bestWave.unique_buyers || 0)} buyers`,
-      `${(Number(token.bestWave.sticky_supply_pct || 0)).toFixed(1)}% sticky supply`,
+      `current score ${esc(token.currentScore)}`,
+      `wave net ${sol(currentWave.net_buy_sol)}`,
+      `${esc(currentWave.unique_buyers || 0)} buyers`,
+      `${(Number(currentWave.sticky_supply_pct || 0)).toFixed(1)}% held supply`,
+    ].join(" / ") + duplicateChip;
+  }
+  if (token.currentSignalTier) {
+    const currentAlerts = token.currentSignalAlerts || [];
+    return [
+      `current score ${esc(token.currentScore)}`,
+      `${esc(sumAlertField(currentAlerts, "hard_wallets"))} hard wallets`,
+      `${esc(sumAlertField(currentAlerts, "support_wallets"))} support wallets`,
     ].join(" / ") + duplicateChip;
   }
   return [
-    `max score ${esc(token.maxScore)}`,
-    `${esc(token.hardSignalCount)} hard wallets / ${sol(token.hardFlowSol)}`,
-    `${esc(token.supportSignalCount)} support wallets / ${sol(token.supportFlowSol)}`,
-    `${esc(token.uniqueWallets)} wallets`,
+    `caught score ${esc(token.caughtScore)}`,
+    "no fresh signal in the latest scan",
   ].join(" / ") + duplicateChip;
 }
 
 function renderSignalTier(token) {
-  const reasons = token.qualityReasons.length
-    ? token.qualityReasons.slice(0, 4).map((item) => chip(item)).join(" ")
-    : `<span class="muted-inline">${esc(tierMeta(token.actionTier).summary)}</span>`;
-  const penalties = token.qualityPenalties.length
-    ? ` ${token.qualityPenalties.slice(0, 4).map((item) => chip(item, item.includes("late") || item.includes("blowoff") || item.includes("only") ? "bad" : "warn")).join(" ")}`
+  if (!token.currentSignalTier) {
+    return `<span class="muted-inline">No fresh signal in the latest successful scan.</span>`;
+  }
+  const reasons = token.currentQualityReasons.length
+    ? token.currentQualityReasons.slice(0, 4).map((item) => chip(item)).join(" ")
+    : `<span class="muted-inline">${esc(tierMeta(token.currentSignalTier).summary)}</span>`;
+  const penalties = token.currentQualityPenalties.length
+    ? ` ${token.currentQualityPenalties.slice(0, 4).map((item) => chip(item, item.includes("late") || item.includes("blowoff") || item.includes("only") ? "bad" : "warn")).join(" ")}`
     : "";
-  return `${tierChip(token.actionTier)} ${reasons}${penalties}`;
+  return `${tierChip(token.currentSignalTier)} ${reasons}${penalties}`;
 }
 
 function thesisTier(thesis) {
@@ -2349,24 +2484,22 @@ function renderScannerReason(token) {
     + token.commonExecutors.length
     + Number(token.routedBuyCount || 0);
   if (linkCount) parts.push(`${linkCount} wallet-link flag${linkCount === 1 ? "" : "s"}`);
-  if (token.currentScanAlertCount) parts.push(`${token.currentScanAlertCount} update${token.currentScanAlertCount === 1 ? "" : "s"} in latest scan`);
+  const freshUpdates = token.currentSignalAlerts.length;
+  if (freshUpdates) parts.push(`${freshUpdates} update${freshUpdates === 1 ? "" : "s"} in latest scan`);
   if (!parts.length) return "Scanner caught this from score-based evidence, but hard wallet evidence is thin.";
   return `${parts.join("; ")}.`;
 }
 
 function renderRiskFlags(token) {
   const flags = [];
-  const phase = marketPhase(token);
-  if (token.actionTier === "late_chase") flags.push(chip("late/chase", "bad"));
-  if (token.actionTier === "noise") flags.push(chip("noise", "bad"));
-  if (token.actionTier === "weakening") flags.push(chip("original cohort is distributing", "warn"));
-  if (token.actionTier === "recheck_due") flags.push(chip("cohort recheck due", "warn"));
-  if (token.actionTier === "inactive") flags.push(chip("original accumulation thesis invalidated", "bad"));
-  if (phase && ["Upper range", "Near ATH"].includes(phase.label)) flags.push(chip(`${phase.label}: ${phase.detail}`, phase.tone));
+  if (token.currentSignalTier === "late_chase") flags.push(chip("late entry", "bad"));
+  if (token.currentSignalTier === "noise") flags.push(chip("low-confidence event", "bad"));
+  if (token.lifecycleStatus === "weakening") flags.push(chip("original buyers are reducing holdings", "warn"));
+  if (token.dataStatus === "check_needed") flags.push(chip("wallet balances need refresh", "warn"));
+  if (token.lifecycleStatus === "closed") flags.push(chip("original accumulation closed", "bad"));
   if (!token.hardSignalCount && !token.hasWaveSignal) flags.push(chip("no hard wallets", "warn"));
   if (!token.athMcapUsd) flags.push(chip(athStatusLabel(token.athStatus, token.athError), "warn"));
-  if (["disabled", "none", "unchecked"].includes(token.socialHeat)) flags.push(chip(socialLabel(token.socialHeat, token.socialReason), token.socialHeat === "disabled" ? "warn" : ""));
-  token.qualityPenalties.slice(0, 4).forEach((item) => {
+  token.currentQualityPenalties.slice(0, 4).forEach((item) => {
     flags.push(chip(item, item.includes("late") || item.includes("blowoff") || item.includes("only") ? "bad" : "warn"));
   });
   if (token.hasFilterDrift) flags.push(chip(`moved from ${filterMeta(token.caughtFilter).label}`, "warn"));
@@ -2496,7 +2629,7 @@ function detailTabButton(id, label, count = null) {
 }
 
 function latestTokenSocial(token) {
-  return [...token.alerts].reverse().map((alert) => alert.social).find(Boolean) || {};
+  return [...(token.currentSignalAlerts || [])].reverse().map((alert) => alert.social).find(Boolean) || {};
 }
 
 function renderOverviewTab(token) {
@@ -2525,7 +2658,7 @@ function renderWalletsTab(token) {
   return `
     <section class="detail-block">
       <div class="detail-block-title">Wallet signal</div>
-      <div class="kv"><span>Current lifecycle</span><span>${renderSignalTier(token)}</span></div>
+      <div class="kv"><span>Fresh signal</span><span>${renderSignalTier(token)}</span></div>
       ${renderThesisDetails(token)}
       <div class="kv"><span>Wallet setup</span><span>${renderWalletCluster(token)}</span></div>
       <div class="kv"><span>Wallet PnL</span><span>${renderWalletSummary(token)}</span></div>
@@ -2546,7 +2679,7 @@ function renderSocialTab(token) {
     <section class="detail-block">
       <div class="detail-block-title">Social pulse</div>
       <div class="social-metrics">
-        ${detailMetric("Status", socialLabel(token.socialHeat, token.socialReason), failures ? `${failures} provider errors` : "latest social pass")}
+        ${detailMetric("Current status", socialLabel(token.currentSocialHeat, token.currentSocialReason), failures ? `${failures} provider errors` : "latest successful scan")}
         ${detailMetric("X posts", compact(social.x_posts || social.results?.length || 0), `${compact(social.unique_authors || 0)} unique authors`)}
         ${detailMetric("Callers", compact(callers.length), callers.length ? "token-matched accounts" : "none resolved")}
       </div>
@@ -2564,7 +2697,7 @@ function renderEvidenceTab(token, gmgnUrl, sourceLinks) {
     <section class="detail-block">
       <div class="detail-block-title">Signal evidence</div>
       <div class="kv"><span>Quality</span><span>${renderSignalQuality(token)}</span></div>
-      <div class="kv"><span>Filter</span><span>${renderFilterLine(token)}</span></div>
+      <div class="kv"><span>Scanner rule</span><span>${renderFilterLine(token)}</span></div>
       <div class="kv"><span>Risk flags</span><span>${renderRiskFlags(token)}</span></div>
       ${renderWaveLine(token)}
     </section>
@@ -2612,10 +2745,9 @@ function renderTokenDetail(token) {
           <div>
             <h2>${esc(token.symbol)} <span class="muted">${esc(token.name)}</span>${token.hidden ? ` ${chip("deleted", "warn")}` : ""}</h2>
             <div class="detail-head-chips">
-              ${tierChip(token.actionTier)}
-              ${chip(filterMeta(token.currentFilter).label)}
+              ${workflowChip(token.workflowStatus)}
+              ${currentSignalChip(token)}
               ${token.hasFilterDrift ? chip(`caught ${filterMeta(token.caughtFilter).label}`, "warn") : ""}
-              ${phase ? chip(phase.label, phase.tone) : ""}
             </div>
           </div>
         </div>
@@ -2628,7 +2760,7 @@ function renderTokenDetail(token) {
         ${detailMetric("Caught", `${esc(dateLabel(token.firstSignalAt))} / ${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)}`, `${pct(token.profitPct)} since caught`, "", pClass(token.profitPct))}
         ${detailMetric("Market now", `${moneyMaybe(token.scanMcapUsd || token.currentMcap)} mcap`, marketNowSub)}
         ${detailMetric(token.athLabel, athValue, athSub, token.athMcapUsd ? "" : "bad")}
-        ${detailMetric("Noticed flow", sol(token.totalSuspiciousSol), `score ${esc(token.maxScore)} / ${esc(token.uniqueWallets)} wallets`)}
+        ${detailMetric("Noticed flow", sol(token.totalSuspiciousSol), `${token.currentScore === null ? "caught" : "current"} score ${esc(token.currentScore ?? token.caughtScore)} / ${esc(token.uniqueWallets)} wallets`)}
       </div>
       <div class="detail-tabs" role="tablist" aria-label="Token research sections">
         ${detailTabButton("overview", "Overview")}
@@ -2699,7 +2831,7 @@ function narrativeGroups(tokens) {
           context: token.narrative.news,
           firstSignalAt: null,
           latestSignalAt: null,
-          maxScore: 0,
+          peakHistoricalScore: 0,
           wallets: new Set(),
           secondary: new Map(),
         });
@@ -2712,7 +2844,7 @@ function narrativeGroups(tokens) {
         group.bestPnl = token.profitPct;
         group.bestToken = token;
       }
-      group.maxScore = Math.max(group.maxScore, token.maxScore || 0);
+      group.peakHistoricalScore = Math.max(group.peakHistoricalScore, token.historicalMaxScore || 0);
       token.wallets.forEach((wallet) => group.wallets.add(wallet.owner));
       token.narrative.secondary.forEach((secondary) => {
         group.secondary.set(secondary, (group.secondary.get(secondary) || 0) + 1);
@@ -2767,7 +2899,7 @@ function renderNarrativeDetail(group) {
       </div>
       <div class="kv"><span>Why it matters</span><span>${esc(group.context?.summary || group.context?.headline || "Narrative is based on scanner metadata and social context.")}</span></div>
       <div class="kv"><span>First/latest signal</span><span>${esc(dateLabel(group.firstSignalAt))} -> ${esc(dateLabel(group.latestSignalAt))}</span></div>
-      <div class="kv"><span>Signal strength</span><span>${esc(group.alerts)} signals / max score ${esc(group.maxScore)} / ${sol(group.totalSol)}</span></div>
+      <div class="kv"><span>Signal history</span><span>${esc(group.alerts)} signals / peak historical score ${esc(group.peakHistoricalScore)} / ${sol(group.totalSol)}</span></div>
       <div class="kv"><span>Wallet coverage</span><span>${esc(group.uniqueWallets)} noticed wallets across this narrative</span></div>
       <div class="kv"><span>Secondary flavor</span><span>${secondary}</span></div>
       ${group.context?.sources?.length ? `<div class="kv"><span>Sources</span><span>${group.context.sources.map((source) => `<a href="${esc(source.url)}" target="_blank" rel="noreferrer">${esc(source.label)}</a>`).join(" ")}</span></div>` : ""}
@@ -2842,16 +2974,6 @@ function selectedFilterToken(group) {
   return group.tokens.find((token) => token.key === state.selectedTokenKey) || group.tokens[0];
 }
 
-function compactTierSummary(group) {
-  const parts = [];
-  if (group.tierCounts.actionable) parts.push(chip(`${group.tierCounts.actionable} actionable`, "good"));
-  if (group.tierCounts.hot_reactivation) parts.push(chip(`${group.tierCounts.hot_reactivation} hot`, "warn"));
-  if (group.tierCounts.watch) parts.push(chip(`${group.tierCounts.watch} watch`, "warn"));
-  const parked = Number(group.tierCounts.late_chase || 0) + Number(group.tierCounts.noise || 0);
-  if (parked) parts.push(chip(`${parked} parked`, "bad"));
-  return parts.join("");
-}
-
 function heldSupplyMetric(token) {
   const currentWave = bestWaveAlert(token.currentScanAlerts || [])?.wave;
   const currentWavePct = currentWave?.sticky_supply_pct;
@@ -2898,11 +3020,14 @@ function heldSupplyMetric(token) {
 
 function tokenFilterSubtitle(token) {
   const parts = [];
-  if (token.currentScanAlertCount) parts.push(`${token.currentScanAlertCount} latest`);
-  if (token.bestWave) {
+  const attention = attentionReason(token);
+  if (attention && token.workflowStatus === "needs_attention") parts.push(attention);
+  if (token.currentSignalAlerts.length) parts.push(`${token.currentSignalAlerts.length} latest`);
+  const wave = bestWaveAlert(token.currentSignalAlerts || [])?.wave || token.bestWave;
+  if (wave) {
     const buyers = Number(
-      token.bestWave.effective_unique_buyers
-      || token.bestWave.unique_buyers
+      wave.effective_unique_buyers
+      || wave.unique_buyers
       || 0,
     );
     if (buyers) parts.push(`${buyers} buyers`);
@@ -2913,7 +3038,6 @@ function tokenFilterSubtitle(token) {
   }
   const phase = marketPhase(token);
   if (phase?.label) parts.push(phase.label);
-  if (token.hasFilterDrift) parts.push(`caught ${filterMeta(token.caughtFilter).label}`);
   if (token.hidden) parts.push("deleted");
   return parts.join(" / ");
 }
@@ -2932,21 +3056,20 @@ function filterGroups(tokens) {
           bestPnl: null,
           bestToken: null,
           alerts: 0,
+          currentSignals: 0,
           firstSignalAt: null,
           latestSignalAt: null,
-          maxScore: 0,
+          currentMaxScore: null,
           wallets: new Set(),
           rawEvents: 0,
           uniqueEvents: 0,
           noticedWallets: 0,
-          tierCounts: {},
         });
       }
       const group = groups.get(name);
       if (!group.tokenKeys.has(token.key)) {
         group.tokens.push(token);
         group.tokenKeys.add(token.key);
-        group.tierCounts[token.actionTier] = (group.tierCounts[token.actionTier] || 0) + 1;
       }
       const groupAlerts = token.alerts;
       const groupEvents = uniqueAlertEvents(groupAlerts);
@@ -2955,8 +3078,10 @@ function filterGroups(tokens) {
       group.uniqueEvents += groupEvents.length;
       group.noticedWallets += sumAlertField(groupAlerts, "suspicious_wallets") || groupEvents.length;
       group.totalSol += sumAlertField(groupAlerts, "suspicious_sol") || sumEventSol(groupEvents);
-      const laneMaxScore = groupAlerts.length ? Math.max(...groupAlerts.map((alert) => Number(alert.score || 0))) : 0;
-      group.maxScore = Math.max(group.maxScore, laneMaxScore);
+      group.currentSignals += token.currentSignalAlerts.length;
+      if (token.currentScore !== null) {
+        group.currentMaxScore = Math.max(group.currentMaxScore ?? 0, token.currentScore);
+      }
       if (token.profitPct !== null && (group.bestPnl === null || token.profitPct > group.bestPnl)) {
         group.bestPnl = token.profitPct;
         group.bestToken = token;
@@ -2996,7 +3121,7 @@ function renderFilterTokenRows(group) {
           <span class="filter-token-copy">
             <span class="filter-token-title">
               <strong>${esc(token.symbol)}</strong>
-              ${tierChip(token.actionTier)}
+              ${primaryStatusChip(token, true)}
             </span>
             <small>${esc(tokenFilterSubtitle(token) || token.name || token.narrative.primary || "-")}</small>
           </span>
@@ -3034,14 +3159,14 @@ function renderFilterTokenPanel(group) {
         </div>
         <div class="filter-panel-kpis">
           <span><strong>${esc(group.tokens.length)}</strong><small>tokens</small></span>
-          <span><strong>${esc(group.alerts)}</strong><small>signals</small></span>
-          <span><strong>${esc(group.noticedWallets)}</strong><small>wallets</small></span>
-          <span><strong>${sol(group.totalSol)}</strong><small>flow</small></span>
+          <span><strong>${esc(group.currentSignals)}</strong><small>fresh signals</small></span>
+          <span><strong>${esc(group.noticedWallets)}</strong><small>tracked wallets</small></span>
+          <span><strong>${sol(group.totalSol)}</strong><small>noticed flow</small></span>
         </div>
       </div>
       <div class="filter-panel-note">
         <span>${esc(group.meta.thesis)}</span>
-        <small>${esc(dateLabel(group.firstSignalAt))} -> ${esc(dateLabel(group.latestSignalAt))} / score ${esc(group.maxScore)}</small>
+        <small>${esc(dateLabel(group.firstSignalAt))} -> ${esc(dateLabel(group.latestSignalAt))} / ${group.currentMaxScore === null ? "no fresh score" : `current score ${esc(group.currentMaxScore)}`}</small>
       </div>
       <div class="filter-token-head">
         <span>Token</span>
@@ -3095,10 +3220,10 @@ function alertMatches(alert) {
   const key = tokenKeyFromPool(pool);
   if (!state.showHidden && isTokenHidden(key)) return false;
   const token = buildTokenSignals().find((item) => item.key === key);
-  const effectiveTier = alert._scope_source === "history" && token
-    ? token.actionTier
-    : alertTier(alert);
-  if (!tierMatches(effectiveTier)) return false;
+  const effectiveTier = alertTier(alert);
+  if (token && !workflowMatches(token, true)) return false;
+  if (!token && state.workflow !== "all") return false;
+  if (state.signal !== "all" && effectiveTier !== state.signal) return false;
   if (state.lane !== "all" && effectiveAlertLane(alert) !== state.lane) return false;
   if (state.heat !== "all" && socialHeat(alert) !== state.heat) return false;
   if (Number(alert.score || 0) < state.minScore) return false;
@@ -3110,9 +3235,7 @@ function alertMatches(alert) {
 function renderAlertRow(alert) {
   const pool = alert.pool || {};
   const token = buildTokenSignals().find((item) => item.key === tokenKeyFromPool(pool));
-  const effectiveTier = alert._scope_source === "history" && token
-    ? token.actionTier
-    : alertTier(alert);
+  const effectiveTier = alertTier(alert);
   return `
     <article class="alert-row">
       <div class="score"><strong>${esc(alert.score ?? 0)}</strong><span>score</span></div>
@@ -3185,8 +3308,21 @@ els.searchInput.addEventListener("input", (event) => {
   state.query = event.target.value;
   render();
 });
-els.tierFilter.addEventListener("change", (event) => {
-  state.tier = event.target.value;
+els.workflowFilter.addEventListener("change", (event) => {
+  state.workflow = event.target.value;
+  if (!["new_signals", "all"].includes(state.workflow)) {
+    state.signal = "all";
+    state.heat = "all";
+    state.minScore = 0;
+    els.signalFilter.value = "all";
+    els.heatFilter.value = "all";
+    els.scoreInput.value = "0";
+  }
+  state.selectedTokenKey = null;
+  render();
+});
+els.signalFilter.addEventListener("change", (event) => {
+  state.signal = event.target.value;
   state.selectedTokenKey = null;
   render();
 });

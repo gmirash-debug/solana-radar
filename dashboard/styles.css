@@ -353,6 +353,10 @@ main {
   gap: 7px;
 }
 
+.current-signal-control.is-disabled {
+  display: none;
+}
+
 .filter-toggle {
   display: none;
 }
