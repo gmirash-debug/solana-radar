@@ -192,6 +192,27 @@ jobs:
           npx convex env list --prod --names-only | grep -qx CONVEX_INGEST_SECRET
           npx convex deploy
 
+      - name: Verify Convex production
+        if: github.event_name == 'push'
+        env:
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+        run: |
+          response="$(
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header 'Content-Type: application/json' \
+              --data '{"path":"radar:dashboardData","args":{"historyLimit":1},"format":"json"}' \
+              https://basic-starfish-944.convex.cloud/api/query
+          )"
+          if ! printf '%s' "$response" | python -c \
+            'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("status") == "success" else 1)'
+          then
+            echo "::error title=Convex smoke test failed::$response"
+            timeout --signal=TERM 20s npx convex logs --prod --history 40 || true
+            exit 1
+          fi
+          echo "Convex production query is healthy."
+
       - name: Run scanner
         id: run_scanner
         if: steps.freshness.outputs.should_scan == 'true'
