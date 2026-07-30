@@ -100,7 +100,7 @@ const els = {
 const FILTER_META = {
   reactivation: {
     label: "Reactivation",
-    criteria: "30d+ / $0-$5m mcap / liq >= $3k / 5m burst + retained buy-wave",
+    criteria: "15d+ / $0-$5m mcap / liq >= $3k / 5m burst + retained buy-wave",
     thesis: "older migrated tokens ranked by renewed 5m and 1h activity, then confirmed by distributed net buying and balances that still retain the acquired supply. ATH is risk context, not a discovery gate.",
   },
 };
@@ -288,7 +288,7 @@ const INFERRABLE_FILTERS = ["reactivation"];
 
 const FILTER_RULES = {
   reactivation: {
-    ageMin: 720,
+    ageMin: 360,
     ageMax: null,
     mcapMin: 0,
     mcapMax: 5_000_000,
