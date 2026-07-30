@@ -7,7 +7,7 @@ Boundary: this project is a market/onchain alert scanner, not the primary narrat
 It uses free DEX data for market discovery and a routed Solana RPC layer for
 onchain work:
 
-- find pools across active lane-based filters: micro sticky, cheap sticky, breakout, and reactivation;
+- focus the production pipeline on one signal family: token reactivation;
 - keep only migrated pump.fun ecosystem pools by default: `pumpfun-amm`, `pumpswap`;
 - retain a rolling registry of known pools and refresh it through free market APIs, so discovery is not limited to current trending pages;
 - rotate scan capacity between high-activity pools and pools that have gone longest without an onchain check;
@@ -21,7 +21,7 @@ onchain work:
 - classify buy wallets as fresh, freshish, low-tx, normal, or dormant;
 - attribute retention only to tokens bought in the detected wave, excluding balances held before the wave;
 - enrich triggered alerts with public X activity through Bright Data Discover;
-- reject incomplete all-lane snapshots and write scanner-health diagnostics into the dashboard report;
+- write scanner-health diagnostics into the dashboard report;
 - write alerts and a compact Markdown report.
 
 ## Setup
@@ -57,25 +57,16 @@ cp config.example.json config.json
 python3 solana-radar/scanner.py --once
 ```
 
-Run all agreed lanes:
+Run the production lane:
 
 ```bash
-python3 solana-radar/scanner.py --once --lane all
-```
-
-Run one lane:
-
-```bash
-python3 solana-radar/scanner.py --once --lane micro_sticky
-python3 solana-radar/scanner.py --once --lane cheap_sticky
-python3 solana-radar/scanner.py --once --lane breakout
 python3 solana-radar/scanner.py --once --lane reactivation
 ```
 
 ## Local dashboard
 
 ```bash
-python3 solana-radar/server.py --port 8765 --auto-lane all --auto-interval-seconds 3600
+python3 solana-radar/server.py --port 8765 --auto-lane reactivation --auto-interval-seconds 3600
 ```
 
 Open `http://127.0.0.1:8765`.
@@ -93,7 +84,7 @@ social status.
 ## Keep watching
 
 ```bash
-python3 solana-radar/scanner.py --watch --lane all
+python3 solana-radar/scanner.py --watch --lane reactivation
 ```
 
 ## GitHub automation
@@ -165,16 +156,15 @@ CONVEX_URL=https://your-deployment.convex.cloud
 CONVEX_INGEST_SECRET=...
 ```
 
-Lanes:
+Production lane:
 
-- `micro_sticky`: `3h-7d`, `$10k-$50k mcap`, `liq >=3k`, low-cap migrated pump.fun tokens with strict sticky buyer supply and net-buy retention. This is the TinyWorld-before-$50k catch lane.
-- `cheap_sticky`: `12h-10d`, `$50k-$250k mcap`, `liq >=10k`, cheap migrated pump.fun tokens with stronger sticky buyer supply before repricing.
-- `breakout`: `3d-30d`, `5m-25m mcap`, `liq >=50k`, `1h vol >=100k`, momentum/anomaly expansion.
-- `reactivation`: `30d+`, any positive mcap up to `$5m`, `liq >=3k`, renewed activity on an old migrated token. It uses `ignition`, `early`, `established`, and `mature` threshold profiles so a strong retained buy-wave can surface below `$100k`. ATH is fetched as entry-risk context rather than used as a discovery gate.
+- `reactivation`: `30d+`, any positive mcap up to `$5m`, `liq >=3k`, and at least `$100` of reported hourly volume. The market rank combines 5-minute burst velocity with 1-hour activity. Stage-balanced scan capacity prevents `ignition` and `early` pools from being crowded out by larger tokens. A signal still requires distributed net buying and current holder retention. ATH is entry-risk context, not a discovery gate.
 
-Retired filters: `incubation` and `young` are no longer scanned or shown as active dashboard filters because they produced too much noise relative to useful catches. The new sticky lanes replace them with a narrower market prefilter plus a balance-retention check: low_tx/freshish buyers only become a dashboard signal when current buyer balances still hold meaningful supply.
+Disabled filters: `micro_sticky`, `cheap_sticky`, `breakout`, `incubation`, and
+`young` are not scanned or shown in the production dashboard. Their old alert
+records remain in Git history but cannot consume Reactivation monitor capacity.
 
-By default, all lanes scan only migrated pump.fun ecosystem pools through
+The production lane scans only migrated pump.fun ecosystem pools through
 `dex_allowlist` in `config.example.json`. Pre-migration `pumpfun` bonding-curve
 pools are excluded before onchain analysis.
 
@@ -215,7 +205,8 @@ cannot remain stuck reading an old tail while new buys happen. If every
 enhanced-history provider is unavailable, the scanner falls back to standard
 signatures plus transaction details.
 
-Market activity is also checked against the pool's standard RPC transaction
+Market activity is ranked using both 5-minute burst data and the 1-hour window,
+then checked against the pool's standard RPC transaction
 head. The tolerated lag scales with reported hourly transaction count. If the
 standard head is fresh but enhanced history is behind, the pool is rescanned
 through the signatures fallback. If both heads are old, the market snapshot is

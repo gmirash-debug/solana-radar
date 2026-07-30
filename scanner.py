@@ -187,9 +187,15 @@ def selected_lanes(config, lane_name=None):
     selected = lane_name or config.get("lane") or "all"
     if selected == "all":
         order = config.get("lane_order") or ["breakout", "reactivation"]
-        return [lane for lane in order if lane in lanes]
+        return [
+            lane
+            for lane in order
+            if lane in lanes and lanes[lane].get("enabled", True)
+        ]
     if selected not in lanes:
         raise SystemExit(f"Unknown lane '{selected}'. Available: all, {', '.join(sorted(lanes))}")
+    if not lanes[selected].get("enabled", True):
+        raise SystemExit(f"Lane '{selected}' is disabled.")
     return [selected]
 
 
@@ -317,9 +323,11 @@ class Pool:
     url: str = ""
     mcap_usd: float = 0.0
     liquidity_usd: float = 0.0
+    volume_5m_usd: float = 0.0
     volume_1h_usd: float = 0.0
     volume_24h_usd: float = 0.0
     price_usd: float = 0.0
+    txns_5m: int = 0
     txns_1h: int = 0
     pair_created_at: int = 0
 
@@ -343,9 +351,11 @@ class Pool:
             "url": self.url,
             "mcap_usd": self.mcap_usd,
             "liquidity_usd": self.liquidity_usd,
+            "volume_5m_usd": self.volume_5m_usd,
             "volume_1h_usd": self.volume_1h_usd,
             "volume_24h_usd": self.volume_24h_usd,
             "price_usd": self.price_usd,
+            "txns_5m": self.txns_5m,
             "txns_1h": self.txns_1h,
             "pair_created_at": self.pair_created_at,
             "pair_created_at_iso": iso(self.pair_created_at),
@@ -1200,6 +1210,7 @@ def gecko_pool_from_item(item, source):
     base = rel.get("base_token", {}).get("data", {}).get("id", "")
     token_address = base.split("solana_", 1)[-1] if base.startswith("solana_") else base
     dex = rel.get("dex", {}).get("data", {}).get("id", "")
+    tx_m5 = attrs.get("transactions", {}).get("m5", {}) or {}
     tx_h1 = attrs.get("transactions", {}).get("h1", {}) or {}
     volume = attrs.get("volume_usd", {}) or {}
     return Pool(
@@ -1212,15 +1223,18 @@ def gecko_pool_from_item(item, source):
         url=f"https://www.geckoterminal.com/solana/pools/{attrs.get('address', '')}",
         mcap_usd=to_float(attrs.get("market_cap_usd") or attrs.get("fdv_usd")),
         liquidity_usd=to_float(attrs.get("reserve_in_usd")),
+        volume_5m_usd=to_float(volume.get("m5")),
         volume_1h_usd=to_float(volume.get("h1")),
         volume_24h_usd=to_float(volume.get("h24")),
         price_usd=to_float(attrs.get("base_token_price_usd")),
+        txns_5m=int(to_float(tx_m5.get("buys")) + to_float(tx_m5.get("sells"))),
         txns_1h=int(to_float(tx_h1.get("buys")) + to_float(tx_h1.get("sells"))),
         pair_created_at=parse_timestamp(attrs.get("pool_created_at") or attrs.get("created_at")),
     )
 
 
 def dexscreener_pool_from_pair(pair, source):
+    tx_m5 = pair.get("txns", {}).get("m5", {}) or {}
     tx_h1 = pair.get("txns", {}).get("h1", {}) or {}
     volume = pair.get("volume", {}) or {}
     base = pair.get("baseToken", {}) or {}
@@ -1235,9 +1249,11 @@ def dexscreener_pool_from_pair(pair, source):
         url=pair.get("url", ""),
         mcap_usd=to_float(pair.get("marketCap") or pair.get("fdv")),
         liquidity_usd=to_float(liquidity.get("usd")),
+        volume_5m_usd=to_float(volume.get("m5")),
         volume_1h_usd=to_float(volume.get("h1")),
         volume_24h_usd=to_float(volume.get("h24")),
         price_usd=to_float(pair.get("priceUsd")),
+        txns_5m=int(to_float(tx_m5.get("buys")) + to_float(tx_m5.get("sells"))),
         txns_1h=int(to_float(tx_h1.get("buys")) + to_float(tx_h1.get("sells"))),
         pair_created_at=parse_timestamp(pair.get("pairCreatedAt")),
     )
@@ -1262,9 +1278,11 @@ def gmgn_pool_from_trenches_item(item):
         url=f"https://gmgn.ai/sol/token/{mint}" if mint else "",
         mcap_usd=mcap_usd,
         liquidity_usd=to_float(item.get("liquidity")),
+        volume_5m_usd=to_float(item.get("volume_5m")),
         volume_1h_usd=to_float(item.get("volume_1h")),
         volume_24h_usd=to_float(item.get("volume_24h")),
         price_usd=price_usd,
+        txns_5m=int(to_float(item.get("swaps_5m"))),
         txns_1h=int(to_float(item.get("swaps_1h"))),
         pair_created_at=parse_timestamp(
             item.get("created_timestamp")
@@ -1539,9 +1557,11 @@ def registry_pool_from_market_entry(entry):
         url=clean_social_text(entry.get("url")),
         mcap_usd=to_float(entry.get("latest_mcap_usd") or entry.get("scan_mcap_usd")),
         liquidity_usd=to_float(entry.get("latest_liquidity_usd") or entry.get("scan_liquidity_usd")),
+        volume_5m_usd=to_float(entry.get("latest_volume_5m_usd")),
         volume_1h_usd=to_float(entry.get("latest_volume_1h_usd")),
         volume_24h_usd=to_float(entry.get("latest_volume_24h_usd")),
         price_usd=to_float(entry.get("latest_price_usd") or entry.get("scan_price_usd")),
+        txns_5m=int(to_float(entry.get("latest_txns_5m"))),
         txns_1h=int(to_float(entry.get("latest_txns_1h"))),
         pair_created_at=parse_timestamp(entry.get("pair_created_at")),
     )
@@ -1728,22 +1748,31 @@ def reactivation_stage_config(pool, config):
 def reactivation_activity_score(pool):
     mcap = max(1.0, float(pool.mcap_usd or 0))
     liquidity = max(1.0, float(pool.liquidity_usd or 0))
+    volume_5m = max(0.0, float(pool.volume_5m_usd or 0))
     volume = max(0.0, float(pool.volume_1h_usd or 0))
+    txns_5m = max(0, int(pool.txns_5m or 0))
     txns = max(0, int(pool.txns_1h or 0))
     volume_to_mcap = min(2.0, volume / mcap)
     volume_to_liquidity = min(4.0, volume / liquidity)
+    burst_to_mcap = min(1.0, volume_5m / mcap)
+    burst_acceleration = min(3.0, (volume_5m * 12.0) / max(1.0, volume))
     return (
         min(6.0, txns / 100.0)
         + volume_to_mcap * 8.0
         + volume_to_liquidity * 2.0
         + min(3.0, volume / 25_000.0)
+        + min(5.0, txns_5m / 8.0)
+        + burst_to_mcap * 12.0
+        + burst_acceleration * 1.5
     )
 
 
 def market_activity_fingerprint(pool):
     return {
         "mcap_usd": round(float(pool.mcap_usd or 0), 2),
+        "volume_5m_usd": round(float(pool.volume_5m_usd or 0), 2),
         "volume_1h_usd": round(float(pool.volume_1h_usd or 0), 2),
+        "txns_5m": int(pool.txns_5m or 0),
         "txns_1h": int(pool.txns_1h or 0),
     }
 
@@ -1821,7 +1850,7 @@ def market_activity_snapshot_changed(pool, fingerprint, config):
         float(config.get("market_activity_stale_rearm_change_ratio", 0.25)),
     )
     current = market_activity_fingerprint(pool)
-    for key in ("mcap_usd", "volume_1h_usd", "txns_1h"):
+    for key in ("mcap_usd", "volume_5m_usd", "volume_1h_usd", "txns_5m", "txns_1h"):
         previous = float(fingerprint.get(key) or 0)
         value = float(current.get(key) or 0)
         if abs(value - previous) / max(1.0, abs(previous)) >= ratio:
@@ -1876,6 +1905,8 @@ def pool_priority_sort_key(pool, config):
     if (config.get("lane") or config.get("mode")) == "reactivation":
         return (
             reactivation_activity_score(pool),
+            int(pool.txns_5m or 0),
+            float(pool.volume_5m_usd or 0),
             int(pool.txns_1h or 0),
             float(pool.volume_1h_usd or 0),
             float(pool.liquidity_usd or 0),
@@ -1921,6 +1952,72 @@ def pool_last_scanned_at(state, pool):
     )
 
 
+def reactivation_stage_counts(pools, config):
+    counts = defaultdict(int)
+    if (config.get("lane") or config.get("mode")) != "reactivation":
+        return {}
+    for pool in pools:
+        stage = reactivation_stage_config(pool, config).get("reactivation_stage") or "mature"
+        counts[stage] += 1
+    return dict(counts)
+
+
+def select_reactivation_priority(candidates, limit, config):
+    if limit <= 0 or not candidates:
+        return []
+    shares = config.get("reactivation_stage_scan_shares")
+    if (
+        (config.get("lane") or config.get("mode")) != "reactivation"
+        or not isinstance(shares, dict)
+        or not shares
+    ):
+        return list(candidates[:limit])
+
+    stages = [
+        (str(name), max(0.0, float(share or 0)))
+        for name, share in shares.items()
+        if float(share or 0) > 0
+    ]
+    total_share = sum(share for _name, share in stages)
+    if not stages or total_share <= 0:
+        return list(candidates[:limit])
+
+    buckets = {name: [] for name, _share in stages}
+    for pool in candidates:
+        stage = reactivation_stage_config(pool, config).get("reactivation_stage") or "mature"
+        if stage in buckets:
+            buckets[stage].append(pool)
+
+    raw_quotas = [
+        (name, limit * share / total_share)
+        for name, share in stages
+    ]
+    quotas = {name: int(raw) for name, raw in raw_quotas}
+    remaining_quota = limit - sum(quotas.values())
+    for name, raw in sorted(
+        raw_quotas,
+        key=lambda item: (item[1] - int(item[1]), item[1]),
+        reverse=True,
+    )[:remaining_quota]:
+        quotas[name] += 1
+
+    selected = []
+    selected_keys = set()
+    for name, _share in stages:
+        for pool in buckets.get(name, [])[: quotas.get(name, 0)]:
+            selected.append(pool)
+            selected_keys.add(pool.pool_address)
+
+    for pool in candidates:
+        if len(selected) >= limit:
+            break
+        if pool.pool_address in selected_keys:
+            continue
+        selected.append(pool)
+        selected_keys.add(pool.pool_address)
+    return selected
+
+
 def select_scan_targets(universe, state, config):
     limit = max(0, int(config.get("active_pool_limit", 0)))
     if not limit or not universe:
@@ -1947,6 +2044,7 @@ def select_scan_targets(universe, state, config):
             "never_scanned": never_scanned,
             "market_stale_suppressed": len(suppressed_pool_keys),
             "market_stale_selected": len(suppressed_pool_keys),
+            "reactivation_stages": reactivation_stage_counts(universe, config),
         }
 
     monitor_share = min(0.5, max(0.0, float(config.get("signal_monitor_share", 0.25))))
@@ -1982,9 +2080,12 @@ def select_scan_targets(universe, state, config):
         if len(monitored) >= monitor_limit:
             break
 
+    active_lane = config.get("lane")
     for alert in sorted(load_alert_history(), key=alert_history_sort_key, reverse=True):
         if len(monitored) >= monitor_limit:
             break
+        if active_lane and alert.get("lane") != active_lane:
+            continue
         if monitor_cutoff and alert_history_timestamp(alert) < monitor_cutoff:
             continue
         alert_pool = alert.get("pool") or {}
@@ -2002,17 +2103,25 @@ def select_scan_targets(universe, state, config):
     market_candidates = [
         pool for pool in universe if pool.pool_address not in monitored_keys
     ]
-    if suppressed_pool_keys:
-        market_candidates = [
-            pool
-            for pool in market_candidates
-            if pool.pool_address not in suppressed_pool_keys
-        ] + [
-            pool
-            for pool in market_candidates
-            if pool.pool_address in suppressed_pool_keys
-        ]
-    market_priority = market_candidates[:market_priority_limit]
+    unsuppressed_candidates = [
+        pool
+        for pool in market_candidates
+        if pool.pool_address not in suppressed_pool_keys
+    ]
+    suppressed_candidates = [
+        pool
+        for pool in market_candidates
+        if pool.pool_address in suppressed_pool_keys
+    ]
+    market_priority = select_reactivation_priority(
+        unsuppressed_candidates,
+        market_priority_limit,
+        config,
+    )
+    if len(market_priority) < market_priority_limit:
+        market_priority.extend(
+            suppressed_candidates[: market_priority_limit - len(market_priority)]
+        )
     priority = [*monitored, *market_priority]
     priority_keys = {pool.pool_address for pool in priority}
     rotation_candidates = [pool for pool in universe if pool.pool_address not in priority_keys]
@@ -2044,6 +2153,7 @@ def select_scan_targets(universe, state, config):
         "market_stale_selected": sum(
             1 for pool in selected if pool.pool_address in suppressed_pool_keys
         ),
+        "reactivation_stages": reactivation_stage_counts(selected, config),
     }
 
 
@@ -6094,10 +6204,13 @@ def compact_alert_history(existing_alerts, new_alerts, config):
     keep_missing_tier = bool(config.get("alert_history_keep_missing_tier", False))
     cutoff = int(time.time() - retention_hours * 3600) if retention_hours > 0 else 0
     deleted = load_deleted_tokens()
+    active_lanes = set(selected_lanes(config, "all")) if config.get("lanes") else set()
     by_id = {}
 
     for alert in [*(existing_alerts or []), *(new_alerts or [])]:
         if not isinstance(alert, dict):
+            continue
+        if active_lanes and alert.get("lane") not in active_lanes:
             continue
         if alert_is_deleted(alert, deleted):
             continue
@@ -6165,7 +6278,7 @@ def write_alerts(alerts, config):
             handle.write(json.dumps(alert, separators=(",", ":")) + "\n")
 
 
-def recent_alert_token_addresses(limit=250):
+def recent_alert_token_addresses(limit=250, lanes=None):
     if not ALERTS_PATH.exists():
         return []
     tokens = []
@@ -6176,13 +6289,15 @@ def recent_alert_token_addresses(limit=250):
             alert = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if lanes and alert.get("lane") not in lanes:
+            continue
         token = (alert.get("pool") or {}).get("token_address")
         if token and token not in tokens:
             tokens.append(token)
     return tokens
 
 
-def caught_market_token_addresses(state, alerts=None, limit=80):
+def caught_market_token_addresses(state, alerts=None, limit=80, lanes=None):
     deleted = load_deleted_tokens()
     candidates = []
 
@@ -6193,12 +6308,16 @@ def caught_market_token_addresses(state, alerts=None, limit=80):
         candidates.append((parse_timestamp(timestamp), token))
 
     for alert in load_alert_history():
+        if lanes and alert.get("lane") not in lanes:
+            continue
         pool = alert.get("pool") or {}
         if pool.get("pool_address") in deleted.get("pools", set()):
             continue
         add(pool.get("token_address"), alert_history_timestamp(alert))
 
     for alert in alerts or []:
+        if lanes and alert.get("lane") not in lanes:
+            continue
         pool = alert.get("pool") or {}
         if pool.get("pool_address") in deleted.get("pools", set()):
             continue
@@ -6206,6 +6325,8 @@ def caught_market_token_addresses(state, alerts=None, limit=80):
 
     for token, entry in (state.get("market") or {}).items():
         if not isinstance(entry, dict) or not entry.get("first_signal_at"):
+            continue
+        if lanes and entry.get("first_obs_lane") not in lanes:
             continue
         add(entry.get("token_address") or token, entry.get("first_signal_at"))
 
@@ -6492,7 +6613,11 @@ def enrich_market_ath(http, state, pools, alerts, config, observed_at):
     }
     pool_tokens = [pool.token_address for pool in pools if pool.token_address]
     alert_tokens = [(alert.get("pool") or {}).get("token_address") for alert in alerts]
-    recent_tokens = recent_alert_token_addresses(int(config.get("ath_recent_alert_limit", 100)))
+    active_lanes = set(selected_lanes(config, "all")) if config.get("lanes") else None
+    recent_tokens = recent_alert_token_addresses(
+        int(config.get("ath_recent_alert_limit", 100)),
+        lanes=active_lanes,
+    )
     priority_tokens = []
     for token in alert_tokens:
         if token and token not in priority_tokens:
@@ -6615,8 +6740,10 @@ def record_market_observations(state, pools, observed_at):
                 "latest_mcap_usd": pool.mcap_usd,
                 "latest_price_usd": pool.price_usd,
                 "latest_liquidity_usd": pool.liquidity_usd,
+                "latest_volume_5m_usd": pool.volume_5m_usd,
                 "latest_volume_1h_usd": pool.volume_1h_usd,
                 "latest_volume_24h_usd": pool.volume_24h_usd,
+                "latest_txns_5m": pool.txns_5m,
                 "latest_txns_1h": pool.txns_1h,
                 "latest_seen_at": observed_at,
                 "scan_mcap_usd": pool.mcap_usd,
@@ -6656,7 +6783,13 @@ def refresh_caught_market_observations(http, state, alerts, config, observed_at)
     limit = int(config.get("caught_market_refresh_max_tokens", 80))
     ttl_seconds = int(config.get("caught_market_refresh_ttl_minutes", 50)) * 60
     now = parse_timestamp(observed_at) or int(time.time())
-    tokens = caught_market_token_addresses(state, alerts, limit=limit)
+    active_lanes = set(selected_lanes(config, "all")) if config.get("lanes") else None
+    tokens = caught_market_token_addresses(
+        state,
+        alerts,
+        limit=limit,
+        lanes=active_lanes,
+    )
     market = state.setdefault("market", {})
     due_tokens = []
     for token in tokens:
@@ -7577,7 +7710,6 @@ def run_once(config, lane_name=None):
     if (
         scan_health["status"] == "unhealthy"
         and config.get("scan_health_reject_unhealthy_snapshot", True)
-        and len(lane_list) > 1
     ):
         raise RuntimeError("unhealthy scan rejected: " + "; ".join(scan_health["reasons"]))
 
@@ -7609,14 +7741,14 @@ def run_once(config, lane_name=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Solana fresh/dormant wallet radar.")
+    parser = argparse.ArgumentParser(description="Solana token reactivation radar.")
     parser.add_argument("--once", action="store_true", help="Run one scan and exit.")
     parser.add_argument("--watch", action="store_true", help="Run forever on scan_interval_seconds.")
     parser.add_argument("--mode", choices=["aggressive", "balanced", "conservative"], help="Scan profile.")
     parser.add_argument(
         "--lane",
-        choices=["all", "micro_sticky", "cheap_sticky", "breakout", "reactivation"],
-        help="Lane profile. Defaults to all lane-based filters.",
+        choices=["all", "reactivation"],
+        help="Lane profile. Reactivation is the only enabled production lane.",
     )
     args = parser.parse_args()
 

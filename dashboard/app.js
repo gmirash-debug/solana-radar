@@ -63,7 +63,7 @@ const state = {
   query: "",
   tier: "focus",
   heat: "all",
-  lane: "all",
+  lane: "reactivation",
   minScore: 0,
   selectedTokenKey: null,
   selectedNarrative: null,
@@ -87,11 +87,9 @@ const els = {
   content: document.querySelector("#content"),
   refresh: document.querySelector("#refresh"),
   runScan: document.querySelector("#runScan"),
-  modeSelect: document.querySelector("#modeSelect"),
   searchInput: document.querySelector("#searchInput"),
   tierFilter: document.querySelector("#tierFilter"),
   heatFilter: document.querySelector("#heatFilter"),
-  laneFilter: document.querySelector("#laneFilter"),
   scoreInput: document.querySelector("#scoreInput"),
   showHiddenInput: document.querySelector("#showHiddenInput"),
   filterToggle: document.querySelector("#filterToggle"),
@@ -100,34 +98,15 @@ const els = {
 };
 
 const FILTER_META = {
-  micro_sticky: {
-    label: "Micro Sticky",
-    criteria: "3h-7d / $10k-$50k mcap / liq >= $3k / sticky buyers >=6% supply",
-    thesis: "strict early cheap migrated pump.fun tokens where multiple buyers still hold meaningful supply after a strong net-buy window.",
-  },
-  cheap_sticky: {
-    label: "Cheap Sticky",
-    criteria: "12h-10d / $50k-$250k mcap / liq >= $10k / sticky buyers >=6% supply",
-    thesis: "TinyWorld-style cheap accumulation with stronger net-buy, holder retention, and sticky buyer supply before repricing.",
-  },
-  breakout: {
-    label: "Breakout",
-    criteria: "3d-30d / $5m-$25m mcap / liq >= $50k / 1h volume >= $100k",
-    thesis: "momentum expansion filtered for volume velocity and suspicious onchain flow.",
-  },
   reactivation: {
     label: "Reactivation",
-    criteria: "30d+ / any positive mcap up to $5m / liq >= $3k / staged sticky buy-wave",
-    thesis: "older migrated tokens ranked by renewed trading intensity, then confirmed by distributed net buying and retained buyer balances. ATH is risk context, not a discovery gate.",
-  },
-  legacy: {
-    label: "Legacy",
-    criteria: "fallback for insufficient snapshots or old catches outside current filter rules",
-    thesis: "historical scanner catches that are missing filter evidence or no longer fit the active lane rules.",
+    criteria: "30d+ / $0-$5m mcap / liq >= $3k / 5m burst + retained buy-wave",
+    thesis: "older migrated tokens ranked by renewed 5m and 1h activity, then confirmed by distributed net buying and balances that still retain the acquired supply. ATH is risk context, not a discovery gate.",
   },
 };
 
-const FILTER_ORDER = ["micro_sticky", "cheap_sticky", "breakout", "reactivation", "legacy"];
+const ACTIVE_SCANNER_LANES = new Set(["reactivation"]);
+const FILTER_ORDER = ["reactivation"];
 const MIGRATED_PUMPFUN_DEX_ALLOWLIST = new Set(["pumpfun-amm", "pumpswap"]);
 const HARD_WALLET_CLASSES = new Set(["fresh", "freshish", "dormant"]);
 const SUPPORT_WALLET_CLASSES = new Set(["low_tx"]);
@@ -304,45 +283,17 @@ function rawTimestampDate(value) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-const EXPLICIT_FILTERS = ["micro_sticky", "cheap_sticky", "breakout", "reactivation"];
-const INFERRABLE_FILTERS = ["breakout", "reactivation"];
+const EXPLICIT_FILTERS = ["reactivation"];
+const INFERRABLE_FILTERS = ["reactivation"];
 
 const FILTER_RULES = {
-  micro_sticky: {
-    ageMin: 3,
-    ageMax: 168,
-    mcapMin: 10_000,
-    mcapMax: 50_000,
-    liquidityMin: 3_000,
-    volumeMin: 250,
-    volumeMax: 25_000,
-  },
-  cheap_sticky: {
-    ageMin: 12,
-    ageMax: 240,
-    mcapMin: 50_000,
-    mcapMax: 250_000,
-    liquidityMin: 10_000,
-    volumeMin: 2_000,
-    volumeMax: 40_000,
-  },
-  breakout: {
-    ageMin: 72,
-    ageMax: 720,
-    mcapMin: 5_000_000,
-    mcapMax: 25_000_000,
-    liquidityMin: 50_000,
-    volumeMin: 100_000,
-    volumeToMcapMin: 0.02,
-    volumeToLiquidityMin: 0.35,
-  },
   reactivation: {
     ageMin: 720,
     ageMax: null,
     mcapMin: 0,
     mcapMax: 5_000_000,
     liquidityMin: 3_000,
-    volumeMin: 250,
+    volumeMin: 100,
   },
 };
 
@@ -742,11 +693,6 @@ function deriveAlertTier(alert = {}) {
   if (!hardSignal) return Number(alert.score || 0) >= 60 ? "watch" : "noise";
   if (isHotReactivationAlert(alert)) return "hot_reactivation";
   if (volumeToMcap !== null && volumeToMcap > 1.5 && evidence.commonLinks === 0) return "late_chase";
-  if (lane === "micro_sticky" || lane === "cheap_sticky") {
-    if (evidence.waveStickySupplyPct >= 5) return "actionable";
-    if (evidence.waveStickySupplyPct >= 3) return "watch";
-    return evidence.commonLinks || evidence.hardWallets >= 2 ? "watch" : "noise";
-  }
   if (lane === "reactivation") {
     const ratio = snapshot.athMcapUsd && mcap ? mcap / snapshot.athMcapUsd : null;
     if (ratio !== null && ratio > 0.4) return "late_chase";
@@ -754,8 +700,7 @@ function deriveAlertTier(alert = {}) {
     if (ratio !== null && ratio <= 0.25 && evidence.commonLinks && evidence.hardWallets >= 2) return "actionable";
     return "watch";
   }
-  if (lane === "breakout") return evidence.commonLinks ? "watch" : "late_chase";
-  return "watch";
+  return "noise";
 }
 
 function alertTier(alert = {}) {
@@ -803,8 +748,11 @@ function pClass(value) {
 }
 
 function sourceAlerts() {
-  const current = (state.report?.alerts || []).map((alert) => ({ ...alert, _scope_source: "current" }));
+  const current = (state.report?.alerts || [])
+    .filter((alert) => ACTIVE_SCANNER_LANES.has(alert.lane))
+    .map((alert) => ({ ...alert, _scope_source: "current" }));
   const history = (state.history || [])
+    .filter((alert) => ACTIVE_SCANNER_LANES.has(alert.lane))
     .filter((alert) => ["actionable", "hot_reactivation", "watch"].includes(alertTier(alert)))
     .map((alert) => ({ ...alert, _scope_source: "history" }));
   return [...history, ...current];
@@ -2717,42 +2665,10 @@ function renderFilters() {
   if (token) state.selectedTokenKey = token.key;
   els.content.innerHTML = `
     <div class="filter-workspace${state.mobileDetailOpen ? " is-detail-open" : ""}">
-      <section class="filter-master">
-        <div class="workspace-title">Scanner lanes</div>
-        <div class="filter-rail">
-          ${groups.map((item) => `
-          <button class="filter-card${item.name === group.name ? " is-selected" : ""}" type="button" data-filter="${esc(item.name)}">
-            <div class="filter-card-head">
-              <strong>${esc(item.meta.label)}</strong>
-              <span>${esc(item.tokens.length)}</span>
-            </div>
-            <div class="filter-card-stats">
-              <span>${esc(item.alerts)} signals</span>
-              <span>${esc(item.noticedWallets)} wallets</span>
-              <span>${sol(item.totalSol)}</span>
-              <span class="${pClass(item.bestPnl)}">${pct(item.bestPnl)}</span>
-            </div>
-            <div class="filter-card-criteria">${esc(item.meta.criteria)}</div>
-            <div class="filter-card-tiers">${compactTierSummary(item)}</div>
-          </button>
-        `).join("")}
-        </div>
-      </section>
       ${renderFilterTokenPanel(group)}
       ${renderTokenDetail(token)}
     </div>
   `;
-  document.querySelectorAll(".filter-card").forEach((card) => {
-    card.addEventListener("click", () => {
-      state.selectedFilter = card.dataset.filter;
-      state.mobileDetailOpen = false;
-      const nextGroup = groups.find((item) => item.name === state.selectedFilter);
-      if (nextGroup && !nextGroup.tokens.some((token) => token.key === state.selectedTokenKey)) {
-        state.selectedTokenKey = nextGroup.tokens[0]?.key || null;
-      }
-      render();
-    });
-  });
   document.querySelectorAll(".filter-token-row").forEach((row) => {
     row.addEventListener("click", () => {
       state.selectedTokenKey = row.dataset.tokenKey;
@@ -2848,9 +2764,8 @@ function render() {
 
 async function runScan() {
   if (state.staticMode) return;
-  const lane = els.modeSelect.value;
   els.runScan.disabled = true;
-  await fetch(`/api/scan?lane=${encodeURIComponent(lane)}`, { method: "POST" });
+  await fetch("/api/scan?lane=reactivation", { method: "POST" });
   await loadData();
 }
 
@@ -2871,11 +2786,6 @@ els.tierFilter.addEventListener("change", (event) => {
 });
 els.heatFilter.addEventListener("change", (event) => {
   state.heat = event.target.value;
-  render();
-});
-els.laneFilter.addEventListener("change", (event) => {
-  state.lane = event.target.value;
-  state.mobileDetailOpen = false;
   render();
 });
 els.scoreInput.addEventListener("input", (event) => {

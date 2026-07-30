@@ -501,6 +501,12 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(stats["priority"], 2)
         self.assertEqual(stats["rotation"], 2)
 
+    def test_default_lane_selection_only_enables_reactivation(self):
+        config = scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {})
+        self.assertEqual(scanner.selected_lanes(config, "all"), ["reactivation"])
+        with self.assertRaises(SystemExit):
+            scanner.selected_lanes(config, "micro_sticky")
+
     def test_scan_selection_reserves_capacity_for_recent_signals(self):
         pools = [
             scanner.Pool(pool_address=f"pool-{index}", token_address=f"token-{index}")
@@ -532,6 +538,87 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(selected[0].pool_address, "pool-5")
         self.assertEqual(stats["signal_monitor"], 1)
         self.assertEqual(len(selected), 4)
+
+    def test_reactivation_monitor_ignores_alerts_from_disabled_lanes(self):
+        pools = [
+            scanner.Pool(pool_address=f"pool-{index}", token_address=f"token-{index}")
+            for index in range(3)
+        ]
+        old_lane_alert = {
+            "created_at": "2026-07-29T12:00:00Z",
+            "lane": "micro_sticky",
+            "pool": {"pool_address": "pool-2", "token_address": "token-2"},
+            "score": 90,
+        }
+        with (
+            mock.patch.object(scanner, "load_alert_history", return_value=[old_lane_alert]),
+            mock.patch.object(
+                scanner.time,
+                "time",
+                return_value=scanner.parse_timestamp(old_lane_alert["created_at"]) + 3_600,
+            ),
+        ):
+            selected, stats = scanner.select_scan_targets(
+                pools,
+                {"pools": {}},
+                {
+                    "lane": "reactivation",
+                    "active_pool_limit": 2,
+                    "scan_priority_share": 1,
+                    "signal_monitor_share": 0.5,
+                    "signal_monitor_max_age_hours": 48,
+                },
+            )
+        self.assertEqual([pool.pool_address for pool in selected], ["pool-0", "pool-1"])
+        self.assertEqual(stats["signal_monitor"], 0)
+
+    def test_market_refresh_ignores_catches_from_disabled_lanes(self):
+        old_token = "A" * 32
+        react_token = "B" * 32
+        history = [
+            {
+                "created_at": "2026-07-29T12:00:00Z",
+                "lane": "micro_sticky",
+                "pool": {"pool_address": "old-pool", "token_address": old_token},
+            },
+            {
+                "created_at": "2026-07-29T13:00:00Z",
+                "lane": "reactivation",
+                "pool": {"pool_address": "react-pool", "token_address": react_token},
+            },
+        ]
+        with mock.patch.object(scanner, "load_alert_history", return_value=history):
+            tokens = scanner.caught_market_token_addresses(
+                {"market": {}},
+                limit=10,
+                lanes={"reactivation"},
+            )
+        self.assertEqual(tokens, [react_token])
+
+    def test_alert_history_compaction_drops_disabled_lanes(self):
+        config = scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {})
+        alerts = [
+            {
+                "created_at": "2026-07-29T12:00:00Z",
+                "lane": "micro_sticky",
+                "action_tier": "actionable",
+                "score": 90,
+                "pool": {"pool_address": "old-pool", "token_address": "old-token"},
+            },
+            {
+                "created_at": "2026-07-29T13:00:00Z",
+                "lane": "reactivation",
+                "action_tier": "watch",
+                "score": 70,
+                "pool": {"pool_address": "react-pool", "token_address": "react-token"},
+            },
+        ]
+        with mock.patch.object(scanner.time, "time", return_value=scanner.parse_timestamp("2026-07-29T14:00:00Z")):
+            compacted = scanner.compact_alert_history(alerts, [], config)
+        self.assertEqual(
+            [(alert["lane"], alert["pool"]["token_address"]) for alert in compacted],
+            [("reactivation", "react-token")],
+        )
 
     def test_due_signal_recheck_preempts_recent_signal_monitor(self):
         now = scanner.parse_timestamp("2026-07-29T13:00:00Z")
@@ -1605,6 +1692,60 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertGreater(
             scanner.reactivation_activity_score(low_cap_wave),
             scanner.reactivation_activity_score(larger_slow_pool),
+        )
+
+    def test_reactivation_priority_rewards_five_minute_burst(self):
+        quiet = scanner.Pool(
+            pool_address="quiet",
+            token_address="quiet-token",
+            mcap_usd=100_000,
+            liquidity_usd=20_000,
+            volume_5m_usd=100,
+            volume_1h_usd=12_000,
+            txns_5m=2,
+            txns_1h=100,
+        )
+        bursting = scanner.Pool(
+            pool_address="burst",
+            token_address="burst-token",
+            mcap_usd=100_000,
+            liquidity_usd=20_000,
+            volume_5m_usd=5_000,
+            volume_1h_usd=12_000,
+            txns_5m=50,
+            txns_1h=100,
+        )
+        self.assertGreater(
+            scanner.reactivation_activity_score(bursting),
+            scanner.reactivation_activity_score(quiet),
+        )
+
+    def test_reactivation_priority_reserves_capacity_by_market_stage(self):
+        config = scanner.apply_lane(
+            scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {}),
+            "reactivation",
+        )
+        stage_mcaps = {
+            "ignition": 50_000,
+            "early": 150_000,
+            "established": 500_000,
+            "mature": 2_000_000,
+        }
+        candidates = []
+        for stage, mcap in reversed(list(stage_mcaps.items())):
+            for index in range(10):
+                candidates.append(
+                    scanner.Pool(
+                        pool_address=f"{stage}-{index}",
+                        token_address=f"{stage}-token-{index}",
+                        mcap_usd=mcap,
+                    )
+                )
+        selected = scanner.select_reactivation_priority(candidates, 20, config)
+        counts = scanner.reactivation_stage_counts(selected, config)
+        self.assertEqual(
+            counts,
+            {"ignition": 6, "early": 6, "established": 5, "mature": 3},
         )
 
     def test_reactivation_priority_defers_unchanged_stale_market_snapshot(self):

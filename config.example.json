@@ -1,6 +1,6 @@
 {
   "mode": "balanced",
-  "lane": "all",
+  "lane": "reactivation",
   "modes": {
     "aggressive": {
       "mcap_min_usd": 100000,
@@ -46,13 +46,11 @@
     }
   },
   "lane_order": [
-    "micro_sticky",
-    "cheap_sticky",
-    "breakout",
     "reactivation"
   ],
   "lanes": {
     "micro_sticky": {
+      "enabled": false,
       "age_min_hours": 3,
       "age_max_hours": 168,
       "mcap_min_usd": 10000,
@@ -115,6 +113,7 @@
       "scan_priority_share": 0.65
     },
     "cheap_sticky": {
+      "enabled": false,
       "age_min_hours": 12,
       "age_max_hours": 240,
       "mcap_min_usd": 50000,
@@ -177,6 +176,7 @@
       "scan_priority_share": 0.65
     },
     "breakout": {
+      "enabled": false,
       "age_min_hours": 72,
       "age_max_hours": 720,
       "mcap_min_usd": 5000000,
@@ -214,6 +214,7 @@
       "scan_priority_share": 0.8
     },
     "reactivation": {
+      "enabled": true,
       "age_min_hours": 720,
       "age_max_hours": null,
       "mcap_min_usd": 0,
@@ -221,7 +222,7 @@
       "actionable_mcap_max_usd": 1000000,
       "watch_mcap_max_usd": 5000000,
       "liquidity_min_usd": 3000,
-      "volume_1h_min_usd": 250,
+      "volume_1h_min_usd": 100,
       "volume_1h_max_usd": null,
       "ath_max_current_ratio": null,
       "ath_actionable_max_current_ratio": 0.25,
@@ -243,7 +244,7 @@
       "reactivation_wave_min_large_buyers": 8,
       "reactivation_wave_large_buy_min_sol": 1,
       "reactivation_wave_candidate_windows": 1,
-      "reactivation_wave_balance_wallet_limit": 50,
+      "reactivation_wave_balance_wallet_limit": 60,
       "reactivation_wave_min_sticky_wallets": 12,
       "reactivation_wave_min_sticky_supply_pct": 3,
       "reactivation_wave_actionable_sticky_supply_pct": 5,
@@ -283,7 +284,7 @@
           "reactivation_wave_actionable_sticky_bought_pct": 70,
           "reactivation_wave_min_net_token_retention_pct": 55,
           "reactivation_wave_actionable_net_token_retention_pct": 75,
-          "reactivation_wave_min_hold_minutes": 30,
+          "reactivation_wave_min_hold_minutes": 15,
           "reactivation_wave_max_top_buyer_share": 0.45,
           "reactivation_wave_max_top3_buyer_share": 0.75,
           "volume_1h_to_mcap_max_actionable": 0.8,
@@ -305,7 +306,7 @@
           "reactivation_wave_actionable_sticky_bought_pct": 65,
           "reactivation_wave_min_net_token_retention_pct": 50,
           "reactivation_wave_actionable_net_token_retention_pct": 75,
-          "reactivation_wave_min_hold_minutes": 45,
+          "reactivation_wave_min_hold_minutes": 30,
           "reactivation_wave_max_top_buyer_share": 0.4,
           "reactivation_wave_max_top3_buyer_share": 0.7,
           "volume_1h_to_mcap_max_actionable": 0.5,
@@ -344,7 +345,7 @@
       "alert_window_minutes": 240,
       "alert_min_suspicious_wallets": 3,
       "alert_min_suspicious_sol": 20,
-      "active_pool_limit": 36,
+      "active_pool_limit": 64,
       "helius_recent_pages": 4,
       "helius_recent_medium_tx_pages": 8,
       "helius_recent_high_tx_pages": 16,
@@ -353,13 +354,20 @@
       "helius_incremental_high_tx_pages": 18,
       "helius_classify_global_buy_limit": 30,
       "helius_classify_top_buys_per_window": 5,
-      "helius_probe_wallet_limit": 10,
-      "max_wallet_classifications_per_pool": 60,
+      "helius_probe_wallet_limit": 15,
+      "max_wallet_classifications_per_pool": 80,
       "max_new_signatures_per_pool": 40,
       "initial_backfill_signatures": 25,
-      "max_wallet_classifications_per_scan": 650,
+      "max_wallet_classifications_per_scan": 1000,
+      "helius_deep_audit_max_pools_per_scan": 2,
       "signal_monitor_share": 0.2,
-      "scan_priority_share": 0.9
+      "scan_priority_share": 0.9,
+      "reactivation_stage_scan_shares": {
+        "ignition": 0.3,
+        "early": 0.3,
+        "established": 0.25,
+        "mature": 0.15
+      }
     }
   },
   "mcap_min_usd": 100000,

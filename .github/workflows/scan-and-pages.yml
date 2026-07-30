@@ -184,7 +184,7 @@ jobs:
           BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
         run: |
           set +e
-          timeout --signal=TERM --kill-after=30s 25m python scanner.py --once --lane all
+          timeout --signal=TERM --kill-after=30s 25m python scanner.py --once --lane reactivation
           status=$?
           if [ "$status" = "124" ]; then
             python - <<'PY'

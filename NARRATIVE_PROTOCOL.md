@@ -22,32 +22,16 @@ Narratives are assigned only to tokens with scanner alerts. The universe list is
 
 ## Lane Scope
 
-The `micro_sticky` lane is the very early cheap sticky-accumulation lane:
+`reactivation` is the only production lane:
 
-- age: `3h-7d`;
-- market cap: `$10k-$50k`;
+- age: `30d+`;
+- market cap: any positive value up to `$5m`;
 - liquidity: `>= $3k`;
-- alert requirement: strict sticky buyer supply, multi-wallet retention, and net-buy flow, not raw low_tx/freshish activity.
+- market prefilter: at least `$100` reported 1h volume, ranked by 5m burst plus 1h activity;
+- scan allocation: explicit capacity for `ignition`, `early`, `established`, and `mature` market-cap stages;
+- alert requirement: distributed net buying, buyer concentration limits, and current balances that retain the acquired supply.
 
-The `cheap_sticky` lane is the TinyWorld-style cheap sticky-accumulation lane:
-
-- age: `12h-10d`;
-- market cap: `$50k-$250k`;
-- liquidity: `>= $10k`;
-- alert requirement: stronger sticky buyer supply and net-buy retention before the market fully reprices the token.
-
-The `breakout` lane is the momentum/anomaly lane:
-
-- age: `3d-30d`;
-- market cap: `$5m-$25m`;
-- liquidity: `>= $50k`;
-- 1h volume: `>= $100k`;
-- 1h volume / market cap: `>= 2%`;
-- 1h volume / liquidity: `>= 0.35x`.
-
-Tokens above `$25m` need a separate higher-cap momentum lane; they should not silently expand `breakout` unless the scanner budget is also increased.
-
-Retired scanner filters: `incubation` and `young` are no longer active lanes. Historical catches from those lanes should be shown under an active current filter if they now match one, otherwise under `Legacy`; do not keep retired filters as first-class dashboard groups. New cheap-token coverage should come from `micro_sticky` and `cheap_sticky`, because those require current holder retention before surfacing low-cap noise.
+`micro_sticky`, `cheap_sticky`, `breakout`, `incubation`, and `young` are disabled. Historical alerts from those lanes must not appear in the production dashboard or consume Reactivation monitoring capacity.
 
 ## Scanner Filter Categorizer
 
@@ -55,12 +39,11 @@ Narrative category answers what the token story is. Scanner filter category answ
 
 Every caught token should expose:
 
-- `primaryFilter`: first lane/filter that produced the token's first alert;
-- `filterCategories`: all lanes/filters that produced alerts for the token;
-- filter criteria shown in the dashboard;
-- filter grouping in the `Filters` tab.
+- `primaryFilter`: `reactivation`;
+- `reactivation_stage`: `ignition`, `early`, `established`, or `mature`;
+- filter criteria shown in the dashboard.
 
-Filter categories should be based on alert lane or, for old untagged alerts, inferred from the alert's market snapshot using the current filter rules. Never infer a filter from token name or narrative. `Legacy` is allowed when the old alert lacks enough age, market cap, liquidity, volume, ATH, or sticky-accumulation data to map it into the active Micro Sticky, Cheap Sticky, Breakout, or Reactivation filters, or when it came from a retired filter and no longer fits an active filter.
+The production dashboard accepts alerts whose backend `lane` is explicitly `reactivation`. It must not relabel an old alert from a disabled lane as Reactivation merely because the token later fits the same age or market-cap range. Never infer a filter from token name or narrative.
 
 ## Enrichment Timing
 

@@ -18,7 +18,7 @@ STATE_PATH = DATA_DIR / "state.json"
 DELETED_TOKENS_PATH = DATA_DIR / "deleted_tokens.json"
 SCANNER_STATUS_PATH = DATA_DIR / "scanner_status.json"
 SCANNER_PATH = ROOT / "scanner.py"
-LANES = {"all", "micro_sticky", "cheap_sticky", "breakout", "reactivation"}
+LANES = {"reactivation"}
 
 scan_lock = threading.Lock()
 scan_status = {
@@ -277,7 +277,7 @@ class RadarHandler(BaseHTTPRequestHandler):
             json_response(self, 404, {"error": "not_found"})
             return
         query = parse_qs(parsed.query)
-        lane = query.get("lane", query.get("mode", ["all"]))[0]
+        lane = query.get("lane", query.get("mode", ["reactivation"]))[0]
         ok, payload = trigger_scan(lane, source="manual")
         json_response(self, 202 if ok else 409 if payload.get("error") == "scan_already_running" else 400, payload)
 
@@ -309,7 +309,7 @@ def main():
     parser = argparse.ArgumentParser(description="Local dashboard server for Solana Radar.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--auto-lane", choices=sorted(LANES), default="all")
+    parser.add_argument("--auto-lane", choices=sorted(LANES), default="reactivation")
     parser.add_argument("--auto-interval-seconds", type=int, default=3600)
     parser.add_argument("--scan-timeout-seconds", type=int, default=840)
     parser.add_argument("--no-auto", action="store_true")
