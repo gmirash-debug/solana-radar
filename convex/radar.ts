@@ -1,4 +1,5 @@
 import { mutation, query } from "./_generated/server";
+import type { MutationCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
 
@@ -9,6 +10,23 @@ const DEFAULT_DELETED_TOKENS = {
   pools: [],
   entries: {},
   updated_at: null,
+};
+const ALERT_RETENTION_DAYS = 7;
+const SCAN_RUN_RETENTION_DAYS = 30;
+const DISCOVERY_RETENTION_DAYS = 2;
+const INACTIVE_DELETE_RETENTION_DAYS = 30;
+
+type UnknownRecord = Record<string, unknown>;
+type DeletedTokenRow = {
+  key: string;
+  kind: "token" | "pool";
+  tokenAddress?: string;
+  poolAddress?: string;
+  symbol?: string;
+  name?: string;
+  active: boolean;
+  deletedAt?: string;
+  updatedAt: string;
 };
 
 function requireIngestSecret(secret: string) {
@@ -36,6 +54,20 @@ function objectField(value: unknown, key: string): unknown {
   return (value as Record<string, unknown>)[key];
 }
 
+function asRecord(value: unknown): UnknownRecord {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as UnknownRecord
+    : {};
+}
+
+function isNewerOrEqual(incoming: string, existing?: string) {
+  const incomingTime = Date.parse(incoming);
+  const existingTime = Date.parse(existing || "");
+  if (!Number.isFinite(incomingTime)) return false;
+  if (!Number.isFinite(existingTime)) return true;
+  return incomingTime >= existingTime;
+}
+
 function alertIdentity(alert: unknown, fallbackGeneratedAt: string) {
   const pool = objectField(alert, "pool");
   const poolAddress = asString(objectField(pool, "pool_address"));
@@ -44,45 +76,57 @@ function alertIdentity(alert: unknown, fallbackGeneratedAt: string) {
   const lane = asString(objectField(alert, "lane"));
   const score = asNumber(objectField(alert, "score"));
   const tier = asString(objectField(alert, "action_tier"));
+  const signalFamily = asString(objectField(alert, "signal_family"));
   const windowStart = asString(objectField(alert, "window_start"));
   const windowEnd = asString(objectField(alert, "window_end"));
   const createdAt = asString(objectField(alert, "created_at"));
   const generatedAt = createdAt || windowEnd || fallbackGeneratedAt;
+  const episodeAt = windowStart || createdAt || fallbackGeneratedAt;
   const tokenKey = tokenAddress || poolAddress || symbol || "unknown";
   const alertKey = [
-    generatedAt,
     tokenKey,
     poolAddress || "",
     lane || "",
-    windowStart || "",
-    windowEnd || "",
-    String(score ?? ""),
+    signalFamily || "classified_wallets",
+    episodeAt,
   ].join("|");
-  return { alertKey, generatedAt, tokenKey, poolAddress, tokenAddress, symbol, lane, score, tier };
+  return { alertKey, generatedAt, tokenKey, poolAddress, tokenAddress, symbol, lane, signalFamily, score, tier };
 }
 
-async function upsertStateDoc(ctx: any, key: string, payload: unknown, now: string) {
-  const existing = await ctx.db.query("stateDocs").withIndex("by_key", (q: any) => q.eq("key", key)).first();
-  const doc = { key, payload, updatedAt: now };
+async function upsertStateDoc(
+  ctx: MutationCtx,
+  key: string,
+  payload: unknown,
+  now: string,
+  sourceUpdatedAt = now,
+) {
+  const existing = await ctx.db.query("stateDocs").withIndex("by_key", (q) => q.eq("key", key)).first();
+  if (existing && !isNewerOrEqual(sourceUpdatedAt, existing.sourceUpdatedAt || existing.updatedAt)) {
+    return false;
+  }
+  const doc = { key, payload, sourceUpdatedAt, updatedAt: now };
   if (existing) {
     await ctx.db.patch(existing._id, doc);
   } else {
     await ctx.db.insert("stateDocs", doc);
   }
+  return true;
 }
 
-async function upsertScanRun(ctx: any, report: any, now: string) {
-  const generatedAt = asString(report?.generated_at) || now;
+async function upsertScanRun(ctx: MutationCtx, report: unknown, now: string) {
+  const generatedAt = asString(objectField(report, "generated_at")) || now;
   const runKey = generatedAt;
-  const existing = await ctx.db.query("scanRuns").withIndex("by_run_key", (q: any) => q.eq("runKey", runKey)).first();
+  const existing = await ctx.db.query("scanRuns").withIndex("by_run_key", (q) => q.eq("runKey", runKey)).first();
   const doc = {
     runKey,
     generatedAt,
-    lane: asString(report?.lane),
-    profile: asString(report?.profile),
-    lanesScanned: Array.isArray(report?.lanes_scanned) ? report.lanes_scanned.filter((item: unknown) => typeof item === "string") : [],
-    stats: report?.stats ?? {},
-    laneStats: report?.lane_stats ?? {},
+    lane: asString(objectField(report, "lane")),
+    profile: asString(objectField(report, "profile")),
+    lanesScanned: Array.isArray(objectField(report, "lanes_scanned"))
+      ? (objectField(report, "lanes_scanned") as unknown[]).filter((item) => typeof item === "string")
+      : [],
+    stats: objectField(report, "stats") ?? {},
+    laneStats: objectField(report, "lane_stats") ?? {},
     createdAt: now,
   };
   if (existing) {
@@ -92,11 +136,11 @@ async function upsertScanRun(ctx: any, report: any, now: string) {
   }
 }
 
-async function upsertAlert(ctx: any, alert: unknown, fallbackGeneratedAt: string, now: string) {
+async function upsertAlert(ctx: MutationCtx, alert: unknown, fallbackGeneratedAt: string, now: string) {
   const identity = alertIdentity(alert, fallbackGeneratedAt);
   const existing = await ctx.db
     .query("alerts")
-    .withIndex("by_alert_key", (q: any) => q.eq("alertKey", identity.alertKey))
+    .withIndex("by_alert_key", (q) => q.eq("alertKey", identity.alertKey))
     .first();
   const doc = {
     ...identity,
@@ -110,16 +154,17 @@ async function upsertAlert(ctx: any, alert: unknown, fallbackGeneratedAt: string
   }
 }
 
-async function upsertDeletedIndex(ctx: any, deletedTokens: any, now: string) {
-  const entries = deletedTokens?.entries && typeof deletedTokens.entries === "object" ? deletedTokens.entries : {};
-  const tokens = Array.isArray(deletedTokens?.tokens) ? deletedTokens.tokens : [];
-  const pools = Array.isArray(deletedTokens?.pools) ? deletedTokens.pools : [];
-  const rows: Array<Record<string, unknown>> = [];
+async function upsertDeletedIndex(ctx: MutationCtx, deletedTokens: unknown, now: string) {
+  const deleted = asRecord(deletedTokens);
+  const entries = asRecord(deleted.entries);
+  const tokens = Array.isArray(deleted.tokens) ? deleted.tokens : [];
+  const pools = Array.isArray(deleted.pools) ? deleted.pools : [];
+  const rows: DeletedTokenRow[] = [];
 
   for (const token of tokens) {
     const tokenAddress = asString(token);
     if (!tokenAddress) continue;
-    const entry = entries[tokenAddress] || {};
+    const entry = asRecord(entries[tokenAddress]);
     rows.push({
       key: `token:${tokenAddress}`,
       kind: "token",
@@ -147,13 +192,41 @@ async function upsertDeletedIndex(ctx: any, deletedTokens: any, now: string) {
   }
 
   for (const row of rows) {
-    const existing = await ctx.db.query("deletedTokens").withIndex("by_key", (q: any) => q.eq("key", row.key)).first();
+    const existing = await ctx.db.query("deletedTokens").withIndex("by_key", (q) => q.eq("key", row.key)).first();
     if (existing) {
-      await ctx.db.patch(existing._id, row);
+      await ctx.db.patch(existing._id, { ...row, restoredAt: undefined });
     } else {
       await ctx.db.insert("deletedTokens", row);
     }
   }
+  const activeKeys = new Set(rows.map((row) => row.key));
+  const activeRows = await ctx.db
+    .query("deletedTokens")
+    .withIndex("by_active", (q) => q.eq("active", true))
+    .take(1000);
+  for (const activeRow of activeRows) {
+    if (activeKeys.has(activeRow.key)) continue;
+    await ctx.db.patch(activeRow._id, {
+      active: false,
+      restoredAt: now,
+      updatedAt: now,
+    });
+  }
+}
+
+function retentionCutoff(days: number, now: string) {
+  return new Date(Date.parse(now) - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+async function deleteExpiredDocs(
+  ctx: MutationCtx,
+  docs: Array<{ _id: any }>,
+  dryRun: boolean,
+) {
+  if (!dryRun) {
+    for (const doc of docs) await ctx.db.delete(doc._id);
+  }
+  return docs.length;
 }
 
 export const ingestSnapshot = mutation({
@@ -168,15 +241,21 @@ export const ingestSnapshot = mutation({
     requireIngestSecret(args.secret);
     const now = new Date().toISOString();
     const generatedAt = asString(args.report?.generated_at) || now;
+    const deletedUpdatedAt = asString(args.deletedTokens?.updated_at) || now;
 
-    await upsertStateDoc(ctx, "latest_report", args.report, now);
-    await upsertStateDoc(ctx, "deleted_tokens", args.deletedTokens ?? DEFAULT_DELETED_TOKENS, now);
+    const reportAccepted = await upsertStateDoc(ctx, "latest_report", args.report, now, generatedAt);
+    if (!reportAccepted) {
+      return { ok: true, generatedAt, ignored: "stale_snapshot", alertsSynced: 0 };
+    }
+    const deletedAccepted = await upsertStateDoc(ctx, "deleted_tokens", args.deletedTokens ?? DEFAULT_DELETED_TOKENS, now, deletedUpdatedAt);
     await upsertScanRun(ctx, args.report, now);
 
     for (const alert of args.history) {
       await upsertAlert(ctx, alert, generatedAt, now);
     }
-    await upsertDeletedIndex(ctx, args.deletedTokens, now);
+    if (deletedAccepted) {
+      await upsertDeletedIndex(ctx, args.deletedTokens ?? DEFAULT_DELETED_TOKENS, now);
+    }
 
     return {
       ok: true,
@@ -195,11 +274,72 @@ export const syncDeletedTokens = mutation({
   handler: async (ctx, args) => {
     requireIngestSecret(args.secret);
     const now = new Date().toISOString();
-    await upsertStateDoc(ctx, "deleted_tokens", args.deletedTokens ?? DEFAULT_DELETED_TOKENS, now);
-    await upsertDeletedIndex(ctx, args.deletedTokens, now);
+    const accepted = await upsertStateDoc(
+      ctx,
+      "deleted_tokens",
+      args.deletedTokens ?? DEFAULT_DELETED_TOKENS,
+      now,
+      asString(args.deletedTokens?.updated_at) || now,
+    );
+    if (accepted) {
+      await upsertDeletedIndex(ctx, args.deletedTokens ?? DEFAULT_DELETED_TOKENS, now);
+    }
     return {
       ok: true,
       updatedAt: now,
+      ignored: !accepted,
+    };
+  },
+});
+
+export const cleanupExpiredData = mutation({
+  args: {
+    secret: v.string(),
+    dryRun: v.optional(v.boolean()),
+    batchLimit: v.optional(v.number()),
+  },
+  returns: v.object({
+    ok: v.boolean(),
+    dryRun: v.boolean(),
+    deleted: v.object({
+      alerts: v.number(),
+      scanRuns: v.number(),
+      discovery: v.number(),
+      inactiveDeletes: v.number(),
+    }),
+  }),
+  handler: async (ctx, args) => {
+    requireIngestSecret(args.secret);
+    const now = new Date().toISOString();
+    const batchLimit = Math.max(1, Math.min(250, Math.floor(args.batchLimit ?? 100)));
+    const dryRun = Boolean(args.dryRun);
+    const expiredAlerts = await ctx.db
+      .query("alerts")
+      .withIndex("by_generated_at", (q) => q.lt("generatedAt", retentionCutoff(ALERT_RETENTION_DAYS, now)))
+      .take(batchLimit);
+    const expiredScanRuns = await ctx.db
+      .query("scanRuns")
+      .withIndex("by_generated_at", (q) => q.lt("generatedAt", retentionCutoff(SCAN_RUN_RETENTION_DAYS, now)))
+      .take(batchLimit);
+    const expiredDiscovery = await ctx.db
+      .query("discoveryState")
+      .withIndex("by_updated_at", (q) => q.lt("updatedAt", retentionCutoff(DISCOVERY_RETENTION_DAYS, now)))
+      .take(batchLimit);
+    const staleInactiveDeletes = (await ctx.db
+      .query("deletedTokens")
+      .withIndex("by_active", (q) => q.eq("active", false))
+      .take(batchLimit))
+      .filter((doc) => Date.parse(doc.updatedAt) < Date.parse(retentionCutoff(INACTIVE_DELETE_RETENTION_DAYS, now)));
+
+    return {
+      ok: true,
+      dryRun,
+      deleted: {
+        alerts: await deleteExpiredDocs(ctx, expiredAlerts, dryRun),
+        scanRuns: await deleteExpiredDocs(ctx, expiredScanRuns, dryRun),
+        discovery: await deleteExpiredDocs(ctx, expiredDiscovery, dryRun),
+        inactiveDeletes: await deleteExpiredDocs(ctx, staleInactiveDeletes, dryRun),
+      },
     };
   },
 });
@@ -242,6 +382,7 @@ export const dashboardData = query({
         finished_at: finishedAt ?? reportDoc?.updatedAt ?? null,
         returncode: 0,
       },
+      report_source_updated_at: reportDoc?.sourceUpdatedAt ?? reportDoc?.updatedAt ?? null,
     };
   },
 });
@@ -265,13 +406,16 @@ export const ingestDiscoveryState = mutation({
   handler: async (ctx, args) => {
     requireIngestSecret(args.secret);
     let rowsSynced = 0;
-    let latestUpdatedAt = new Date().toISOString();
+    let latestUpdatedAt = new Date(0).toISOString();
     for (const row of args.rows) {
-      latestUpdatedAt = row.updatedAt;
+      if (isNewerOrEqual(row.updatedAt, latestUpdatedAt)) latestUpdatedAt = row.updatedAt;
       const existing = await ctx.db
         .query("discoveryState")
         .withIndex("by_token_key", (q) => q.eq("tokenKey", row.tokenKey))
         .first();
+      if (existing && !isNewerOrEqual(row.updatedAt, existing.updatedAt)) {
+        continue;
+      }
       const doc = {
         tokenKey: row.tokenKey,
         ...(row.poolAddress ? { poolAddress: row.poolAddress } : {}),
@@ -301,6 +445,7 @@ export const ingestDiscoveryState = mutation({
       "discovery_status",
       { status: "ok", rowsSynced, updatedAt: latestUpdatedAt },
       latestUpdatedAt,
+      latestUpdatedAt,
     );
     const legacyMarketDoc = await ctx.db
       .query("stateDocs")
@@ -322,7 +467,11 @@ export const ingestDiscoveryStatus = mutation({
   handler: async (ctx, args) => {
     requireIngestSecret(args.secret);
     const now = new Date().toISOString();
-    await upsertStateDoc(ctx, "discovery_status", args.status ?? {}, now);
+    const sourceUpdatedAt = asString(args.status?.last_success_at)
+      || asString(args.status?.last_attempt_at)
+      || asString(args.status?.updatedAt)
+      || now;
+    await upsertStateDoc(ctx, "discovery_status", args.status ?? {}, now, sourceUpdatedAt);
     return { ok: true, updatedAt: now };
   },
 });

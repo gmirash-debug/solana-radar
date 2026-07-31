@@ -1,18 +1,34 @@
 const DEFAULT_OWNER = "gmirash-debug";
 const DEFAULT_REPO = "solana-radar";
 const DEFAULT_WORKFLOW = "scan-and-pages.yml";
+const DEFAULT_DISCOVERY_WORKFLOW = "discovery-pulse.yml";
 const DEFAULT_REF = "main";
 const DELETED_TOKENS_PATH = "data/deleted_tokens.json";
+const ACCESS_CERT_CACHE_TTL_MS = 60 * 60 * 1000;
+const DISCOVERY_CRON = "*/5 * * * *";
+const DEEP_SCAN_CRON = "7 * * * *";
+let accessCertCache = { expiresAt: 0, keys: new Map() };
 
-function json(body, status = 200) {
+function corsHeaders(request, env) {
+  const origin = request.headers.get("origin");
+  const allowedOrigin = normalizeId(env.ALLOWED_ORIGIN);
+  if (!origin || !allowedOrigin || origin !== allowedOrigin) return {};
+  return {
+    "access-control-allow-origin": allowedOrigin,
+    "access-control-allow-methods": "POST,OPTIONS",
+    "access-control-allow-headers": "content-type,cf-access-jwt-assertion",
+    "access-control-allow-credentials": "true",
+    vary: "Origin",
+  };
+}
+
+function json(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body, null, 2), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
-      "access-control-allow-origin": "*",
-      "access-control-allow-methods": "GET,POST,OPTIONS",
-      "access-control-allow-headers": "content-type,x-dispatch-secret",
+      ...headers,
     },
   });
 }
@@ -23,17 +39,6 @@ function requireEnv(env, name) {
     throw new Error(`Missing required secret/env: ${name}`);
   }
   return value;
-}
-
-function requireDispatchSecret(request, env) {
-  const expectedSecret = env.DISPATCH_SECRET;
-  if (!expectedSecret) return null;
-  const url = new URL(request.url);
-  const providedSecret = request.headers.get("x-dispatch-secret") || url.searchParams.get("secret");
-  if (providedSecret !== expectedSecret) {
-    return json({ ok: false, error: "Unauthorized" }, 401);
-  }
-  return null;
 }
 
 function normalizeId(value) {
@@ -67,6 +72,86 @@ function encodeBase64Utf8(value) {
     binary += String.fromCharCode(byte);
   });
   return btoa(binary);
+}
+
+function decodeBase64UrlJson(value) {
+  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+  return JSON.parse(decodeBase64Utf8(padded));
+}
+
+function base64UrlBytes(value) {
+  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+function accessAudienceMatches(value, audience) {
+  if (Array.isArray(value)) return value.includes(audience);
+  return value === audience;
+}
+
+async function cloudflareAccessKeys(env) {
+  const teamDomain = normalizeId(env.CLOUDFLARE_ACCESS_TEAM_DOMAIN);
+  if (!teamDomain) throw new Error("CLOUDFLARE_ACCESS_TEAM_DOMAIN is not configured");
+  if (accessCertCache.expiresAt > Date.now() && accessCertCache.keys.size) {
+    return accessCertCache.keys;
+  }
+  const response = await fetch(`https://${teamDomain}/cdn-cgi/access/certs`);
+  const body = await response.json().catch(() => null);
+  if (!response.ok || !Array.isArray(body?.keys)) {
+    throw new Error(`Cloudflare Access certificate fetch failed: ${response.status}`);
+  }
+  const keys = new Map(body.keys.filter((key) => key?.kid).map((key) => [key.kid, key]));
+  accessCertCache = {
+    keys,
+    expiresAt: Date.now() + ACCESS_CERT_CACHE_TTL_MS,
+  };
+  return keys;
+}
+
+async function requireCloudflareAccess(request, env) {
+  const audience = normalizeId(env.CLOUDFLARE_ACCESS_AUD);
+  if (!audience || !normalizeId(env.CLOUDFLARE_ACCESS_TEAM_DOMAIN)) {
+    return { ok: false, status: 503, error: "delete_access_not_configured" };
+  }
+  const token = request.headers.get("cf-access-jwt-assertion");
+  if (!token) return { ok: false, status: 401, error: "Cloudflare Access login required" };
+  const [encodedHeader, encodedPayload, encodedSignature] = token.split(".");
+  if (!encodedHeader || !encodedPayload || !encodedSignature) {
+    return { ok: false, status: 401, error: "Invalid Cloudflare Access token" };
+  }
+  try {
+    const header = decodeBase64UrlJson(encodedHeader);
+    const claims = decodeBase64UrlJson(encodedPayload);
+    if (header.alg !== "RS256" || !header.kid) {
+      return { ok: false, status: 401, error: "Unsupported Cloudflare Access token" };
+    }
+    if (!accessAudienceMatches(claims.aud, audience) || Number(claims.exp || 0) <= Math.floor(Date.now() / 1000)) {
+      return { ok: false, status: 401, error: "Expired or mismatched Cloudflare Access token" };
+    }
+    const key = (await cloudflareAccessKeys(env)).get(header.kid);
+    if (!key) return { ok: false, status: 401, error: "Unknown Cloudflare Access signing key" };
+    const cryptoKey = await crypto.subtle.importKey(
+      "jwk",
+      key,
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
+    const valid = await crypto.subtle.verify(
+      "RSASSA-PKCS1-v1_5",
+      cryptoKey,
+      base64UrlBytes(encodedSignature),
+      new TextEncoder().encode(`${encodedHeader}.${encodedPayload}`),
+    );
+    return valid
+      ? { ok: true }
+      : { ok: false, status: 401, error: "Invalid Cloudflare Access signature" };
+  } catch (error) {
+    return { ok: false, status: 401, error: `Cloudflare Access verification failed: ${error.message}` };
+  }
 }
 
 async function githubContentsRequest(env, path, options = {}) {
@@ -128,7 +213,9 @@ async function writeDeletedTokensToGitHub(env, data, sha, message) {
     body: JSON.stringify(body),
   });
   if (!result.response.ok) {
-    throw new Error(`GitHub write failed: ${result.response.status} ${result.text.slice(0, 500)}`);
+    const error = new Error(`GitHub write failed: ${result.response.status} ${result.text.slice(0, 500)}`);
+    error.status = result.response.status;
+    throw error;
   }
   return result.body;
 }
@@ -169,15 +256,14 @@ async function syncDeletedTokensToConvex(env, data) {
   };
 }
 
-async function updateDeletedToken(env, payload) {
+function applyDeletedTokenUpdate(source, payload, now) {
   const action = payload.action || "delete";
   const tokenAddress = normalizeId(payload.token_address || payload.token_key);
   const poolAddress = normalizeId(payload.pool_address);
   if (!tokenAddress && !poolAddress) {
     return { ok: false, error: "token_address_or_pool_address_required" };
   }
-
-  const { data, sha } = await readDeletedTokensFromGitHub(env);
+  const data = JSON.parse(JSON.stringify(source || defaultDeletedTokens()));
   const tokens = new Set(uniqueSorted(data.tokens));
   const pools = new Set(uniqueSorted(data.pools));
   const entryKey = tokenAddress || poolAddress;
@@ -185,7 +271,17 @@ async function updateDeletedToken(env, payload) {
   if (action === "restore") {
     if (tokenAddress) tokens.delete(tokenAddress);
     if (poolAddress) pools.delete(poolAddress);
-    delete data.entries[entryKey];
+    Object.entries(data.entries).forEach(([key, entry]) => {
+      if (
+        key === entryKey
+        || key === tokenAddress
+        || key === poolAddress
+        || entry?.token_address === tokenAddress
+        || entry?.pool_address === poolAddress
+      ) {
+        delete data.entries[key];
+      }
+    });
   } else if (action === "delete") {
     if (tokenAddress) tokens.add(tokenAddress);
     if (poolAddress) pools.add(poolAddress);
@@ -194,7 +290,7 @@ async function updateDeletedToken(env, payload) {
       pool_address: poolAddress,
       symbol: payload.symbol || "",
       name: payload.name || "",
-      deleted_at: new Date().toISOString(),
+      deleted_at: now,
     };
   } else {
     return { ok: false, error: "invalid_action", actions: ["delete", "restore"] };
@@ -202,32 +298,82 @@ async function updateDeletedToken(env, payload) {
 
   data.tokens = [...tokens].sort();
   data.pools = [...pools].sort();
-  data.updated_at = new Date().toISOString();
-  const commit = await writeDeletedTokensToGitHub(
-    env,
-    data,
-    sha,
-    `${action === "delete" ? "Delete" : "Restore"} scanner token ${payload.symbol || tokenAddress || poolAddress}`,
-  );
-  const convexSync = await syncDeletedTokensToConvex(env, data).catch((error) => ({
+  data.updated_at = now;
+  return { ok: true, action, data, tokenAddress, poolAddress };
+}
+
+async function updateDeletedToken(env, payload) {
+  let mutation;
+  let commit;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { data, sha } = await readDeletedTokensFromGitHub(env);
+    mutation = applyDeletedTokenUpdate(data, payload, new Date().toISOString());
+    if (!mutation.ok) return mutation;
+    try {
+      commit = await writeDeletedTokensToGitHub(
+        env,
+        mutation.data,
+        sha,
+        `${mutation.action === "delete" ? "Delete" : "Restore"} scanner token ${payload.symbol || mutation.tokenAddress || mutation.poolAddress}`,
+      );
+      break;
+    } catch (error) {
+      if (!([409, 422].includes(error.status)) || attempt === 2) throw error;
+    }
+  }
+  if (!commit || !mutation) throw new Error("GitHub deleted-token update did not complete");
+  const convexSync = await syncDeletedTokensToConvex(env, mutation.data).catch((error) => ({
     enabled: true,
     ok: false,
     error: error.message,
   }));
   return {
     ok: true,
-    action,
-    deleted_tokens: data,
+    action: mutation.action,
+    deleted_tokens: mutation.data,
     commit_sha: commit?.commit?.sha || null,
     convex_sync: convexSync,
   };
 }
 
-async function dispatchScan(env, source) {
+function schedulerKindForCron(cron) {
+  if (cron === DISCOVERY_CRON) return "discovery";
+  if (cron === DEEP_SCAN_CRON) return "deep_scan";
+  return "deep_scan";
+}
+
+function schedulerBucket(kind, now = new Date()) {
+  const timestamp = new Date(now);
+  if (kind === "discovery") {
+    timestamp.setUTCMinutes(Math.floor(timestamp.getUTCMinutes() / 5) * 5, 0, 0);
+  } else {
+    timestamp.setUTCMinutes(0, 0, 0);
+  }
+  return `${kind}:${timestamp.toISOString()}`;
+}
+
+async function claimDispatchBucket(env, kind, bucket) {
+  const kv = env.DISPATCH_BUCKETS;
+  if (!kv || typeof kv.get !== "function" || typeof kv.put !== "function") {
+    return { claimed: true, persistent: false };
+  }
+  const key = `dispatch:${bucket}`;
+  if (await kv.get(key)) return { claimed: false, persistent: true };
+  await kv.put(key, new Date().toISOString(), {
+    expirationTtl: kind === "discovery" ? 15 * 60 : 2 * 60 * 60,
+  });
+  return { claimed: true, persistent: true };
+}
+
+async function dispatchScan(env, source, options = {}) {
   const token = requireEnv(env, "GITHUB_TOKEN");
   const owner = env.GITHUB_OWNER || DEFAULT_OWNER;
   const repo = env.GITHUB_REPO || DEFAULT_REPO;
-  const workflow = env.GITHUB_WORKFLOW || DEFAULT_WORKFLOW;
+  const kind = options.kind || "deep_scan";
+  const workflow = options.workflow
+    || (kind === "discovery"
+      ? env.GITHUB_DISCOVERY_WORKFLOW || DEFAULT_DISCOVERY_WORKFLOW
+      : env.GITHUB_WORKFLOW || DEFAULT_WORKFLOW);
   const ref = env.GITHUB_REF || DEFAULT_REF;
 
   const url = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflow}/dispatches`;
@@ -244,6 +390,7 @@ async function dispatchScan(env, source) {
       ref,
       inputs: {
         source,
+        dispatch_bucket: options.bucket || "manual",
       },
     }),
   });
@@ -260,26 +407,41 @@ async function dispatchScan(env, source) {
     repo,
     workflow,
     ref,
+    kind,
+    dispatch_bucket: options.bucket || null,
     dispatched_at: new Date().toISOString(),
+  };
+}
+
+async function dispatchScheduledScan(event, env) {
+  const kind = schedulerKindForCron(event?.cron);
+  const bucket = schedulerBucket(kind, event?.scheduledTime || new Date());
+  const claim = await claimDispatchBucket(env, kind, bucket);
+  if (!claim.claimed) {
+    return { ok: true, skipped: "duplicate_bucket", kind, bucket, persistent_dedupe: claim.persistent };
+  }
+  return {
+    ...(await dispatchScan(env, `cloudflare-${kind}`, { kind, bucket })),
+    persistent_dedupe: claim.persistent,
   };
 }
 
 export default {
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(dispatchScan(env, "cloudflare-cron"));
+    ctx.waitUntil(dispatchScheduledScan(_event, env));
   },
 
   async fetch(request, env) {
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
+      const headers = corsHeaders(request, env);
+      if (!headers["access-control-allow-origin"]) {
+        return json({ ok: false, error: "Origin not allowed" }, 403);
+      }
       return new Response(null, {
         status: 204,
-        headers: {
-          "access-control-allow-origin": "*",
-          "access-control-allow-methods": "GET,POST,OPTIONS",
-          "access-control-allow-headers": "content-type,x-dispatch-secret",
-        },
+        headers,
       });
     }
 
@@ -288,39 +450,52 @@ export default {
         ok: true,
         worker: "solana-radar-scan-dispatcher",
         checked_at: new Date().toISOString(),
-      });
+        delete_access_configured: Boolean(env.CLOUDFLARE_ACCESS_AUD && env.CLOUDFLARE_ACCESS_TEAM_DOMAIN),
+        scheduler_dedupe_configured: Boolean(env.DISPATCH_BUCKETS),
+      }, 200, corsHeaders(request, env));
     }
 
     if (url.pathname === "/deleted-token") {
       if (request.method !== "POST") {
-        return json({ ok: false, error: "POST required" }, 405);
+        return json({ ok: false, error: "POST required" }, 405, corsHeaders(request, env));
       }
-      const unauthorized = requireDispatchSecret(request, env);
-      if (unauthorized) return unauthorized;
+      const access = await requireCloudflareAccess(request, env);
+      if (!access.ok) return json({ ok: false, error: access.error }, access.status, corsHeaders(request, env));
       try {
         const payload = await request.json();
         const response = await updateDeletedToken(env, payload || {});
-        return json(response, response.ok ? 200 : 400);
+        return json(response, response.ok ? 200 : 400, corsHeaders(request, env));
       } catch (error) {
-        return json({ ok: false, error: error.message }, 500);
+        return json({ ok: false, error: error.message }, 500, corsHeaders(request, env));
       }
     }
 
     if (url.pathname !== "/dispatch") {
-      return json({ ok: false, error: "Use /health, /dispatch, or /deleted-token" }, 404);
+      return json({ ok: false, error: "Use /health, /dispatch, or /deleted-token" }, 404, corsHeaders(request, env));
     }
 
     if (request.method !== "POST") {
-      return json({ ok: false, error: "POST required" }, 405);
+      return json({ ok: false, error: "POST required" }, 405, corsHeaders(request, env));
     }
 
-    const unauthorized = requireDispatchSecret(request, env);
-    if (unauthorized) return unauthorized;
+    const access = await requireCloudflareAccess(request, env);
+    if (!access.ok) return json({ ok: false, error: access.error }, access.status, corsHeaders(request, env));
 
     try {
-      return json(await dispatchScan(env, "manual-http"));
+      return json(await dispatchScan(env, "manual-http"), 200, corsHeaders(request, env));
     } catch (error) {
-      return json({ ok: false, error: error.message }, 500);
+      return json({ ok: false, error: error.message }, 500, corsHeaders(request, env));
     }
   },
+};
+
+export {
+  applyDeletedTokenUpdate,
+  claimDispatchBucket,
+  corsHeaders,
+  dispatchScheduledScan,
+  requireCloudflareAccess,
+  schedulerBucket,
+  schedulerKindForCron,
+  updateDeletedToken,
 };

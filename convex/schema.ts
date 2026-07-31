@@ -4,7 +4,10 @@ import { v } from "convex/values";
 export default defineSchema({
   stateDocs: defineTable({
     key: v.string(),
+    // Raw scanner snapshots remain forward-compatible; indexed fields stay typed.
     payload: v.any(),
+    // Optional for existing documents written before freshness protection.
+    sourceUpdatedAt: v.optional(v.string()),
     updatedAt: v.string(),
   }).index("by_key", ["key"]),
 
@@ -29,6 +32,7 @@ export default defineSchema({
     tokenAddress: v.optional(v.string()),
     symbol: v.optional(v.string()),
     lane: v.optional(v.string()),
+    signalFamily: v.optional(v.string()),
     score: v.optional(v.number()),
     tier: v.optional(v.string()),
     payload: v.any(),

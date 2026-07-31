@@ -7,6 +7,10 @@ on:
         description: "Who triggered the scan"
         required: false
         default: "manual"
+      dispatch_bucket:
+        description: "Cloudflare scheduler bucket"
+        required: false
+        default: "manual"
   schedule:
     - cron: "37 * * * *"
   push:
@@ -78,7 +82,7 @@ jobs:
           except Exception:
               pass
           dispatch_source = (event.get("inputs") or {}).get("source", "")
-          if event_name == "workflow_dispatch" and dispatch_source not in ("cloudflare-cron",):
+          if event_name == "workflow_dispatch" and not dispatch_source.startswith("cloudflare-"):
               print("should_scan=true")
               print("reason=manual_dispatch")
               raise SystemExit
@@ -268,8 +272,31 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
           # Scanner failures are represented in scanner_status.json. Keeping this
-          # step green prevents an hourly provider outage from sending failure mail.
+          # step green lets the failure be classified, committed, and published below.
           exit 0
+
+      - name: Classify scanner failure
+        id: failure_taxonomy
+        if: steps.freshness.outputs.should_scan == 'true'
+        env:
+          SCAN_EXIT_CODE: ${{ steps.run_scanner.outputs.exit_code }}
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          from pathlib import Path
+          import scanner
+
+          try:
+              status = json.loads(Path("data/scanner_status.json").read_text())
+          except Exception:
+              status = {}
+          classification = scanner.scanner_failure_class(
+              status,
+              int(os.environ.get("SCAN_EXIT_CODE") or 1),
+          )
+          print(f"classification={classification}")
+          PY
 
       - name: Commit scanner data
         if: steps.freshness.outputs.should_scan == 'true'
@@ -321,7 +348,7 @@ jobs:
         run: |
           rm -rf .pages
           mkdir -p .pages/data
-          cp dashboard/index.html dashboard/app.js dashboard/styles.css dashboard/config.js .pages/
+          cp dashboard/index.html dashboard/app.js dashboard/data-source.js dashboard/styles.css dashboard/config.js .pages/
           cp data/latest_report.json data/latest_report.md data/alerts.jsonl data/scanner_status.json .pages/data/
           if [ -f data/discovery_status.json ]; then
             cp data/discovery_status.json .pages/data/
@@ -357,8 +384,14 @@ jobs:
         with:
           path: .pages
 
+      - name: Fail hard scanner errors after publishing status
+        if: steps.freshness.outputs.should_scan == 'true' && steps.failure_taxonomy.outputs.classification == 'hard_failure'
+        run: |
+          echo "Scanner failed with a programming, invariant, or corrupted-state error."
+          exit 1
+
   deploy:
-    if: github.ref == 'refs/heads/main' && needs.scan.outputs.pages_ready == 'true'
+    if: always() && github.ref == 'refs/heads/main' && needs.scan.outputs.pages_ready == 'true'
     needs: scan
     runs-on: ubuntu-latest
     environment:
