@@ -1,1 +1,1 @@
-window.SOLANA_RADAR_CONVEX_URL = window.SOLANA_RADAR_CONVEX_URL || "https://basic-starfish-944.convex.cloud";
+window.SOLANA_RADAR_DATA_API_URL = window.SOLANA_RADAR_DATA_API_URL || "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev";

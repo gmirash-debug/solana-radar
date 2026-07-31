@@ -15,7 +15,7 @@ function corsHeaders(request, env) {
   if (!origin || !allowedOrigin || origin !== allowedOrigin) return {};
   return {
     "access-control-allow-origin": allowedOrigin,
-    "access-control-allow-methods": "POST,OPTIONS",
+    "access-control-allow-methods": "GET,POST,OPTIONS",
     "access-control-allow-headers": "content-type,cf-access-jwt-assertion",
     "access-control-allow-credentials": "true",
     vary: "Origin",
@@ -220,40 +220,372 @@ async function writeDeletedTokensToGitHub(env, data, sha, message) {
   return result.body;
 }
 
-async function syncDeletedTokensToConvex(env, data) {
-  const convexUrl = normalizeId(env.CONVEX_URL)?.replace(/\/+$/, "");
-  const secret = env.CONVEX_INGEST_SECRET;
-  if (!convexUrl || !secret) {
-    return { enabled: false };
+function hasRadarDb(env) {
+  return Boolean(env.RADAR_DB && typeof env.RADAR_DB.prepare === "function");
+}
+
+function serializePayload(value) {
+  return JSON.stringify(value ?? {});
+}
+
+function parsePayload(value, fallback = {}) {
+  try {
+    const parsed = JSON.parse(value || "");
+    return parsed && typeof parsed === "object" ? parsed : fallback;
+  } catch {
+    return fallback;
   }
-  const response = await fetch(`${convexUrl}/api/mutation`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "application/json",
-    },
-    body: JSON.stringify({
-      path: "radar:syncDeletedTokens",
-      args: {
-        secret,
-        deletedTokens: data,
-      },
-      format: "json",
-    }),
-  });
-  const result = await response.json().catch(() => null);
-  if (!response.ok || result?.status !== "success") {
-    return {
-      enabled: true,
-      ok: false,
-      error: result?.errorMessage || `Convex sync failed: ${response.status}`,
-    };
+}
+
+function ingestAccess(request, env) {
+  const expected = normalizeId(env.RADAR_INGEST_SECRET);
+  if (!expected) return { ok: false, status: 503, error: "ingest_not_configured" };
+  const supplied = normalizeId(request.headers.get("x-radar-ingest-secret"));
+  if (!supplied || supplied !== expected) return { ok: false, status: 401, error: "unauthorized" };
+  return { ok: true };
+}
+
+function isoNow() {
+  return new Date().toISOString();
+}
+
+function alertIdentity(alert = {}, fallbackGeneratedAt = "") {
+  const pool = alert.pool || {};
+  const tokenKey = normalizeId(pool.token_address) || normalizeId(pool.pool_address) || normalizeId(pool.symbol) || "unknown";
+  const episodeAt = normalizeId(alert.window_start) || normalizeId(alert.created_at) || fallbackGeneratedAt;
+  return {
+    alertKey: [tokenKey, normalizeId(pool.pool_address) || "", normalizeId(alert.lane) || "", normalizeId(alert.signal_family) || "classified_wallets", episodeAt].join("|"),
+    tokenKey,
+    poolAddress: normalizeId(pool.pool_address),
+    tokenAddress: normalizeId(pool.token_address),
+    symbol: normalizeId(pool.symbol),
+    lane: normalizeId(alert.lane),
+    signalFamily: normalizeId(alert.signal_family),
+    generatedAt: normalizeId(alert.created_at) || normalizeId(alert.window_end) || fallbackGeneratedAt,
+    score: Number.isFinite(Number(alert.score)) ? Number(alert.score) : null,
+    tier: normalizeId(alert.action_tier),
+  };
+}
+
+async function upsertStateDoc(db, key, payload, sourceUpdatedAt, now = isoNow()) {
+  const result = await db.prepare(`
+    INSERT INTO state_docs (key, payload_json, source_updated_at, updated_at)
+    VALUES (?1, ?2, ?3, ?4)
+    ON CONFLICT(key) DO UPDATE SET
+      payload_json = excluded.payload_json,
+      source_updated_at = excluded.source_updated_at,
+      updated_at = excluded.updated_at
+    WHERE excluded.source_updated_at >= state_docs.source_updated_at
+  `).bind(key, serializePayload(payload), sourceUpdatedAt || now, now).run();
+  return Number(result?.meta?.changes || 0) > 0;
+}
+
+async function upsertScanRun(db, report, now) {
+  const generatedAt = normalizeId(report?.generated_at) || now;
+  await db.prepare(`
+    INSERT INTO scan_runs (run_key, generated_at, lane, profile, lanes_scanned_json, stats_json, lane_stats_json, created_at)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+    ON CONFLICT(run_key) DO UPDATE SET
+      lane = excluded.lane,
+      profile = excluded.profile,
+      lanes_scanned_json = excluded.lanes_scanned_json,
+      stats_json = excluded.stats_json,
+      lane_stats_json = excluded.lane_stats_json
+  `).bind(
+    generatedAt,
+    generatedAt,
+    normalizeId(report?.lane),
+    normalizeId(report?.profile),
+    serializePayload(Array.isArray(report?.lanes_scanned) ? report.lanes_scanned : []),
+    serializePayload(report?.stats || {}),
+    serializePayload(report?.lane_stats || {}),
+    now,
+  ).run();
+}
+
+async function runD1Batch(db, statements) {
+  for (let index = 0; index < statements.length; index += 100) {
+    await db.batch(statements.slice(index, index + 100));
+  }
+}
+
+async function upsertAlerts(db, history, fallbackGeneratedAt, now) {
+  const statements = [];
+  for (const alert of history || []) {
+    const identity = alertIdentity(alert, fallbackGeneratedAt);
+    statements.push(db.prepare(`
+      INSERT INTO alerts (alert_key, generated_at, token_key, pool_address, token_address, symbol, lane, signal_family, score, tier, payload_json, updated_at)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+      ON CONFLICT(alert_key) DO UPDATE SET
+        generated_at = excluded.generated_at,
+        score = excluded.score,
+        tier = excluded.tier,
+        payload_json = excluded.payload_json,
+        updated_at = excluded.updated_at
+    `).bind(
+      identity.alertKey,
+      identity.generatedAt,
+      identity.tokenKey,
+      identity.poolAddress,
+      identity.tokenAddress,
+      identity.symbol,
+      identity.lane,
+      identity.signalFamily,
+      identity.score,
+      identity.tier,
+      serializePayload(alert),
+      now,
+    ));
+  }
+  await runD1Batch(db, statements);
+  return statements.length;
+}
+
+async function upsertDeletedTokenIndex(db, deletedTokens, now = isoNow()) {
+  const source = deletedTokens && typeof deletedTokens === "object" ? deletedTokens : defaultDeletedTokens();
+  const entries = source.entries && typeof source.entries === "object" ? source.entries : {};
+  const rows = [];
+  for (const token of uniqueSorted(source.tokens)) {
+    const entry = entries[token] || {};
+    rows.push({
+      key: `token:${token}`,
+      kind: "token",
+      tokenAddress: token,
+      poolAddress: normalizeId(entry.pool_address),
+      symbol: normalizeId(entry.symbol),
+      name: normalizeId(entry.name),
+      deletedAt: normalizeId(entry.deleted_at) || now,
+    });
+  }
+  for (const pool of uniqueSorted(source.pools)) {
+    rows.push({ key: `pool:${pool}`, kind: "pool", tokenAddress: null, poolAddress: pool, symbol: null, name: null, deletedAt: now });
+  }
+  const statements = [
+    db.prepare("UPDATE deleted_tokens SET active = 0, restored_at = ?1, updated_at = ?1 WHERE active = 1").bind(now),
+  ];
+  for (const row of rows) {
+    statements.push(db.prepare(`
+      INSERT INTO deleted_tokens (key, kind, token_address, pool_address, symbol, name, active, deleted_at, restored_at, updated_at)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, NULL, ?8)
+      ON CONFLICT(key) DO UPDATE SET
+        token_address = excluded.token_address,
+        pool_address = excluded.pool_address,
+        symbol = excluded.symbol,
+        name = excluded.name,
+        active = 1,
+        deleted_at = excluded.deleted_at,
+        restored_at = NULL,
+        updated_at = excluded.updated_at
+    `).bind(row.key, row.kind, row.tokenAddress, row.poolAddress, row.symbol, row.name, row.deletedAt, now));
+  }
+  await runD1Batch(db, statements);
+  return rows.length;
+}
+
+async function pruneRadarData(db, now = isoNow()) {
+  const cutoff = (days) => new Date(Date.parse(now) - days * 24 * 60 * 60 * 1000).toISOString();
+  await db.prepare("DELETE FROM alerts WHERE generated_at < ?1").bind(cutoff(7)).run();
+  await db.prepare("DELETE FROM scan_runs WHERE generated_at < ?1").bind(cutoff(30)).run();
+  await db.prepare("DELETE FROM discovery_state WHERE updated_at < ?1").bind(cutoff(2)).run();
+  await db.prepare("DELETE FROM deleted_tokens WHERE active = 0 AND updated_at < ?1").bind(cutoff(30)).run();
+}
+
+async function ingestDashboardSnapshot(env, payload) {
+  if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
+  const report = payload?.report && typeof payload.report === "object" ? payload.report : {};
+  const history = Array.isArray(payload?.history) ? payload.history : [];
+  const market = payload?.market && typeof payload.market === "object" ? payload.market : {};
+  const deletedTokens = payload?.deleted_tokens || defaultDeletedTokens();
+  const now = isoNow();
+  const generatedAt = normalizeId(report.generated_at) || now;
+  const reportJson = serializePayload(report);
+  if (new TextEncoder().encode(reportJson).byteLength > 1_500_000) {
+    throw new Error("compact_report_exceeds_1_5mb");
+  }
+  const accepted = await upsertStateDoc(env.RADAR_DB, "latest_report", report, generatedAt, now);
+  if (!accepted) return { ok: true, ignored: "stale_snapshot", generated_at: generatedAt, alerts_synced: 0 };
+  await upsertStateDoc(env.RADAR_DB, "deleted_tokens", deletedTokens, normalizeId(deletedTokens.updated_at) || now, now);
+  await upsertScanRun(env.RADAR_DB, report, now);
+  const alertsSynced = await upsertAlerts(env.RADAR_DB, history, generatedAt, now);
+  const marketRows = Object.entries(market).slice(0, 250).map(([tokenKey, item]) => ({
+    tokenKey,
+    poolAddress: normalizeId(item?.pool_address),
+    market: item,
+    updatedAt: normalizeId(item?.current_market_verified_at)
+      || normalizeId(item?.latest_seen_at)
+      || generatedAt,
+  }));
+  const marketSynced = await upsertDiscoveryStateRows(env.RADAR_DB, marketRows);
+  await upsertDeletedTokenIndex(env.RADAR_DB, deletedTokens, now);
+  await pruneRadarData(env.RADAR_DB, now);
+  return { ok: true, generated_at: generatedAt, alerts_synced: alertsSynced, market_synced: marketSynced };
+}
+
+function decodeCursor(value) {
+  if (!value) return null;
+  try {
+    return decodeBase64UrlJson(value);
+  } catch {
+    return null;
+  }
+}
+
+function encodeCursor(value) {
+  return encodeBase64Utf8(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function scanStatusPayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
+  return payload.status && typeof payload.status === "object" && !Array.isArray(payload.status)
+    ? payload.status
+    : payload;
+}
+
+function discoveryRow(row) {
+  return {
+    tokenKey: row.token_key,
+    poolAddress: row.pool_address || null,
+    market: parsePayload(row.market_json, null),
+    baseline: parsePayload(row.baseline_json, null),
+    queue: parsePayload(row.queue_json, null),
+    outcome: parsePayload(row.outcome_json, null),
+    updatedAt: row.updated_at,
+  };
+}
+
+function dashboardTokenKeys(report, history) {
+  const keys = [];
+  const seen = new Set();
+  const add = (value) => {
+    const key = normalizeId(value);
+    if (key && !seen.has(key) && keys.length < 250) {
+      seen.add(key);
+      keys.push(key);
+    }
+  };
+  const addPool = (pool) => add(pool?.token_address);
+  for (const thesis of report?.signal_theses || []) add(thesis?.token_address);
+  for (const alert of [...(report?.alerts || []), ...(history || [])]) addPool(alert?.pool);
+  for (const summary of report?.summaries || []) addPool(summary?.pool);
+  return keys;
+}
+
+async function discoveryStatePage(env, limit, cursor) {
+  if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
+  const pageSize = Math.max(1, Math.min(100, Number(limit) || 50));
+  const decoded = decodeCursor(cursor);
+  const query = decoded?.updatedAt && decoded?.tokenKey
+    ? env.RADAR_DB.prepare(`
+        SELECT token_key, pool_address, market_json, baseline_json, queue_json, outcome_json, updated_at
+        FROM discovery_state
+        WHERE updated_at < ?1 OR (updated_at = ?1 AND token_key > ?2)
+        ORDER BY updated_at DESC, token_key ASC
+        LIMIT ?3
+      `).bind(decoded.updatedAt, decoded.tokenKey, pageSize + 1)
+    : env.RADAR_DB.prepare(`
+        SELECT token_key, pool_address, market_json, baseline_json, queue_json, outcome_json, updated_at
+        FROM discovery_state
+        ORDER BY updated_at DESC, token_key ASC
+        LIMIT ?1
+      `).bind(pageSize + 1);
+  const results = (await query.all()).results || [];
+  const hasMore = results.length > pageSize;
+  const rows = results.slice(0, pageSize).map(discoveryRow);
+  const last = rows.at(-1);
+  return { ok: true, rows, is_done: !hasMore, next_cursor: hasMore && last ? encodeCursor(last) : null };
+}
+
+async function upsertDiscoveryStateRows(db, rows) {
+  const safeRows = Array.isArray(rows) ? rows.slice(0, 250) : [];
+  const statements = [];
+  for (const row of safeRows) {
+    const tokenKey = normalizeId(row?.tokenKey);
+    const updatedAt = normalizeId(row?.updatedAt);
+    if (!tokenKey || !updatedAt) continue;
+    statements.push(db.prepare(`
+      INSERT INTO discovery_state (token_key, pool_address, market_json, baseline_json, queue_json, outcome_json, updated_at)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+      ON CONFLICT(token_key) DO UPDATE SET
+        pool_address = COALESCE(excluded.pool_address, discovery_state.pool_address),
+        market_json = COALESCE(excluded.market_json, discovery_state.market_json),
+        baseline_json = COALESCE(excluded.baseline_json, discovery_state.baseline_json),
+        queue_json = COALESCE(excluded.queue_json, discovery_state.queue_json),
+        outcome_json = COALESCE(excluded.outcome_json, discovery_state.outcome_json),
+        updated_at = excluded.updated_at
+      WHERE excluded.updated_at >= discovery_state.updated_at
+    `).bind(
+      tokenKey,
+      normalizeId(row.poolAddress),
+      row.market === null || row.market === undefined ? null : serializePayload(row.market),
+      row.baseline === null || row.baseline === undefined ? null : serializePayload(row.baseline),
+      row.queue === null || row.queue === undefined ? null : serializePayload(row.queue),
+      row.outcome === null || row.outcome === undefined ? null : serializePayload(row.outcome),
+      updatedAt,
+    ));
+  }
+  await runD1Batch(db, statements);
+  return statements.length;
+}
+
+async function ingestDiscoveryState(env, rows) {
+  if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
+  const rowsSynced = await upsertDiscoveryStateRows(env.RADAR_DB, Array.isArray(rows) ? rows.slice(0, 50) : []);
+  return { ok: true, rows_synced: rowsSynced };
+}
+
+async function dashboardData(env, historyLimit = 40) {
+  if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
+  const limit = Math.max(1, Math.min(250, Number(historyLimit) || 40));
+  const [reportDoc, deletedDoc, discoveryStatusDoc, scanStatusDoc, alertsResult] = await Promise.all([
+    env.RADAR_DB.prepare("SELECT payload_json, source_updated_at, updated_at FROM state_docs WHERE key = 'latest_report'").first(),
+    env.RADAR_DB.prepare("SELECT payload_json FROM state_docs WHERE key = 'deleted_tokens'").first(),
+    env.RADAR_DB.prepare("SELECT payload_json FROM state_docs WHERE key = 'discovery_status'").first(),
+    env.RADAR_DB.prepare("SELECT payload_json FROM state_docs WHERE key = 'scan_status'").first(),
+    env.RADAR_DB.prepare("SELECT payload_json FROM alerts ORDER BY generated_at DESC LIMIT ?1").bind(limit).all(),
+  ]);
+  const report = parsePayload(reportDoc?.payload_json, {});
+  const history = (alertsResult.results || []).map((row) => parsePayload(row.payload_json, {}));
+  const tokenKeys = dashboardTokenKeys(report, history);
+  const discoveryResult = tokenKeys.length
+    ? await env.RADAR_DB.prepare(`
+        SELECT token_key, pool_address, market_json, baseline_json, queue_json, outcome_json, updated_at
+        FROM discovery_state
+        WHERE token_key IN (${tokenKeys.map((_, index) => `?${index + 1}`).join(", ")})
+      `).bind(...tokenKeys).all()
+    : { results: [] };
+  const market = {};
+  for (const row of discoveryResult.results || []) {
+    const item = discoveryRow(row);
+    if (item.market) market[item.tokenKey] = item.market;
   }
   return {
-    enabled: true,
     ok: true,
-    value: result.value || null,
+    report,
+    history,
+    market,
+    deleted_tokens: parsePayload(deletedDoc?.payload_json, defaultDeletedTokens()),
+    discovery_status: parsePayload(discoveryStatusDoc?.payload_json, {}),
+    scan_status: parsePayload(scanStatusDoc?.payload_json, {
+      running: false,
+      source: "cloudflare_d1",
+      static_mode: false,
+      finished_at: report.generated_at || reportDoc?.updated_at || null,
+      returncode: 0,
+    }),
+    report_source_updated_at: reportDoc?.source_updated_at || reportDoc?.updated_at || null,
   };
+}
+
+async function syncDeletedTokensToD1(env, data) {
+  if (!hasRadarDb(env)) return { enabled: false, ok: false, error: "radar_db_not_configured" };
+  try {
+    const now = isoNow();
+    await upsertStateDoc(env.RADAR_DB, "deleted_tokens", data, normalizeId(data?.updated_at) || now, now);
+    const count = await upsertDeletedTokenIndex(env.RADAR_DB, data, now);
+    return { enabled: true, ok: true, rows_synced: count };
+  } catch (error) {
+    return { enabled: true, ok: false, error: error.message };
+  }
 }
 
 function applyDeletedTokenUpdate(source, payload, now) {
@@ -322,7 +654,7 @@ async function updateDeletedToken(env, payload) {
     }
   }
   if (!commit || !mutation) throw new Error("GitHub deleted-token update did not complete");
-  const convexSync = await syncDeletedTokensToConvex(env, mutation.data).catch((error) => ({
+  const d1Sync = await syncDeletedTokensToD1(env, mutation.data).catch((error) => ({
     enabled: true,
     ok: false,
     error: error.message,
@@ -332,7 +664,7 @@ async function updateDeletedToken(env, payload) {
     action: mutation.action,
     deleted_tokens: mutation.data,
     commit_sha: commit?.commit?.sha || null,
-    convex_sync: convexSync,
+    d1_sync: d1Sync,
   };
 }
 
@@ -472,13 +804,98 @@ export default {
     }
 
     if (url.pathname === "/health") {
+      let d1Healthy = false;
+      let d1Error = null;
+      if (hasRadarDb(env)) {
+        try {
+          await env.RADAR_DB.prepare("SELECT 1 AS ok").first();
+          d1Healthy = true;
+        } catch (error) {
+          d1Error = error.message;
+        }
+      }
       return json({
-        ok: true,
+        ok: d1Healthy,
         worker: "solana-radar-scan-dispatcher",
         checked_at: new Date().toISOString(),
         delete_access_configured: Boolean(env.CLOUDFLARE_ACCESS_AUD && env.CLOUDFLARE_ACCESS_TEAM_DOMAIN),
+        ingest_secret_configured: Boolean(env.RADAR_INGEST_SECRET),
         scheduler_dedupe_configured: Boolean(env.DISPATCH_BUCKETS),
+        d1_configured: hasRadarDb(env),
+        d1_healthy: d1Healthy,
+        d1_error: d1Error,
       }, 200, corsHeaders(request, env));
+    }
+
+    if (url.pathname === "/api/dashboard") {
+      if (request.method !== "GET") {
+        return json({ ok: false, error: "GET required" }, 405, corsHeaders(request, env));
+      }
+      try {
+        return json(
+          await dashboardData(env, url.searchParams.get("history_limit")),
+          200,
+          corsHeaders(request, env),
+        );
+      } catch (error) {
+        return json({ ok: false, error: error.message }, 503, corsHeaders(request, env));
+      }
+    }
+
+    if (url.pathname.startsWith("/api/")) {
+      const access = ingestAccess(request, env);
+      if (!access.ok) return json({ ok: false, error: access.error }, access.status, corsHeaders(request, env));
+      try {
+        if (url.pathname === "/api/ingest/snapshot") {
+          if (request.method !== "POST") return json({ ok: false, error: "POST required" }, 405, corsHeaders(request, env));
+          return json(await ingestDashboardSnapshot(env, await request.json()), 200, corsHeaders(request, env));
+        }
+        if (url.pathname === "/api/discovery/state") {
+          if (request.method === "GET") {
+            return json(
+              await discoveryStatePage(env, url.searchParams.get("limit"), url.searchParams.get("cursor")),
+              200,
+              corsHeaders(request, env),
+            );
+          }
+          if (request.method === "POST") {
+            const payload = await request.json();
+            return json(await ingestDiscoveryState(env, payload?.rows), 200, corsHeaders(request, env));
+          }
+          return json({ ok: false, error: "GET or POST required" }, 405, corsHeaders(request, env));
+        }
+        if (url.pathname === "/api/discovery/status") {
+          if (request.method !== "POST") return json({ ok: false, error: "POST required" }, 405, corsHeaders(request, env));
+          const payload = await request.json();
+          const now = isoNow();
+          await upsertStateDoc(env.RADAR_DB, "discovery_status", payload?.status || {}, normalizeId(payload?.status?.last_attempt_at) || now, now);
+          return json({ ok: true, updated_at: now }, 200, corsHeaders(request, env));
+        }
+        if (url.pathname === "/api/scan/status") {
+          if (request.method !== "POST") return json({ ok: false, error: "POST required" }, 405, corsHeaders(request, env));
+          const payload = await request.json();
+          const now = isoNow();
+          // Scanner clients send { status }, while an operator can safely replay
+          // a raw scanner_status.json document during incident recovery.
+          const status = scanStatusPayload(payload);
+          await upsertStateDoc(
+            env.RADAR_DB,
+            "scan_status",
+            status,
+            normalizeId(status.last_attempt_at) || now,
+            now,
+          );
+          return json({ ok: true, updated_at: now }, 200, corsHeaders(request, env));
+        }
+        if (url.pathname === "/api/deleted/sync") {
+          if (request.method !== "POST") return json({ ok: false, error: "POST required" }, 405, corsHeaders(request, env));
+          const payload = await request.json();
+          return json(await syncDeletedTokensToD1(env, payload?.deleted_tokens || payload), 200, corsHeaders(request, env));
+        }
+        return json({ ok: false, error: "unknown_api_path" }, 404, corsHeaders(request, env));
+      } catch (error) {
+        return json({ ok: false, error: error.message }, 500, corsHeaders(request, env));
+      }
     }
 
     if (url.pathname === "/deleted-token") {
@@ -497,7 +914,7 @@ export default {
     }
 
     if (url.pathname !== "/dispatch") {
-      return json({ ok: false, error: "Use /health, /dispatch, or /deleted-token" }, 404, corsHeaders(request, env));
+      return json({ ok: false, error: "Use /health, /api/dashboard, /dispatch, or /deleted-token" }, 404, corsHeaders(request, env));
     }
 
     if (request.method !== "POST") {
@@ -523,5 +940,15 @@ export {
   requireCloudflareAccess,
   schedulerBucket,
   schedulerKindForCron,
+  scanStatusPayload,
+  dashboardData,
+  dashboardTokenKeys,
+  decodeCursor,
+  discoveryStatePage,
+  encodeCursor,
+  ingestDashboardSnapshot,
+  ingestDiscoveryState,
+  ingestAccess,
+  syncDeletedTokensToD1,
   updateDeletedToken,
 };

@@ -76,10 +76,13 @@ python3 solana-radar/server.py --port 8765 --auto-lane reactivation --auto-inter
 
 Open `http://127.0.0.1:8765`.
 
-The dashboard reads `data/latest_report.json`, shows recent alert history, and
-auto-runs the lane scanner. The scan button is only a force-refresh. Each scan
-also refreshes current market snapshots for already caught tokens when their
-dashboard market data is older than about one hour.
+The local dashboard reads the scanner's local runtime files, shows recent alert
+history, and auto-runs the lane scanner. The published GitHub Pages dashboard
+reads the current snapshot from the Cloudflare Worker backed by D1; it falls
+back to a compact static snapshot if the Worker is temporarily unavailable.
+The scan button is only a force-refresh. Each scan also refreshes current
+market snapshots for already caught tokens when their dashboard market data is
+older than about one hour.
 
 Narrative assignment follows [`NARRATIVE_PROTOCOL.md`](NARRATIVE_PROTOCOL.md):
 one primary narrative per caught token, optional secondary flavor, source-ranked
@@ -96,19 +99,18 @@ python3 solana-radar/scanner.py --watch --lane reactivation
 
 The repository includes `.github/workflows/scan-and-pages.yml`.
 
-It runs the scanner at most once per hour, commits compact report/alert
-snapshots, and deploys the static dashboard to GitHub Pages. Hourly triggers share a
+It runs the scanner at most once per hour, keeps its private runtime state in
+GitHub Actions Cache, writes the current dashboard payload to Cloudflare D1,
+and deploys a compact fallback snapshot to GitHub Pages. Hourly triggers share a
 50-minute freshness guard: fresh reports are skipped before paid API work, while
 stale reports trigger the full scan. Already running scans are not cancelled.
 Scanner data commits do not retrigger the workflow, which prevents a
 scan-commit-scan loop. Scanner failures are logged as workflow warnings and the
 previous dashboard snapshot is preserved. A completed report separately exposes data
-freshness and scan health (`healthy`, `degraded`, or `unhealthy`). The dashboard reads:
+freshness and scan health (`healthy`, `degraded`, or `unhealthy`). GitHub Pages publishes
+only a compact fallback snapshot; it never publishes the scanner's full runtime state.
 
-- `data/latest_report.json`
-- `data/alerts.jsonl`
-- `data/state.json`
-- `data/deleted_tokens.json`
+- `data/dashboard_fallback.json`
 
 Recommended production GitHub Actions secrets:
 
@@ -118,6 +120,7 @@ ALCHEMY_SOLANA_RPC_URL
 CHAINSTACK_SOLANA_RPC_URL
 GMGN_API_KEY
 BRIGHTDATA_API_KEY
+RADAR_INGEST_SECRET
 ```
 
 At least one Solana RPC provider is required. For the intended production
@@ -139,39 +142,31 @@ Production uses two scan layers:
 - `Reactivation discovery pulse` runs every 5 minutes without Solana RPC calls.
   It uses a narrow low-cost GMGN set (`1m`/`5m` volume and swaps plus two
   Trenches rankings), updates current market snapshots, quiet-regime baselines,
-  and the priority queue in Convex.
+  and the priority queue in Cloudflare D1.
 - `Scan and deploy dashboard` runs the deep onchain pass hourly. It restores raw
   cursors and swap buffers from GitHub Actions Cache, loads the latest discovery
-  context from Convex, scans selected pools, and publishes the dashboard.
+  context from D1, scans selected pools, and publishes the dashboard.
 
-Convex is the primary dashboard read path. GitHub Pages keeps the latest static
-report as a fallback. Market/baseline/outcome data is stored one row per token;
-the full growing market is not stored in a single Convex document. A temporary
-Convex outage does not stop the hourly scan: it continues from Actions Cache and
-publishes the static Pages snapshot.
+Cloudflare D1 is the primary dashboard read path. GitHub Pages keeps a compact
+snapshot fallback. Market/baseline/outcome data is stored one row per token; raw
+transaction buffers, RPC cursors, and the wallet cache remain only in the Actions
+runtime cache. A temporary D1 outage does not stop the hourly scan: it publishes
+the prior verified fallback and retries the remote sync on the next run.
 
-Convex production setup:
+Cloudflare production setup:
 
 ```bash
-# GitHub Actions variable, public client/backend URL
-CONVEX_URL=https://your-deployment.convex.cloud
-
-# GitHub Actions secrets
-CONVEX_DEPLOY_KEY=...
-CONVEX_INGEST_SECRET=...
+# GitHub Actions secret and Worker secret with the same value
+RADAR_INGEST_SECRET=...
 ```
 
-The workflow deploys Convex functions on code pushes and syncs a compact report,
-alert history, token market rows, discovery baselines, queues, and signal
-outcomes. Raw transaction buffers and wallet cache never go to Convex.
+Apply `cloudflare/scan-dispatcher/migrations/0001_radar_data.sql` to the bound
+`solana-radar` D1 database, then deploy the worker. The scanner syncs a compact
+report, alert history, token market rows, discovery baselines, queues, and signal
+outcomes through the protected Worker ingestion API.
 
 The Cloudflare delete worker writes Delete/Restore actions to GitHub and mirrors
-the deletion index to Convex:
-
-```bash
-CONVEX_URL=https://your-deployment.convex.cloud
-CONVEX_INGEST_SECRET=...
-```
+the deletion index to D1.
 
 Production lane:
 
@@ -227,12 +222,14 @@ pools are excluded before onchain analysis.
 
 ## Outputs
 
-- `solana-radar/data/state.json` - compact bootstrap state. The live copy is
-  persisted in GitHub Actions Cache and is no longer committed hourly.
-- `solana-radar/data/alerts.jsonl` - machine-readable alerts.
-- `solana-radar/data/latest_report.md` - human-readable latest scan.
-- `solana-radar/data/latest_report.json` - structured dashboard data.
-- `solana-radar/data/deleted_tokens.json` - scanner blacklist for false catches deleted from the dashboard.
+- `solana-radar/data/state.json` - private scanner runtime state. It is cached
+  in GitHub Actions and never published.
+- `solana-radar/data/alerts.jsonl` and `latest_report.*` - private local scan
+  artifacts. D1 is the production source for the dashboard.
+- `solana-radar/data/dashboard_fallback.json` - compact public fallback for
+  Pages. It has a short raw-alert window; the full dashboard history remains in D1.
+- `solana-radar/data/deleted_tokens.json` - small scanner blacklist for false
+  catches deleted from the dashboard.
 
 ## Notes
 

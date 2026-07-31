@@ -4,19 +4,19 @@ export function payloadTimestamp(payload) {
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
-export function chooseDashboardPayload({ staticPayload, convexPayload }) {
-  if (staticPayload && (!convexPayload || payloadTimestamp(staticPayload) >= payloadTimestamp(convexPayload))) {
+export function chooseDashboardPayload({ staticPayload, remotePayload }) {
+  if (remotePayload && (!staticPayload || payloadTimestamp(remotePayload) >= payloadTimestamp(staticPayload))) {
+    return {
+      payload: remotePayload,
+      source: "remote",
+      fallbackReason: null,
+    };
+  }
+  if (staticPayload) {
     return {
       payload: staticPayload,
       source: "static",
-      fallbackReason: convexPayload ? "static_snapshot_is_newer_or_equal" : "convex_unavailable",
-    };
-  }
-  if (convexPayload) {
-    return {
-      payload: convexPayload,
-      source: "convex",
-      fallbackReason: null,
+      fallbackReason: remotePayload ? "remote_snapshot_stale" : "remote_unavailable",
     };
   }
   return {

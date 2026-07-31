@@ -5,7 +5,11 @@ import {
   applyDeletedTokenUpdate,
   claimDispatchBucket,
   corsHeaders,
+  dashboardTokenKeys,
+  decodeCursor,
+  encodeCursor,
   requireCloudflareAccess,
+  scanStatusPayload,
   schedulerBucket,
   schedulerKindForCron,
   updateDeletedToken,
@@ -120,4 +124,29 @@ test("scheduler buckets distinguish five-minute discovery from hourly deep scans
   };
   assert.deepEqual(await claimDispatchBucket(env, "discovery", "discovery:bucket"), { claimed: true, persistent: true });
   assert.deepEqual(await claimDispatchBucket(env, "discovery", "discovery:bucket"), { claimed: false, persistent: true });
+});
+
+test("D1 dashboard selects only token rows that can appear in the UI", () => {
+  const keys = dashboardTokenKeys(
+    {
+      signal_theses: [{ token_address: "thesis-token" }],
+      alerts: [{ pool: { token_address: "alert-token" } }],
+      summaries: [{ pool: { token_address: "summary-token" } }],
+    },
+    [{ pool: { token_address: "history-token" } }],
+  );
+  assert.deepEqual(keys, ["thesis-token", "alert-token", "history-token", "summary-token"]);
+});
+
+test("D1 discovery cursor round-trips padded and unpadded base64url", () => {
+  const source = { updatedAt: "2026-07-31T12:00:00Z", tokenKey: "token-key" };
+  const cursor = encodeCursor(source);
+  assert.deepEqual(decodeCursor(cursor), source);
+});
+
+test("scan status ingestion accepts scanner wrappers and raw recovery documents", () => {
+  const status = { status: "failed", last_attempt_at: "2026-07-31T12:00:00Z" };
+  assert.deepEqual(scanStatusPayload({ status }), status);
+  assert.deepEqual(scanStatusPayload(status), status);
+  assert.deepEqual(scanStatusPayload(null), {});
 });

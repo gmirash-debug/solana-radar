@@ -21,7 +21,6 @@ on:
       - "scanner.py"
       - "package.json"
       - "package-lock.json"
-      - "convex/**"
       - "config.example.json"
       - "config.json"
       - "requirements.txt"
@@ -30,7 +29,7 @@ on:
       - "NARRATIVE_PROTOCOL.md"
 
 concurrency:
-  # Both workflows mutate data/state.json. They must share one writer lock.
+  # Scanner runs share one runtime-state writer lock.
   group: solana-radar-state-writer
   cancel-in-progress: false
 
@@ -67,11 +66,14 @@ jobs:
 
       - name: Check scan freshness
         id: freshness
+        env:
+          RADAR_DATA_API_URL: https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import json
           import os
           from datetime import datetime, timezone
+          from urllib.request import urlopen
 
           event_name = os.environ.get("GITHUB_EVENT_NAME", "")
           event = {}
@@ -91,20 +93,29 @@ jobs:
               print("reason=push_deploy_only")
               raise SystemExit
 
+          report = {}
           try:
-              with open("data/latest_report.json", "r", encoding="utf-8") as handle:
-                  report = json.load(handle)
+              base_url = os.environ.get("RADAR_DATA_API_URL", "").rstrip("/")
+              with urlopen(f"{base_url}/api/dashboard?history_limit=1", timeout=10) as response:
+                  payload = json.load(response)
+              if payload.get("ok"):
+                  report = payload.get("report") or {}
+                  scanner_status = payload.get("scan_status") or {}
+          except Exception:
+              # A first deployment or temporary Worker outage should trigger a scan,
+              # not make Git-tracked runtime JSON the source of truth again.
+              report = {}
+
+          try:
               generated_at = report.get("generated_at", "")
               generated = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
               age_seconds = (datetime.now(timezone.utc) - generated).total_seconds()
           except Exception:
               print("should_scan=true")
-              print("reason=missing_report")
+              print("reason=missing_remote_report")
               raise SystemExit
 
           try:
-              with open("data/scanner_status.json", "r", encoding="utf-8") as handle:
-                  scanner_status = json.load(handle)
               last_attempt = datetime.fromisoformat(
                   str(scanner_status.get("last_attempt_at", "")).replace("Z", "+00:00")
               )
@@ -179,7 +190,6 @@ jobs:
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
         run: |
           python -m pip install -r requirements.txt
-          npm ci
           npm install -g gmgn-cli@1.5.4
 
       - name: Validate scanner and dashboard
@@ -187,49 +197,8 @@ jobs:
         run: |
           python -m unittest discover -s tests -v
           python -m json.tool config.example.json > /dev/null
+          node --test cloudflare/scan-dispatcher/test/index.test.mjs dashboard/test/data-source.test.mjs dashboard/test/token-state.test.mjs
           node --check dashboard/app.js
-          npx tsc -p convex/tsconfig.json --noEmit
-
-      - name: Configure and deploy Convex
-        if: github.event_name == 'push'
-        env:
-          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
-          CONVEX_INGEST_SECRET: ${{ secrets.CONVEX_INGEST_SECRET }}
-        run: |
-          printf '%s' "$CONVEX_INGEST_SECRET" | npx convex env set --prod CONVEX_INGEST_SECRET
-          npx convex env list --prod --names-only | grep -qx CONVEX_INGEST_SECRET
-          npx convex deploy
-
-      - name: Verify Convex production
-        if: github.event_name == 'push'
-        env:
-          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
-        run: |
-          response="$(
-            curl --fail-with-body --silent --show-error \
-              --request POST \
-              --header 'Content-Type: application/json' \
-              --data '{"path":"radar:dashboardData","args":{"historyLimit":1},"format":"json"}' \
-              https://basic-starfish-944.convex.cloud/api/query
-          )"
-          if ! printf '%s' "$response" | python -c \
-            'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("status") == "success" else 1)'
-          then
-            logs="$(timeout --signal=TERM 20s npx convex logs --prod --history 40 2>&1 || true)"
-            printf '%s\n' "$logs"
-            if printf '%s' "$logs" | grep -qi "exceeded the free plan limits"; then
-              echo "::warning title=Convex quota exhausted::Dashboard and scanner will use the GitHub snapshot/cache fallback."
-              {
-                echo "### Convex degraded"
-                echo ""
-                echo "The free-plan quota is exhausted. GitHub Pages and the shared Actions cache remain active."
-              } >> "$GITHUB_STEP_SUMMARY"
-              exit 0
-            fi
-            echo "::error title=Convex smoke test failed::$response"
-            exit 1
-          fi
-          echo "Convex production query is healthy."
 
       - name: Run scanner
         id: run_scanner
@@ -244,11 +213,11 @@ jobs:
           PUBLICNODE_SOLANA_RPC_URL: https://solana-rpc.publicnode.com
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
           BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
-          CONVEX_URL: https://basic-starfish-944.convex.cloud
-          CONVEX_INGEST_SECRET: ${{ secrets.CONVEX_INGEST_SECRET }}
-          # The Actions cache and static Pages snapshot keep the hourly scan
-          # operational during a temporary Convex outage.
-          CONVEX_SYNC_REQUIRED: "false"
+          RADAR_DATA_API_URL: https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev
+          RADAR_INGEST_SECRET: ${{ secrets.RADAR_INGEST_SECRET }}
+          # D1 is canonical; the compact Pages snapshot remains available if
+          # the remote write is temporarily unavailable.
+          RADAR_REMOTE_SYNC_REQUIRED: "false"
         run: |
           set +e
           timeout --signal=TERM --kill-after=30s 25m python scanner.py --once --lane reactivation
@@ -299,41 +268,6 @@ jobs:
           print(f"classification={classification}")
           PY
 
-      - name: Commit scanner data
-        if: steps.freshness.outputs.should_scan == 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          cp data/state.json /tmp/solana-radar-runtime-state.json
-          git restore --worktree -- data/state.json
-          if [ "${{ steps.run_scanner.outputs.exit_code }}" != "0" ]; then
-            cp data/scanner_status.json /tmp/scanner_status.json
-            git restore --worktree -- data/latest_report.json data/latest_report.md data/alerts.jsonl data/deleted_tokens.json
-            cp /tmp/scanner_status.json data/scanner_status.json
-          fi
-          git add data/scanner_status.json
-          if [ "${{ steps.run_scanner.outputs.exit_code }}" = "0" ]; then
-            git add data/latest_report.json data/latest_report.md data/alerts.jsonl data/deleted_tokens.json
-          fi
-          if ! git diff --cached --quiet; then
-            if [ "${{ steps.run_scanner.outputs.exit_code }}" = "0" ]; then
-              git commit -m "Update scanner data"
-            else
-              git commit -m "Record scanner failure"
-            fi
-            for attempt in 1 2 3; do
-              if git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME"; then
-                break
-              fi
-              if [ "$attempt" = "3" ]; then
-                exit 1
-              fi
-              git rebase --abort || true
-              sleep 5
-            done
-          fi
-          cp /tmp/solana-radar-runtime-state.json data/state.json
-
       - name: Save scanner runtime state
         if: steps.freshness.outputs.should_scan == 'true' && steps.run_scanner.outputs.exit_code == '0'
         uses: actions/cache/save@v4
@@ -349,28 +283,9 @@ jobs:
         run: |
           rm -rf .pages
           mkdir -p .pages/data
-          cp dashboard/index.html dashboard/app.js dashboard/data-source.js dashboard/styles.css dashboard/config.js .pages/
-          cp data/latest_report.json data/latest_report.md data/alerts.jsonl data/scanner_status.json .pages/data/
-          if [ -f data/discovery_status.json ]; then
-            cp data/discovery_status.json .pages/data/
-          else
-            printf '{"status":"warming","last_attempt_at":null,"last_success_at":null,"error":null}\n' > .pages/data/discovery_status.json
-          fi
-          if [ -f data/deleted_tokens.json ]; then
-            cp data/deleted_tokens.json .pages/data/
-          else
-            printf '{"tokens":[],"pools":[],"entries":{},"updated_at":null}\n' > .pages/data/deleted_tokens.json
-          fi
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          state = json.loads(Path("data/state.json").read_text())
-          public_state = {
-              "market": state.get("market", {}),
-          }
-          Path(".pages/data/state.json").write_text(json.dumps(public_state, separators=(",", ":")))
-          PY
+          cp dashboard/index.html dashboard/app.js dashboard/data-source.js dashboard/token-state.js dashboard/styles.css dashboard/config.js .pages/
+          test -f data/dashboard_fallback.json
+          cp data/dashboard_fallback.json .pages/data/dashboard_fallback.json
 
       - name: Configure Pages
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'

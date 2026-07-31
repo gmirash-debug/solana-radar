@@ -1,4 +1,9 @@
 import { chooseDashboardPayload } from "./data-source.js";
+import {
+  resolveAthContext,
+  resolveCurrentMarket,
+  resolveSignalEpisodes,
+} from "./token-state.js";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const DELETE_SYNC_ENDPOINT = "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/deleted-token";
@@ -77,11 +82,11 @@ const state = {
   hiddenTokenKeys: loadHiddenTokenKeys(),
   serverDeletedTokenKeys: new Set(),
   serverDeletedPoolKeys: new Set(),
-  staticMode: false,
+  publishedDashboard: false,
   dataSource: "none",
   fallbackReason: null,
-  staticExtrasLoadedFor: null,
-  staticExtrasLoadingFor: null,
+  remoteRetryAt: 0,
+  remoteFailureCount: 0,
 };
 
 const els = {
@@ -362,7 +367,7 @@ function socialLabel(value, reason = "") {
 
 function athSourceLabel(source) {
   if (source === "gmgn") return "GMGN";
-  if (source === "solana_tracker") return "Solana Tracker";
+  if (source === "solana_tracker") return "Solana Tracker legacy";
   if (source === "ohlcv_high") return "OHLCV high";
   return "ATH missing";
 }
@@ -377,6 +382,7 @@ function athStatusLabel(status, error = "") {
     return "ATH retry pending";
   }
   if (status === "unverified") return "ATH unverified";
+  if (status === "legacy") return "legacy ATH, recheck pending";
   return "pending";
 }
 
@@ -451,7 +457,7 @@ async function persistTokenDeletion(token, hidden) {
   if (!token) return;
   let endpoint = "/api/deleted-token";
   const headers = { "content-type": "application/json" };
-  if (state.staticMode) {
+  if (state.publishedDashboard) {
     endpoint = DELETE_SYNC_ENDPOINT;
   }
   const response = await fetch(endpoint, {
@@ -472,7 +478,7 @@ async function persistTokenDeletion(token, hidden) {
 }
 
 async function syncLocalDeletedTokens() {
-  if (!state.staticMode || !state.hiddenTokenKeys.size) return;
+  if (!state.publishedDashboard || !state.hiddenTokenKeys.size) return;
   const tokens = buildTokenSignals().filter((token) => state.hiddenTokenKeys.has(token.key) && !isTokenServerDeleted(token));
   for (const token of tokens) {
     await persistTokenDeletion(token, true);
@@ -483,7 +489,7 @@ async function syncLocalDeletedTokens() {
 function renderHiddenAction(token, compact = false) {
   const hidden = isTokenHidden(token);
   const serverDeleted = isTokenServerDeleted(token);
-  const disabled = serverDeleted && state.staticMode;
+  const disabled = false;
   const label = hidden ? (disabled ? "Deleted" : "Restore") : "Delete";
   return `
     <button
@@ -635,6 +641,14 @@ function mergeMarketMeta(pool = {}, meta = null) {
     "scan_price_usd",
     "scan_liquidity_usd",
     "scan_mcap_at",
+    "market_snapshot_stale",
+    "market_snapshot_error",
+    "market_snapshot_checked_at",
+    "current_market_verified_at",
+    "market_source",
+    "ath_latest_checked_at",
+    "ath_verified_at",
+    "ath_validation_status",
   ].forEach((key) => {
     if (meta[key] !== undefined && meta[key] !== null && meta[key] !== "") enriched[key] = meta[key];
   });
@@ -646,7 +660,7 @@ function mergeMarketMeta(pool = {}, meta = null) {
 
 function currentPoolsByToken() {
   const map = new Map();
-  const put = (pool, observedAt) => {
+  const put = (pool, observedAt, snapshotSource) => {
     if (!pool) return;
     if (!isPumpfunPool(pool)) return;
     const key = tokenKeyFromPool(pool);
@@ -660,14 +674,20 @@ function currentPoolsByToken() {
       || currentRank > existing._observed_rank
       || (currentRank === existing._observed_rank && liquidityRank >= existing._liquidity_rank)
     ) {
-      map.set(key, { ...pool, _observed_rank: currentRank, _liquidity_rank: liquidityRank });
+      map.set(key, {
+        ...pool,
+        _observed_rank: currentRank,
+        _observed_at: observedAt || null,
+        _snapshot_source: snapshotSource || pool.source || null,
+        _liquidity_rank: liquidityRank,
+      });
     }
   };
-  allAlerts().forEach((alert) => put(alert.pool, alert.window_start || alert.created_at));
-  (state.report?.universe || []).forEach((pool) => put(pool, state.report?.generated_at));
-  (state.report?.active_pools || []).forEach((item) => put(item.pool, state.report?.generated_at));
-  (state.report?.summaries || []).forEach((item) => put(item.pool, state.report?.generated_at));
-  Object.values(state.market || {}).forEach((pool) => put(normalizeMarketPool(pool), pool.latest_seen_at || pool.scan_mcap_at || pool.ath_latest_checked_at));
+  allAlerts().forEach((alert) => put(alert.pool, alert.window_start || alert.created_at, "alert"));
+  (state.report?.universe || []).forEach((pool) => put(pool, state.report?.generated_at, "universe"));
+  (state.report?.active_pools || []).forEach((item) => put(item.pool, state.report?.generated_at, "active"));
+  (state.report?.summaries || []).forEach((item) => put(item.pool, state.report?.generated_at, "summary"));
+  Object.values(state.market || {}).forEach((pool) => put(normalizeMarketPool(pool), pool.latest_seen_at || pool.scan_mcap_at || pool.ath_latest_checked_at, "market_cache"));
   return map;
 }
 
@@ -973,9 +993,20 @@ function buildTokenSignals() {
       return best;
     }, null);
     const firstPool = first.pool || {};
-    const firstPriceUsd = Number(firstPool.price_usd || 0);
-    const currentPriceUsd = Number(latestPool.price_usd || last.pool?.price_usd || firstPriceUsd || 0);
-    const profitPct = firstPriceUsd && currentPriceUsd ? ((currentPriceUsd / firstPriceUsd) - 1) * 100 : null;
+    const signalEpisodes = resolveSignalEpisodes({
+      alerts: token.alerts,
+      market: latestPool,
+      thesis: token.signalThesis,
+    });
+    const currentMarket = resolveCurrentMarket({
+      pool: latestPool,
+      latestObservation,
+    });
+    const firstPriceUsd = signalEpisodes.displayCatch.priceUsd;
+    const currentPriceUsd = currentMarket.priceUsd;
+    const profitPct = firstPriceUsd && currentPriceUsd
+      ? ((currentPriceUsd / firstPriceUsd) - 1) * 100
+      : null;
     const uniqueEvents = uniqueAlertEvents(token.alerts);
     const rawEvents = rawEventCount(token.alerts);
     const nativeRatios = [];
@@ -1202,30 +1233,24 @@ function buildTokenSignals() {
       return Number(b.sol_in || 0) - Number(a.sol_in || 0);
     });
     const walletPnls = wallets.map((row) => row.pnl_pct).filter((value) => Number.isFinite(value));
+    const athContext = resolveAthContext({
+      market: latestPool,
+      currentMarket,
+    });
     token.latestPool = latestPool;
-    token.firstSignalAt = first.created_at || first.window_end || first.window_start;
+    token.originalCatch = signalEpisodes.originalCatch;
+    token.activeEpisode = signalEpisodes.activeEpisode;
+    token.displayCatch = signalEpisodes.displayCatch;
+    token.firstSignalAt = token.displayCatch.at;
     token.lastSignalAt = last.created_at || last.window_end || last.window_start;
     token.firstPriceUsd = firstPriceUsd;
     token.currentPriceUsd = currentPriceUsd;
     token.profitPct = profitPct;
-    token.firstMcap = Number(firstPool.mcap_usd || 0);
-    token.currentMcap = Number(latestPool.mcap_usd || 0);
-    token.firstObsMcapUsd = Number(
-      first.first_obs_mcap_usd
-      || first.obs_mcap_usd
-      || firstPool.first_obs_mcap_usd
-      || latestPool.first_obs_mcap_usd
-      || firstPool.mcap_usd
-      || 0
-    );
-    token.firstObsMcapAt = first.first_obs_mcap_at
-      || first.obs_mcap_at
-      || firstPool.first_obs_mcap_at
-      || latestPool.first_obs_mcap_at
-      || first.created_at
-      || first.window_end
-      || first.window_start
-      || null;
+    token.firstMcap = token.displayCatch.mcapUsd || Number(firstPool.mcap_usd || 0);
+    token.currentMarket = currentMarket;
+    token.currentMcap = currentMarket.mcapUsd;
+    token.firstObsMcapUsd = token.displayCatch.mcapUsd;
+    token.firstObsMcapAt = token.displayCatch.at;
     const createdAt = poolCreatedAt(latestPool) || poolCreatedAt(firstPool);
     const reportedAge = latestPool.age_hours ?? firstPool.age_hours;
     token.tokenAgeHours = reportedAge !== null && reportedAge !== undefined
@@ -1234,16 +1259,19 @@ function buildTokenSignals() {
         ? Math.max(0, (Date.now() - createdAt.getTime()) / 3_600_000)
         : null;
     token.tokenCreatedAt = createdAt ? createdAt.toISOString() : null;
-    const trustedAth = ["gmgn", "solana_tracker", "ohlcv_high"].includes(latestPool.ath_source) && Number(latestPool.ath_mcap_usd || 0) > 0;
-    token.athMcapUsd = trustedAth ? Number(latestPool.ath_mcap_usd || 0) : null;
-    token.athMcapAt = trustedAth ? latestPool.ath_mcap_at || null : null;
-    token.athSource = trustedAth ? latestPool.ath_source : "missing";
-    token.athStatus = trustedAth ? latestPool.ath_status || "ready" : latestPool.ath_status || (latestPool.ath_error ? "error" : "pending");
-    token.athError = latestPool.ath_error || "";
-    token.athLabel = trustedAth ? `${athSourceLabel(latestPool.ath_source)} ATH` : "GMGN ATH";
-    token.scanMcapUsd = Number(latestPool.scan_mcap_usd || latestPool.latest_mcap_usd || latestObservation?.mcap_usd || token.currentMcap || token.firstMcap || 0);
-    token.scanMcapAt = latestPool.scan_mcap_at || latestPool.latest_seen_at || latestObservation?.at || token.lastSignalAt || null;
-    token.liquidityUsd = Number(latestPool.liquidity_usd || 0);
+    token.athMcapUsd = athContext.mcapUsd;
+    token.athMcapAt = athContext.at;
+    token.athSource = athContext.source;
+    token.athStatus = athContext.status;
+    token.athError = athContext.error;
+    token.athVerifiedAt = athContext.verifiedAt;
+    token.athCurrentRatio = athContext.ratio;
+    token.athLabel = athContext.mcapUsd ? `${athSourceLabel(athContext.source)} ATH` : "GMGN ATH";
+    token.scanMcapUsd = currentMarket.mcapUsd;
+    token.scanMcapAt = currentMarket.observedAt;
+    token.liquidityUsd = currentMarket.liquidityUsd;
+    token.lastVerifiedMcapUsd = currentMarket.lastVerifiedMcapUsd;
+    token.lastVerifiedLiquidityUsd = currentMarket.lastVerifiedLiquidityUsd;
     token.historicalMaxScore = Math.max(...token.alerts.map((alert) => Number(alert.score || 0)));
     token.caughtScore = Number(
       token.signalThesis?.source_score
@@ -1277,7 +1305,8 @@ function buildTokenSignals() {
     token.medianWalletPnl = median(walletPnls);
     token.observedFilters = [...new Set(token.alerts.map((alert) => normalizeFilterName(alert.filterLane || "legacy")))];
     token.caughtFilter = normalizeFilterName(
-      first.first_obs_lane
+      token.originalCatch.lane
+      || first.first_obs_lane
       || first.obs_lane
       || firstPool.first_obs_lane
       || latestPool.first_obs_lane
@@ -1285,7 +1314,12 @@ function buildTokenSignals() {
       || token.observedFilters[0]
       || "legacy"
     );
-    token.currentFilter = normalizeFilterName(last.filterLane || token.observedFilters[token.observedFilters.length - 1] || token.caughtFilter);
+    token.currentFilter = normalizeFilterName(
+      token.activeEpisode?.lane
+      || last.filterLane
+      || token.observedFilters[token.observedFilters.length - 1]
+      || token.caughtFilter,
+    );
     token.filterCategories = [token.currentFilter];
     token.primaryFilter = token.currentFilter;
     token.lanes = token.filterCategories;
@@ -1442,68 +1476,49 @@ async function fetchJson(path, optional = false) {
   return response.json();
 }
 
-function convexUrl() {
-  const raw = String(window.SOLANA_RADAR_CONVEX_URL || "").trim();
+function remoteDataUrl() {
+  const raw = String(window.SOLANA_RADAR_DATA_API_URL || "").trim();
   return raw.replace(/\/+$/, "");
 }
 
-async function fetchConvexQuery(path, args = {}) {
-  const baseUrl = convexUrl();
+function isPublishedDashboard() {
+  return window.location.hostname.endsWith("github.io") || window.location.protocol === "file:";
+}
+
+function remoteRetryDelayMs(failures) {
+  return Math.min(15 * 60_000, 30_000 * (2 ** Math.max(0, failures - 1)));
+}
+
+async function fetchRemoteDashboard() {
+  const baseUrl = remoteDataUrl();
   if (!baseUrl) return null;
-  const response = await fetch(`${baseUrl}/api/query`, {
-    method: "POST",
+  const response = await fetch(`${baseUrl}/api/dashboard?history_limit=80`, {
     cache: "no-store",
     headers: {
-      "Content-Type": "application/json",
       "accept": "application/json",
     },
-    body: JSON.stringify({ path, args, format: "json" }),
   });
   const payload = await response.json().catch(() => null);
-  if (!response.ok || payload?.status !== "success") {
-    const message = payload?.errorMessage || `${path} ${response.status}`;
+  if (!response.ok || !payload?.ok || !payload?.report?.generated_at) {
+    const message = payload?.error || `dashboard ${response.status}`;
     throw new Error(message);
   }
-  return payload.value || {};
-}
-
-async function fetchText(path, optional = false) {
-  const response = await fetch(path, { cache: "no-store" });
-  if (!response.ok) {
-    if (optional) return "";
-    throw new Error(`${path} ${response.status}`);
-  }
-  return response.text();
-}
-
-function parseJsonl(text) {
-  return String(text || "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean)
-    .reverse();
+  return payload;
 }
 
 async function loadStaticData() {
+  const fallback = await fetchJson("data/dashboard_fallback.json", true);
+  if (fallback?.report?.generated_at) return fallback;
   const [report, deletedTokens, scannerStatus, discoveryStatus] = await Promise.all([
     fetchJson("data/latest_report.json"),
     fetchJson("data/deleted_tokens.json", true),
     fetchJson("data/scanner_status.json", true),
     fetchJson("data/discovery_status.json", true),
   ]);
-  const extrasReady = state.staticExtrasLoadedFor === report.generated_at;
   return {
     report,
-    history: extrasReady ? state.history : [],
-    market: extrasReady ? state.market : {},
+    history: [],
+    market: {},
     scan_status: {
       ...(scannerStatus || {}),
       running: scannerStatus?.status === "running",
@@ -1516,92 +1531,52 @@ async function loadStaticData() {
   };
 }
 
-async function loadConvexData() {
-  const payload = await fetchConvexQuery("radar:dashboardData", { historyLimit: 40 });
-  if (!payload?.report?.generated_at) return null;
-  return payload;
-}
-
-async function loadStaticExtras(reportGeneratedAt) {
-  if (!reportGeneratedAt) return;
-  if (state.staticExtrasLoadedFor === reportGeneratedAt) return;
-  if (state.staticExtrasLoadingFor === reportGeneratedAt) return;
-  state.staticExtrasLoadingFor = reportGeneratedAt;
-  renderStatus();
-  try {
-    const [alertsText, scannerState] = await Promise.all([
-      fetchText("data/alerts.jsonl", true),
-      fetchJson("data/state.json", true),
-    ]);
-    if (state.report?.generated_at !== reportGeneratedAt) return;
-    state.history = parseJsonl(alertsText);
-    state.market = scannerState?.market || {};
-    state.staticExtrasLoadedFor = reportGeneratedAt;
-    const tokens = buildTokenSignals();
-    const visibleTokens = filteredTokens(tokens);
-    if (!state.selectedTokenKey && visibleTokens.length) state.selectedTokenKey = visibleTokens[0].key;
-    if (!state.showHidden && isTokenHidden(state.selectedTokenKey)) {
-      state.selectedTokenKey = visibleTokens[0]?.key || null;
-    }
-    render();
-  } finally {
-    if (state.staticExtrasLoadingFor === reportGeneratedAt) {
-      state.staticExtrasLoadingFor = null;
-      renderStatus();
-    }
-  }
-}
-
 async function loadData() {
   let payload = null;
   let staticPayload = null;
-  let convexPayload = null;
-  const staticHost = window.location.hostname.endsWith("github.io")
-    || window.location.protocol === "file:"
-    || ["127.0.0.1", "localhost"].includes(window.location.hostname);
+  let remotePayload = null;
+  state.publishedDashboard = isPublishedDashboard();
   const loads = [];
-  if (convexUrl()) {
-    loads.push(loadConvexData()
-      .then((value) => { convexPayload = value; })
-      .catch((error) => console.warn("Convex load failed", error)));
-  }
-  if (staticHost) {
+  if (state.publishedDashboard) {
     loads.push(loadStaticData()
       .then((value) => { staticPayload = value; })
       .catch((error) => console.warn("Static snapshot load failed", error)));
+    if (remoteDataUrl() && Date.now() >= state.remoteRetryAt) {
+      loads.push(fetchRemoteDashboard()
+        .then((value) => {
+          remotePayload = value;
+          state.remoteFailureCount = 0;
+          state.remoteRetryAt = 0;
+        })
+        .catch((error) => {
+          state.remoteFailureCount += 1;
+          state.remoteRetryAt = Date.now() + remoteRetryDelayMs(state.remoteFailureCount);
+          console.warn("D1 dashboard load failed", error);
+        }));
+    }
   }
   await Promise.all(loads);
 
-  const selected = chooseDashboardPayload({ staticPayload, convexPayload });
+  const selected = chooseDashboardPayload({ staticPayload, remotePayload });
   if (selected.payload) {
     payload = selected.payload;
     state.dataSource = selected.source;
     state.fallbackReason = selected.fallbackReason;
-    state.staticMode = selected.source === "static";
   } else {
     try {
       payload = await fetchJson("/api/report");
-      state.staticMode = false;
       state.dataSource = "local_api";
       state.fallbackReason = null;
     } catch {
       payload = await loadStaticData();
-      state.staticMode = true;
       state.dataSource = "static";
       state.fallbackReason = "local_api_unavailable";
     }
   }
   state.report = payload.report || {};
   applyDeletedTokenList(payload.deleted_tokens || {});
-  if (state.staticMode) {
-    if (state.staticExtrasLoadedFor !== state.report.generated_at) {
-      state.history = payload.history || [];
-      state.market = payload.market || {};
-    }
-  } else {
-    state.history = payload.history || [];
-    state.market = payload.market || {};
-  }
+  state.history = payload.history || [];
+  state.market = payload.market || {};
   state.scanStatus = payload.scan_status || {};
   state.discoveryStatus = payload.discovery_status || {};
   const tokens = buildTokenSignals();
@@ -1611,11 +1586,6 @@ async function loadData() {
     state.selectedTokenKey = visibleTokens[0]?.key || null;
   }
   render();
-  if (state.staticMode) {
-    loadStaticExtras(state.report.generated_at).catch((error) => {
-      els.statusRow.innerHTML += `<span class="status-pill freshness-bad">history load failed: ${esc(error.message)}</span>`;
-    });
-  }
 }
 
 function renderStatus() {
@@ -1664,8 +1634,8 @@ function renderStatus() {
   els.subtitle.textContent = report.generated_at
     ? `Latest successful scan ${dateLabel(report.generated_at)} - ${report.profile || report.lane || report.mode || "unknown"}`
     : "No scan report yet";
-  els.runScan.disabled = running || state.staticMode;
-  els.runScan.title = state.staticMode ? "Scanner runs by GitHub Actions schedule" : "";
+  els.runScan.disabled = running || state.publishedDashboard;
+  els.runScan.title = state.publishedDashboard ? "Scanner runs by the hourly GitHub Actions schedule" : "";
   els.statusRow.innerHTML = [
     `<span class="status-pill"><span class="dot ${running ? "warn" : ""}"></span>${running ? "scan running" : "idle"}</span>`,
     failed ? `<span class="status-pill freshness-bad" title="${esc(status.error || "Scanner failed")}"><span class="dot bad"></span>last attempt failed ${esc(dateLabel(status.last_attempt_at))}</span>` : "",
@@ -1680,9 +1650,9 @@ function renderStatus() {
     blockedRpcProviders.length ? `<span class="status-pill freshness-warn" title="${esc(rpcTitle)}">${esc(blockedRpcProviders.join(" + "))} blocked</span>` : "",
     athProvider.status && athProvider.status !== "ok" ? `<span class="status-pill freshness-bad" title="${esc(athProvider.error || "GMGN unavailable")}">ATH source ${esc(athProvider.status)}</span>` : "",
     `<span class="status-pill">lane ${esc(laneText)}</span>`,
-    state.dataSource === "static" ? `<span class="status-pill" title="${esc(state.fallbackReason || "static snapshot")}">static snapshot</span>` : "",
-    state.staticMode && state.hiddenTokenKeys.size ? `<button class="status-action" id="syncDeleted" type="button">Sync deleted</button>` : "",
-    state.staticExtrasLoadingFor === report.generated_at ? `<span class="status-pill freshness-warn">loading history</span>` : "",
+    state.dataSource === "remote" ? `<span class="status-pill">live D1</span>` : "",
+    state.dataSource === "static" ? `<span class="status-pill freshness-warn" title="${esc(state.fallbackReason || "remote unavailable")}">fallback snapshot</span>` : "",
+    state.publishedDashboard && state.hiddenTokenKeys.size ? `<button class="status-action" id="syncDeleted" type="button">Sync deleted</button>` : "",
     status.next_scan_at ? `<span class="status-pill">next auto ${esc(dateLabel(status.next_scan_at))}</span>` : "",
   ].filter(Boolean).join("");
   document.querySelector("#syncDeleted")?.addEventListener("click", () => {
@@ -1702,7 +1672,7 @@ function renderMetrics(tokens) {
   const outcomeMedian = outcomes.median_return_24h_pct;
   const outcomePositive = outcomes.positive_24h_pct;
   els.metrics.innerHTML = [
-    metric("Active", baseTokens.filter((token) => ["active", "hot", "watch", "weakening"].includes(token.workflowStatus)).length),
+    metric("Tracked", baseTokens.filter((token) => ["active", "hot", "watch", "weakening"].includes(token.workflowStatus)).length),
     metric("Hot", workflowCount("hot")),
     metric("Watch", workflowCount("watch")),
     metric("Weakening", workflowCount("weakening")),
@@ -1750,6 +1720,7 @@ function operationalFlagChips(token) {
   if (token.dataStatus === "scanner_stale" || token.currentQualityReasons.length || token.currentQualityPenalties.length) {
     flags.push(chip("data incomplete", "warn"));
   }
+  if (!token.currentMarket?.isFresh) flags.push(chip("market update pending", "warn"));
   return flags.join("");
 }
 
@@ -1777,11 +1748,11 @@ function renderTokenRow(token) {
               ${token.hidden ? chip("deleted", "warn") : ""}
             </div>
             <div class="meta">
-              <span>caught ${esc(dateLabel(token.firstSignalAt))}</span>
+              <span>${token.activeEpisode ? "reactivated" : "caught"} ${esc(dateLabel(token.firstSignalAt))}</span>
               <span>${esc(durationLabel(token.tokenAgeHours))} old</span>
               <span>${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)} caught mcap</span>
               <span>${esc(athText)}</span>
-              <span>${money(token.liquidityUsd)} liq</span>
+              <span>${token.currentMarket?.isFresh ? `${moneyMaybe(token.liquidityUsd)} liq` : "market pending"}</span>
               <span>${token.uniqueWallets} wallets</span>
             </div>
           </div>
@@ -1791,7 +1762,7 @@ function renderTokenRow(token) {
           ${operationalFlagChips(token)}
           ${chip(`${token.narrative.primary} - ${token.narrative.tilt}`, narrativeTone(token.narrative))}
           ${token.narrative.secondary.slice(0, 1).map((name) => chip(`${name} flavor`)).join("")}
-          ${token.hasFilterDrift ? chip(`caught ${filterMeta(token.caughtFilter).label}`, "warn") : ""}
+          ${token.activeEpisode && token.caughtFilter !== "reactivation" ? chip(`original ${filterMeta(token.caughtFilter).label}`) : ""}
           ${positiveSocialChip(token)}
           ${gmgnUrl ? `<a class="chip token-terminal-link" href="${esc(gmgnUrl)}" target="_blank" rel="noreferrer">GMGN</a>` : ""}
           ${renderHiddenAction(token, true)}
@@ -2206,39 +2177,14 @@ function originalSignalTier(token) {
 }
 
 function renderCaughtSignal(token) {
-  const thesis = token.signalThesis;
-  const originalAlert = token.alerts?.[0] || {};
-  const tier = originalSignalTier(token);
-  const caughtAt = thesis?.signal_at
-    || originalAlert.created_at
-    || originalAlert.window_end
-    || originalAlert.window_start
-    || token.firstSignalAt;
-  const mcap = Number(
-    thesis?.signal_mcap_usd
-    || originalAlert.obs_mcap_usd
-    || originalAlert.pool?.mcap_usd
-    || token.firstObsMcapUsd
-    || 0,
-  );
-  const score = Number(
-    thesis?.source_score
-    ?? originalAlert.score
-    ?? Number.NaN,
-  );
-  const flow = Number(
-    thesis?.source_flow_sol
-    ?? originalAlert.suspicious_sol
-    ?? Number.NaN,
-  );
-  const wallets = Number(
-    thesis?.source_wallets
-    ?? originalAlert.suspicious_wallets
-    ?? Number.NaN,
-  );
+  const episode = token.displayCatch || {};
+  const tier = episode.tier || originalSignalTier(token);
+  const score = Number(episode.score ?? Number.NaN);
+  const flow = Number(episode.flowSol ?? Number.NaN);
+  const wallets = Number(episode.wallets ?? Number.NaN);
   const metrics = [
-    caughtAt ? dateLabel(caughtAt) : "",
-    mcap > 0 ? `${money(mcap)} mcap` : "",
+    episode.at ? dateLabel(episode.at) : "",
+    episode.mcapUsd ? `${money(episode.mcapUsd)} mcap` : "",
     Number.isFinite(score) ? `score ${score.toFixed(0)}` : "",
     Number.isFinite(flow) ? `${sol(flow)} flow` : "",
     Number.isFinite(wallets) ? `${wallets.toFixed(0)} wallets` : "",
@@ -2248,6 +2194,18 @@ function renderCaughtSignal(token) {
     metrics,
     `<span class="muted-inline">${esc(tierMeta(tier).summary)}</span>`,
   ].filter(Boolean).join(" ");
+}
+
+function renderOriginalCatch(token) {
+  const original = token.originalCatch || {};
+  if (!token.activeEpisode) return "same as current signal";
+  const pieces = [
+    original.at ? dateLabel(original.at) : "",
+    original.mcapUsd ? `${money(original.mcapUsd)} mcap` : "",
+    original.lane ? filterMeta(normalizeFilterName(original.lane)).label : "",
+    Number.isFinite(Number(original.score)) ? `score ${Number(original.score).toFixed(0)}` : "",
+  ].filter(Boolean);
+  return pieces.length ? esc(pieces.join(" / ")) : "history unavailable";
 }
 
 function renderThesisSummary(token) {
@@ -2437,9 +2395,7 @@ function renderDetailSection(title, summary, body, open = false) {
 }
 
 function tokenAthRatio(token) {
-  const currentMcap = Number(token.scanMcapUsd || token.currentMcap || 0);
-  const athMcap = Number(token.athMcapUsd || 0);
-  return currentMcap && athMcap ? currentMcap / athMcap : null;
+  return Number.isFinite(Number(token.athCurrentRatio)) ? Number(token.athCurrentRatio) : null;
 }
 
 function marketPhase(token) {
@@ -2527,6 +2483,7 @@ function renderOverviewTab(token) {
     <section class="detail-block">
       <div class="detail-block-title">Decision</div>
       <div class="kv"><span>Caught as</span><span>${renderCaughtSignal(token)}</span></div>
+      ${token.activeEpisode ? `<div class="kv"><span>Original catch</span><span>${renderOriginalCatch(token)}</span></div>` : ""}
       <div class="kv"><span>Why caught</span><span>${esc(renderScannerReason(token))}</span></div>
       <div class="kv"><span>Cohort now</span><span>${renderThesisSummary(token)}</span></div>
       ${renderWaveLine(token)}
@@ -2611,12 +2568,15 @@ function renderTokenDetail(token) {
     ? `${token.athMcapAt ? `${esc(dateLabel(token.athMcapAt))} / ` : ""}${money(token.athMcapUsd)}`
     : athStatusLabel(token.athStatus, token.athError);
   const athSub = token.athMcapUsd
-    ? `${phase ? `${esc(phase.detail)} / ` : ""}${athSourceLabel(token.athSource)}`
+    ? `${phase ? `${esc(phase.detail)} / ` : ""}${athSourceLabel(token.athSource)}${token.athVerifiedAt ? ` / checked ${esc(dateLabel(token.athVerifiedAt))}` : ""}`
     : "GMGN ATH not ready";
-  const marketNowSub = [
-    `${money(token.liquidityUsd)} liq`,
-    token.scanMcapAt ? dateLabel(token.scanMcapAt) : "",
-  ].filter(Boolean).join(" / ");
+  const marketNowSub = token.currentMarket?.isFresh
+    ? [`${moneyMaybe(token.liquidityUsd)} liq`, token.scanMcapAt ? dateLabel(token.scanMcapAt) : ""].filter(Boolean).join(" / ")
+    : [
+      token.currentMarket?.observedAt ? `last verified ${dateLabel(token.currentMarket.observedAt)}` : "no verified market snapshot",
+      token.lastVerifiedMcapUsd ? `${money(token.lastVerifiedMcapUsd)} last mcap` : "",
+      token.currentMarket?.staleReason || "",
+    ].filter(Boolean).join(" / ");
   const sourceLinks = renderTokenSourceLinks(token);
   const tabContent = state.detailTab === "wallets"
     ? renderWalletsTab(token)
@@ -2636,7 +2596,7 @@ function renderTokenDetail(token) {
             <div class="detail-head-chips">
               ${workflowChip(token.workflowStatus)}
               ${currentSignalChip(token)}
-              ${token.hasFilterDrift ? chip(`caught ${filterMeta(token.caughtFilter).label}`, "warn") : ""}
+              ${token.activeEpisode && token.caughtFilter !== "reactivation" ? chip(`original ${filterMeta(token.caughtFilter).label}`) : ""}
             </div>
           </div>
         </div>
@@ -2646,8 +2606,8 @@ function renderTokenDetail(token) {
         </div>
       </div>
       <div class="decision-grid">
-        ${detailMetric("Caught", `${esc(dateLabel(token.firstSignalAt))} / ${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)}`, `${pct(token.profitPct)} since caught`, "", pClass(token.profitPct))}
-        ${detailMetric("Market now", `${moneyMaybe(token.scanMcapUsd || token.currentMcap)} mcap`, marketNowSub)}
+        ${detailMetric(token.activeEpisode ? "Reactivation" : "Caught", `${esc(dateLabel(token.firstSignalAt))} / ${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)}`, `${token.profitPct === null ? "market update pending" : `${pct(token.profitPct)} since signal`}`, "", pClass(token.profitPct))}
+        ${detailMetric("Market now", token.currentMarket?.isFresh ? `${moneyMaybe(token.currentMcap)} mcap` : "Update pending", marketNowSub, token.currentMarket?.isFresh ? "" : "warn")}
         ${detailMetric(token.athLabel, athValue, athSub, token.athMcapUsd ? "" : "bad")}
         ${detailMetric("Noticed flow", sol(token.totalSuspiciousSol), `${token.currentScore === null ? "caught" : "current"} score ${esc(token.currentScore ?? token.caughtScore)} / ${esc(token.uniqueWallets)} wallets`)}
       </div>
@@ -3184,7 +3144,7 @@ function render() {
 }
 
 async function runScan() {
-  if (state.staticMode) return;
+  if (state.publishedDashboard) return;
   els.runScan.disabled = true;
   try {
     const response = await fetch("/api/scan?lane=reactivation", { method: "POST" });
@@ -3193,7 +3153,7 @@ async function runScan() {
   } catch (error) {
     els.statusRow.innerHTML += `<span class="status-pill freshness-bad">run scan failed: ${esc(error.message)}</span>`;
   } finally {
-    if (!state.staticMode && !state.scanStatus?.running) els.runScan.disabled = false;
+    if (!state.publishedDashboard && !state.scanStatus?.running) els.runScan.disabled = false;
   }
 }
 

@@ -101,6 +101,9 @@ jobs:
         if: steps.freshness.outputs.should_run == 'true'
         env:
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+          RADAR_DATA_API_URL: https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev
+          RADAR_INGEST_SECRET: ${{ secrets.RADAR_INGEST_SECRET }}
+          RADAR_REMOTE_SYNC_REQUIRED: "false"
         run: |
           set +e
           timeout --signal=TERM --kill-after=15s 6m python scanner.py --discovery-only
