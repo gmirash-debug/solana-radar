@@ -13,6 +13,10 @@ export function timestampMs(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
+export function compareTokensByCatchNewest(a = {}, b = {}) {
+  return timestampMs(b.firstSignalAt) - timestampMs(a.firstSignalAt);
+}
+
 function signalTime(signal = {}) {
   return signal.created_at || signal.window_end || signal.window_start || null;
 }

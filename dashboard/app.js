@@ -1,5 +1,6 @@
 import { chooseDashboardPayload } from "./data-source.js";
 import {
+  compareTokensByCatchNewest,
   resolveAthContext,
   resolveCurrentMarket,
   resolveSignalEpisodes,
@@ -2075,49 +2076,11 @@ function signalRankScore(token) {
     + Math.max(0, Number(token.profitPct || 0)) / 10;
 }
 
-function tokenFreshnessMs(token) {
-  const latestScanMs = token.currentScanAlerts.reduce((best, alert) => {
-    const value = new Date(alert.window_start || alert.created_at || 0).getTime();
-    return Number.isNaN(value) ? best : Math.max(best, value);
-  }, 0);
-  const lastSignalMs = new Date(token.lastSignalAt || 0).getTime();
-  const firstSignalMs = new Date(token.firstSignalAt || 0).getTime();
-  return latestScanMs || (Number.isNaN(lastSignalMs) ? 0 : lastSignalMs) || (Number.isNaN(firstSignalMs) ? 0 : firstSignalMs);
-}
-
 function compareFilterTokens(a, b) {
-  const workflowDiff = workflowMeta(b.workflowStatus).rank - workflowMeta(a.workflowStatus).rank;
-  if (workflowDiff) return workflowDiff;
-
-  if (a.workflowStatus === "hot" && b.workflowStatus === "hot") {
-    const tierDiff = tierMeta(b.currentSignalTier).rank - tierMeta(a.currentSignalTier).rank;
-    if (tierDiff) return tierDiff;
-    const scoreDiff = Number(b.currentScore || 0) - Number(a.currentScore || 0);
-    if (scoreDiff) return scoreDiff;
-  }
-
-  if (a.workflowStatus === "weakening" && b.workflowStatus === "weakening") {
-    const attentionPriority = (token) => {
-      if (token.currentSignalTier === "late_chase") return 3;
-      if (token.lifecycleStatus === "weakening") return 2;
-      if (token.dataStatus === "check_needed") return 1;
-      return 0;
-    };
-    const attentionDiff = attentionPriority(b) - attentionPriority(a);
-    if (attentionDiff) return attentionDiff;
-  }
-
-  if (a.workflowStatus === "active" && b.workflowStatus === "active") {
-    const heldDiff = Number(heldSupplyMetric(b).pct || 0) - Number(heldSupplyMetric(a).pct || 0);
-    if (heldDiff) return heldDiff;
-  }
-
-  const freshnessDiff = tokenFreshnessMs(b) - tokenFreshnessMs(a);
-  if (freshnessDiff) return freshnessDiff;
-
-  const caughtDiff = new Date(b.firstSignalAt || 0).getTime() - new Date(a.firstSignalAt || 0).getTime();
+  const caughtDiff = compareTokensByCatchNewest(a, b);
   if (caughtDiff) return caughtDiff;
 
+  // Catch time is the stable user-facing order. Signal strength only breaks ties.
   return signalRankScore(b) - signalRankScore(a);
 }
 
