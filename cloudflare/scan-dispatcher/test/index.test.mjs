@@ -105,11 +105,17 @@ test("scheduler buckets distinguish five-minute discovery from hourly deep scans
   assert.equal(schedulerBucket("discovery", now), "discovery:2026-07-31T12:05:00.000Z");
   assert.equal(schedulerBucket("deep_scan", now), "deep_scan:2026-07-31T12:00:00.000Z");
 
-  const entries = new Map();
+  const entries = new Set();
   const env = {
     DISPATCH_BUCKETS: {
-      get: async (key) => entries.get(key) || null,
-      put: async (key, value) => entries.set(key, value),
+      idFromName: (key) => key,
+      get: (key) => ({
+        fetch: async () => {
+          const claimed = !entries.has(key);
+          entries.add(key);
+          return new Response(JSON.stringify({ claimed }));
+        },
+      }),
     },
   };
   assert.deepEqual(await claimDispatchBucket(env, "discovery", "discovery:bucket"), { claimed: true, persistent: true });

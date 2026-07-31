@@ -353,16 +353,42 @@ function schedulerBucket(kind, now = new Date()) {
 }
 
 async function claimDispatchBucket(env, kind, bucket) {
-  const kv = env.DISPATCH_BUCKETS;
-  if (!kv || typeof kv.get !== "function" || typeof kv.put !== "function") {
+  const namespace = env.DISPATCH_BUCKETS;
+  if (!namespace || typeof namespace.idFromName !== "function" || typeof namespace.get !== "function") {
     return { claimed: true, persistent: false };
   }
-  const key = `dispatch:${bucket}`;
-  if (await kv.get(key)) return { claimed: false, persistent: true };
-  await kv.put(key, new Date().toISOString(), {
-    expirationTtl: kind === "discovery" ? 15 * 60 : 2 * 60 * 60,
+  const objectId = namespace.idFromName(bucket);
+  const response = await namespace.get(objectId).fetch("https://dispatch-bucket/claim", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      bucket,
+      expiresAt: Date.now() + (kind === "discovery" ? 15 * 60 * 1000 : 2 * 60 * 60 * 1000),
+    }),
   });
-  return { claimed: true, persistent: true };
+  if (!response.ok) throw new Error(`dispatch bucket claim failed: ${response.status}`);
+  const result = await response.json();
+  return { claimed: Boolean(result.claimed), persistent: true };
+}
+
+export class DispatchBuckets {
+  constructor(state) {
+    this.state = state;
+  }
+
+  async fetch(request) {
+    if (request.method !== "POST") return json({ ok: false, error: "POST required" }, 405);
+    const payload = await request.json().catch(() => null);
+    const bucket = normalizeId(payload?.bucket);
+    const expiresAt = Number(payload?.expiresAt || 0);
+    if (!bucket || !Number.isFinite(expiresAt)) {
+      return json({ ok: false, error: "invalid_bucket" }, 400);
+    }
+    const existing = await this.state.storage.get("claim");
+    if (existing?.expiresAt > Date.now()) return json({ claimed: false });
+    await this.state.storage.put("claim", { bucket, expiresAt });
+    return json({ claimed: true });
+  }
 }
 
 async function dispatchScan(env, source, options = {}) {

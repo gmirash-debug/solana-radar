@@ -37,9 +37,9 @@ for example `your-team.cloudflareaccess.com`. The Worker verifies the JWT
 signature against Cloudflare's published signing keys. `/health` returns
 `delete_access_configured: true` only when both values are present.
 
-Bind a Workers KV namespace as `DISPATCH_BUCKETS`. The Worker claims a short-lived
-time bucket before it dispatches discovery or deep-scan work, so a duplicate Cron
-event is a no-op instead of another GitHub Actions run.
+The included `DISPATCH_BUCKETS` Durable Object claims a short-lived time bucket
+before dispatching discovery or deep-scan work. Its serialized storage makes a
+duplicate Cron event a no-op instead of another GitHub Actions run.
 
 ## Manual Trigger
 
