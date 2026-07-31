@@ -240,6 +240,7 @@ jobs:
           ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
           CHAINSTACK_SOLANA_RPC_URL: ${{ secrets.CHAINSTACK_SOLANA_RPC_URL }}
           DRPC_SOLANA_RPC_URL: ${{ secrets.DRPC_SOLANA_RPC_URL }}
+          DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
           PUBLICNODE_SOLANA_RPC_URL: https://solana-rpc.publicnode.com
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
           BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
