@@ -1,10 +1,10 @@
-import { chooseDashboardPayload } from "./data-source.js";
+import { chooseDashboardPayload } from "./data-source.js?v=20260731-catch-sort-1";
 import {
   compareTokensByCatchNewest,
   resolveAthContext,
   resolveCurrentMarket,
   resolveSignalEpisodes,
-} from "./token-state.js";
+} from "./token-state.js?v=20260731-catch-sort-1";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const DELETE_SYNC_ENDPOINT = "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/deleted-token";
