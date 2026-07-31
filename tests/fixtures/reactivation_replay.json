@@ -1,0 +1,87 @@
+{
+  "fixture_set": "reactivation_regression_envelopes_v1",
+  "cases": [
+    {
+      "id": "early_low_cap_distributed_wave",
+      "detected_at": "2026-07-29T12:00:00Z",
+      "pump_started_at": "2026-07-29T12:35:00Z",
+      "estimated_rpc_credits": 84,
+      "pool": {
+        "pool_address": "fixture-hot-pool",
+        "token_address": "fixture-hot-token",
+        "mcap_usd": 133042,
+        "liquidity_usd": 43548,
+        "volume_1h_usd": 34586
+      },
+      "alert": {
+        "score": 90,
+        "signal_family": "reactivation_wave",
+        "suspicious_sol": 82.6,
+        "wave": {
+          "net_buy_sol": 82.6,
+          "unique_buyers": 142,
+          "sticky_wallets": 36,
+          "sticky_supply_pct": 14.13,
+          "sticky_bought_pct": 43.68,
+          "net_token_retention_pct": 55.42,
+          "top_buyer_share": 0.227,
+          "top3_buyer_share": 0.305,
+          "balance_coverage_pct": 100,
+          "hold_age_minutes": 0,
+          "min_hold_minutes": 45
+        }
+      },
+      "evidence": {
+        "hard_wallets": 0,
+        "support_wallets": 0,
+        "hard_sol": 0,
+        "hard_classes": {},
+        "support_only": false
+      },
+      "expected": {
+        "tier": "hot_reactivation",
+        "outcome_24h_pct": 120.0
+      }
+    },
+    {
+      "id": "high_cap_blowoff_is_not_early_reactivation",
+      "detected_at": "2026-07-29T12:00:00Z",
+      "pump_started_at": "2026-07-29T12:00:00Z",
+      "estimated_rpc_credits": 51,
+      "pool": {
+        "pool_address": "fixture-late-pool",
+        "token_address": "fixture-late-token",
+        "mcap_usd": 900000,
+        "liquidity_usd": 100000,
+        "volume_1h_usd": 800000
+      },
+      "alert": {
+        "score": 65,
+        "signal_family": "reactivation_wave",
+        "suspicious_sol": 30,
+        "wave": {
+          "net_buy_sol": 30,
+          "unique_buyers": 20,
+          "sticky_wallets": 10,
+          "sticky_supply_pct": 4,
+          "sticky_bought_pct": 50,
+          "net_token_retention_pct": 60,
+          "top_buyer_share": 0.2,
+          "top3_buyer_share": 0.4,
+          "balance_coverage_pct": 100
+        }
+      },
+      "evidence": {
+        "hard_wallets": 0,
+        "support_wallets": 0,
+        "hard_sol": 0,
+        "hard_classes": {},
+        "support_only": false
+      },
+      "expected": {
+        "tier": "late_chase",
+        "outcome_24h_pct": -10.0
+      }
+    }
+  ]
+}

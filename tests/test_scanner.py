@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 from unittest import mock
 
 import scanner
@@ -72,6 +74,50 @@ class FakeSignatureTransactionRpc:
 
 
 class ScannerCoreTests(unittest.TestCase):
+    def test_stale_runtime_revision_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            scanner.save_json(
+                state_path,
+                {
+                    "_runtime": {
+                        "revision": 4,
+                        "updated_at": "2026-07-31T12:05:00Z",
+                    }
+                },
+            )
+            stale = {
+                "_runtime": {
+                    "revision": 3,
+                    "updated_at": "2026-07-31T12:00:00Z",
+                }
+            }
+            with mock.patch.object(scanner, "STATE_PATH", state_path):
+                with self.assertRaises(scanner.StaleStateRevisionError):
+                    scanner.save_runtime_state(stale, {}, "deep_scan")
+
+    def test_failure_taxonomy_keeps_provider_outages_soft_and_invariants_hard(self):
+        self.assertEqual(
+            scanner.scanner_failure_class(
+                {"scan_health": {"scan_error_categories": {"helius_quota": 2}}},
+                1,
+            ),
+            "soft_provider_failure",
+        )
+        self.assertEqual(
+            scanner.scanner_failure_class(
+                {"error": "classification coverage invariant violated"},
+                1,
+            ),
+            "hard_failure",
+        )
+
+    def test_effective_config_version_changes_only_with_effective_configuration(self):
+        config = {"lane": "reactivation", "mcap_max_usd": 5_000_000, "_rpc_retries": {"helius": 2}}
+        version = scanner.effective_config_version(config)
+        self.assertEqual(version, scanner.effective_config_version({**config, "_rpc_retries": {"helius": 99}}))
+        self.assertNotEqual(version, scanner.effective_config_version({**config, "mcap_max_usd": 4_000_000}))
+
     def test_helius_circuit_opens_after_repeated_provider_failures(self):
         rpc = scanner.HeliusRpc(
             "secret-key",
@@ -713,6 +759,26 @@ class ScannerCoreTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             scanner.selected_lanes(config, "micro_sticky")
 
+    def test_report_uses_effective_reactivation_config(self):
+        config = scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {})
+        effective = scanner.apply_lane(config, "reactivation")
+        report_config = scanner.report_config_for_lanes(
+            config,
+            {"reactivation": effective},
+        )
+        payload = scanner.build_report_payload(
+            [],
+            [],
+            [],
+            {},
+            report_config,
+            "2026-07-29T13:00:00Z",
+            {},
+        )
+        self.assertEqual(payload["config"]["mcap_min_usd"], effective["mcap_min_usd"])
+        self.assertEqual(payload["config"]["mcap_max_usd"], effective["mcap_max_usd"])
+        self.assertEqual(payload["config"]["liquidity_min_usd"], effective["liquidity_min_usd"])
+
     def test_scan_selection_reserves_capacity_for_recent_signals(self):
         pools = [
             scanner.Pool(pool_address=f"pool-{index}", token_address=f"token-{index}")
@@ -826,7 +892,42 @@ class ScannerCoreTests(unittest.TestCase):
             [("reactivation", "react-token")],
         )
 
-    def test_due_signal_recheck_preempts_recent_signal_monitor(self):
+    def test_alert_deduplication_preserves_distinct_signal_families(self):
+        base = {
+            "created_at": "2026-07-29T13:00:00Z",
+            "window_start": "2026-07-29T12:00:00Z",
+            "window_end": "2026-07-29T13:00:00Z",
+            "score": 80,
+            "suspicious_sol": 20,
+            "suspicious_wallets": 4,
+            "lane": "reactivation",
+            "action_tier": "watch",
+            "pool": {"pool_address": "pool", "token_address": "token"},
+        }
+        wave = {**base, "signal_family": "reactivation_wave"}
+        classified = {**base, "signal_family": "classified_wallets"}
+        deduped = scanner.dedupe_pool_alerts([wave, classified])
+        self.assertEqual(
+            {alert["signal_family"] for alert in deduped},
+            {"reactivation_wave", "classified_wallets"},
+        )
+        history = scanner.compact_alert_history(
+            [],
+            [wave, classified],
+            {
+                "alert_history_keep_tiers": ["watch"],
+                "alert_history_retention_hours": 0,
+                "alert_history_max_tokens": 10,
+                "alert_history_max_alerts": 10,
+                "alert_history_max_alerts_per_token": 2,
+            },
+        )
+        self.assertEqual(
+            {alert["signal_family"] for alert in history},
+            {"reactivation_wave", "classified_wallets"},
+        )
+
+    def test_discovery_queue_reserves_capacity_before_due_rechecks(self):
         now = scanner.parse_timestamp("2026-07-29T13:00:00Z")
         pools = [
             scanner.Pool(pool_address=f"pool-{index}", token_address=f"token-{index}")
@@ -862,9 +963,11 @@ class ScannerCoreTests(unittest.TestCase):
                     "signal_monitor_max_age_hours": 48,
                 },
             )
-        self.assertEqual(selected[0].pool_address, "pool-4")
+        self.assertEqual(selected[0].pool_address, "pool-5")
         self.assertEqual(stats["due_rechecks"], 1)
-        self.assertEqual(stats["discovery_queue"], 0)
+        self.assertEqual(stats["discovery_queue"], 1)
+        self.assertEqual(state["pools"]["pool-5"]["last_selection_reason"], "discovery_queue")
+        self.assertEqual(state["pools"]["pool-4"]["last_selection_reason"], "due_recheck")
 
     def test_due_signal_thesis_is_restored_to_monitor_universe(self):
         now = scanner.parse_timestamp("2026-07-29T13:00:00Z")
@@ -1068,8 +1171,8 @@ class ScannerCoreTests(unittest.TestCase):
             },
         )
         self.assertEqual(thesis["status"], "intact")
-        self.assertEqual(thesis["original_wallets"], 2)
-        self.assertEqual(thesis["original_retained_tokens"], 1_000)
+        self.assertEqual(thesis["original_wallets"], 3)
+        self.assertEqual(thesis["original_retained_tokens"], 1_050)
         self.assertEqual(thesis["cohort_token_coverage_pct"], 100)
         self.assertEqual(thesis["source_score"], 88)
         self.assertEqual(thesis["source_flow_sol"], 24)
@@ -1084,6 +1187,39 @@ class ScannerCoreTests(unittest.TestCase):
             thesis["cohort"][0]["checked_at"],
             "2026-07-29T12:00:00Z",
         )
+
+    def test_signal_thesis_retention_aggregate_matches_full_wallet_rows(self):
+        thesis = scanner.signal_thesis_from_alert(
+            {
+                "created_at": "2026-07-29T12:00:00Z",
+                "signal_family": "reactivation_wave",
+                "action_tier": "watch",
+                "pool": {"pool_address": "pool", "token_address": "token"},
+                "wave": {
+                    "supply": 10_000,
+                    "balance_coverage_pct": 100,
+                    "checked_wallets": 4,
+                    "checked_bought_tokens": 1_000,
+                    "top_buyers": [
+                        {
+                            "owner": f"wallet-{index}",
+                            "token_bought": 250,
+                            "retained_from_wave": 250,
+                            "current_balance": 250,
+                            "wave_retention_pct": 100,
+                        }
+                        for index in range(4)
+                    ],
+                },
+            },
+            {"signal_thesis_wallet_limit": 40},
+        )
+        totals = scanner.cohort_retention_totals(thesis["cohort"])
+        self.assertEqual(totals["retained_tokens"], 1_000)
+        self.assertEqual(totals["retention_pct"], 100)
+        self.assertEqual(thesis["current_retained_tokens"], totals["retained_tokens"])
+        self.assertEqual(thesis["token_retention_pct"], totals["retention_pct"])
+        self.assertEqual(thesis["current_retained_supply_pct"], 10)
 
     def test_signal_thesis_tracks_classified_wallet_signal_cohort(self):
         thesis = scanner.signal_thesis_from_alert(
@@ -2439,6 +2575,17 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(candidate_count, 1)
         self.assertEqual(errors, 0)
 
+    def test_classification_coverage_over_100_is_an_invariant_failure(self):
+        with self.assertRaisesRegex(ValueError, "coverage invariant"):
+            scanner.apply_alert_data_quality(
+                [{"action_tier": "watch", "signal_family": "classified_wallets", "wave": {}}],
+                {},
+                candidate_buys=1,
+                classified_buys=2,
+                classification_errors=0,
+                config={},
+            )
+
     def test_wave_score_distinguishes_weak_and_strong_retention(self):
         config = {
             "sticky_accumulation_min_net_buy_sol": 10,
@@ -3140,6 +3287,125 @@ class ScannerCoreTests(unittest.TestCase):
                 {"order_by": "swaps", "intervals": ["1m", "5m"]},
             ],
         )
+
+    def test_discovery_merge_keeps_newer_market_and_queue_records(self):
+        state = {
+            "market": {
+                "token-a": {
+                    "latest_seen_at": "2026-07-30T12:00:00Z",
+                    "latest_mcap_usd": 120_000,
+                }
+            },
+            "activity_baselines": {
+                "token-a": {"last_snapshot_at": 1_753_876_800, "score": 7}
+            },
+            "discovery_queue": [
+                {
+                    "token_address": "token-a",
+                    "observed_at": "2026-07-30T12:00:00Z",
+                    "activity_score": 7,
+                }
+            ],
+        }
+        discovery_state = {
+            "market": {
+                "token-a": {
+                    "latest_seen_at": "2026-07-30T11:00:00Z",
+                    "latest_mcap_usd": 100_000,
+                },
+                "token-b": {
+                    "latest_seen_at": "2026-07-30T13:00:00Z",
+                    "latest_mcap_usd": 80_000,
+                },
+            },
+            "activity_baselines": {
+                "token-a": {"last_snapshot_at": 1_753_873_200, "score": 4},
+                "token-b": {"last_snapshot_at": 1_753_880_400, "score": 9},
+            },
+            "discovery_queue": [
+                {
+                    "token_address": "token-a",
+                    "observed_at": "2026-07-30T11:00:00Z",
+                    "activity_score": 4,
+                },
+                {
+                    "token_address": "token-b",
+                    "observed_at": "2026-07-30T13:00:00Z",
+                    "activity_score": 9,
+                    "reactivation_confirmed": True,
+                },
+            ],
+        }
+
+        stats = scanner.merge_discovery_state(state, discovery_state)
+
+        self.assertEqual(stats["market"], 1)
+        self.assertEqual(state["market"]["token-a"]["latest_mcap_usd"], 120_000)
+        self.assertEqual(state["market"]["token-b"]["latest_mcap_usd"], 80_000)
+        self.assertEqual(state["activity_baselines"]["token-a"]["score"], 7)
+        self.assertEqual(state["activity_baselines"]["token-b"]["score"], 9)
+        self.assertEqual(
+            [item["token_address"] for item in state["discovery_queue"]],
+            ["token-b", "token-a"],
+        )
+
+    def test_runtime_state_revisions_are_atomic_and_monotonic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            config = {"state_json_compact": True}
+            state = {"pools": {}}
+            with mock.patch.object(scanner, "STATE_PATH", state_path):
+                first = scanner.save_runtime_state(
+                    state,
+                    config,
+                    "deep_scan",
+                    "2026-07-30T12:00:00Z",
+                )
+                second = scanner.save_runtime_state(
+                    state,
+                    config,
+                    "deep_scan",
+                    "2026-07-30T13:00:00Z",
+                )
+            self.assertEqual(first["revision"], 1)
+            self.assertEqual(second["revision"], 2)
+            self.assertEqual(scanner.load_json(state_path, {})["_runtime"]["revision"], 2)
+            self.assertEqual(list(Path(directory).glob("*.tmp")), [])
+
+    def test_legacy_thesis_migration_recomputes_retention_from_wallet_rows(self):
+        state = {
+            "pools": {
+                "pool": {
+                    "signal_thesis": {
+                        "version": 1,
+                        "original_retained_tokens": 999,
+                        "supply": 10_000,
+                        "last_checked_at": "2026-07-30T12:00:00Z",
+                        "cohort": [
+                            {
+                                "owner": "wallet-a",
+                                "attributed_tokens": 250,
+                                "current_balance": 250,
+                            },
+                            {
+                                "owner": "wallet-b",
+                                "attributed_tokens": 250,
+                                "current_balance": 250,
+                            },
+                        ],
+                    }
+                }
+            }
+        }
+
+        scanner.migrate_scanner_state(state)
+
+        thesis = state["pools"]["pool"]["signal_thesis"]
+        self.assertEqual(thesis["version"], 2)
+        self.assertEqual(thesis["original_retained_tokens"], 500)
+        self.assertEqual(thesis["current_retained_tokens"], 500)
+        self.assertEqual(thesis["token_retention_pct"], 100)
+        self.assertEqual(thesis["current_retained_supply_pct"], 5)
 
     def test_scan_selection_reserves_gap_repair_capacity(self):
         pools = [

@@ -30,10 +30,10 @@
 
       <section class="toolbar">
         <div class="tabs" role="tablist">
-          <button class="tab is-active" data-tab="filters" type="button">Radar</button>
-          <button class="tab" data-tab="tokens" type="button">Tokens</button>
-          <button class="tab" data-tab="narratives" type="button">Narratives</button>
-          <button class="tab" data-tab="alerts" type="button">Events</button>
+          <button class="tab is-active" data-tab="filters" id="tab-radar" type="button" role="tab" aria-selected="true" aria-controls="dashboardContent">Radar</button>
+          <button class="tab" data-tab="tokens" id="tab-tokens" type="button" role="tab" aria-selected="false" aria-controls="dashboardContent">Tokens</button>
+          <button class="tab" data-tab="narratives" id="tab-narratives" type="button" role="tab" aria-selected="false" aria-controls="dashboardContent">Narratives</button>
+          <button class="tab" data-tab="alerts" id="tab-events" type="button" role="tab" aria-selected="false" aria-controls="dashboardContent">Events</button>
         </div>
         <div class="filters">
           <label class="search-control">
@@ -45,20 +45,12 @@
             <label class="field-control">
               <span class="visually-hidden">Workflow</span>
               <select id="workflowFilter" aria-label="Workflow">
-              <option value="new_signals">new signals</option>
-              <option value="holding">holding</option>
-              <option value="needs_attention">needs attention</option>
-              <option value="closed">closed</option>
-              <option value="all">all</option>
-              </select>
-            </label>
-            <label class="field-control current-signal-control">
-              <span class="visually-hidden">Current signal strength</span>
-              <select id="signalFilter" aria-label="Current signal strength">
-              <option value="all">all signal strength</option>
-              <option value="actionable">strong signal</option>
-              <option value="hot_reactivation">fast move</option>
+              <option value="active">active</option>
+              <option value="hot">hot</option>
               <option value="watch">watch</option>
+              <option value="weakening">weakening</option>
+              <option value="inactive">inactive</option>
+              <option value="all">all</option>
               </select>
             </label>
             <label class="field-control current-signal-control">
@@ -85,10 +77,10 @@
         </div>
       </section>
 
-      <section id="content" class="content"></section>
+      <section id="content" class="content" role="tabpanel" aria-live="polite" aria-labelledby="tab-radar"></section>
     </main>
 
     <script src="config.js?v=20260731-wallet-retention-1"></script>
-    <script src="app.js?v=20260731-wallet-retention-1"></script>
+    <script type="module" src="app.js?v=20260731-reactivation-remediation-1"></script>
   </body>
 </html>

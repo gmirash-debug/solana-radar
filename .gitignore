@@ -7,3 +7,4 @@ node_modules/
 .pages/
 data/server.log
 data/server.pid
+data/discovery_state.json

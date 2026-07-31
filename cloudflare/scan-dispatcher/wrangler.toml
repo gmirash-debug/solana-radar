@@ -3,11 +3,21 @@ main = "src/index.js"
 compatibility_date = "2026-05-13"
 
 [triggers]
-crons = ["7 * * * *"]
+crons = ["*/5 * * * *", "7 * * * *"]
+
+[[durable_objects.bindings]]
+name = "DISPATCH_BUCKETS"
+class_name = "DispatchBuckets"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DispatchBuckets"]
 
 [vars]
 GITHUB_OWNER = "gmirash-debug"
 GITHUB_REPO = "solana-radar"
 GITHUB_WORKFLOW = "scan-and-pages.yml"
+GITHUB_DISCOVERY_WORKFLOW = "discovery-pulse.yml"
 GITHUB_REF = "main"
 CONVEX_URL = "https://basic-starfish-944.convex.cloud"
+ALLOWED_ORIGIN = "https://gmirash-debug.github.io"
