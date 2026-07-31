@@ -7999,15 +7999,27 @@ def parse_helius_swaps(txs, pool):
     return swaps, parse_errors
 
 
-def merge_events(*event_groups):
-    by_signature = {}
+def merge_events(*event_groups, dedupe_wallets=False):
+    by_key = {}
     for group in event_groups:
         for event in group or []:
             signature = event.get("signature")
             if not signature:
                 continue
-            by_signature[signature] = event
-    return sorted(by_signature.values(), key=lambda event: event.get("block_time") or 0)
+            signer = event.get("signer")
+            key = signer if dedupe_wallets and signer else signature
+            previous = by_key.get(key)
+            if previous is None or (
+                float(event.get("sol_amount") or 0),
+                int(event.get("block_time") or 0),
+                str(signature),
+            ) >= (
+                float(previous.get("sol_amount") or 0),
+                int(previous.get("block_time") or 0),
+                str(previous.get("signature") or ""),
+            ):
+                by_key[key] = event
+    return sorted(by_key.values(), key=lambda event: event.get("block_time") or 0)
 
 
 def probe_classification_config(config):
@@ -8478,7 +8490,11 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
                 state,
                 classification_budget,
             )
-            events = merge_events(seed_events, classified_events)
+            events = merge_events(
+                seed_events,
+                classified_events,
+                dedupe_wallets=bool(config.get("helius_dedupe_classification_wallets", True)),
+            )
         else:
             candidate_buys = len(buy_swap_candidates(swaps, config))
             classification_errors = 0

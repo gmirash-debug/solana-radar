@@ -2575,6 +2575,29 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(candidate_count, 1)
         self.assertEqual(errors, 0)
 
+    def test_deep_merge_keeps_one_classified_event_per_wallet(self):
+        events = scanner.merge_events(
+            [
+                {
+                    "signer": "same-wallet",
+                    "signature": "probe-buy",
+                    "block_time": 100,
+                    "sol_amount": 1,
+                }
+            ],
+            [
+                {
+                    "signer": "same-wallet",
+                    "signature": "deep-buy",
+                    "block_time": 200,
+                    "sol_amount": 2,
+                }
+            ],
+            dedupe_wallets=True,
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["signature"], "deep-buy")
+
     def test_classification_coverage_over_100_is_an_invariant_failure(self):
         with self.assertRaisesRegex(ValueError, "coverage invariant"):
             scanner.apply_alert_data_quality(
