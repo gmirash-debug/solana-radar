@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "python3 -m unittest discover -s tests -v && node --check dashboard/app.js && tsc -p convex/tsconfig.json --noEmit",
+    "test": "python3 -m unittest discover -s tests -v && node --test cloudflare/scan-dispatcher/test/index.test.mjs dashboard/test/data-source.test.mjs && node --check dashboard/app.js && tsc -p convex/tsconfig.json --noEmit",
+    "replay": "python3 tools/replay_reactivation.py",
     "convex:dev": "CONVEX_AGENT_MODE=anonymous convex dev",
     "convex:deploy": "convex deploy",
     "convex:codegen": "convex codegen"
