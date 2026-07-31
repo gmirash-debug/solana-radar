@@ -284,27 +284,8 @@ jobs:
           rm -rf .pages
           mkdir -p .pages/data
           cp dashboard/index.html dashboard/app.js dashboard/data-source.js dashboard/token-state.js dashboard/styles.css dashboard/config.js .pages/
-          if [ -f data/dashboard_fallback.json ]; then
-            cp data/dashboard_fallback.json .pages/data/dashboard_fallback.json
-          else
-            python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          report_path = Path("data/latest_report.json")
-          report = json.loads(report_path.read_text()) if report_path.exists() else {}
-          snapshot = {
-              "schema_version": 1,
-              "generated_at": report.get("generated_at"),
-              "report": report,
-              "history": [],
-              "market": {},
-              "deleted_tokens": {"tokens": [], "pools": [], "entries": {}, "updated_at": None},
-              "scan_status": {"status": "warming", "last_attempt_at": report.get("generated_at")},
-              "discovery_status": {},
-          }
-          Path(".pages/data/dashboard_fallback.json").write_text(json.dumps(snapshot, separators=(",", ":")))
-          PY
+          test -f data/dashboard_fallback.json
+          cp data/dashboard_fallback.json .pages/data/dashboard_fallback.json
 
       - name: Configure Pages
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
