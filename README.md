@@ -126,7 +126,9 @@ no-key standard fallback. `DRPC_SOLANA_RPC_URL` is optional and is used ahead of
 PublicNode only when Solana access is enabled on that dRPC plan. `DRPC_API_KEY`
 is supported as an alternative to the full dRPC endpoint URL. Complete
 Alchemy/Chainstack/dRPC endpoint URLs are preferred; `ALCHEMY_API_KEY` is also
-supported as an alternative to the full Alchemy endpoint.
+supported as an alternative to the full Alchemy endpoint. Verify that the dRPC
+key's plan includes Solana before setting either dRPC variable; otherwise leave
+both unset and the scanner will use the remaining providers.
 
 `GMGN_API_KEY` is strongly recommended. It supplies migrated Pump.fun Trenches,
 multi-window trending discovery, token metadata, and ATH market cap/date.
