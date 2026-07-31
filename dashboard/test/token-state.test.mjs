@@ -2,10 +2,21 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  compareTokensByCatchNewest,
   resolveAthContext,
   resolveCurrentMarket,
   resolveSignalEpisodes,
 } from "../token-state.js";
+
+test("newer catch sorts ahead of an older catch", () => {
+  const newest = { firstSignalAt: "2026-07-31T09:00:00Z" };
+  const oldest = { firstSignalAt: "2026-07-30T09:00:00Z" };
+  const missingCatch = {};
+
+  assert.ok(compareTokensByCatchNewest(newest, oldest) < 0);
+  assert.ok(compareTokensByCatchNewest(oldest, newest) > 0);
+  assert.ok(compareTokensByCatchNewest(newest, missingCatch) < 0);
+});
 
 test("DATA-style stale market cannot create current PnL or ATH ratio", () => {
   const market = resolveCurrentMarket({
