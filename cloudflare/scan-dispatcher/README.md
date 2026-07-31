@@ -1,20 +1,31 @@
 # Solana Radar Scan Dispatcher
 
 Cloudflare Worker that triggers the five-minute discovery pulse, the hourly deep
-scan, and syncs dashboard token deletions.
+scan, serves the live dashboard from D1, and syncs dashboard token deletions.
 
 ## Deploy
 
 ```bash
 cd cloudflare/scan-dispatcher
 npx wrangler login
+npx wrangler d1 create solana-radar
+# Copy the returned database id into wrangler.toml.
+npx wrangler d1 migrations apply solana-radar --remote
 npx wrangler secret put GITHUB_TOKEN
-npx wrangler secret put CONVEX_INGEST_SECRET
+npx wrangler secret put RADAR_INGEST_SECRET
 npx wrangler deploy
 ```
 
 `GITHUB_TOKEN` must be able to run Actions for `gmirash-debug/solana-radar`.
 For a fine-grained GitHub token, grant this repository read/write access to Actions.
+`RADAR_INGEST_SECRET` must have the same value as the GitHub Actions repository
+secret of the same name. It protects the scanner-to-D1 ingestion endpoints.
+
+The public dashboard reads `GET /api/dashboard`; it is CORS-restricted to the
+configured Pages origin. The scanner writes compact reports, alert history,
+token-scoped market/baseline state, and every terminal scan status through
+protected `/api/*` ingestion routes. Raw scanner state, wallet cache, and
+transaction buffers do not leave the runtime cache.
 
 ## Access-protected writes
 

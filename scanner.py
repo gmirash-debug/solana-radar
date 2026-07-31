@@ -28,6 +28,7 @@ STATE_PATH = DATA_DIR / "state.json"
 ALERTS_PATH = DATA_DIR / "alerts.jsonl"
 REPORT_PATH = DATA_DIR / "latest_report.md"
 REPORT_JSON_PATH = DATA_DIR / "latest_report.json"
+DASHBOARD_FALLBACK_PATH = DATA_DIR / "dashboard_fallback.json"
 SCANNER_STATUS_PATH = DATA_DIR / "scanner_status.json"
 DISCOVERY_STATUS_PATH = DATA_DIR / "discovery_status.json"
 DISCOVERY_STATE_PATH = DATA_DIR / "discovery_state.json"
@@ -288,6 +289,12 @@ def migrate_scanner_state(state):
     """Apply lossless state migrations before a scan mutates persisted data."""
     if not isinstance(state, dict):
         raise TypeError("scanner runtime state must be a mapping")
+    legacy_remote_updates = state.pop("convex_discovery_updated_at", None)
+    if isinstance(legacy_remote_updates, dict):
+        remote_updates = state.setdefault("remote_discovery_updated_at", {})
+        for token, updated_at in legacy_remote_updates.items():
+            if parse_timestamp(updated_at) > parse_timestamp(remote_updates.get(token)):
+                remote_updates[token] = updated_at
     for pool_state in (state.get("pools") or {}).values():
         if not isinstance(pool_state, dict):
             continue
@@ -359,8 +366,8 @@ def discovery_state_from(state):
         "market": copy.deepcopy(state.get("market") or {}),
         "activity_baselines": copy.deepcopy(state.get("activity_baselines") or {}),
         "discovery_queue": copy.deepcopy(state.get("discovery_queue") or []),
-        "convex_discovery_updated_at": copy.deepcopy(
-            state.get("convex_discovery_updated_at") or {}
+        "remote_discovery_updated_at": copy.deepcopy(
+            state.get("remote_discovery_updated_at") or {}
         ),
         "maintenance": {},
     }
@@ -435,8 +442,8 @@ def merge_discovery_state(state, discovery_state):
         ),
         reverse=True,
     )
-    remote_updates = state.setdefault("convex_discovery_updated_at", {})
-    for token, updated_at in (discovery_state.get("convex_discovery_updated_at") or {}).items():
+    remote_updates = state.setdefault("remote_discovery_updated_at", {})
+    for token, updated_at in (discovery_state.get("remote_discovery_updated_at") or {}).items():
         if parse_timestamp(updated_at) > parse_timestamp(remote_updates.get(token)):
             remote_updates[token] = updated_at
     return {
@@ -534,22 +541,26 @@ def write_discovery_status(status, payload=None, error=None):
     return body
 
 
-def convex_url_from_env():
-    for key in ("CONVEX_URL", "NEXT_PUBLIC_CONVEX_URL", "VITE_CONVEX_URL"):
+def remote_data_url_from_env():
+    for key in ("RADAR_DATA_API_URL", "SOLANA_RADAR_DATA_API_URL"):
         value = os.environ.get(key)
         if value:
             return value.rstrip("/")
     return None
 
 
-def convex_sync_required(config):
-    raw = os.environ.get("CONVEX_SYNC_REQUIRED")
+def remote_sync_required(config):
+    raw = os.environ.get("RADAR_REMOTE_SYNC_REQUIRED")
     if raw is None:
-        raw = config.get("convex_sync_required", False)
+        raw = config.get("remote_sync_required", False)
     return str(raw).strip().lower() in {"1", "true", "yes", "required"}
 
 
-def compact_report_for_convex(report):
+def remote_ingest_secret():
+    return os.environ.get("RADAR_INGEST_SECRET") or os.environ.get("RADAR_REMOTE_INGEST_SECRET")
+
+
+def compact_report_for_remote(report):
     pool_fields = {
         "pool_address",
         "token_address",
@@ -566,6 +577,35 @@ def compact_report_for_convex(report):
         "txns_5m",
         "txns_1h",
         "age_hours",
+        "latest_mcap_usd",
+        "latest_price_usd",
+        "latest_liquidity_usd",
+        "latest_seen_at",
+        "market_snapshot_at",
+        "market_snapshot_stale",
+        "market_snapshot_error",
+        "market_snapshot_checked_at",
+        "market_source",
+        "scan_mcap_usd",
+        "scan_price_usd",
+        "scan_liquidity_usd",
+        "scan_mcap_at",
+        "first_signal_at",
+        "first_obs_mcap_usd",
+        "first_obs_price_usd",
+        "first_obs_liquidity_usd",
+        "first_obs_mcap_at",
+        "first_obs_lane",
+        "first_obs_score",
+        "ath_mcap_usd",
+        "ath_mcap_at",
+        "ath_price_usd",
+        "ath_pool_address",
+        "ath_source",
+        "ath_status",
+        "ath_validation_status",
+        "ath_latest_checked_at",
+        "ath_verified_at",
     }
 
     def compact_pool(pool):
@@ -590,133 +630,272 @@ def compact_report_for_convex(report):
         }
         for summary in report.get("summaries", [])
     ]
-    compact["convex_compact"] = True
+    compact["remote_compact"] = True
     return compact
 
 
-def sync_convex_snapshot(report_payload, state, config):
-    convex_url = convex_url_from_env()
-    if not convex_url:
-        return
-    secret = os.environ.get("CONVEX_INGEST_SECRET")
+def dashboard_snapshot_token_keys(report, history):
+    """Return the small, user-visible token set allowed into a dashboard snapshot."""
+    keys = []
+    seen = set()
+
+    def add(value):
+        token = clean_solana_address(value)
+        if token and token not in seen:
+            seen.add(token)
+            keys.append(token)
+
+    def add_pool(pool):
+        if not isinstance(pool, dict):
+            return
+        add(pool.get("token_address"))
+
+    for thesis in report.get("signal_theses") or []:
+        if isinstance(thesis, dict):
+            add(thesis.get("token_address"))
+    for alert in [*(report.get("alerts") or []), *(history or [])]:
+        if isinstance(alert, dict):
+            add_pool(alert.get("pool") or {})
+    for section in ("summaries", "active_pools", "universe"):
+        for item in report.get(section) or []:
+            add_pool(item.get("pool") if isinstance(item, dict) and "pool" in item else item)
+    return keys
+
+
+def compact_market_for_dashboard(entry):
+    """Expose market facts only; runtime cursors and wallet caches stay private."""
+    market_fields = {
+        "token_address",
+        "pool_address",
+        "symbol",
+        "name",
+        "dex",
+        "url",
+        "pair_created_at",
+        "pair_created_at_iso",
+        "latest_mcap_usd",
+        "latest_price_usd",
+        "latest_liquidity_usd",
+        "latest_volume_5m_usd",
+        "latest_volume_1h_usd",
+        "latest_volume_24h_usd",
+        "latest_txns_5m",
+        "latest_txns_1h",
+        "latest_seen_at",
+        "market_snapshot_at",
+        "current_market_verified_at",
+        "market_snapshot_stale",
+        "market_snapshot_error",
+        "market_snapshot_checked_at",
+        "market_source",
+        "scan_mcap_usd",
+        "scan_price_usd",
+        "scan_liquidity_usd",
+        "scan_mcap_at",
+        "scan_source",
+        "first_signal_at",
+        "first_obs_mcap_usd",
+        "first_obs_price_usd",
+        "first_obs_liquidity_usd",
+        "first_obs_mcap_at",
+        "first_obs_source",
+        "first_obs_lane",
+        "first_obs_score",
+        "caught_obs_mcap_usd",
+        "caught_obs_price_usd",
+        "caught_obs_liquidity_usd",
+        "caught_obs_mcap_at",
+        "ath_mcap_usd",
+        "ath_mcap_at",
+        "ath_price_usd",
+        "ath_pool_address",
+        "ath_source",
+        "ath_status",
+        "ath_validation_status",
+        "ath_error",
+        "ath_error_checked_at",
+        "ath_current_ratio",
+        "ath_drawdown_pct",
+        "ath_filter_checked_at",
+        "ath_latest_checked_at",
+        "ath_verified_at",
+    }
+    return {
+        key: value
+        for key, value in (entry or {}).items()
+        if key in market_fields
+    }
+
+
+def build_dashboard_snapshot(report_payload, state, config, scan_status=None, history_limit=None):
+    """Build the D1/Pages contract without publishing scanner runtime state."""
+    if history_limit is None:
+        history_limit = config.get("remote_sync_alert_history_limit", 40)
+    history_limit = max(0, int(history_limit))
+    history = load_alert_history()[-history_limit:] if history_limit else []
+    token_keys = dashboard_snapshot_token_keys(report_payload, history)
+    market = state.get("market") if isinstance(state, dict) else {}
+    compact_market = {
+        token: compact_market_for_dashboard(market.get(token))
+        for token in token_keys
+        if isinstance(market, dict) and isinstance(market.get(token), dict)
+    }
+    generated_at = report_payload.get("generated_at") or utc_now().isoformat().replace("+00:00", "Z")
+    fallback_scan_status = {
+        "status": "ok",
+        "last_attempt_at": generated_at,
+        "last_success_at": generated_at,
+        "error": None,
+        "scan_health": ((report_payload.get("stats") or {}).get("scan_health") or {}),
+    }
+    return {
+        "schema_version": 1,
+        "generated_at": generated_at,
+        "report": compact_report_for_remote(report_payload),
+        "history": history,
+        "market": compact_market,
+        "deleted_tokens": load_json(
+            DELETED_TOKENS_PATH,
+            {"tokens": [], "pools": [], "entries": {}, "updated_at": None},
+        ),
+        "scan_status": scan_status or fallback_scan_status,
+        "discovery_status": load_json(DISCOVERY_STATUS_PATH, {}),
+    }
+
+
+def write_dashboard_fallback(report_payload, state, config):
+    """Persist the compact GitHub Pages fallback next to the normal report."""
+    # The Pages file is an emergency fallback. Full raw history stays in D1,
+    # which avoids putting a growing onchain event log into Git on every scan.
+    snapshot = build_dashboard_snapshot(
+        report_payload,
+        state,
+        config,
+        history_limit=config.get("dashboard_fallback_alert_history_limit", 6),
+    )
+    save_json(DASHBOARD_FALLBACK_PATH, snapshot, compact=True)
+    return snapshot
+
+
+def remote_api_call(method, path, config, payload=None, params=None):
+    base_url = remote_data_url_from_env()
+    if not base_url:
+        raise RuntimeError("RADAR_DATA_API_URL is missing")
+    secret = remote_ingest_secret()
     if not secret:
-        message = "Convex sync skipped: CONVEX_INGEST_SECRET is missing"
-        if convex_sync_required(config):
+        raise RuntimeError("RADAR_INGEST_SECRET is missing")
+    headers = {
+        "Content-Type": "application/json",
+        "accept": "application/json",
+        "x-radar-ingest-secret": secret,
+    }
+    response = requests.request(
+        method,
+        f"{base_url}{path}",
+        headers=headers,
+        json=payload,
+        params=params,
+        timeout=int(config.get("remote_sync_timeout_seconds", 25)),
+    )
+    response.raise_for_status()
+    result = response.json()
+    if not result.get("ok"):
+        raise RuntimeError(result.get("error") or f"unexpected remote response: {result}")
+    return result
+
+
+def sync_remote_snapshot(report_payload, state, config):
+    base_url = remote_data_url_from_env()
+    if not base_url:
+        return
+    secret = remote_ingest_secret()
+    if not secret:
+        message = "Remote sync skipped: RADAR_INGEST_SECRET is missing"
+        if remote_sync_required(config):
             raise RuntimeError(message)
         print(message, file=sys.stderr)
         return
 
-    history_limit = int(os.environ.get("CONVEX_SYNC_ALERT_HISTORY_LIMIT") or config.get("convex_sync_alert_history_limit", 250))
-    history = load_alert_history()[-history_limit:]
-    deleted_tokens = load_json(
-        DELETED_TOKENS_PATH,
-        {"tokens": [], "pools": [], "entries": {}, "updated_at": None},
-    )
-    body = {
-        "path": "radar:ingestSnapshot",
-        "args": {
-            "secret": secret,
-            "report": compact_report_for_convex(report_payload),
-            "history": history,
-            "deletedTokens": deleted_tokens,
-        },
-        "format": "json",
-    }
+    body = build_dashboard_snapshot(report_payload, state, config)
     try:
-        response = requests.post(
-            f"{convex_url}/api/mutation",
-            headers={"Content-Type": "application/json", "accept": "application/json"},
-            json=body,
-            timeout=int(config.get("convex_sync_timeout_seconds", 25)),
+        result = remote_api_call("POST", "/api/ingest/snapshot", config, body)
+        print(
+            "Remote sync: "
+            f"{result.get('alerts_synced', len(body.get('history') or []))} alerts, "
+            f"generated_at={result.get('generated_at') or report_payload.get('generated_at')}"
         )
-        response.raise_for_status()
-        result = response.json()
-        if result.get("status") != "success":
-            raise RuntimeError(result.get("errorMessage") or f"unexpected Convex response: {result}")
-        value = result.get("value") or {}
-        print(f"Convex sync: {value.get('alertsSynced', len(history))} alerts, generated_at={value.get('generatedAt')}")
     except Exception as exc:
-        if convex_sync_required(config):
+        if remote_sync_required(config):
             raise
-        print(f"Convex sync failed: {exc}", file=sys.stderr)
+        print(f"Remote sync failed: {exc}", file=sys.stderr)
 
 
-def convex_api_call(kind, path, args, config):
-    convex_url = convex_url_from_env()
-    if not convex_url:
-        raise RuntimeError("CONVEX_URL is missing")
-    response = requests.post(
-        f"{convex_url}/api/{kind}",
-        headers={"Content-Type": "application/json", "accept": "application/json"},
-        json={"path": path, "args": args, "format": "json"},
-        timeout=int(config.get("convex_sync_timeout_seconds", 25)),
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get("status") != "success":
-        raise RuntimeError(
-            payload.get("errorMessage")
-            or f"unexpected Convex response: {payload}"
-        )
-    return payload.get("value")
-
-
-def sync_convex_discovery_status(status, config):
-    secret = os.environ.get("CONVEX_INGEST_SECRET")
-    if not convex_url_from_env() or not secret:
+def sync_remote_discovery_status(status, config):
+    if not remote_data_url_from_env() or not remote_ingest_secret():
         return {}
     try:
-        return convex_api_call(
-            "mutation",
-            "radar:ingestDiscoveryStatus",
-            {"secret": secret, "status": status},
+        return remote_api_call(
+            "POST",
+            "/api/discovery/status",
             config,
+            {"status": status},
         ) or {}
     except Exception as exc:
-        print(f"Convex discovery status sync failed: {exc}", file=sys.stderr)
+        print(f"Remote discovery status sync failed: {exc}", file=sys.stderr)
         return {"ok": False, "error": str(exc)[:300]}
 
 
-def load_convex_discovery_state(state, config):
-    if not config.get("convex_discovery_state_enabled", True):
+def sync_remote_scan_status(status, config):
+    """Persist a successful or failed scanner attempt without exposing runtime state."""
+    if not remote_data_url_from_env() or not remote_ingest_secret():
         return {}
-    secret = os.environ.get("CONVEX_INGEST_SECRET")
-    if not convex_url_from_env() or not secret:
+    try:
+        return remote_api_call(
+            "POST",
+            "/api/scan/status",
+            config,
+            {"status": status},
+        ) or {}
+    except Exception as exc:
+        # The main scan result is still usable through the Pages fallback. A
+        # status-sync outage must not turn a completed scan into a hard failure.
+        print(f"Remote scanner status sync failed: {exc}", file=sys.stderr)
+        return {"ok": False, "error": str(exc)[:300]}
+
+
+def load_remote_discovery_state(state, config):
+    if not config.get("remote_discovery_state_enabled", True):
+        return {}
+    if not remote_data_url_from_env() or not remote_ingest_secret():
         return {}
     rows = []
     cursor = None
     max_pages = max(
         1,
-        int(config.get("convex_discovery_load_max_pages", 10)),
+        int(config.get("remote_discovery_load_max_pages", 10)),
     )
     page_size = max(
         1,
-        min(100, int(config.get("convex_discovery_page_size", 50))),
+        min(100, int(config.get("remote_discovery_page_size", 50))),
     )
     try:
         for _page in range(max_pages):
-            result = convex_api_call(
-                "query",
-                "radar:discoveryStatePage",
-                {
-                    "secret": secret,
-                    "paginationOpts": {
-                        "numItems": page_size,
-                        "cursor": cursor,
-                    },
-                },
+            result = remote_api_call(
+                "GET",
+                "/api/discovery/state",
                 config,
+                params={"limit": page_size, "cursor": cursor or ""},
             ) or {}
-            rows.extend(result.get("page") or [])
-            if result.get("isDone"):
+            rows.extend(result.get("rows") or [])
+            if result.get("is_done"):
                 break
-            cursor = result.get("continueCursor")
+            cursor = result.get("next_cursor")
             if not cursor:
                 break
     except Exception as exc:
-        if convex_sync_required(config):
+        if remote_sync_required(config):
             raise
-        print(f"Convex discovery load failed: {exc}", file=sys.stderr)
+        print(f"Remote discovery load failed: {exc}", file=sys.stderr)
         return {"status": "error", "error": str(exc)[:300]}
 
     market = state.setdefault("market", {})
@@ -727,7 +906,7 @@ def load_convex_discovery_state(state, config):
         for item in state.get("discovery_queue", []) or []
         if isinstance(item, dict) and item.get("token_address")
     }
-    remote_updates = state.setdefault("convex_discovery_updated_at", {})
+    remote_updates = state.setdefault("remote_discovery_updated_at", {})
     merged_market = 0
     merged_baselines = 0
     merged_queue = 0
@@ -792,15 +971,14 @@ def load_convex_discovery_state(state, config):
         "queue_merged": merged_queue,
         "outcomes_merged": merged_outcomes,
     }
-    state.setdefault("maintenance", {})["convex_discovery_load"] = stats
+    state.setdefault("maintenance", {})["remote_discovery_load"] = stats
     return stats
 
 
-def sync_convex_discovery_state(state, pools, config, observed_at):
-    if not config.get("convex_discovery_state_enabled", True):
+def sync_remote_discovery_state(state, pools, config, observed_at):
+    if not config.get("remote_discovery_state_enabled", True):
         return {}
-    secret = os.environ.get("CONVEX_INGEST_SECRET")
-    if not convex_url_from_env() or not secret:
+    if not remote_data_url_from_env() or not remote_ingest_secret():
         return {}
     market = state.get("market") or {}
     baselines = state.get("activity_baselines") or {}
@@ -810,14 +988,14 @@ def sync_convex_discovery_state(state, pools, config, observed_at):
         for item in state.get("discovery_queue", []) or []
         if isinstance(item, dict) and item.get("token_address")
     }
-    remote_updates = state.setdefault("convex_discovery_updated_at", {})
+    remote_updates = state.setdefault("remote_discovery_updated_at", {})
     now = parse_timestamp(observed_at) or int(time.time())
     full_sync_interval = max(
         300,
         int(
             float(
                 config.get(
-                    "convex_discovery_full_sync_interval_minutes",
+                    "remote_discovery_full_sync_interval_minutes",
                     60,
                 )
             )
@@ -826,13 +1004,13 @@ def sync_convex_discovery_state(state, pools, config, observed_at):
     )
     hot_volume = float(
         config.get(
-            "convex_discovery_hot_volume_5m_usd",
+            "remote_discovery_hot_volume_5m_usd",
             config.get("discovery_queue_min_volume_5m_usd", 500),
         )
     )
     hot_txns = int(
         config.get(
-            "convex_discovery_hot_txns_5m",
+            "remote_discovery_hot_txns_5m",
             config.get("discovery_queue_min_txns_5m", 5),
         )
     )
@@ -873,24 +1051,24 @@ def sync_convex_discovery_state(state, pools, config, observed_at):
         )
     batch_size = max(
         1,
-        min(50, int(config.get("convex_discovery_sync_batch_size", 20))),
+        min(50, int(config.get("remote_discovery_sync_batch_size", 20))),
     )
     synced = 0
     try:
         for batch in chunked(rows, batch_size):
-            result = convex_api_call(
-                "mutation",
-                "radar:ingestDiscoveryState",
-                {"secret": secret, "rows": batch},
+            result = remote_api_call(
+                "POST",
+                "/api/discovery/state",
                 config,
+                {"rows": batch},
             ) or {}
-            synced += int(result.get("rowsSynced") or len(batch))
+            synced += int(result.get("rows_synced") or len(batch))
             for row in batch:
                 remote_updates[row["tokenKey"]] = observed_at
     except Exception as exc:
-        if convex_sync_required(config):
+        if remote_sync_required(config):
             raise
-        print(f"Convex discovery sync failed: {exc}", file=sys.stderr)
+        print(f"Remote discovery sync failed: {exc}", file=sys.stderr)
         return {"status": "error", "error": str(exc)[:300], "rows_synced": synced}
     stats = {
         "status": "ok",
@@ -899,7 +1077,7 @@ def sync_convex_discovery_state(state, pools, config, observed_at):
         "candidate_rows": len(seen),
         "full_sync_interval_minutes": full_sync_interval // 60,
     }
-    state.setdefault("maintenance", {})["convex_discovery_sync"] = stats
+    state.setdefault("maintenance", {})["remote_discovery_sync"] = stats
     return stats
 
 
@@ -9000,13 +9178,30 @@ def recent_alert_token_addresses(limit=250, lanes=None):
 
 def caught_market_token_addresses(state, alerts=None, limit=80, lanes=None):
     deleted = load_deleted_tokens()
+    priority_candidates = []
     candidates = []
 
-    def add(token, timestamp):
+    def add(token, timestamp, priority=False):
         token = clean_solana_address(token)
         if not token or token in deleted.get("tokens", set()):
             return
-        candidates.append((parse_timestamp(timestamp), token))
+        (priority_candidates if priority else candidates).append(
+            (parse_timestamp(timestamp), token)
+        )
+
+    for pool_state in (state.get("pools") or {}).values():
+        if not isinstance(pool_state, dict):
+            continue
+        thesis = pool_state.get("signal_thesis")
+        if not isinstance(thesis, dict):
+            continue
+        if thesis.get("status") not in {"intact", "unknown", "weakening"}:
+            continue
+        add(
+            thesis.get("token_address") or pool_state.get("token_address"),
+            thesis.get("updated_at") or thesis.get("last_checked_at") or thesis.get("signal_at"),
+            priority=True,
+        )
 
     for alert in load_alert_history():
         if lanes and alert.get("lane") not in lanes:
@@ -9033,7 +9228,7 @@ def caught_market_token_addresses(state, alerts=None, limit=80, lanes=None):
 
     ordered = []
     seen = set()
-    for _, token in sorted(candidates, reverse=True):
+    for _, token in [*sorted(priority_candidates, reverse=True), *sorted(candidates, reverse=True)]:
         if token in seen:
             continue
         seen.add(token)
@@ -9231,6 +9426,7 @@ def apply_gmgn_ath(entry, ath, observed_at, current_mcap=0, config=None):
     entry["ath_status"] = "ready" if entry.get("ath_mcap_at") else "partial"
     entry["ath_validation_status"] = "valid"
     entry["ath_latest_checked_at"] = observed_at
+    entry["ath_verified_at"] = observed_at
     if ath.get("timestamp_error"):
         entry["ath_timestamp_error"] = ath.get("timestamp_error")
     else:
@@ -9539,7 +9735,11 @@ def enrich_market_ath(http, state, pools, alerts, config, observed_at):
                 entry,
                 ath,
                 observed_at,
-                current_mcap=to_float(entry.get("latest_mcap_usd")),
+                current_mcap=(
+                    0.0
+                    if entry.get("market_snapshot_stale")
+                    else to_float(entry.get("latest_mcap_usd"))
+                ),
                 config=config,
             )
         elif ath and ath.get("error"):
@@ -9588,6 +9788,9 @@ def record_market_observations(state, pools, observed_at):
                 "latest_txns_1h": pool.txns_1h,
                 "latest_seen_at": observed_at,
                 "market_snapshot_at": observed_at,
+                "current_market_verified_at": observed_at,
+                "market_snapshot_checked_at": observed_at,
+                "market_snapshot_stale": False,
                 "market_source": pool.source,
                 "scan_mcap_usd": pool.mcap_usd,
                 "scan_price_usd": pool.price_usd,
@@ -9596,6 +9799,7 @@ def record_market_observations(state, pools, observed_at):
                 "scan_source": pool.source or "scanner_snapshot",
             }
         )
+        entry.pop("market_snapshot_error", None)
         if pool.pair_created_at and (
             not entry.get("pair_created_at") or pool.pair_created_at < int(entry.get("pair_created_at", 0))
         ):
@@ -9665,6 +9869,18 @@ def refresh_caught_market_observations(http, state, alerts, config, observed_at)
     record_market_observations(state, refreshed, observed_at)
     stats["refreshed_tokens"] = len(refreshed)
     stats["missing_tokens"] = len(due_tokens) - len(refreshed)
+    refreshed_tokens = {
+        pool.token_address or pool.pool_address
+        for pool in refreshed
+        if pool.token_address or pool.pool_address
+    }
+    for token in due_tokens:
+        if token in refreshed_tokens:
+            continue
+        entry = market.setdefault(token, {"token_address": token})
+        entry["market_snapshot_stale"] = True
+        entry["market_snapshot_error"] = "market_refresh_missing"
+        entry["market_snapshot_checked_at"] = observed_at
     state.setdefault("maintenance", {})["caught_market_refresh"] = stats
     if refreshed:
         print(f"caught market refresh: {len(refreshed)}/{len(due_tokens)} tokens", flush=True)
@@ -9708,6 +9924,8 @@ SIGNAL_OUTCOME_HORIZONS = {
 
 def outcome_market_snapshot(entry, observed_at):
     if not isinstance(entry, dict):
+        return None
+    if entry.get("market_snapshot_stale"):
         return None
     at = (
         entry.get("latest_seen_at")
@@ -10361,7 +10579,7 @@ def compact_state(state, pools, alerts, config, observed_at):
         stats[f"{section}_before"] = before
         stats[f"{section}_after"] = len(state[section])
 
-    remote_updates = state.get("convex_discovery_updated_at")
+    remote_updates = state.get("remote_discovery_updated_at")
     if isinstance(remote_updates, dict):
         before = len(remote_updates)
         remote_cutoff = now - int(
@@ -10371,14 +10589,14 @@ def compact_state(state, pools, alerts, config, observed_at):
         retained_tokens = set(state.get("market") or {}) | set(
             state.get("activity_baselines") or {}
         ) | set(state.get("signal_outcomes") or {})
-        state["convex_discovery_updated_at"] = {
+        state["remote_discovery_updated_at"] = {
             key: value
             for key, value in remote_updates.items()
             if key in retained_tokens or parse_timestamp(value) >= remote_cutoff
         }
-        stats["convex_discovery_updates_before"] = before
-        stats["convex_discovery_updates_after"] = len(
-            state["convex_discovery_updated_at"]
+        stats["remote_discovery_updates_before"] = before
+        stats["remote_discovery_updates_after"] = len(
+            state["remote_discovery_updated_at"]
         )
 
     maintenance["state_compaction"] = stats
@@ -10411,11 +10629,17 @@ def apply_market_meta(pool_dict, state):
         "ath_current_ratio",
         "ath_drawdown_pct",
         "ath_filter_checked_at",
+        "ath_latest_checked_at",
+        "ath_verified_at",
         "latest_mcap_usd",
         "latest_price_usd",
         "latest_liquidity_usd",
         "latest_seen_at",
         "market_snapshot_at",
+        "current_market_verified_at",
+        "market_snapshot_stale",
+        "market_snapshot_error",
+        "market_snapshot_checked_at",
         "market_source",
         "scan_mcap_usd",
         "scan_price_usd",
@@ -11089,7 +11313,7 @@ def run_once(config, lane_name=None):
         state,
         load_discovery_state(),
     )
-    load_convex_discovery_state(state, config)
+    load_remote_discovery_state(state, config)
     config["_signal_thesis_bootstrap"] = bootstrap_signal_theses(
         state,
         load_alert_history(),
@@ -11195,7 +11419,7 @@ def run_once(config, lane_name=None):
         generated_at,
         config,
     )
-    sync_convex_discovery_state(
+    sync_remote_discovery_state(
         state,
         [*universe, *refreshed_caught_pools],
         config,
@@ -11219,8 +11443,9 @@ def run_once(config, lane_name=None):
     report_payload["lane_stats"] = lane_stats
     report_payload["lanes_scanned"] = list(lane_stats)
     write_report_json(report_payload)
+    write_dashboard_fallback(report_payload, state, config)
     render_report(report_payload)
-    sync_convex_snapshot(report_payload, state, config)
+    sync_remote_snapshot(report_payload, state, config)
 
     print(f"Solana RPC: {health}")
     print(f"RPC providers: {', '.join(rpc.providers)}")
@@ -11229,6 +11454,7 @@ def run_once(config, lane_name=None):
     print(f"Alerts: {len(all_alerts)}")
     print(f"Report: {REPORT_PATH}")
     print(f"Report JSON: {REPORT_JSON_PATH}")
+    print(f"Dashboard fallback: {DASHBOARD_FALLBACK_PATH}")
     print(f"RPC calls: {dict(rpc.calls)}")
 
 
@@ -11271,7 +11497,7 @@ def run_discovery_once(config):
     load_env()
     http = Http()
     state = load_discovery_state()
-    load_convex_discovery_state(state, config)
+    load_remote_discovery_state(state, config)
     lane_config = discovery_pulse_config(config)
     observed_at = utc_now().isoformat().replace("+00:00", "Z")
     discovered = discover_market_pools(http, lane_config)
@@ -11305,7 +11531,7 @@ def run_discovery_once(config):
         observed_at,
         lane_config,
     )
-    convex_stats = sync_convex_discovery_state(
+    remote_stats = sync_remote_discovery_state(
         state,
         universe,
         lane_config,
@@ -11321,11 +11547,11 @@ def run_discovery_once(config):
         "registry_refresh": registry_stats,
         "queue": queue_stats,
         "baselines": baseline_stats,
-        "convex": convex_stats,
+        "remote": remote_stats,
         "gmgn_status": "error" if lane_config.get("_gmgn_error") else "ok",
     }
     status = write_discovery_status("ok", payload)
-    sync_convex_discovery_status(status, lane_config)
+    sync_remote_discovery_status(status, lane_config)
     print(
         "Discovery pulse: "
         f"{len(discovered)} live, {len(registry)} registry, "
@@ -11365,7 +11591,7 @@ def main():
             run_discovery_once(config)
         except (Exception, SystemExit) as exc:
             status = write_discovery_status("failed", error=exc)
-            sync_convex_discovery_status(status, config)
+            sync_remote_discovery_status(status, config)
             raise
         return
     if not args.once and not args.watch:
@@ -11384,13 +11610,15 @@ def main():
                 scan_health.setdefault("reasons", [str(exc)[:300]])
                 scan_health["rpc_providers"] = config["_rpc_providers"]
                 config["_scan_health"] = scan_health
-            write_scanner_status(
+            status = write_scanner_status(
                 "failed",
                 error=exc,
                 scan_health=config.get("_scan_health"),
             )
+            sync_remote_scan_status(status, config)
             raise
-        write_scanner_status("ok", scan_health=config.get("_scan_health"))
+        status = write_scanner_status("ok", scan_health=config.get("_scan_health"))
+        sync_remote_scan_status(status, config)
         if not args.watch:
             break
         time.sleep(int(config["scan_interval_seconds"]))

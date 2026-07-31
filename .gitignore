@@ -8,3 +8,8 @@ node_modules/
 data/server.log
 data/server.pid
 data/discovery_state.json
+data/state.json
+data/alerts.jsonl
+data/latest_report.json
+data/latest_report.md
+data/scanner_status.json

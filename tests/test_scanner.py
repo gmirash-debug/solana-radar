@@ -1,3 +1,4 @@
+import json
 import unittest
 import tempfile
 from pathlib import Path
@@ -74,6 +75,46 @@ class FakeSignatureTransactionRpc:
 
 
 class ScannerCoreTests(unittest.TestCase):
+    def test_dashboard_fallback_excludes_private_runtime_state(self):
+        mint = "11111111111111111111111111111111"
+        report = {
+            "generated_at": "2026-07-31T12:00:00Z",
+            "alerts": [{"pool": {"token_address": mint}}],
+            "signal_theses": [{"token_address": mint}],
+            "universe": [{"token_address": mint, "mcap_usd": 100}],
+            "active_pools": [],
+            "summaries": [],
+        }
+        state = {
+            "wallet_cache": {"private-wallet": {"secret": "must-not-publish"}},
+            "market": {
+                mint: {
+                    "token_address": mint,
+                    "latest_mcap_usd": 100,
+                    "latest_seen_at": "2026-07-31T12:00:00Z",
+                    "first_signal_at": "2026-07-31T11:00:00Z",
+                    "private_cursor": "must-not-publish",
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            alerts_path = base / "alerts.jsonl"
+            alerts_path.write_text(json.dumps({"pool": {"token_address": mint}}) + "\n")
+            with (
+                mock.patch.object(scanner, "ALERTS_PATH", alerts_path),
+                mock.patch.object(scanner, "DELETED_TOKENS_PATH", base / "deleted_tokens.json"),
+                mock.patch.object(scanner, "DISCOVERY_STATUS_PATH", base / "discovery_status.json"),
+            ):
+                snapshot = scanner.build_dashboard_snapshot(report, state, {"remote_sync_alert_history_limit": 40})
+                fallback = scanner.build_dashboard_snapshot(report, state, {}, history_limit=0)
+
+        self.assertEqual(snapshot["report"]["universe"], [])
+        self.assertEqual(snapshot["market"][mint]["latest_mcap_usd"], 100)
+        self.assertNotIn("private_cursor", snapshot["market"][mint])
+        self.assertNotIn("wallet_cache", json.dumps(snapshot))
+        self.assertEqual(fallback["history"], [])
+
     def test_stale_runtime_revision_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             state_path = Path(directory) / "state.json"
