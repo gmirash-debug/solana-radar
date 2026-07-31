@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
@@ -236,20 +237,51 @@ def atomic_write_text(path, text):
     os.replace(temporary_path, path)
 
 
+class StaleStateRevisionError(RuntimeError):
+    """Raised when an older cached state attempts to replace a newer revision."""
+
+
+def next_runtime_metadata(state, persisted, writer, observed_at=None):
+    """Create the next revision while refusing a stale in-memory state snapshot."""
+    runtime = state.get("_runtime")
+    runtime = dict(runtime) if isinstance(runtime, dict) else {}
+    persisted_runtime = persisted.get("_runtime") if isinstance(persisted, dict) else {}
+    persisted_runtime = (
+        dict(persisted_runtime) if isinstance(persisted_runtime, dict) else {}
+    )
+    source_revision = max(0, int(runtime.get("revision") or 0))
+    persisted_revision = max(0, int(persisted_runtime.get("revision") or 0))
+    source_updated_at = parse_timestamp(runtime.get("updated_at"))
+    persisted_updated_at = parse_timestamp(persisted_runtime.get("updated_at"))
+    if persisted_revision > source_revision or (
+        persisted_revision == source_revision
+        and persisted_revision > 0
+        and persisted_updated_at > source_updated_at
+    ):
+        raise StaleStateRevisionError(
+            "refusing to overwrite newer runtime state "
+            f"revision {persisted_revision} with stale revision {source_revision}"
+        )
+    runtime["schema_version"] = STATE_SCHEMA_VERSION
+    runtime["revision"] = max(source_revision, persisted_revision) + 1
+    runtime["writer"] = writer
+    runtime["updated_at"] = observed_at or utc_now().isoformat().replace("+00:00", "Z")
+    runtime["run_id"] = os.environ.get("GITHUB_RUN_ID") or None
+    return runtime
+
+
 def save_runtime_state(state, config, writer, observed_at=None):
     """Persist a versioned state revision so concurrent writers are observable."""
     if not isinstance(state, dict):
         raise TypeError("scanner runtime state must be a mapping")
-    runtime = state.get("_runtime")
-    runtime = dict(runtime) if isinstance(runtime, dict) else {}
-    runtime["schema_version"] = STATE_SCHEMA_VERSION
-    runtime["revision"] = max(0, int(runtime.get("revision") or 0)) + 1
-    runtime["writer"] = writer
-    runtime["updated_at"] = observed_at or utc_now().isoformat().replace("+00:00", "Z")
-    runtime["run_id"] = os.environ.get("GITHUB_RUN_ID") or None
-    state["_runtime"] = runtime
+    state["_runtime"] = next_runtime_metadata(
+        state,
+        load_json(STATE_PATH, {}),
+        writer,
+        observed_at,
+    )
     save_json(STATE_PATH, state, compact=bool(config.get("state_json_compact", True)))
-    return runtime
+    return state["_runtime"]
 
 
 def migrate_scanner_state(state):
@@ -263,8 +295,58 @@ def migrate_scanner_state(state):
             thesis = pool_state.get(key)
             if not isinstance(thesis, dict) or int(thesis.get("version") or 1) >= 2:
                 continue
-            original = max(0.0, float(thesis.get("original_retained_tokens") or 0))
-            thesis.setdefault("original_attributed_tokens", original)
+            cohort = [row for row in thesis.get("cohort") or [] if isinstance(row, dict)]
+            holder_min_pct = max(
+                0.0,
+                float(thesis.get("holder_min_pct") or 10),
+            )
+            complete = bool(cohort)
+            for row in cohort:
+                attributed = max(
+                    0.0,
+                    float(row.get("attributed_tokens") or row.get("initial_balance") or 0),
+                )
+                if not attributed:
+                    complete = False
+                    continue
+                row["attributed_tokens"] = attributed
+                current = row.get("current_retained_tokens")
+                if current is None:
+                    current = row.get("current_balance")
+                if current is None:
+                    complete = False
+                    continue
+                retained = min(attributed, max(0.0, float(current)))
+                row["current_retained_tokens"] = retained
+                row["retention_pct"] = retained / attributed * 100
+                row["is_holder"] = retained / attributed * 100 >= holder_min_pct
+                row.setdefault("checked_at", thesis.get("last_checked_at"))
+            if complete:
+                totals = cohort_retention_totals(cohort)
+                original = totals["attributed_tokens"]
+                thesis["original_retained_tokens"] = original
+                thesis["current_retained_tokens"] = totals["retained_tokens"]
+                thesis["token_retention_pct"] = totals["retention_pct"]
+                thesis["holders_remaining"] = totals["holders"]
+                thesis["holder_retention_pct"] = (
+                    totals["holders"] / len(cohort) * 100 if cohort else None
+                )
+                supply = max(0.0, float(thesis.get("supply") or 0))
+                if supply:
+                    thesis["original_retained_supply_pct"] = original / supply * 100
+                    thesis["current_retained_supply_pct"] = (
+                        totals["retained_tokens"] / supply * 100
+                    )
+            else:
+                original = max(0.0, float(thesis.get("original_retained_tokens") or 0))
+                thesis["current_retained_tokens"] = None
+                thesis["token_retention_pct"] = None
+                thesis["status"] = "unknown"
+                thesis["reason"] = (
+                    "legacy cohort needs a complete balance recheck before retention "
+                    "or distribution is shown"
+                )
+            thesis["original_attributed_tokens"] = original
             thesis.setdefault("source_attributed_tokens", original)
             thesis["version"] = 2
     return state
@@ -291,20 +373,18 @@ def load_discovery_state():
 
 
 def save_discovery_state(state, config, observed_at=None):
-    runtime = state.get("_runtime")
-    runtime = dict(runtime) if isinstance(runtime, dict) else {}
-    runtime["schema_version"] = STATE_SCHEMA_VERSION
-    runtime["revision"] = max(0, int(runtime.get("revision") or 0)) + 1
-    runtime["writer"] = "discovery_pulse"
-    runtime["updated_at"] = observed_at or utc_now().isoformat().replace("+00:00", "Z")
-    runtime["run_id"] = os.environ.get("GITHUB_RUN_ID") or None
-    state["_runtime"] = runtime
+    state["_runtime"] = next_runtime_metadata(
+        state,
+        load_json(DISCOVERY_STATE_PATH, {}),
+        "discovery_pulse",
+        observed_at,
+    )
     save_json(
         DISCOVERY_STATE_PATH,
         state,
         compact=bool(config.get("state_json_compact", True)),
     )
-    return runtime
+    return state["_runtime"]
 
 
 def merge_discovery_state(state, discovery_state):
@@ -387,6 +467,55 @@ def write_scanner_status(status, error=None, scan_health=None):
         payload["last_success_at"] = now
     save_json(SCANNER_STATUS_PATH, payload)
     return payload
+
+
+def scanner_failure_class(status_payload, exit_code):
+    """Classify a failed run without hiding programming or invariant failures."""
+    if int(exit_code or 0) == 0:
+        return "success"
+    payload = status_payload if isinstance(status_payload, dict) else {}
+    health = payload.get("scan_health") or {}
+    categories = {
+        str(name)
+        for name, count in (health.get("scan_error_categories") or {}).items()
+        if count
+    }
+    soft_categories = {"rpc_all_unavailable"}
+    soft_suffixes = ("_rate_limit", "_quota", "_auth", "_circuit_open")
+    if categories and all(
+        category in soft_categories or category.endswith(soft_suffixes)
+        for category in categories
+    ):
+        return "soft_provider_failure"
+    error = str(payload.get("error") or "").lower()
+    soft_markers = (
+        "all rpc provider",
+        "rate limit",
+        "rate_limit",
+        "quota",
+        "credit",
+        "timed out",
+        "timeout",
+        "http 429",
+        "http 401",
+        "http 403",
+        "unauthorized",
+        "forbidden",
+    )
+    if any(marker in error for marker in soft_markers):
+        return "soft_provider_failure"
+    return "hard_failure"
+
+
+def effective_config_version(config):
+    """Return a stable, non-secret fingerprint for the configuration that ran."""
+    public_config = {
+        key: value
+        for key, value in (config or {}).items()
+        if not str(key).startswith("_")
+    }
+    encoded = json.dumps(public_config, sort_keys=True, separators=(",", ":"), default=str)
+    return f"sha256:{hashlib.sha256(encoded.encode()).hexdigest()[:12]}"
 
 
 def write_discovery_status(status, payload=None, error=None):
@@ -10529,6 +10658,7 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
         "lane": config.get("lane"),
         "profile": config.get("lane") or config.get("mode"),
         "config": {
+            "config_version": effective_config_version(config),
             "mcap_min_usd": config["mcap_min_usd"],
             "mcap_max_usd": config["mcap_max_usd"],
             "liquidity_min_usd": config["liquidity_min_usd"],

@@ -74,6 +74,50 @@ class FakeSignatureTransactionRpc:
 
 
 class ScannerCoreTests(unittest.TestCase):
+    def test_stale_runtime_revision_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            scanner.save_json(
+                state_path,
+                {
+                    "_runtime": {
+                        "revision": 4,
+                        "updated_at": "2026-07-31T12:05:00Z",
+                    }
+                },
+            )
+            stale = {
+                "_runtime": {
+                    "revision": 3,
+                    "updated_at": "2026-07-31T12:00:00Z",
+                }
+            }
+            with mock.patch.object(scanner, "STATE_PATH", state_path):
+                with self.assertRaises(scanner.StaleStateRevisionError):
+                    scanner.save_runtime_state(stale, {}, "deep_scan")
+
+    def test_failure_taxonomy_keeps_provider_outages_soft_and_invariants_hard(self):
+        self.assertEqual(
+            scanner.scanner_failure_class(
+                {"scan_health": {"scan_error_categories": {"helius_quota": 2}}},
+                1,
+            ),
+            "soft_provider_failure",
+        )
+        self.assertEqual(
+            scanner.scanner_failure_class(
+                {"error": "classification coverage invariant violated"},
+                1,
+            ),
+            "hard_failure",
+        )
+
+    def test_effective_config_version_changes_only_with_effective_configuration(self):
+        config = {"lane": "reactivation", "mcap_max_usd": 5_000_000, "_rpc_retries": {"helius": 2}}
+        version = scanner.effective_config_version(config)
+        self.assertEqual(version, scanner.effective_config_version({**config, "_rpc_retries": {"helius": 99}}))
+        self.assertNotEqual(version, scanner.effective_config_version({**config, "mcap_max_usd": 4_000_000}))
+
     def test_helius_circuit_opens_after_repeated_provider_failures(self):
         rpc = scanner.HeliusRpc(
             "secret-key",
@@ -3327,6 +3371,41 @@ class ScannerCoreTests(unittest.TestCase):
             self.assertEqual(second["revision"], 2)
             self.assertEqual(scanner.load_json(state_path, {})["_runtime"]["revision"], 2)
             self.assertEqual(list(Path(directory).glob("*.tmp")), [])
+
+    def test_legacy_thesis_migration_recomputes_retention_from_wallet_rows(self):
+        state = {
+            "pools": {
+                "pool": {
+                    "signal_thesis": {
+                        "version": 1,
+                        "original_retained_tokens": 999,
+                        "supply": 10_000,
+                        "last_checked_at": "2026-07-30T12:00:00Z",
+                        "cohort": [
+                            {
+                                "owner": "wallet-a",
+                                "attributed_tokens": 250,
+                                "current_balance": 250,
+                            },
+                            {
+                                "owner": "wallet-b",
+                                "attributed_tokens": 250,
+                                "current_balance": 250,
+                            },
+                        ],
+                    }
+                }
+            }
+        }
+
+        scanner.migrate_scanner_state(state)
+
+        thesis = state["pools"]["pool"]["signal_thesis"]
+        self.assertEqual(thesis["version"], 2)
+        self.assertEqual(thesis["original_retained_tokens"], 500)
+        self.assertEqual(thesis["current_retained_tokens"], 500)
+        self.assertEqual(thesis["token_retention_pct"], 100)
+        self.assertEqual(thesis["current_retained_supply_pct"], 5)
 
     def test_scan_selection_reserves_gap_repair_capacity(self):
         pools = [
