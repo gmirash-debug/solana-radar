@@ -21,6 +21,7 @@ import {
 } from "../src/index.js";
 import {
   ageBand,
+  historyEventEffects,
   historyEventId,
   historyEventsFromPayload,
   mcapBand,
@@ -269,4 +270,37 @@ test("history event ids sort by their observation time for deterministic initial
   });
   assert.match(earlier, /^history:1785542400:/);
   assert.ok(earlier < later);
+});
+
+test("only an original signal can add relationship evidence; outcomes alone refresh learned scores", () => {
+  assert.deepEqual(historyEventEffects("signal"), {
+    type: "signal",
+    isSignalEvent: true,
+    isOutcomeEvent: false,
+    capturesPriorScore: true,
+    updatesOutcomes: true,
+    recordsClusterEdge: true,
+    refreshesScores: false,
+    refreshesClusters: true,
+  });
+  assert.deepEqual(historyEventEffects("retention_check"), {
+    type: "retention_check",
+    isSignalEvent: false,
+    isOutcomeEvent: false,
+    capturesPriorScore: false,
+    updatesOutcomes: false,
+    recordsClusterEdge: false,
+    refreshesScores: false,
+    refreshesClusters: false,
+  });
+  assert.deepEqual(historyEventEffects("outcome_72h"), {
+    type: "outcome_72h",
+    isSignalEvent: false,
+    isOutcomeEvent: true,
+    capturesPriorScore: false,
+    updatesOutcomes: true,
+    recordsClusterEdge: false,
+    refreshesScores: true,
+    refreshesClusters: true,
+  });
 });
