@@ -451,26 +451,46 @@ async function upsertClusterEdges(db, episode, wallets, observedAt, now) {
     }
   }
   const statements = [];
+  const edgeIds = [];
   for (const group of groups.values()) {
     const members = [...new Set(group.wallets)].sort();
     for (let left = 0; left < members.length; left += 1) {
       for (let right = left + 1; right < members.length; right += 1) {
         const edgeId = `edge:${hash(`${members[left]}|${members[right]}|${group.type}|${group.value}`)}`;
+        edgeIds.push(edgeId);
         statements.push(db.prepare(`
           INSERT INTO wallet_cluster_edges (
             edge_id, wallet_a, wallet_b, relation_type, evidence_count, first_seen_at, last_seen_at,
             weight, evidence_json, created_at, updated_at
-          ) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, 1, ?6, ?7, ?7)
+          ) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5, 0, ?6, ?7, ?7)
           ON CONFLICT(edge_id) DO UPDATE SET
-            evidence_count = wallet_cluster_edges.evidence_count + 1,
-            last_seen_at = excluded.last_seen_at,
-            weight = wallet_cluster_edges.weight + 1,
+            last_seen_at = CASE WHEN excluded.last_seen_at > wallet_cluster_edges.last_seen_at THEN excluded.last_seen_at ELSE wallet_cluster_edges.last_seen_at END,
             updated_at = excluded.updated_at
         `).bind(edgeId, members[left], members[right], group.type, observedAt, serialize({ value: group.value, episode_id: episode.episode_id }), now));
+        // A retried outbox event represents the same episode, not fresh
+        // independent evidence. This table makes edge strength idempotent.
+        statements.push(db.prepare(`
+          INSERT OR IGNORE INTO wallet_cluster_edge_evidence (
+            edge_id, episode_id, observed_at, evidence_json, created_at
+          ) VALUES (?1, ?2, ?3, ?4, ?5)
+        `).bind(edgeId, episode.episode_id, observedAt, serialize({ value: group.value, relation_type: group.type }), now));
       }
     }
   }
   await runBatch(db, statements);
+  const uniqueEdges = [...new Set(edgeIds)];
+  await runBatch(db, uniqueEdges.map((edgeId) => db.prepare(`
+    UPDATE wallet_cluster_edges
+    SET evidence_count = (
+          SELECT COUNT(*) FROM wallet_cluster_edge_evidence evidence
+          WHERE evidence.edge_id = wallet_cluster_edges.edge_id
+        ),
+        weight = (
+          SELECT COUNT(*) FROM wallet_cluster_edge_evidence evidence
+          WHERE evidence.edge_id = wallet_cluster_edges.edge_id
+        )
+    WHERE edge_id = ?1
+  `).bind(edgeId)));
 }
 
 async function refreshMarketBaselines(db, now) {
@@ -613,7 +633,9 @@ async function refreshClusters(db, walletAddresses, now) {
     SELECT wallet_a, wallet_b, relation_type, weight, first_seen_at, last_seen_at
     FROM wallet_cluster_edges
     WHERE wallet_a IN (${placeholders}) OR wallet_b IN (${placeholders})
-  `).bind(...wallets, ...wallets).all();
+  // Numbered parameters are intentionally reused for wallet_a and wallet_b;
+  // D1 expects one bound value per distinct placeholder.
+  `).bind(...wallets).all();
   const parent = new Map();
   const find = (value) => {
     if (!parent.has(value)) parent.set(value, value);
