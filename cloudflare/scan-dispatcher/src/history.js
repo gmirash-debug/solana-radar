@@ -106,6 +106,22 @@ export function hasHistoryDb(env) {
   return Boolean(env?.RADAR_HISTORY_DB && typeof env.RADAR_HISTORY_DB.prepare === "function");
 }
 
+export function historyEventEffects(eventType) {
+  const type = text(eventType) || "snapshot";
+  const isSignalEvent = type === "signal";
+  const isOutcomeEvent = type.startsWith("outcome_");
+  return {
+    type,
+    isSignalEvent,
+    isOutcomeEvent,
+    capturesPriorScore: isSignalEvent,
+    updatesOutcomes: isSignalEvent || isOutcomeEvent,
+    recordsClusterEdge: isSignalEvent,
+    refreshesScores: isOutcomeEvent,
+    refreshesClusters: isSignalEvent || isOutcomeEvent,
+  };
+}
+
 function historyEventId(event) {
   const provided = text(event?.event_id);
   if (provided) return provided;
@@ -671,6 +687,7 @@ async function ingestHistoryEvent(env, rawEvent, now = nowIso()) {
   const episode = normalizedEpisode(rawEvent?.episode, now);
   if (!episode) throw new Error("history_episode_token_required");
   const event = rawEvent?.event && typeof rawEvent.event === "object" ? rawEvent.event : {};
+  const effects = historyEventEffects(event.event_type);
   const observedAt = iso(event.observed_at, episode.last_signal_at || now);
   const wallets = (Array.isArray(rawEvent?.wallets) ? rawEvent.wallets : [])
     .map((row) => normalizedWallet(row, episode))
@@ -683,24 +700,40 @@ async function ingestHistoryEvent(env, rawEvent, now = nowIso()) {
   }
   await upsertEpisode(env.RADAR_HISTORY_DB, episode, now);
   await upsertEpisodeEvent(env.RADAR_HISTORY_DB, eventId, episode, { ...event, observed_at: observedAt }, rawEvent, now);
-  const priors = await existingPriorScores(env.RADAR_HISTORY_DB, wallets, observedAt);
+  // Prior edge belongs to the original catch only. A later balance recheck
+  // must not rewrite what was knowable when this cohort first appeared.
+  const priors = effects.capturesPriorScore
+    ? await existingPriorScores(env.RADAR_HISTORY_DB, wallets, observedAt)
+    : new Map();
   await upsertWallets(env.RADAR_HISTORY_DB, episode, wallets, observedAt, priors, now);
-  await upsertOutcomes(env.RADAR_HISTORY_DB, episode, rawEvent?.outcome || {}, now);
-  await upsertClusterEdges(env.RADAR_HISTORY_DB, episode, wallets, observedAt, now);
-  await refreshMarketBaselines(env.RADAR_HISTORY_DB, now);
-  // Outcome events intentionally carry no fresh wallet observation. Resolve
-  // every member of their episode nevertheless, so an outcome refreshes the
-  // cohort's learned result instead of only the event's empty wallet list.
-  const episodeWalletRows = await env.RADAR_HISTORY_DB.prepare(`
-    SELECT DISTINCT wallet_address FROM signal_wallets
-    WHERE episode_id = ?1 AND cohort_role = 'at_catch'
-  `).bind(episode.episode_id).all();
-  const relatedWallets = [
-    ...wallets.map((wallet) => wallet.wallet_address),
-    ...(episodeWalletRows.results || []).map((row) => row.wallet_address),
-  ];
-  const scoresUpdated = await refreshWalletScores(env.RADAR_HISTORY_DB, relatedWallets, now);
-  const clustersUpdated = await refreshClusters(env.RADAR_HISTORY_DB, relatedWallets, now);
+  // A signal initializes pending horizons. Only an explicit frozen horizon
+  // result changes performance baselines or wallet scores.
+  if (effects.updatesOutcomes) {
+    await upsertOutcomes(env.RADAR_HISTORY_DB, episode, rawEvent?.outcome || {}, now);
+  }
+  // Rechecks reuse the cohort to record balances. They are not independent
+  // relationship evidence and must never increase a cluster's edge weight.
+  if (effects.recordsClusterEdge) {
+    await upsertClusterEdges(env.RADAR_HISTORY_DB, episode, wallets, observedAt, now);
+  }
+
+  let relatedWallets = wallets.map((wallet) => wallet.wallet_address);
+  let scoresUpdated = 0;
+  if (effects.refreshesScores) {
+    // Outcome events intentionally carry no fresh wallet observation. Resolve
+    // every member of their episode nevertheless, so a result refreshes the
+    // cohort's learned record instead of an empty event wallet list.
+    const episodeWalletRows = await env.RADAR_HISTORY_DB.prepare(`
+      SELECT DISTINCT wallet_address FROM signal_wallets
+      WHERE episode_id = ?1 AND cohort_role = 'at_catch'
+    `).bind(episode.episode_id).all();
+    relatedWallets = (episodeWalletRows.results || []).map((row) => row.wallet_address);
+    await refreshMarketBaselines(env.RADAR_HISTORY_DB, now);
+    scoresUpdated = await refreshWalletScores(env.RADAR_HISTORY_DB, relatedWallets, now);
+  }
+  const clustersUpdated = effects.refreshesClusters
+    ? await refreshClusters(env.RADAR_HISTORY_DB, relatedWallets, now)
+    : 0;
   return { event_id: eventId, episode_id: episode.episode_id, wallets: wallets.length, scores_updated: scoresUpdated, clusters_updated: clustersUpdated };
 }
 
