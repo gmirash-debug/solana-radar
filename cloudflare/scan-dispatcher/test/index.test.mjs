@@ -5,6 +5,7 @@ import {
   applyDeletedTokenUpdate,
   claimDispatchBucket,
   corsHeaders,
+  discoveryStateForTokens,
   dashboardTokenKeys,
   decodeCursor,
   encodeCursor,
@@ -136,6 +137,28 @@ test("D1 dashboard selects only token rows that can appear in the UI", () => {
     [{ pool: { token_address: "history-token" } }],
   );
   assert.deepEqual(keys, ["thesis-token", "alert-token", "history-token", "summary-token"]);
+});
+
+test("D1 dashboard chunks market lookups below the SQLite parameter limit", async () => {
+  const bindings = [];
+  const db = {
+    prepare: () => ({
+      bind: (...keys) => ({
+        all: async () => {
+          bindings.push(keys);
+          return { results: keys.map((token_key) => ({ token_key })) };
+        },
+      }),
+    }),
+  };
+  const tokenKeys = Array.from({ length: 201 }, (_, index) => `token-${index}`);
+
+  const rows = await discoveryStateForTokens(db, tokenKeys);
+
+  assert.deepEqual(bindings.map((keys) => keys.length), [100, 100, 1]);
+  assert.equal(rows.length, 201);
+  assert.equal(rows[0].token_key, "token-0");
+  assert.equal(rows.at(-1).token_key, "token-200");
 });
 
 test("D1 discovery cursor round-trips padded and unpadded base64url", () => {

@@ -7,6 +7,7 @@ const DELETED_TOKENS_PATH = "data/deleted_tokens.json";
 const ACCESS_CERT_CACHE_TTL_MS = 60 * 60 * 1000;
 const DISCOVERY_CRON = "*/5 * * * *";
 const DEEP_SCAN_CRON = "7 * * * *";
+const D1_IN_PARAMETER_LIMIT = 100;
 let accessCertCache = { expiresAt: 0, keys: new Map() };
 
 function corsHeaders(request, env) {
@@ -470,6 +471,21 @@ function dashboardTokenKeys(report, history) {
   return keys;
 }
 
+async function discoveryStateForTokens(db, tokenKeys) {
+  const rows = [];
+  for (let start = 0; start < tokenKeys.length; start += D1_IN_PARAMETER_LIMIT) {
+    const keys = tokenKeys.slice(start, start + D1_IN_PARAMETER_LIMIT);
+    const placeholders = keys.map((_, index) => `?${index + 1}`).join(", ");
+    const result = await db.prepare(`
+      SELECT token_key, pool_address, market_json, baseline_json, queue_json, outcome_json, updated_at
+      FROM discovery_state
+      WHERE token_key IN (${placeholders})
+    `).bind(...keys).all();
+    rows.push(...(result.results || []));
+  }
+  return rows;
+}
+
 async function discoveryStatePage(env, limit, cursor) {
   if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
   const pageSize = Math.max(1, Math.min(100, Number(limit) || 50));
@@ -546,15 +562,11 @@ async function dashboardData(env, historyLimit = 40) {
   const report = parsePayload(reportDoc?.payload_json, {});
   const history = (alertsResult.results || []).map((row) => parsePayload(row.payload_json, {}));
   const tokenKeys = dashboardTokenKeys(report, history);
-  const discoveryResult = tokenKeys.length
-    ? await env.RADAR_DB.prepare(`
-        SELECT token_key, pool_address, market_json, baseline_json, queue_json, outcome_json, updated_at
-        FROM discovery_state
-        WHERE token_key IN (${tokenKeys.map((_, index) => `?${index + 1}`).join(", ")})
-      `).bind(...tokenKeys).all()
-    : { results: [] };
+  const discoveryRows = tokenKeys.length
+    ? await discoveryStateForTokens(env.RADAR_DB, tokenKeys)
+    : [];
   const market = {};
-  for (const row of discoveryResult.results || []) {
+  for (const row of discoveryRows) {
     const item = discoveryRow(row);
     if (item.market) market[item.tokenKey] = item.market;
   }
@@ -943,6 +955,7 @@ export {
   scanStatusPayload,
   dashboardData,
   dashboardTokenKeys,
+  discoveryStateForTokens,
   decodeCursor,
   discoveryStatePage,
   encodeCursor,
