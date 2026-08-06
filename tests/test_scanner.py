@@ -135,6 +135,127 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(detail["detail_current_alerts"][0]["events"][0]["signature"], "private-event")
         self.assertEqual(detail["detail_signal_theses"][0]["cohort_wallets"][0]["owner"], "private-wallet")
 
+    def test_history_ledger_is_authenticated_only_and_does_not_call_reduced_balance_a_sale(self):
+        mint = "11111111111111111111111111111111"
+        report = {
+            "generated_at": "2026-08-07T12:00:00Z",
+            "alerts": [],
+            "signal_theses": [],
+            "universe": [],
+            "active_pools": [],
+            "summaries": [],
+        }
+        state = {
+            "market": {
+                mint: {
+                    "latest_mcap_usd": 150_000,
+                    "latest_price_usd": 0.015,
+                }
+            },
+            "pools": {
+                "pool-a": {
+                    "signal_thesis": {
+                        "token_address": mint,
+                        "pool_address": "pool-a",
+                        "symbol": "TEST",
+                        "name": "Test",
+                        "signal_family": "reactivation_wave",
+                        "signal_at": "2026-08-01T12:00:00Z",
+                        "last_signal_at": "2026-08-01T12:00:00Z",
+                        "last_checked_at": "2026-08-02T12:00:00Z",
+                        "signal_mcap_usd": 100_000,
+                        "signal_price_usd": 0.01,
+                        "signal_liquidity_usd": 10_000,
+                        "source_tier": "watch",
+                        "source_score": 62,
+                        "status": "weakening",
+                        "balance_coverage_pct": 100,
+                        "token_retention_pct": 40,
+                        "original_retained_supply_pct": 1,
+                        "current_retained_supply_pct": 0.4,
+                        "supply": 10_000,
+                        "cohort": [{
+                            "owner": "wallet-a",
+                            "wallet_class": "fresh",
+                            "attributed_tokens": 100,
+                            "initial_balance": 100,
+                            "current_balance": 40,
+                            "retention_pct": 40,
+                            "buy_sol": 5,
+                            "first_buy_time": 1_754_049_600,
+                        }],
+                    }
+                }
+            },
+            "signal_outcomes": {},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            with (
+                mock.patch.object(scanner, "ALERTS_PATH", base / "alerts.jsonl"),
+                mock.patch.object(scanner, "DELETED_TOKENS_PATH", base / "deleted_tokens.json"),
+                mock.patch.object(scanner, "DISCOVERY_STATUS_PATH", base / "discovery_status.json"),
+            ):
+                fallback = scanner.build_dashboard_snapshot(report, state, {})
+                remote = scanner.build_dashboard_snapshot(
+                    report,
+                    state,
+                    {},
+                    include_detail=True,
+                )
+
+        self.assertNotIn("history_ledger", fallback)
+        events = remote["history_ledger"]["events"]
+        self.assertEqual([item["event"]["event_type"] for item in events], ["signal", "retention_check"])
+        retention_wallet = events[1]["wallets"][0]
+        self.assertEqual(retention_wallet["behavior_status"], "reduced_unverified")
+        self.assertIsNone(retention_wallet["outbound_transfer_tokens"])
+
+    def test_signal_outcome_freezes_earlier_horizon_before_later_pump(self):
+        mint = "11111111111111111111111111111111"
+        alert = {
+            "pool": {"token_address": mint, "pool_address": "pool-a", "symbol": "TEST"},
+            "created_at": "2026-08-01T00:00:00Z",
+            "obs_mcap_at": "2026-08-01T00:00:00Z",
+            "obs_mcap_usd": 100_000,
+            "obs_price_usd": 0.01,
+            "obs_liquidity_usd": 10_000,
+        }
+        state = {
+            "market": {
+                mint: {
+                    "latest_seen_at": "2026-08-01T01:05:00Z",
+                    "latest_mcap_usd": 120_000,
+                    "latest_price_usd": 0.012,
+                    "latest_liquidity_usd": 10_000,
+                }
+            }
+        }
+        scanner.update_signal_outcomes(
+            state,
+            [alert],
+            "2026-08-01T01:05:00Z",
+            {},
+        )
+        first = state["signal_outcomes"][mint]["horizons"]["1h"]
+        self.assertAlmostEqual(first["max_return_pct"], 20)
+
+        state["market"][mint].update({
+            "latest_seen_at": "2026-08-09T00:00:00Z",
+            "latest_mcap_usd": 800_000,
+            "latest_price_usd": 0.08,
+        })
+        scanner.update_signal_outcomes(
+            state,
+            [alert],
+            "2026-08-09T00:00:00Z",
+            {},
+        )
+        self.assertAlmostEqual(
+            state["signal_outcomes"][mint]["horizons"]["1h"]["max_return_pct"],
+            20,
+        )
+
     def test_stale_runtime_revision_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             state_path = Path(directory) / "state.json"
@@ -3528,6 +3649,72 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertIn("pool-5", [pool.pool_address for pool in selected])
         self.assertEqual(stats["gap_repairs"], 1)
         self.assertEqual(stats["rotation_reserve"], 1)
+
+    def test_history_ledger_orders_events_by_observation_time(self):
+        mint = "11111111111111111111111111111111"
+        state = {
+            "market": {},
+            "signal_outcomes": {},
+            "pools": {
+                "pool-a": {
+                    "signal_thesis": {
+                        "token_address": mint,
+                        "pool_address": "pool-a",
+                        "signal_at": "2026-08-01T00:00:00Z",
+                        "last_checked_at": "2026-08-01T02:00:00Z",
+                        "signal_mcap_usd": 50_000,
+                        "signal_price_usd": 0.01,
+                        "signal_liquidity_usd": 5_000,
+                        "supply": 1_000_000,
+                        "balance_coverage_pct": 100,
+                        "cohort": [{
+                            "owner": "wallet-a",
+                            "attributed_tokens": 100_000,
+                            "initial_balance": 100_000,
+                            "current_balance": 100_000,
+                            "retention_pct": 100,
+                            "buy_sol": 5,
+                        }],
+                    }
+                }
+            },
+        }
+        ledger = scanner.build_history_ledger(
+            {"alerts": []}, state, {"history_ledger_enabled": True}, "2026-08-02T00:00:00Z"
+        )
+
+        events = ledger["events"]
+        self.assertEqual([event["event"]["event_type"] for event in events], ["signal", "retention_check"])
+        self.assertLess(events[0]["event_id"], events[1]["event_id"])
+        self.assertTrue(events[0]["event_id"].startswith("history:1785542400:"))
+
+    def test_signal_thesis_keeps_only_verified_cluster_relationships(self):
+        alert = {
+            "created_at": "2026-08-01T00:00:00Z",
+            "pool": {
+                "token_address": "token-a",
+                "pool_address": "pool-a",
+                "price_usd": 0.01,
+                "liquidity_usd": 10_000,
+            },
+            "wave": {
+                "supply": 1_000_000,
+                "top_buyers": [
+                    {"owner": "wallet-a", "token_bought": 100_000, "current_balance": 100_000, "buy_sol": 3},
+                    {"owner": "wallet-b", "token_bought": 100_000, "current_balance": 100_000, "buy_sol": 2},
+                ],
+                "checked_bought_tokens": 200_000,
+                "checked_wallets": 2,
+                "balance_coverage_pct": 100,
+            },
+            "common_funders": [{"source": "funder-a", "members": ["wallet-a", "wallet-b"]}],
+            "common_executors": [{"executor": "executor-a", "members": ["wallet-a", "wallet-b"]}],
+        }
+
+        thesis = scanner.signal_thesis_from_alert(alert, {"signal_thesis_wallet_limit": 10})
+
+        self.assertEqual(thesis["cohort"][0]["common_funder"], "funder-a")
+        self.assertEqual(thesis["cohort"][1]["common_executor"], "executor-a")
 
 
 if __name__ == "__main__":

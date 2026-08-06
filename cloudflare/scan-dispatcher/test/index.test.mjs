@@ -19,6 +19,13 @@ import {
   githubActionsStatus,
   updateDeletedToken,
 } from "../src/index.js";
+import {
+  ageBand,
+  historyEventId,
+  historyEventsFromPayload,
+  mcapBand,
+  normalizedOutcome,
+} from "../src/history.js";
 
 function githubContent(data, sha) {
   return new Response(JSON.stringify({
@@ -214,4 +221,52 @@ test("scan status ingestion accepts scanner wrappers and raw recovery documents"
   assert.deepEqual(scanStatusPayload({ status }), status);
   assert.deepEqual(scanStatusPayload(status), status);
   assert.deepEqual(scanStatusPayload(null), {});
+});
+
+test("history dimensions preserve unknown inputs instead of classifying missing market facts as low range", () => {
+  assert.equal(mcapBand(null), "unknown");
+  assert.equal(ageBand(null), "unknown");
+  assert.equal(mcapBand(24_999), "lt_25k");
+  assert.equal(ageBand(15), "15d_30d");
+});
+
+test("history outcome uses the frozen horizon result, not a later all-time peak", () => {
+  const rows = normalizedOutcome({
+    max_favorable: { return_pct: 900 },
+    horizons: {
+      "1h": {
+        at: "2026-08-01T01:05:00Z",
+        return_pct: 20,
+        max_return_pct: 25,
+        max_drawdown_pct: -5,
+        time_to_1_5x_minutes: null,
+      },
+    },
+  }, {
+    caught_at: "2026-08-01T00:00:00Z",
+    caught_liquidity_usd: 10_000,
+  }, "2026-08-09T00:00:00Z");
+  const hour = rows.find((row) => row.horizon_minutes === 60);
+  const week = rows.find((row) => row.horizon_minutes === 10_080);
+  assert.equal(hour.max_return_pct, 25);
+  assert.equal(hour.max_drawdown_pct, -5);
+  assert.equal(week.status, "pending");
+});
+
+test("history outbox accepts only explicit ledger events", () => {
+  assert.deepEqual(historyEventsFromPayload({ history_ledger: { events: [{ episode: { token_address: "a" } }] } }).length, 1);
+  assert.deepEqual(historyEventsFromPayload({ history: [{ episode: { token_address: "a" } }] }), []);
+});
+
+test("history event ids sort by their observation time for deterministic initial backfill", () => {
+  const earlier = historyEventId({
+    episode: { episode_id: "episode-a" },
+    event: { event_type: "signal", observed_at: "2026-08-01T00:00:00Z" },
+  });
+  const later = historyEventId({
+    episode: { episode_id: "episode-b" },
+    event: { event_type: "signal", observed_at: "2026-08-02T00:00:00Z" },
+  });
+  assert.match(earlier, /^history:1785542400:/);
+  assert.ok(earlier < later);
 });

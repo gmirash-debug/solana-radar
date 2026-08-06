@@ -1,3 +1,18 @@
+import {
+  enqueueHistoryEvents,
+  flushHistoryOutbox,
+  hasHistoryDb,
+  historyClusterDetail,
+  historyClusters,
+  historyEpisodeDetail,
+  historyEpisodes,
+  historyOverview,
+  historyStatus,
+  historyTokenDetail,
+  historyWalletDetail,
+  historyWallets,
+} from "./history.js";
+
 const DEFAULT_OWNER = "gmirash-debug";
 const DEFAULT_REPO = "solana-radar";
 const DEFAULT_WORKFLOW = "scan-and-pages.yml";
@@ -505,6 +520,12 @@ async function ingestDashboardSnapshot(env, payload) {
   }));
   const marketSynced = await upsertDiscoveryStateRows(env.RADAR_DB, marketRows);
   await upsertDeletedTokenIndex(env.RADAR_DB, deletedTokens, now);
+  const historyQueued = await enqueueHistoryEvents(env, payload, now);
+  // The operational dashboard stays available if the analytics store is
+  // temporarily unavailable. Events remain in the outbox and retry on cron.
+  const historySync = hasHistoryDb(env)
+    ? await flushHistoryOutbox(env).catch((error) => ({ enabled: true, error: error.message, pending: historyQueued.queued }))
+    : { enabled: false, pending: historyQueued.queued, error: "history_db_not_configured" };
   await pruneRadarData(env.RADAR_DB, now);
   return {
     ok: true,
@@ -512,6 +533,8 @@ async function ingestDashboardSnapshot(env, payload) {
     alerts_synced: alertsSynced,
     thesis_details_synced: thesisDetailsSynced,
     market_synced: marketSynced,
+    history_queued: historyQueued.queued,
+    history_sync: historySync,
   };
 }
 
@@ -645,11 +668,12 @@ async function ingestDiscoveryState(env, rows) {
 async function dashboardData(env, historyLimit = 40) {
   if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
   const limit = Math.max(1, Math.min(250, Number(historyLimit) || 40));
-  const [reportDoc, deletedDoc, discoveryStatusDoc, scanStatusDoc, alertsResult] = await Promise.all([
+  const [reportDoc, deletedDoc, discoveryStatusDoc, scanStatusDoc, historyStatusDoc, alertsResult] = await Promise.all([
     env.RADAR_DB.prepare("SELECT payload_json, source_updated_at, updated_at FROM state_docs WHERE key = 'latest_report'").first(),
     env.RADAR_DB.prepare("SELECT payload_json FROM state_docs WHERE key = 'deleted_tokens'").first(),
     env.RADAR_DB.prepare("SELECT payload_json FROM state_docs WHERE key = 'discovery_status'").first(),
     env.RADAR_DB.prepare("SELECT payload_json FROM state_docs WHERE key = 'scan_status'").first(),
+    env.RADAR_DB.prepare("SELECT payload_json FROM state_docs WHERE key = 'history_status'").first(),
     env.RADAR_DB.prepare("SELECT payload_json FROM alerts ORDER BY generated_at DESC LIMIT ?1").bind(limit).all(),
   ]);
   const report = compactDashboardReport(parsePayload(reportDoc?.payload_json, {}));
@@ -677,6 +701,7 @@ async function dashboardData(env, historyLimit = 40) {
       finished_at: report.generated_at || reportDoc?.updated_at || null,
       returncode: 0,
     }),
+    history_status: parsePayload(historyStatusDoc?.payload_json, {}),
     report_source_updated_at: reportDoc?.source_updated_at || reportDoc?.updated_at || null,
   };
 }
@@ -712,6 +737,7 @@ async function dashboardTokenDetail(env, requestedTokenKey) {
   const marketRows = await discoveryStateForTokens(env.RADAR_DB, [tokenKey]);
   const marketRow = marketRows[0] ? discoveryRow(marketRows[0]) : null;
   if (!thesis && !alerts.length && !marketRow?.market) throw new Error("token_not_found");
+  const walletEdge = await historyTokenDetail(env, tokenKey).catch(() => null);
   return {
     ok: true,
     token_key: tokenKey,
@@ -721,6 +747,7 @@ async function dashboardTokenDetail(env, requestedTokenKey) {
       .map((row) => row.alert),
     history: alerts,
     market: marketRow?.market || null,
+    wallet_edge: walletEdge,
     report_source_updated_at: reportDoc?.source_updated_at || reportDoc?.updated_at || null,
   };
 }
@@ -973,8 +1000,15 @@ async function dispatchScheduledScan(event, env) {
 export default {
   async scheduled(_event, env, ctx) {
     const mode = schedulerMode(env);
-    if (mode === "disabled") return;
-    ctx.waitUntil(mode === "auto" ? dispatchAutoScheduledScan(_event, env) : dispatchScheduledScan(_event, env));
+    const historyTask = hasHistoryDb(env)
+      ? flushHistoryOutbox(env).catch(() => null)
+      : Promise.resolve(null);
+    if (mode === "disabled") {
+      ctx.waitUntil(historyTask);
+      return;
+    }
+    const scanTask = mode === "auto" ? dispatchAutoScheduledScan(_event, env) : dispatchScheduledScan(_event, env);
+    ctx.waitUntil(Promise.all([scanTask, historyTask]));
   },
 
   async fetch(request, env) {
@@ -1002,6 +1036,7 @@ export default {
           d1Error = error.message;
         }
       }
+      const historical = await historyStatus(env).catch((error) => ({ configured: hasHistoryDb(env), healthy: false, error: error.message }));
       return json({
         ok: d1Healthy,
         worker: "solana-radar-scan-dispatcher",
@@ -1012,6 +1047,7 @@ export default {
         d1_configured: hasRadarDb(env),
         d1_healthy: d1Healthy,
         d1_error: d1Error,
+        history: historical,
       }, 200, corsHeaders(request, env));
     }
 
@@ -1043,6 +1079,46 @@ export default {
       } catch (error) {
         const status = error.message === "token_key_required" ? 400 : error.message === "token_not_found" ? 404 : 503;
         return json({ ok: false, error: error.message }, status, corsHeaders(request, env));
+      }
+    }
+
+    if (url.pathname.startsWith("/api/intelligence/")) {
+      if (request.method !== "GET") {
+        return json({ ok: false, error: "GET required" }, 405, corsHeaders(request, env));
+      }
+      try {
+        const params = Object.fromEntries(url.searchParams.entries());
+        if (url.pathname === "/api/intelligence/overview") {
+          return json(await historyOverview(env, params.window), 200, corsHeaders(request, env));
+        }
+        if (url.pathname === "/api/intelligence/wallets") {
+          return json(await historyWallets(env, params), 200, corsHeaders(request, env));
+        }
+        if (url.pathname === "/api/intelligence/wallet") {
+          return json(await historyWalletDetail(env, params.wallet), 200, corsHeaders(request, env));
+        }
+        if (url.pathname === "/api/intelligence/clusters") {
+          return json(await historyClusters(env, params), 200, corsHeaders(request, env));
+        }
+        if (url.pathname === "/api/intelligence/cluster") {
+          return json(await historyClusterDetail(env, params.cluster), 200, corsHeaders(request, env));
+        }
+        if (url.pathname === "/api/intelligence/episodes") {
+          return json(await historyEpisodes(env, params), 200, corsHeaders(request, env));
+        }
+        if (url.pathname === "/api/intelligence/episode") {
+          return json(await historyEpisodeDetail(env, params.episode), 200, corsHeaders(request, env));
+        }
+        if (url.pathname === "/api/intelligence/token") {
+          return json({ ok: true, wallet_edge: await historyTokenDetail(env, params.token_key) }, 200, corsHeaders(request, env));
+        }
+        return json({ ok: false, error: "intelligence_endpoint_not_found" }, 404, corsHeaders(request, env));
+      } catch (error) {
+        const message = error.message || "history_unavailable";
+        const status = ["wallet_required", "cluster_required", "episode_required"].includes(message) ? 400
+          : ["wallet_not_found", "cluster_not_found", "episode_not_found"].includes(message) ? 404
+            : 503;
+        return json({ ok: false, error: message }, status, corsHeaders(request, env));
       }
     }
 
@@ -1163,4 +1239,15 @@ export {
   ingestAccess,
   syncDeletedTokensToD1,
   updateDeletedToken,
+  enqueueHistoryEvents,
+  flushHistoryOutbox,
+  hasHistoryDb,
+  historyOverview,
+  historyWallets,
+  historyWalletDetail,
+  historyClusters,
+  historyClusterDetail,
+  historyEpisodes,
+  historyEpisodeDetail,
+  historyTokenDetail,
 };

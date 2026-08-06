@@ -27,3 +27,16 @@ SCHEDULER_ENABLED = "auto"
 binding = "RADAR_DB"
 database_name = "solana-radar"
 database_id = "cf245cb3-475b-4fda-8831-70b7c8a0d672"
+
+[[d1_databases]]
+binding = "RADAR_HISTORY_DB"
+database_name = "solana-radar-history"
+database_id = "41d38b04-c3ae-41c0-aa80-1bcb2f0dead4"
+migrations_dir = "migrations-history"
+
+# Raw transaction and provider payloads are optional. The account has not
+# enabled R2 yet, so do not add an active binding until the bucket exists.
+# Once enabled, create `solana-radar-archive` and add:
+# [[r2_buckets]]
+# binding = "RADAR_ARCHIVE"
+# bucket_name = "solana-radar-archive"

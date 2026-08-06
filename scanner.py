@@ -781,6 +781,330 @@ def compact_market_for_dashboard(entry):
     }
 
 
+HISTORY_LEDGER_SCHEMA_VERSION = 1
+HISTORY_LEDGER_HORIZONS = ("1h", "6h", "24h", "72h", "7d")
+
+
+def history_ledger_event_id(episode_id, event_type, observed_at):
+    # Prefix the immutable event id with its observation time. The Worker uses
+    # this for deterministic chronological delivery when it first backfills a
+    # ledger, preventing a later result from becoming a prior score.
+    observed_epoch = max(0, int(parse_timestamp(observed_at) or 0))
+    payload = "|".join(
+        str(value or "") for value in (episode_id, event_type, observed_at)
+    )
+    return (
+        f"history:{observed_epoch:010d}:"
+        + hashlib.sha256(payload.encode()).hexdigest()[:24]
+    )
+
+
+def history_ledger_alert_index(alerts):
+    index = defaultdict(list)
+    for alert in alerts or []:
+        if not isinstance(alert, dict) or alert.get("lane") != "reactivation":
+            continue
+        pool = alert.get("pool") or {}
+        for key in (pool.get("token_address"), pool.get("pool_address")):
+            if key:
+                index[str(key)].append(alert)
+    return index
+
+
+def history_ledger_matching_alert(thesis, alert_index):
+    candidates = []
+    for key in (thesis.get("token_address"), thesis.get("pool_address")):
+        candidates.extend(alert_index.get(str(key), []))
+    if not candidates:
+        return None
+    signal_at = parse_timestamp(thesis.get("signal_at"))
+    return min(
+        candidates,
+        key=lambda alert: abs(alert_history_timestamp(alert) - signal_at),
+    )
+
+
+def history_ledger_age_days(thesis):
+    signal_at = parse_timestamp(thesis.get("signal_at"))
+    created_at = parse_timestamp(thesis.get("pair_created_at"))
+    if not signal_at or not created_at or signal_at < created_at:
+        return None
+    return (signal_at - created_at) / 86400
+
+
+def history_ledger_wallets(thesis, market_entry, at_catch=False):
+    """Return evidence-based wallet rows for the historical D1 ledger.
+
+    A balance decrease only establishes that assets left the original wallet.
+    It deliberately remains `reduced_unverified`; detecting a sale or transfer
+    requires transaction-level attribution and is not inferred here.
+    """
+    cohort = thesis.get("cohort") or []
+    supply = max(0.0, to_float(thesis.get("supply")))
+    entry_price = to_float(thesis.get("signal_price_usd"))
+    current_price = to_float(
+        (market_entry or {}).get("latest_price_usd")
+        or (market_entry or {}).get("scan_price_usd")
+    )
+    estimated_pnl_pct = (
+        (current_price / entry_price - 1) * 100
+        if current_price > 0 and entry_price > 0 and not at_catch
+        else 0.0 if at_catch and entry_price > 0 else None
+    )
+    coverage = float(thesis.get("balance_coverage_pct") or 0)
+    rows = []
+    for row in cohort:
+        if not isinstance(row, dict) or not row.get("owner"):
+            continue
+        bought_tokens = max(0.0, to_float(row.get("attributed_tokens")))
+        held_at_catch = max(
+            0.0,
+            to_float(row.get("initial_balance") or row.get("attributed_tokens")),
+        )
+        checked_balance = row.get("current_balance")
+        current_balance = (
+            held_at_catch
+            if at_catch
+            else (
+                max(0.0, to_float(checked_balance))
+                if checked_balance is not None
+                else None
+            )
+        )
+        retained_pct = (
+            100.0
+            if at_catch and bought_tokens > 0
+            else (
+                max(0.0, min(100.0, to_float(row.get("retention_pct"))))
+                if row.get("retention_pct") is not None
+                else None
+            )
+        )
+        if at_catch:
+            behavior_status = "holding"
+            coverage_status = "complete"
+        elif current_balance is None or coverage < 80:
+            behavior_status = "unknown"
+            coverage_status = "partial"
+        elif retained_pct is not None and retained_pct >= 99:
+            behavior_status = "holding"
+            coverage_status = "complete"
+        else:
+            behavior_status = "reduced_unverified"
+            coverage_status = "complete"
+        rows.append(
+            {
+                "wallet_address": row.get("owner"),
+                "cohort_role": "at_catch",
+                "wallet_class_at_signal": row.get("wallet_class"),
+                "first_buy_at": iso(row.get("first_buy_time")),
+                "last_buy_at": iso(row.get("first_buy_time")),
+                "buy_count": 1,
+                "buy_sol": max(0.0, to_float(row.get("buy_sol"))),
+                "bought_tokens": bought_tokens,
+                "average_entry_price": entry_price or None,
+                "entry_mcap_usd": to_float(thesis.get("signal_mcap_usd")) or None,
+                "supply_pct_bought": (
+                    bought_tokens / supply * 100 if supply and bought_tokens else None
+                ),
+                "held_tokens_at_catch": held_at_catch or None,
+                "held_supply_pct_at_catch": (
+                    held_at_catch / supply * 100 if supply and held_at_catch else None
+                ),
+                "retained_pct_at_catch": 100.0 if bought_tokens else None,
+                "common_funder": row.get("common_funder"),
+                "common_executor": row.get("common_executor"),
+                "evidence_status": "complete" if at_catch or coverage >= 80 else "partial",
+                "current_token_balance": current_balance,
+                "balance_retained_pct": retained_pct,
+                "behavior_status": behavior_status,
+                "estimated_pnl_pct": estimated_pnl_pct,
+                # A net balance cannot prove a sale. Transaction-level work is
+                # intentionally required before either field is populated.
+                "additional_buy_tokens": None,
+                "outbound_transfer_tokens": None,
+                "coverage_status": coverage_status,
+            }
+        )
+    return rows
+
+
+def build_history_ledger(report_payload, state, config, generated_at):
+    """Build immutable analytics events for the remote history database.
+
+    This contract is only added to authenticated remote-sync payloads. It never
+    reaches the static GitHub Pages fallback, which keeps private wallet detail
+    out of the public emergency artifact.
+    """
+    if not config.get("history_ledger_enabled", True):
+        return {"schema_version": HISTORY_LEDGER_SCHEMA_VERSION, "events": []}
+
+    deleted = load_deleted_tokens()
+    alert_index = history_ledger_alert_index(report_payload.get("alerts") or [])
+    market = state.get("market") if isinstance(state, dict) else {}
+    outcomes = state.get("signal_outcomes") if isinstance(state, dict) else {}
+    pools = state.get("pools") if isinstance(state, dict) else {}
+    candidates = []
+    for pool_state in pools.values() if isinstance(pools, dict) else []:
+        thesis = pool_state.get("signal_thesis") if isinstance(pool_state, dict) else None
+        if not isinstance(thesis, dict):
+            continue
+        token = thesis.get("token_address") or thesis.get("pool_address")
+        if not token or token in deleted.get("tokens", set()) or thesis.get("pool_address") in deleted.get("pools", set()):
+            continue
+        candidates.append(thesis)
+    candidates.sort(
+        key=lambda thesis: parse_timestamp(
+            thesis.get("signal_at") or thesis.get("captured_at")
+        ),
+        reverse=True,
+    )
+    limit = max(0, int(config.get("history_ledger_max_theses", 120)))
+    if limit:
+        candidates = candidates[:limit]
+
+    events = []
+    for thesis in candidates:
+        token = str(thesis.get("token_address") or thesis.get("pool_address"))
+        pool_address = thesis.get("pool_address")
+        caught_at = (
+            thesis.get("signal_at")
+            or thesis.get("captured_at")
+            or generated_at
+        )
+        market_entry = market.get(token) if isinstance(market, dict) else {}
+        market_entry = market_entry if isinstance(market_entry, dict) else {}
+        matching_alert = history_ledger_matching_alert(thesis, alert_index)
+        quality = ((matching_alert or {}).get("data_quality") or {}).get("status")
+        if not quality:
+            quality = "complete" if float(thesis.get("balance_coverage_pct") or 0) >= 80 else "partial"
+        ath_mcap = trusted_ath_mcap(market_entry)
+        caught_mcap = to_float(thesis.get("signal_mcap_usd"))
+        episode_id = "episode:" + hashlib.sha256(
+            "|".join(
+                str(value or "")
+                for value in (token, thesis.get("signal_family"), caught_at)
+            ).encode()
+        ).hexdigest()[:24]
+        episode = {
+            "episode_id": episode_id,
+            "token_address": thesis.get("token_address") or token,
+            "pool_address": pool_address,
+            "symbol": thesis.get("symbol"),
+            "name": thesis.get("name"),
+            "lane": "reactivation",
+            "signal_family": thesis.get("signal_family") or "reactivation_wave",
+            "caught_at": caught_at,
+            "last_signal_at": thesis.get("last_signal_at") or caught_at,
+            "closed_at": thesis.get("invalidated_at"),
+            "caught_tier": thesis.get("source_tier"),
+            "caught_score": thesis.get("source_score"),
+            "caught_price_usd": thesis.get("signal_price_usd"),
+            "caught_mcap_usd": caught_mcap or None,
+            "caught_liquidity_usd": thesis.get("signal_liquidity_usd"),
+            "token_age_days": history_ledger_age_days(thesis),
+            "ath_mcap_usd": ath_mcap or None,
+            "ath_ratio": caught_mcap / ath_mcap if caught_mcap and ath_mcap else None,
+            "market_stage": (matching_alert or {}).get("reactivation_stage"),
+            "source_run_key": generated_at,
+            "source_kind": "scanner_snapshot",
+            "data_quality_status": quality,
+            "schema_version": HISTORY_LEDGER_SCHEMA_VERSION,
+        }
+        outcome = outcomes.get(token, {}) if isinstance(outcomes, dict) else {}
+        signal_wallets = history_ledger_wallets(thesis, market_entry, at_catch=True)
+        signal_event = {
+            "event_id": history_ledger_event_id(episode_id, "signal", caught_at),
+            "episode": episode,
+            "event": {
+                "event_type": "signal",
+                "observed_at": caught_at,
+                "tier": thesis.get("source_tier"),
+                "score": thesis.get("source_score"),
+                "price_usd": thesis.get("signal_price_usd"),
+                "mcap_usd": caught_mcap or None,
+                "liquidity_usd": thesis.get("signal_liquidity_usd"),
+                "retained_supply_pct": thesis.get("original_retained_supply_pct"),
+                "cohort_retained_pct": 100.0,
+                "thesis_status": "captured",
+                "data_quality_status": quality,
+            },
+            "wallets": signal_wallets,
+            "outcome": {},
+        }
+        events.append(signal_event)
+
+        checked_at = thesis.get("last_checked_at")
+        if parse_timestamp(checked_at) > parse_timestamp(caught_at):
+            events.append(
+                {
+                    "event_id": history_ledger_event_id(
+                        episode_id, "retention_check", checked_at
+                    ),
+                    "episode": episode,
+                    "event": {
+                        "event_type": "retention_check",
+                        "observed_at": checked_at,
+                        "tier": thesis.get("source_tier"),
+                        "score": thesis.get("source_score"),
+                        "price_usd": market_entry.get("latest_price_usd"),
+                        "mcap_usd": market_entry.get("latest_mcap_usd"),
+                        "liquidity_usd": market_entry.get("latest_liquidity_usd"),
+                        "retained_supply_pct": thesis.get("current_retained_supply_pct"),
+                        "cohort_retained_pct": thesis.get("token_retention_pct"),
+                        "thesis_status": thesis.get("status"),
+                        "data_quality_status": quality,
+                    },
+                    "wallets": history_ledger_wallets(
+                        thesis, market_entry, at_catch=False
+                    ),
+                    "outcome": {},
+                }
+            )
+
+        horizons = outcome.get("horizons") if isinstance(outcome, dict) else {}
+        for horizon in HISTORY_LEDGER_HORIZONS:
+            checkpoint = horizons.get(horizon) if isinstance(horizons, dict) else None
+            checkpoint_at = checkpoint.get("at") if isinstance(checkpoint, dict) else None
+            if not checkpoint_at:
+                continue
+            events.append(
+                {
+                    "event_id": history_ledger_event_id(
+                        episode_id, f"outcome_{horizon}", checkpoint_at
+                    ),
+                    "episode": episode,
+                    "event": {
+                        "event_type": f"outcome_{horizon}",
+                        "observed_at": checkpoint_at,
+                        "tier": thesis.get("source_tier"),
+                        "score": thesis.get("source_score"),
+                        "price_usd": checkpoint.get("price_usd"),
+                        "mcap_usd": checkpoint.get("mcap_usd"),
+                        "liquidity_usd": checkpoint.get("liquidity_usd"),
+                        "thesis_status": thesis.get("status"),
+                        "data_quality_status": quality,
+                    },
+                    # A market horizon does not imply a fresh wallet balance
+                    # check, so no stale wallet observation is written here.
+                    "wallets": [],
+                    "outcome": outcome,
+                }
+            )
+
+    events.sort(
+        key=lambda row: (
+            parse_timestamp((row.get("event") or {}).get("observed_at")) or 0,
+            str(row.get("event_id") or ""),
+        )
+    )
+    return {
+        "schema_version": HISTORY_LEDGER_SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "events": events,
+    }
+
+
 def build_dashboard_snapshot(
     report_payload,
     state,
@@ -835,6 +1159,12 @@ def build_dashboard_snapshot(
             if isinstance(alert, dict)
         ]
         snapshot["detail_history"] = detail_history
+        snapshot["history_ledger"] = build_history_ledger(
+            report_payload,
+            state,
+            config,
+            generated_at,
+        )
     return snapshot
 
 
@@ -5742,12 +6072,40 @@ def classified_alert_cohort(alert, wallet_limit):
     )[:wallet_limit]
 
 
+def verified_alert_cluster_members(alert):
+    """Map only explicit common funder/executor evidence onto cohort wallets."""
+    funders = {}
+    executors = {}
+    for group in alert.get("common_funders") or []:
+        if not isinstance(group, dict):
+            continue
+        source = str(group.get("source") or "").strip()
+        members = group.get("members") or []
+        if not source or not isinstance(members, list):
+            continue
+        for owner in members:
+            if owner:
+                funders[str(owner)] = source
+    for group in alert.get("common_executors") or []:
+        if not isinstance(group, dict):
+            continue
+        executor = str(group.get("executor") or "").strip()
+        members = group.get("members") or []
+        if not executor or not isinstance(members, list):
+            continue
+        for owner in members:
+            if owner:
+                executors[str(owner)] = executor
+    return funders, executors
+
+
 def signal_thesis_from_alert(alert, config, captured_at=None):
     if not isinstance(alert, dict):
         return None
     wave = alert.get("wave") or {}
     wave_rows = wave.get("top_buyers") or []
     cohort = []
+    common_funders, common_executors = verified_alert_cluster_members(alert)
     wallet_limit = max(1, int(config.get("signal_thesis_wallet_limit", 40)))
     holder_min_pct = max(
         0.0,
@@ -5794,6 +6152,8 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
                         row.get("first_buy_time")
                     ),
                     "wallet_class": row.get("wallet_class"),
+                    "common_funder": common_funders.get(owner),
+                    "common_executor": common_executors.get(owner),
                     "current_balance": current_balance,
                     "current_retained_tokens": retained_tokens,
                     "retention_pct": retention_pct,
@@ -5802,6 +6162,10 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
             )
     else:
         cohort = classified_alert_cohort(alert, wallet_limit)
+        for row in cohort:
+            owner = str(row.get("owner") or "")
+            row["common_funder"] = common_funders.get(owner)
+            row["common_executor"] = common_executors.get(owner)
     original_tokens = sum(row["attributed_tokens"] for row in cohort)
     if not cohort or original_tokens <= 0:
         return None
@@ -9994,6 +10358,7 @@ SIGNAL_OUTCOME_HORIZONS = {
     "6h": 6 * 3600,
     "24h": 24 * 3600,
     "72h": 72 * 3600,
+    "7d": 7 * 24 * 3600,
 }
 
 
@@ -10183,6 +10548,14 @@ def update_signal_outcomes(state, alerts, observed_at, config):
             trough = outcome.get("max_adverse")
             if not trough or current_return < to_float(trough.get("return_pct")):
                 outcome["max_adverse"] = dict(snapshot)
+            elapsed_minutes = max(0.0, (snapshot_ts - caught_ts) / 60)
+            for threshold, field in (
+                (50, "time_to_1_5x_minutes"),
+                (100, "time_to_2x_minutes"),
+                (400, "time_to_5x_minutes"),
+            ):
+                if current_return >= threshold and outcome.get(field) is None:
+                    outcome[field] = elapsed_minutes
         horizons = outcome.setdefault("horizons", {})
         for name, seconds in SIGNAL_OUTCOME_HORIZONS.items():
             if name in horizons or snapshot_ts < caught_ts + seconds:
@@ -10191,6 +10564,20 @@ def update_signal_outcomes(state, alerts, observed_at, config):
                 **snapshot,
                 "target_at": iso(caught_ts + seconds),
                 "delay_seconds": max(0, snapshot_ts - caught_ts - seconds),
+                # These fields are frozen at the first observation after the
+                # horizon is due. Later performance cannot leak backward into
+                # a historical 1h/6h/24h result.
+                "max_return_pct": to_float(
+                    (outcome.get("max_favorable") or {}).get("return_pct"),
+                    None,
+                ),
+                "max_drawdown_pct": to_float(
+                    (outcome.get("max_adverse") or {}).get("return_pct"),
+                    None,
+                ),
+                "time_to_1_5x_minutes": outcome.get("time_to_1_5x_minutes"),
+                "time_to_2x_minutes": outcome.get("time_to_2x_minutes"),
+                "time_to_5x_minutes": outcome.get("time_to_5x_minutes"),
             }
 
     retention_days = float(config.get("signal_outcomes_retention_days", 180))
