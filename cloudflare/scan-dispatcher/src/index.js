@@ -686,6 +686,12 @@ function schedulerKindForCron(cron) {
   return "deep_scan";
 }
 
+function schedulerEnabled(env) {
+  const value = normalizeId(env.SCHEDULER_ENABLED);
+  if (!value) return true;
+  return !["0", "false", "off", "disabled"].includes(value.toLowerCase());
+}
+
 function schedulerBucket(kind, now = new Date()) {
   const timestamp = new Date(now);
   if (kind === "discovery") {
@@ -798,6 +804,7 @@ async function dispatchScheduledScan(event, env) {
 
 export default {
   async scheduled(_event, env, ctx) {
+    if (!schedulerEnabled(env)) return;
     ctx.waitUntil(dispatchScheduledScan(_event, env));
   },
 
@@ -951,6 +958,7 @@ export {
   dispatchScheduledScan,
   requireCloudflareAccess,
   schedulerBucket,
+  schedulerEnabled,
   schedulerKindForCron,
   scanStatusPayload,
   dashboardData,
