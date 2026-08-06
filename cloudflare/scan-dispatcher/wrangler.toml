@@ -20,6 +20,7 @@ GITHUB_WORKFLOW = "scan-and-pages.yml"
 GITHUB_DISCOVERY_WORKFLOW = "discovery-pulse.yml"
 GITHUB_REF = "main"
 ALLOWED_ORIGIN = "https://gmirash-debug.github.io"
+SCHEDULER_ENABLED = "auto"
 
 # Create the database before the first production deploy, then replace this id.
 [[d1_databases]]
