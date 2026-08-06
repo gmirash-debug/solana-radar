@@ -11,9 +11,6 @@ on:
         description: "Cloudflare scheduler bucket"
         required: false
         default: "manual"
-  schedule:
-    - cron: "*/5 * * * *"
-
 concurrency:
   # Shared lock with the hourly deep scan: never overwrite a newer state cache.
   group: solana-radar-state-writer
