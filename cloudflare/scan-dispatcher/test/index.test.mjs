@@ -13,7 +13,9 @@ import {
   scanStatusPayload,
   schedulerBucket,
   schedulerEnabled,
+  schedulerMode,
   schedulerKindForCron,
+  githubActionsStatus,
   updateDeletedToken,
 } from "../src/index.js";
 
@@ -133,6 +135,14 @@ test("scheduler can be paused without removing its cron triggers", () => {
   assert.equal(schedulerEnabled({ SCHEDULER_ENABLED: "true" }), true);
   assert.equal(schedulerEnabled({ SCHEDULER_ENABLED: "false" }), false);
   assert.equal(schedulerEnabled({ SCHEDULER_ENABLED: "off" }), false);
+  assert.equal(schedulerMode({ SCHEDULER_ENABLED: "auto" }), "auto");
+  assert.equal(schedulerMode({ SCHEDULER_ENABLED: "false" }), "disabled");
+});
+
+test("auto scheduler dispatches only when GitHub Actions is operational", () => {
+  assert.equal(githubActionsStatus({ components: [{ name: "Actions", status: "operational" }] }), "operational");
+  assert.equal(githubActionsStatus({ components: [{ name: "Actions", status: "major_outage" }] }), "major_outage");
+  assert.equal(githubActionsStatus({ components: [{ name: "Pages", status: "operational" }] }), null);
 });
 
 test("D1 dashboard selects only token rows that can appear in the UI", () => {

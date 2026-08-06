@@ -8,6 +8,7 @@ const ACCESS_CERT_CACHE_TTL_MS = 60 * 60 * 1000;
 const DISCOVERY_CRON = "*/5 * * * *";
 const DEEP_SCAN_CRON = "7 * * * *";
 const D1_IN_PARAMETER_LIMIT = 100;
+const GITHUB_STATUS_COMPONENTS_URL = "https://www.githubstatus.com/api/v2/components.json";
 let accessCertCache = { expiresAt: 0, keys: new Map() };
 
 function corsHeaders(request, env) {
@@ -686,10 +687,41 @@ function schedulerKindForCron(cron) {
   return "deep_scan";
 }
 
-function schedulerEnabled(env) {
+function schedulerMode(env) {
   const value = normalizeId(env.SCHEDULER_ENABLED);
-  if (!value) return true;
-  return !["0", "false", "off", "disabled"].includes(value.toLowerCase());
+  if (!value) return "enabled";
+  const normalized = value.toLowerCase();
+  if (normalized === "auto") return "auto";
+  if (["0", "false", "off", "disabled"].includes(normalized)) return "disabled";
+  return "enabled";
+}
+
+function schedulerEnabled(env) {
+  return schedulerMode(env) !== "disabled";
+}
+
+function githubActionsStatus(payload) {
+  const component = (payload?.components || []).find((entry) => String(entry?.name || "").toLowerCase() === "actions");
+  return normalizeId(component?.status)?.toLowerCase() || null;
+}
+
+async function dispatchAutoScheduledScan(event, env) {
+  let status = null;
+  try {
+    const response = await fetch(GITHUB_STATUS_COMPONENTS_URL, {
+      headers: { accept: "application/json", "user-agent": "solana-radar-scan-dispatcher" },
+    });
+    if (!response.ok) {
+      return { ok: true, skipped: "github_actions_status_unavailable", status_code: response.status };
+    }
+    status = githubActionsStatus(await response.json());
+  } catch (error) {
+    return { ok: true, skipped: "github_actions_status_unavailable", error: error.message };
+  }
+  if (status !== "operational") {
+    return { ok: true, skipped: "github_actions_not_operational", github_actions_status: status || "unknown" };
+  }
+  return dispatchScheduledScan(event, env);
 }
 
 function schedulerBucket(kind, now = new Date()) {
@@ -804,8 +836,9 @@ async function dispatchScheduledScan(event, env) {
 
 export default {
   async scheduled(_event, env, ctx) {
-    if (!schedulerEnabled(env)) return;
-    ctx.waitUntil(dispatchScheduledScan(_event, env));
+    const mode = schedulerMode(env);
+    if (mode === "disabled") return;
+    ctx.waitUntil(mode === "auto" ? dispatchAutoScheduledScan(_event, env) : dispatchScheduledScan(_event, env));
   },
 
   async fetch(request, env) {
@@ -956,9 +989,12 @@ export {
   claimDispatchBucket,
   corsHeaders,
   dispatchScheduledScan,
+  dispatchAutoScheduledScan,
+  githubActionsStatus,
   requireCloudflareAccess,
   schedulerBucket,
   schedulerEnabled,
+  schedulerMode,
   schedulerKindForCron,
   scanStatusPayload,
   dashboardData,
