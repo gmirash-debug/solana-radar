@@ -12,6 +12,7 @@ import {
   requireCloudflareAccess,
   scanStatusPayload,
   schedulerBucket,
+  schedulerEnabled,
   schedulerKindForCron,
   updateDeletedToken,
 } from "../src/index.js";
@@ -125,6 +126,13 @@ test("scheduler buckets distinguish five-minute discovery from hourly deep scans
   };
   assert.deepEqual(await claimDispatchBucket(env, "discovery", "discovery:bucket"), { claimed: true, persistent: true });
   assert.deepEqual(await claimDispatchBucket(env, "discovery", "discovery:bucket"), { claimed: false, persistent: true });
+});
+
+test("scheduler can be paused without removing its cron triggers", () => {
+  assert.equal(schedulerEnabled({}), true);
+  assert.equal(schedulerEnabled({ SCHEDULER_ENABLED: "true" }), true);
+  assert.equal(schedulerEnabled({ SCHEDULER_ENABLED: "false" }), false);
+  assert.equal(schedulerEnabled({ SCHEDULER_ENABLED: "off" }), false);
 });
 
 test("D1 dashboard selects only token rows that can appear in the UI", () => {
