@@ -24,6 +24,7 @@ on:
       - "requirements.txt"
       - "tests/**"
       - "dashboard/**"
+      - "cloudflare/**"
       - "NARRATIVE_PROTOCOL.md"
 
 concurrency:

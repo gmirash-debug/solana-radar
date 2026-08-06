@@ -1,10 +1,10 @@
-import { chooseDashboardPayload } from "./data-source.js?v=20260806-fast-load-1";
+import { chooseDashboardPayload } from "./data-source.js?v=20260807-wallet-edge-1";
 import {
   compareTokensByCatchNewest,
   resolveAthContext,
   resolveCurrentMarket,
   resolveSignalEpisodes,
-} from "./token-state.js?v=20260806-fast-load-1";
+} from "./token-state.js?v=20260807-wallet-edge-1";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const DELETE_SYNC_ENDPOINT = "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/deleted-token";
@@ -67,6 +67,17 @@ const state = {
   market: {},
   scanStatus: {},
   discoveryStatus: {},
+  historyStatus: {},
+  walletEdgeByToken: new Map(),
+  intelligence: {
+    status: "idle",
+    overview: null,
+    wallets: [],
+    clusters: [],
+    episodes: [],
+    error: null,
+    loadedAt: 0,
+  },
   tab: "filters",
   query: "",
   workflow: "active",
@@ -1520,6 +1531,53 @@ async function fetchRemoteDashboard() {
   return payload;
 }
 
+async function fetchIntelligence(path) {
+  const baseUrl = remoteDataUrl();
+  const endpoint = baseUrl ? `${baseUrl}${path}` : path;
+  const response = await fetchWithTimeout(endpoint, {
+    cache: "no-store",
+    headers: { accept: "application/json" },
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error || `learning ${response.status}`);
+  }
+  return payload;
+}
+
+async function ensureIntelligence(force = false) {
+  const current = state.intelligence;
+  if (current.status === "loading") return;
+  if (!force && current.loadedAt && Date.now() - current.loadedAt < 5 * 60_000) return;
+  state.intelligence = { ...current, status: "loading", error: null };
+  if (state.tab === "intelligence") render();
+  try {
+    const [overview, wallets, clusters, episodes] = await Promise.all([
+      fetchIntelligence("/api/intelligence/overview?window=90d"),
+      fetchIntelligence("/api/intelligence/wallets?limit=30&min_sample=1"),
+      fetchIntelligence("/api/intelligence/clusters?limit=20"),
+      fetchIntelligence("/api/intelligence/episodes?window=90d&limit=40"),
+    ]);
+    state.intelligence = {
+      status: "ready",
+      overview,
+      wallets: wallets.rows || [],
+      clusters: clusters.rows || [],
+      episodes: episodes.rows || [],
+      error: null,
+      loadedAt: Date.now(),
+    };
+  } catch (error) {
+    state.intelligence = {
+      ...current,
+      status: "error",
+      error: error.message,
+      loadedAt: Date.now(),
+    };
+  }
+  if (state.tab === "intelligence") render();
+}
+
 async function loadStaticData() {
   const fallback = await fetchJson("data/dashboard_fallback.json", true);
   if (fallback?.report?.generated_at) return fallback;
@@ -1556,6 +1614,7 @@ function applyDashboardPayload(payload, source, fallbackReason = null) {
   state.market = payload?.market || {};
   state.scanStatus = payload?.scan_status || {};
   state.discoveryStatus = payload?.discovery_status || {};
+  state.historyStatus = payload?.history_status || {};
   state.dataSource = source;
   state.fallbackReason = fallbackReason;
   if (snapshotChanged) {
@@ -1656,6 +1715,9 @@ function mergeTokenAlertDetails(existing, tokenKey, details) {
 function applyTokenDetail(detail) {
   const tokenKey = String(detail?.token_key || "").trim();
   if (!tokenKey) return;
+  if (detail.wallet_edge && typeof detail.wallet_edge === "object") {
+    state.walletEdgeByToken.set(tokenKey, detail.wallet_edge);
+  }
   if (detail.thesis && typeof detail.thesis === "object") {
     const signalTheses = state.report?.signal_theses || [];
     state.report = {
@@ -2387,6 +2449,30 @@ function renderWalletSummary(token) {
   return `${esc(retention)} / ${esc(pnl)}`;
 }
 
+function renderWalletEdge(token) {
+  const edge = state.walletEdgeByToken.get(token.key);
+  if (!edge) {
+    return state.tokenDetailLoadingKeys.has(token.key)
+      ? `<div class="kv"><span>Historical wallet edge</span><span class="muted-inline">loading prior signal record</span></div>`
+      : `<div class="kv"><span>Historical wallet edge</span><span class="muted-inline">no prior scored cohort yet</span></div>`;
+  }
+  const latest = edge.latest || {};
+  const validated = Number(latest.validated_wallets || 0);
+  const emerging = Number(latest.emerging_wallets || 0);
+  const caughtScore = latest.edge_at_catch_score;
+  const currentScore = latest.edge_now_score;
+  const evidence = [
+    validated ? `${validated} validated` : "",
+    emerging ? `${emerging} emerging` : "",
+    Number.isFinite(Number(caughtScore)) ? `at-catch score ${Math.round(Number(caughtScore))}` : "",
+    Number.isFinite(Number(currentScore)) ? `now ${Math.round(Number(currentScore))}` : "",
+  ].filter(Boolean);
+  return `
+    <div class="kv"><span>Historical wallet edge</span><span>${evidence.length ? esc(evidence.join(" / ")) : `<span class="muted-inline">recording only; no prior edge claim</span>`}</span></div>
+    <div class="kv"><span>Tracked episodes</span><span>${esc(edge.episodes?.length || 0)} historical signal${edge.episodes?.length === 1 ? "" : "s"} for this token</span></div>
+  `;
+}
+
 function detailMetric(label, value, sub = "", valueClass = "", subClass = "") {
   return `
     <div class="detail-metric">
@@ -2595,6 +2681,7 @@ function renderWalletsTab(token) {
       <div class="detail-block-title">Wallet signal</div>
       <div class="kv"><span>Fresh signal</span><span>${renderSignalTier(token)}</span></div>
       ${renderThesisDetails(token)}
+      ${renderWalletEdge(token)}
       <div class="kv"><span>Wallet setup</span><span>${renderWalletCluster(token)}</span></div>
       <div class="kv"><span>Wallet PnL</span><span>${renderWalletSummary(token)}</span></div>
       ${renderTopWalletPreview(token)}
@@ -3211,6 +3298,139 @@ function renderRawAlerts() {
   els.content.innerHTML = `<div class="list">${alerts.slice(0, 80).map(renderAlertRow).join("")}</div>`;
 }
 
+function ratePct(value) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "-";
+  return `${(Number(value) * 100).toFixed(0)}%`;
+}
+
+function intelligenceConfidence(value) {
+  if (value === "validated") return chip("validated", "good");
+  if (value === "emerging") return chip("emerging", "warn");
+  return chip("recording");
+}
+
+function renderIntelligenceWallets(rows) {
+  if (!rows.length) return `<div class="empty compact">No wallet has enough completed history yet. This is expected while the new ledger warms up.</div>`;
+  return `
+    <div class="table-wrap compact-table intelligence-table">
+      <table>
+        <thead><tr><th>Wallet</th><th>Confidence</th><th>Signals</th><th>2x rate</th><th>Lift</th><th>Last seen</th></tr></thead>
+        <tbody>${rows.map((row) => `
+          <tr>
+            <td><code>${esc(short(row.wallet_address))}</code></td>
+            <td>${intelligenceConfidence(row.confidence)}</td>
+            <td>${esc(row.eligible_episodes || 0)} / ${esc(row.distinct_tokens || 0)} tokens</td>
+            <td>${esc(ratePct(row.bayesian_hit_rate_2x))}</td>
+            <td>${row.lift_2x === null || row.lift_2x === undefined ? "-" : `${Number(row.lift_2x).toFixed(2)}x`}</td>
+            <td>${esc(dateLabel(row.last_seen_at))}</td>
+          </tr>
+        `).join("")}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderIntelligenceClusters(rows) {
+  if (!rows.length) return `<div class="empty compact">No independently evidenced wallet links yet. Co-buying alone does not create a cluster.</div>`;
+  return `
+    <div class="table-wrap compact-table intelligence-table">
+      <table>
+        <thead><tr><th>Cluster</th><th>Confidence</th><th>Wallets</th><th>Signals</th><th>Lift</th><th>Evidence</th></tr></thead>
+        <tbody>${rows.map((row) => `
+          <tr>
+            <td><code>${esc(short(row.cluster_id))}</code></td>
+            <td>${intelligenceConfidence(row.confidence)}</td>
+            <td>${esc(row.wallet_count || 0)}</td>
+            <td>${esc(row.eligible_episodes || 0)}</td>
+            <td>${row.lift_2x === null || row.lift_2x === undefined ? "-" : `${Number(row.lift_2x).toFixed(2)}x`}</td>
+            <td>${esc((row.relation_types || []).join(", ") || "-")}</td>
+          </tr>
+        `).join("")}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderIntelligenceEpisodes(rows) {
+  if (!rows.length) return `<div class="empty compact">No historical signal episodes recorded yet.</div>`;
+  return `
+    <div class="table-wrap compact-table intelligence-table">
+      <table>
+        <thead><tr><th>Token</th><th>Caught</th><th>72h observed</th><th>At-catch edge</th><th>Coverage</th></tr></thead>
+        <tbody>${rows.map((row) => `
+          <tr>
+            <td><button class="inline-token-action" type="button" data-token-key="${esc(row.token_address)}"><strong>${esc(row.symbol || short(row.token_address))}</strong></button></td>
+            <td>${esc(dateLabel(row.caught_at))} / ${moneyMaybe(row.caught_mcap_usd)}</td>
+            <td>${row.outcome_status === "complete" ? `peak ${pct(row.max_return_72h)} / end ${pct(row.return_72h)}` : chip("pending", "warn")}</td>
+            <td>${Number(row.has_validated_edge) ? chip("validated", "good") : Number(row.has_emerging_edge) ? chip("emerging", "warn") : "none"}</td>
+            <td>${esc(row.data_quality_status || "partial")}</td>
+          </tr>
+        `).join("")}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderIntelligence() {
+  renderMetrics(filteredTokens(buildTokenSignals()));
+  const intelligence = state.intelligence;
+  const overview = intelligence.overview || {};
+  const ready = intelligence.status === "ready";
+  const unavailable = intelligence.status === "error";
+  const history = state.historyStatus || {};
+  const statusText = intelligence.status === "loading"
+    ? "Loading the historical ledger..."
+    : unavailable
+      ? `Historical ledger is unavailable: ${intelligence.error || "unknown error"}`
+      : !ready
+        ? "Historical ledger will begin learning from newly recorded signals."
+        : overview.episodes
+          ? `${overview.episodes} episodes recorded; this view stays in shadow mode until the sample is large enough.`
+          : "The ledger is connected and waiting for its first signal episode.";
+  els.content.innerHTML = `
+    <div class="intelligence-layout">
+      <section class="intelligence-header">
+        <div>
+          <span class="section-eyebrow">Historical learning</span>
+          <h2>Wallet Edge</h2>
+          <p>${esc(statusText)}</p>
+        </div>
+        <button class="secondary-action" id="refreshIntelligence" type="button" ${intelligence.status === "loading" ? "disabled" : ""}>Refresh learning</button>
+      </section>
+      <section class="intelligence-kpis">
+        ${detailMetric("Signal episodes", compact(overview.episodes || 0), `${compact(overview.resolved_72h || 0)} resolved at 72h`)}
+        ${detailMetric("Scanner precision", ratePct(overview.precision_2x_72h), "tradable 2x by 72h")}
+        ${detailMetric("Wallet edge", ratePct(overview.edge_precision_2x_72h), overview.edge_lift ? `${Number(overview.edge_lift).toFixed(2)}x scanner baseline` : "needs more validated samples")}
+        ${detailMetric("Observed wallets", compact(overview.emerging_or_validated_wallets || 0), `${compact(overview.emerging_or_validated_clusters || 0)} evidence-based clusters`)}
+      </section>
+      <section class="intelligence-section">
+        <div class="section-title-row"><div><h2>Ranked wallets</h2><p>Scores are frozen at signal time to avoid future information leaking into earlier catches.</p></div>${history.pending_outbox ? chip(`${history.pending_outbox} history events pending`, "warn") : ""}</div>
+        ${renderIntelligenceWallets(intelligence.wallets || [])}
+      </section>
+      <section class="intelligence-section">
+        <div class="section-title-row"><div><h2>Evidence-based clusters</h2><p>Only common-funder or common-executor evidence creates a wallet link.</p></div></div>
+        ${renderIntelligenceClusters(intelligence.clusters || [])}
+      </section>
+      <section class="intelligence-section">
+        <div class="section-title-row"><div><h2>Recent signal outcomes</h2><p>Outcome cells remain pending until the associated time horizon has passed.</p></div></div>
+        ${renderIntelligenceEpisodes(intelligence.episodes || [])}
+      </section>
+    </div>
+  `;
+  document.querySelector("#refreshIntelligence")?.addEventListener("click", () => {
+    void ensureIntelligence(true);
+  });
+  document.querySelectorAll(".inline-token-action").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedTokenKey = button.dataset.tokenKey;
+      state.detailTab = "wallets";
+      state.tab = "filters";
+      render();
+    });
+  });
+  if (intelligence.status === "idle") void ensureIntelligence();
+}
+
 function updateTabs() {
   els.tabs.forEach((tab) => {
     const active = tab.dataset.tab === state.tab;
@@ -3230,6 +3450,7 @@ function render() {
     return;
   }
   if (state.tab === "narratives") renderNarratives();
+  else if (state.tab === "intelligence") renderIntelligence();
   else if (state.tab === "filters") renderFilters();
   else if (state.tab === "alerts") renderRawAlerts();
   else renderTokens();
