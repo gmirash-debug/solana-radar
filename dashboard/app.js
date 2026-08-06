@@ -3401,7 +3401,7 @@ function renderIntelligence() {
         ${detailMetric("Signal episodes", compact(overview.episodes || 0), `${compact(overview.resolved_72h || 0)} resolved at 72h`)}
         ${detailMetric("Scanner precision", ratePct(overview.precision_2x_72h), "tradable 2x by 72h")}
         ${detailMetric("Wallet edge", ratePct(overview.edge_precision_2x_72h), overview.edge_lift ? `${Number(overview.edge_lift).toFixed(2)}x scanner baseline` : "needs more validated samples")}
-        ${detailMetric("Observed wallets", compact(overview.emerging_or_validated_wallets || 0), `${compact(overview.emerging_or_validated_clusters || 0)} evidence-based clusters`)}
+        ${detailMetric("Wallets with edge", compact(overview.emerging_or_validated_wallets || 0), `${compact(overview.emerging_or_validated_clusters || 0)} evidence-based clusters`)}
       </section>
       <section class="intelligence-section">
         <div class="section-title-row"><div><h2>Ranked wallets</h2><p>Scores are frozen at signal time to avoid future information leaking into earlier catches.</p></div>${history.pending_outbox ? chip(`${history.pending_outbox} history events pending`, "warn") : ""}</div>
