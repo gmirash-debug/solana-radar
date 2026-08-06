@@ -1,4 +1,7 @@
-const OUTBOX_BATCH_SIZE = 12;
+// A bootstrap can contain several hundred immutable checkpoints. Process a
+// bounded but useful page on each cron so history catches up in about an hour,
+// without making scanner ingest wait for the entire backlog.
+const OUTBOX_BATCH_SIZE = 50;
 const D1_IN_PARAMETER_LIMIT = 100;
 const HISTORY_SCHEMA_VERSION = 1;
 const OUTCOME_HORIZONS = {
