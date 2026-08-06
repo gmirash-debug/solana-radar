@@ -560,6 +560,50 @@ def remote_ingest_secret():
     return os.environ.get("RADAR_INGEST_SECRET") or os.environ.get("RADAR_REMOTE_INGEST_SECRET")
 
 
+def compact_alert_for_dashboard(alert):
+    """Keep list-level alert facts while deferring event-level evidence to D1."""
+    if not isinstance(alert, dict):
+        return {}
+    detail_fields = {
+        "events",
+        "common_funders",
+        "common_recipients",
+        "common_executors",
+    }
+    compact = {
+        key: value
+        for key, value in alert.items()
+        if key not in detail_fields
+    }
+    for field in detail_fields:
+        value = alert.get(field)
+        if isinstance(value, list):
+            compact[f"{field}_count"] = len(value)
+    wave = alert.get("wave")
+    if isinstance(wave, dict):
+        compact_wave = {
+            key: value
+            for key, value in wave.items()
+            if key != "top_buyers"
+        }
+        top_buyers = wave.get("top_buyers")
+        if isinstance(top_buyers, list):
+            compact_wave["top_buyers_count"] = len(top_buyers)
+        compact["wave"] = compact_wave
+    return compact
+
+
+def compact_signal_thesis_for_dashboard(thesis):
+    """Keep thesis state in the list response, but not the wallet-by-wallet cohort."""
+    if not isinstance(thesis, dict):
+        return {}
+    return {
+        key: value
+        for key, value in thesis.items()
+        if key not in {"cohort", "cohort_wallets"}
+    }
+
+
 def compact_report_for_remote(report):
     pool_fields = {
         "pool_address",
@@ -629,6 +673,16 @@ def compact_report_for_remote(report):
             "scan_failed": bool(summary.get("scan_failed")),
         }
         for summary in report.get("summaries", [])
+    ]
+    compact["alerts"] = [
+        compact_alert_for_dashboard(alert)
+        for alert in report.get("alerts", [])
+        if isinstance(alert, dict)
+    ]
+    compact["signal_theses"] = [
+        compact_signal_thesis_for_dashboard(thesis)
+        for thesis in report.get("signal_theses", [])
+        if isinstance(thesis, dict)
     ]
     compact["remote_compact"] = True
     return compact
@@ -727,12 +781,20 @@ def compact_market_for_dashboard(entry):
     }
 
 
-def build_dashboard_snapshot(report_payload, state, config, scan_status=None, history_limit=None):
+def build_dashboard_snapshot(
+    report_payload,
+    state,
+    config,
+    scan_status=None,
+    history_limit=None,
+    include_detail=False,
+):
     """Build the D1/Pages contract without publishing scanner runtime state."""
     if history_limit is None:
         history_limit = config.get("remote_sync_alert_history_limit", 40)
     history_limit = max(0, int(history_limit))
-    history = load_alert_history()[-history_limit:] if history_limit else []
+    detail_history = load_alert_history()[-history_limit:] if history_limit else []
+    history = [compact_alert_for_dashboard(alert) for alert in detail_history]
     token_keys = dashboard_snapshot_token_keys(report_payload, history)
     market = state.get("market") if isinstance(state, dict) else {}
     compact_market = {
@@ -748,7 +810,7 @@ def build_dashboard_snapshot(report_payload, state, config, scan_status=None, hi
         "error": None,
         "scan_health": ((report_payload.get("stats") or {}).get("scan_health") or {}),
     }
-    return {
+    snapshot = {
         "schema_version": 1,
         "generated_at": generated_at,
         "report": compact_report_for_remote(report_payload),
@@ -761,6 +823,19 @@ def build_dashboard_snapshot(report_payload, state, config, scan_status=None, hi
         "scan_status": scan_status or fallback_scan_status,
         "discovery_status": load_json(DISCOVERY_STATUS_PATH, {}),
     }
+    if include_detail:
+        snapshot["detail_signal_theses"] = [
+            thesis
+            for thesis in report_payload.get("signal_theses", [])
+            if isinstance(thesis, dict)
+        ]
+        snapshot["detail_current_alerts"] = [
+            alert
+            for alert in report_payload.get("alerts", [])
+            if isinstance(alert, dict)
+        ]
+        snapshot["detail_history"] = detail_history
+    return snapshot
 
 
 def write_dashboard_fallback(report_payload, state, config):
@@ -816,7 +891,7 @@ def sync_remote_snapshot(report_payload, state, config):
         print(message, file=sys.stderr)
         return
 
-    body = build_dashboard_snapshot(report_payload, state, config)
+    body = build_dashboard_snapshot(report_payload, state, config, include_detail=True)
     try:
         result = remote_api_call("POST", "/api/ingest/snapshot", config, body)
         print(

@@ -79,8 +79,17 @@ class ScannerCoreTests(unittest.TestCase):
         mint = "11111111111111111111111111111111"
         report = {
             "generated_at": "2026-07-31T12:00:00Z",
-            "alerts": [{"pool": {"token_address": mint}}],
-            "signal_theses": [{"token_address": mint}],
+            "alerts": [{
+                "pool": {"token_address": mint},
+                "events": [{"signature": "private-event"}],
+                "common_funders": [{"source": "private-funder", "wallets": 2}],
+                "wave": {"top_buyers": [{"owner": "private-wallet"}], "net_buy_sol": 10},
+            }],
+            "signal_theses": [{
+                "token_address": mint,
+                "cohort_wallets": [{"owner": "private-wallet"}],
+                "source_score": 80,
+            }],
             "universe": [{"token_address": mint, "mcap_usd": 100}],
             "active_pools": [],
             "summaries": [],
@@ -108,12 +117,23 @@ class ScannerCoreTests(unittest.TestCase):
             ):
                 snapshot = scanner.build_dashboard_snapshot(report, state, {"remote_sync_alert_history_limit": 40})
                 fallback = scanner.build_dashboard_snapshot(report, state, {}, history_limit=0)
+                detail = scanner.build_dashboard_snapshot(
+                    report,
+                    state,
+                    {"remote_sync_alert_history_limit": 40},
+                    include_detail=True,
+                )
 
         self.assertEqual(snapshot["report"]["universe"], [])
         self.assertEqual(snapshot["market"][mint]["latest_mcap_usd"], 100)
         self.assertNotIn("private_cursor", snapshot["market"][mint])
         self.assertNotIn("wallet_cache", json.dumps(snapshot))
         self.assertEqual(fallback["history"], [])
+        self.assertNotIn("events", snapshot["report"]["alerts"][0])
+        self.assertEqual(snapshot["report"]["alerts"][0]["events_count"], 1)
+        self.assertNotIn("cohort_wallets", snapshot["report"]["signal_theses"][0])
+        self.assertEqual(detail["detail_current_alerts"][0]["events"][0]["signature"], "private-event")
+        self.assertEqual(detail["detail_signal_theses"][0]["cohort_wallets"][0]["owner"], "private-wallet")
 
     def test_stale_runtime_revision_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

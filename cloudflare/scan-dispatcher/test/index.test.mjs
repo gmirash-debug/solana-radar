@@ -5,6 +5,7 @@ import {
   applyDeletedTokenUpdate,
   claimDispatchBucket,
   corsHeaders,
+  compactDashboardReport,
   discoveryStateForTokens,
   dashboardTokenKeys,
   decodeCursor,
@@ -155,6 +156,29 @@ test("D1 dashboard selects only token rows that can appear in the UI", () => {
     [{ pool: { token_address: "history-token" } }],
   );
   assert.deepEqual(keys, ["thesis-token", "alert-token", "history-token", "summary-token"]);
+});
+
+test("public dashboard payload excludes per-wallet event detail", () => {
+  const compact = compactDashboardReport({
+    alerts: [{
+      pool: { token_address: "token-a" },
+      events: [{ signature: "private-event" }],
+      common_funders: [{ source: "private-funder" }],
+      wave: { net_buy_sol: 10, top_buyers: [{ owner: "wallet-a" }] },
+    }],
+    signal_theses: [{
+      token_address: "token-a",
+      cohort_wallets: [{ owner: "wallet-a" }],
+      source_score: 80,
+    }],
+  });
+  assert.equal(compact.alerts[0].events, undefined);
+  assert.equal(compact.alerts[0].events_count, 1);
+  assert.equal(compact.alerts[0].common_funders, undefined);
+  assert.equal(compact.alerts[0].wave.top_buyers, undefined);
+  assert.equal(compact.alerts[0].wave.top_buyers_count, 1);
+  assert.equal(compact.signal_theses[0].cohort_wallets, undefined);
+  assert.equal(compact.signal_theses[0].source_score, 80);
 });
 
 test("D1 dashboard chunks market lookups below the SQLite parameter limit", async () => {

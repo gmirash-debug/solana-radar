@@ -1,10 +1,10 @@
-import { chooseDashboardPayload } from "./data-source.js?v=20260731-catch-sort-1";
+import { chooseDashboardPayload } from "./data-source.js?v=20260806-fast-load-1";
 import {
   compareTokensByCatchNewest,
   resolveAthContext,
   resolveCurrentMarket,
   resolveSignalEpisodes,
-} from "./token-state.js?v=20260731-catch-sort-1";
+} from "./token-state.js?v=20260806-fast-load-1";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const DELETE_SYNC_ENDPOINT = "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/deleted-token";
@@ -88,6 +88,9 @@ const state = {
   fallbackReason: null,
   remoteRetryAt: 0,
   remoteFailureCount: 0,
+  tokenDetailLoadedKeys: new Set(),
+  tokenDetailLoadingKeys: new Set(),
+  tokenDetailRetryAt: new Map(),
 };
 
 const els = {
@@ -1468,8 +1471,18 @@ function emptyMessage(text) {
   return `<div class="empty">${esc(text)}${hiddenHint}</div>`;
 }
 
+async function fetchWithTimeout(path, options = {}, timeoutMs = 12_000) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(path, { ...options, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 async function fetchJson(path, optional = false) {
-  const response = await fetch(path, { cache: "no-store" });
+  const response = await fetchWithTimeout(path, { cache: "no-store" });
   if (!response.ok) {
     if (optional) return null;
     throw new Error(`${path} ${response.status}`);
@@ -1493,7 +1506,7 @@ function remoteRetryDelayMs(failures) {
 async function fetchRemoteDashboard() {
   const baseUrl = remoteDataUrl();
   if (!baseUrl) return null;
-  const response = await fetch(`${baseUrl}/api/dashboard?history_limit=80`, {
+  const response = await fetchWithTimeout(`${baseUrl}/api/dashboard?history_limit=15`, {
     cache: "no-store",
     headers: {
       "accept": "application/json",
@@ -1532,54 +1545,23 @@ async function loadStaticData() {
   };
 }
 
-async function loadData() {
-  let payload = null;
-  let staticPayload = null;
-  let remotePayload = null;
-  state.publishedDashboard = isPublishedDashboard();
-  const loads = [];
-  if (state.publishedDashboard) {
-    loads.push(loadStaticData()
-      .then((value) => { staticPayload = value; })
-      .catch((error) => console.warn("Static snapshot load failed", error)));
-    if (remoteDataUrl() && Date.now() >= state.remoteRetryAt) {
-      loads.push(fetchRemoteDashboard()
-        .then((value) => {
-          remotePayload = value;
-          state.remoteFailureCount = 0;
-          state.remoteRetryAt = 0;
-        })
-        .catch((error) => {
-          state.remoteFailureCount += 1;
-          state.remoteRetryAt = Date.now() + remoteRetryDelayMs(state.remoteFailureCount);
-          console.warn("D1 dashboard load failed", error);
-        }));
-    }
+function applyDashboardPayload(payload, source, fallbackReason = null) {
+  const nextReport = payload?.report || {};
+  const previousGeneratedAt = state.report?.generated_at || "";
+  const nextGeneratedAt = nextReport.generated_at || "";
+  const snapshotChanged = Boolean(nextGeneratedAt && nextGeneratedAt !== previousGeneratedAt);
+  state.report = nextReport;
+  applyDeletedTokenList(payload?.deleted_tokens || {});
+  state.history = payload?.history || [];
+  state.market = payload?.market || {};
+  state.scanStatus = payload?.scan_status || {};
+  state.discoveryStatus = payload?.discovery_status || {};
+  state.dataSource = source;
+  state.fallbackReason = fallbackReason;
+  if (snapshotChanged) {
+    state.tokenDetailLoadedKeys.clear();
+    state.tokenDetailRetryAt.clear();
   }
-  await Promise.all(loads);
-
-  const selected = chooseDashboardPayload({ staticPayload, remotePayload });
-  if (selected.payload) {
-    payload = selected.payload;
-    state.dataSource = selected.source;
-    state.fallbackReason = selected.fallbackReason;
-  } else {
-    try {
-      payload = await fetchJson("/api/report");
-      state.dataSource = "local_api";
-      state.fallbackReason = null;
-    } catch {
-      payload = await loadStaticData();
-      state.dataSource = "static";
-      state.fallbackReason = "local_api_unavailable";
-    }
-  }
-  state.report = payload.report || {};
-  applyDeletedTokenList(payload.deleted_tokens || {});
-  state.history = payload.history || [];
-  state.market = payload.market || {};
-  state.scanStatus = payload.scan_status || {};
-  state.discoveryStatus = payload.discovery_status || {};
   const tokens = buildTokenSignals();
   const visibleTokens = filteredTokens(tokens);
   if (!state.selectedTokenKey && visibleTokens.length) state.selectedTokenKey = visibleTokens[0].key;
@@ -1587,6 +1569,146 @@ async function loadData() {
     state.selectedTokenKey = visibleTokens[0]?.key || null;
   }
   render();
+}
+
+async function loadData() {
+  state.publishedDashboard = isPublishedDashboard();
+  if (state.publishedDashboard) {
+    const remoteTask = remoteDataUrl() && Date.now() >= state.remoteRetryAt
+      ? fetchRemoteDashboard()
+        .then((value) => {
+          state.remoteFailureCount = 0;
+          state.remoteRetryAt = 0;
+          return value;
+        })
+        .catch((error) => {
+          state.remoteFailureCount += 1;
+          state.remoteRetryAt = Date.now() + remoteRetryDelayMs(state.remoteFailureCount);
+          console.warn("D1 dashboard load failed", error);
+          return null;
+        })
+      : Promise.resolve(null);
+
+    let staticPayload = null;
+    try {
+      staticPayload = await loadStaticData();
+      applyDashboardPayload(staticPayload, "static", null);
+    } catch (error) {
+      console.warn("Static snapshot load failed", error);
+    }
+
+    const remotePayload = await remoteTask;
+    const selected = chooseDashboardPayload({ staticPayload, remotePayload });
+    if (!selected.payload) throw new Error("No dashboard snapshot is available");
+    if (
+      !state.report?.generated_at
+      || selected.source !== state.dataSource
+      || selected.payload.report?.generated_at !== state.report.generated_at
+    ) {
+      applyDashboardPayload(selected.payload, selected.source, selected.fallbackReason);
+    } else {
+      state.fallbackReason = selected.fallbackReason;
+      renderStatus();
+    }
+    return;
+  }
+
+  let payload;
+  let source = "local_api";
+  let fallbackReason = null;
+  try {
+    payload = await fetchJson("/api/report");
+  } catch {
+    payload = await loadStaticData();
+    source = "static";
+    fallbackReason = "local_api_unavailable";
+  }
+  applyDashboardPayload(payload, source, fallbackReason);
+}
+
+function detailRecordMatchesToken(record, tokenKey) {
+  const pool = record?.pool || {};
+  const wanted = String(tokenKey || "").trim();
+  return [
+    record?.token_address,
+    record?.pool_address,
+    pool.token_address,
+    pool.pool_address,
+  ].some((value) => String(value || "").trim() === wanted);
+}
+
+function mergeTokenAlertDetails(existing, tokenKey, details) {
+  const incoming = Array.isArray(details) ? details.filter((item) => item && typeof item === "object") : [];
+  if (!incoming.length) return existing || [];
+  const byId = new Map(incoming.map((item) => [alertId(item), item]));
+  const knownIds = new Set();
+  const merged = (existing || []).map((item) => {
+    const id = alertId(item);
+    knownIds.add(id);
+    return byId.get(id) || item;
+  });
+  incoming.forEach((item) => {
+    if (!knownIds.has(alertId(item))) merged.push(item);
+  });
+  return merged;
+}
+
+function applyTokenDetail(detail) {
+  const tokenKey = String(detail?.token_key || "").trim();
+  if (!tokenKey) return;
+  if (detail.thesis && typeof detail.thesis === "object") {
+    const signalTheses = state.report?.signal_theses || [];
+    state.report = {
+      ...state.report,
+      signal_theses: [
+        ...signalTheses.filter((item) => !detailRecordMatchesToken(item, tokenKey)),
+        detail.thesis,
+      ],
+      alerts: mergeTokenAlertDetails(state.report?.alerts, tokenKey, detail.current_alerts),
+    };
+  } else {
+    state.report = {
+      ...state.report,
+      alerts: mergeTokenAlertDetails(state.report?.alerts, tokenKey, detail.current_alerts),
+    };
+  }
+  state.history = mergeTokenAlertDetails(state.history, tokenKey, detail.history);
+  if (detail.market && typeof detail.market === "object") {
+    state.market = { ...state.market, [tokenKey]: detail.market };
+  }
+}
+
+async function ensureTokenDetail(tokenKey) {
+  const key = String(tokenKey || "").trim();
+  const baseUrl = remoteDataUrl();
+  if (
+    !state.publishedDashboard
+    || !baseUrl
+    || !key
+    || state.tokenDetailLoadedKeys.has(key)
+    || state.tokenDetailLoadingKeys.has(key)
+    || Number(state.tokenDetailRetryAt.get(key) || 0) > Date.now()
+  ) return;
+  state.tokenDetailLoadingKeys.add(key);
+  let refreshSelected = false;
+  try {
+    const response = await fetchWithTimeout(`${baseUrl}/api/dashboard/token?token_key=${encodeURIComponent(key)}`, {
+      cache: "no-store",
+      headers: { accept: "application/json" },
+    });
+    const detail = await response.json().catch(() => null);
+    if (!response.ok || !detail?.ok) throw new Error(detail?.error || `token detail ${response.status}`);
+    applyTokenDetail(detail);
+    state.tokenDetailLoadedKeys.add(key);
+    state.tokenDetailRetryAt.delete(key);
+    refreshSelected = state.selectedTokenKey === key;
+  } catch (error) {
+    state.tokenDetailRetryAt.set(key, Date.now() + 5 * 60_000);
+    console.warn("Token detail load failed", error);
+  } finally {
+    state.tokenDetailLoadingKeys.delete(key);
+    if (refreshSelected) render();
+  }
 }
 
 function renderStatus() {
@@ -1834,7 +1956,11 @@ function walletHeldClass(wallet) {
 }
 
 function renderWalletRows(token) {
-  if (!token.wallets.length) return `<div class="empty compact">No wallet events.</div>`;
+  if (!token.wallets.length) {
+    return state.tokenDetailLoadingKeys.has(token.key)
+      ? `<div class="empty compact">Loading wallet evidence...</div>`
+      : `<div class="empty compact">No wallet events.</div>`;
+  }
   return `
     <div class="table-wrap compact-table">
       <table>
@@ -2559,6 +2685,7 @@ function renderTokenDetail(token) {
             <div class="detail-head-chips">
               ${workflowChip(token.workflowStatus)}
               ${currentSignalChip(token)}
+              ${state.tokenDetailLoadingKeys.has(token.key) ? chip("loading wallet evidence", "warn") : ""}
               ${token.activeEpisode && token.caughtFilter !== "reactivation" ? chip(`original ${filterMeta(token.caughtFilter).label}`) : ""}
             </div>
           </div>
@@ -2626,6 +2753,7 @@ function renderTokens() {
   });
   bindTokenHideActions();
   bindDetailControls();
+  void ensureTokenDetail(token.key);
 }
 
 function narrativeGroups(tokens) {
@@ -3025,6 +3153,7 @@ function renderFilters() {
   });
   bindTokenHideActions();
   bindDetailControls();
+  if (token) void ensureTokenDetail(token.key);
 }
 
 function alertMatches(alert) {

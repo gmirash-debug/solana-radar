@@ -22,10 +22,13 @@ For a fine-grained GitHub token, grant this repository read/write access to Acti
 secret of the same name. It protects the scanner-to-D1 ingestion endpoints.
 
 The public dashboard reads `GET /api/dashboard`; it is CORS-restricted to the
-configured Pages origin. The scanner writes compact reports, alert history,
-token-scoped market/baseline state, and every terminal scan status through
-protected `/api/*` ingestion routes. Raw scanner state, wallet cache, and
-transaction buffers do not leave the runtime cache.
+configured Pages origin. That endpoint intentionally returns list-level facts
+only. `GET /api/dashboard/token?token_key=<mint>` loads the selected token's
+wallet cohort and event evidence on demand, so the dashboard remains responsive
+on mobile. The scanner writes compact reports, alert history, token-scoped
+market/baseline state, and every terminal scan status through protected `/api/*`
+ingestion routes. Raw scanner state and runtime caches do not leave the runtime
+cache.
 
 ## Access-protected writes
 
