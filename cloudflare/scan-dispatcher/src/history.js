@@ -629,12 +629,12 @@ async function refreshClusters(db, walletAddresses, now) {
   const wallets = [...new Set(walletAddresses.filter(Boolean))];
   if (wallets.length < 2) return 0;
   const placeholders = wallets.map((_, index) => `?${index + 1}`).join(", ");
+  // Numbered parameters are intentionally reused for wallet_a and wallet_b;
+  // D1 expects one bound value per distinct placeholder.
   const result = await db.prepare(`
     SELECT wallet_a, wallet_b, relation_type, weight, first_seen_at, last_seen_at
     FROM wallet_cluster_edges
     WHERE wallet_a IN (${placeholders}) OR wallet_b IN (${placeholders})
-  // Numbered parameters are intentionally reused for wallet_a and wallet_b;
-  // D1 expects one bound value per distinct placeholder.
   `).bind(...wallets).all();
   const parent = new Map();
   const find = (value) => {
