@@ -298,6 +298,9 @@ jobs:
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
         uses: actions/upload-pages-artifact@v3
         with:
+          # A unique name prevents a stale Pages artifact from another queued
+          # run being selected by the deployment job.
+          name: solana-radar-pages-${{ github.run_id }}
           path: .pages
 
       - name: Fail hard scanner errors after publishing status
@@ -318,3 +321,5 @@ jobs:
       - name: Deploy Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: solana-radar-pages-${{ github.run_id }}
