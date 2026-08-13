@@ -1,6 +1,7 @@
 {
   "mode": "balanced",
   "lane": "reactivation",
+  "dashboard_signal_epoch": "2026-08-13T01:01:00Z",
   "modes": {
     "aggressive": {
       "mcap_min_usd": 100000,
