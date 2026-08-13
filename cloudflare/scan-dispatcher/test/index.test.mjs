@@ -248,6 +248,36 @@ test("dashboard excludes records from the previous scanner filter era", () => {
   );
 });
 
+test("dashboard excludes out-of-window pools from all operational payloads", () => {
+  const report = {
+    config: {
+      dashboard_signal_epoch: "2026-08-13T01:01:00Z",
+      age_min_hours: 24,
+      age_max_hours: 360,
+    },
+    alerts: [
+      {
+        created_at: "2026-08-13T02:00:00Z",
+        pool: { token_address: "old-alert", age_hours: 361 },
+      },
+      {
+        created_at: "2026-08-13T02:00:00Z",
+        pool: { token_address: "current-alert", age_hours: 72 },
+      },
+    ],
+    summaries: [
+      { pool: { token_address: "old-summary", age_hours: 361 } },
+      { pool: { token_address: "current-summary", age_hours: 72 } },
+    ],
+  };
+
+  const compact = compactDashboardReport(report);
+
+  assert.deepEqual(compact.alerts.map((item) => item.pool.token_address), ["current-alert"]);
+  assert.deepEqual(compact.summaries.map((item) => item.pool.token_address), ["current-summary"]);
+  assert.equal(isCurrentDashboardSignal(report.alerts[0], report), false);
+});
+
 test("D1 dashboard chunks market lookups below the SQLite parameter limit", async () => {
   const bindings = [];
   const db = {

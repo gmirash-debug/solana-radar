@@ -78,11 +78,42 @@ export function dashboardSignalEpochMs(report = {}) {
   );
 }
 
+function recordAgeHours(record = {}) {
+  const pool = record?.pool && typeof record.pool === "object" ? record.pool : {};
+  const pairCreatedAt = Number(pool.pair_created_at ?? record?.pair_created_at);
+  if (Number.isFinite(pairCreatedAt) && pairCreatedAt > 0) {
+    const pairCreatedMs = pairCreatedAt > 10_000_000_000
+      ? pairCreatedAt
+      : pairCreatedAt * 1000;
+    return Math.max(0, (Date.now() - pairCreatedMs) / 3_600_000);
+  }
+  const reportedAgeHours = Number(pool.age_hours ?? record?.age_hours);
+  return Number.isFinite(reportedAgeHours) && reportedAgeHours >= 0
+    ? reportedAgeHours
+    : null;
+}
+
+export function isCurrentFilterPool(record = {}, report = {}) {
+  const minAgeHours = Number(report?.config?.age_min_hours);
+  const maxAgeHours = Number(report?.config?.age_max_hours);
+  const hasMin = Number.isFinite(minAgeHours);
+  const hasMax = Number.isFinite(maxAgeHours);
+  if (!hasMin && !hasMax) return true;
+
+  const ageHours = recordAgeHours(record);
+  if (ageHours === null) return false;
+  if (hasMin && ageHours < minAgeHours) return false;
+  if (hasMax && ageHours > maxAgeHours) return false;
+  return true;
+}
+
 export function isCurrentFilterSignal(record = {}, report = {}) {
   const epochMs = dashboardSignalEpochMs(report);
-  if (!epochMs) return true;
   const signalMs = signalTimestampMs(record, report);
-  return Boolean(signalMs && signalMs >= epochMs);
+  return Boolean(
+    isCurrentFilterPool(record, report)
+    && (!epochMs || (signalMs && signalMs >= epochMs)),
+  );
 }
 
 export function marketWithCurrentFilterCatch(market = {}, report = {}) {

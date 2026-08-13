@@ -5,6 +5,7 @@ import { resolveSignalEpisodes } from "../token-state.js";
 import {
   DEFAULT_DASHBOARD_SIGNAL_EPOCH,
   dashboardSignalEpochMs,
+  isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
 } from "../filter-scope.js";
@@ -60,6 +61,26 @@ test("a report epoch overrides the static fallback", () => {
   assert.equal(
     isCurrentFilterSignal({ created_at: "2026-08-12T00:00:00Z" }, report),
     true,
+  );
+});
+
+test("the current filter scope excludes pools outside its age window", () => {
+  const report = {
+    config: {
+      age_min_hours: 24,
+      age_max_hours: 360,
+    },
+  };
+
+  assert.equal(isCurrentFilterPool({ age_hours: 72 }, report), true);
+  assert.equal(isCurrentFilterPool({ age_hours: 361 }, report), false);
+  assert.equal(isCurrentFilterPool({}, report), false);
+  assert.equal(
+    isCurrentFilterSignal(
+      { created_at: "2026-08-13T02:00:00Z", pool: { age_hours: 361 } },
+      report,
+    ),
+    false,
   );
 });
 

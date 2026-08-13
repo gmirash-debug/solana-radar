@@ -1219,6 +1219,54 @@ class ScannerCoreTests(unittest.TestCase):
                     "dashboard_signal_epoch": "2026-08-13T01:01:00Z",
                 },
                 now=now,
+        )
+        self.assertEqual(pools, [])
+
+    def test_signal_thesis_monitor_respects_current_age_window(self):
+        now = scanner.parse_timestamp("2026-08-13T13:00:00Z")
+        state = {
+            "pools": {
+                "old-pool": {
+                    "signal_recheck_due_at": "2026-08-13T12:00:00Z",
+                    "signal_thesis": {
+                        "status": "intact",
+                        "signal_at": "2026-08-13T11:00:00Z",
+                        "pool_address": "old-pool",
+                        "token_address": "old-token",
+                        "symbol": "OLD",
+                        "dex": "pumpswap",
+                        "pair_created_at": now - 361 * 3600,
+                    },
+                },
+                "unknown-pool": {
+                    "signal_recheck_due_at": "2026-08-13T12:00:00Z",
+                    "signal_thesis": {
+                        "status": "intact",
+                        "signal_at": "2026-08-13T11:00:00Z",
+                        "pool_address": "unknown-pool",
+                        "token_address": "unknown-token",
+                        "symbol": "UNKNOWN",
+                        "dex": "pumpswap",
+                    },
+                },
+            }
+        }
+        with (
+            mock.patch.object(scanner, "load_alert_history", return_value=[]),
+            mock.patch.object(
+                scanner,
+                "utc_now",
+                return_value=datetime.fromtimestamp(now, tz=timezone.utc),
+            ),
+        ):
+            pools = scanner.due_signal_thesis_monitor_pools(
+                state,
+                {
+                    "dex_allowlist": ["pumpswap"],
+                    "age_min_hours": 24,
+                    "age_max_hours": 360,
+                },
+                now=now,
             )
         self.assertEqual(pools, [])
 

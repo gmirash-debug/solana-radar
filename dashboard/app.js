@@ -6,9 +6,10 @@ import {
   resolveSignalEpisodes,
 } from "./token-state.js?v=20260807-wallet-edge-1";
 import {
+  isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20260813-current-filter-scope-2";
+} from "./filter-scope.js?v=20260813-current-filter-scope-3";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const DELETE_SYNC_ENDPOINT = "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/deleted-token";
@@ -684,6 +685,7 @@ function currentPoolsByToken() {
   const put = (pool, observedAt, snapshotSource) => {
     if (!pool) return;
     if (!isPumpfunPool(pool)) return;
+    if (!isCurrentFilterPool(pool, state.report)) return;
     const key = tokenKeyFromPool(pool);
     if (!key) return;
     const existing = map.get(key);
@@ -717,6 +719,7 @@ function poolObservationsByToken() {
   const add = (pool, observedAt, source) => {
     if (!pool) return;
     if (!isPumpfunPool(pool)) return;
+    if (!isCurrentFilterPool(pool, state.report)) return;
     const key = tokenKeyFromPool(pool);
     const mcapUsd = Number(pool.mcap_usd || 0);
     if (!key || !mcapUsd) return;
@@ -920,6 +923,7 @@ function buildTokenSignals() {
   const cleanScannedTokenKeys = new Set(
     (state.report?.summaries || [])
       .filter((summary) => !summary?.error && !summary?.scan_failed)
+      .filter((summary) => isCurrentFilterPool(summary, state.report))
       .map((summary) => tokenKeyFromPool(summary.pool || {}))
       .filter(Boolean),
   );

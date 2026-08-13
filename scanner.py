@@ -3139,6 +3139,21 @@ def discover_market_pools(http, config):
     return list(pools.values())
 
 
+def pool_age_matches_config(pool, config):
+    age_hours = pool.age_hours()
+    age_min = config.get("age_min_hours")
+    age_max = config.get("age_max_hours")
+    if age_min is None and age_max is None:
+        return True
+    if age_hours is None:
+        return False
+    if age_min is not None and age_hours < float(age_min):
+        return False
+    if age_max is not None and age_hours > float(age_max):
+        return False
+    return True
+
+
 def pool_matches_config(pool, config):
     if not pool.pool_address:
         return False
@@ -3153,16 +3168,8 @@ def pool_matches_config(pool, config):
         return False
     if pool.liquidity_usd < config["liquidity_min_usd"]:
         return False
-    age_hours = pool.age_hours()
-    age_min = config.get("age_min_hours")
-    age_max = config.get("age_max_hours")
-    if age_min is not None or age_max is not None:
-        if age_hours is None:
-            return False
-        if age_min is not None and age_hours < float(age_min):
-            return False
-        if age_max is not None and age_hours > float(age_max):
-            return False
+    if not pool_age_matches_config(pool, config):
+        return False
     volume_unknown_registry = pool.source == "registry" and pool.volume_1h_usd <= 0
     if (
         pool.volume_1h_usd < config["volume_1h_min_usd"]
@@ -3891,6 +3898,7 @@ def due_signal_thesis_monitor_pools(state, config, now=None):
             not pool.pool_address
             or not pool.token_address
             or not pool_dex_allowed(pool, config)
+            or not pool_age_matches_config(pool, config)
         ):
             continue
         pool.source = "signal_thesis_monitor"
