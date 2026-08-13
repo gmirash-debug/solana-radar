@@ -201,7 +201,6 @@ test("dashboard excludes records from the previous scanner filter era", () => {
         pool: {
           token_address: "old-monitor-alert",
           source: "signal_thesis_monitor",
-          first_signal_at: "2026-08-02T19:46:56Z",
         },
         created_at: "2026-08-13T02:00:00Z",
       },
@@ -213,8 +212,8 @@ test("dashboard excludes records from the previous scanner filter era", () => {
     summaries: [
       {
         pool: {
-          token_address: "old-monitor-summary",
-          source: "signal_thesis_monitor",
+          token_address: "old-monitor-alert",
+          market_source: "signal_thesis_monitor",
           first_signal_at: "2026-08-02T19:46:56Z",
         },
       },
@@ -231,8 +230,8 @@ test("dashboard excludes records from the previous scanner filter era", () => {
     isCurrentDashboardSignal(
       {
         pool: {
+          token_address: "old-monitor-alert",
           source: "signal_thesis_monitor",
-          first_signal_at: "2026-08-02T19:46:56Z",
         },
         created_at: "2026-08-13T02:00:00Z",
       },

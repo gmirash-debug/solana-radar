@@ -260,18 +260,44 @@ function timestampMs(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
-function dashboardSignalTimestampMs(record = {}) {
+function dashboardRecordTokenKey(record = {}) {
   const pool = record?.pool && typeof record.pool === "object" ? record.pool : {};
-  const monitorOriginMs = String(record?.source || pool.source || "") === "signal_thesis_monitor"
-    ? timestampMs(
-      record.first_signal_at
-        || pool.first_signal_at
-        || record.first_obs_mcap_at
-        || pool.first_obs_mcap_at
+  return normalizeId(record?.token_address)
+    || normalizeId(pool.token_address)
+    || normalizeId(record?.pool_address)
+    || normalizeId(pool.pool_address);
+}
+
+function dashboardMonitorOriginMs(record = {}, report = {}) {
+  const pool = record?.pool && typeof record.pool === "object" ? record.pool : {};
+  const source = String(record?.source || pool.source || record?.market_source || pool.market_source || "");
+  if (source !== "signal_thesis_monitor") return null;
+
+  const tokenKey = dashboardRecordTokenKey(record);
+  const candidates = [record, pool];
+  for (const item of [
+    ...(report?.summaries || []),
+    ...(report?.active_pools || []),
+    ...(report?.universe || []),
+  ]) {
+    if (dashboardRecordTokenKey(item) !== tokenKey) continue;
+    candidates.push(item, item?.pool);
+  }
+  for (const candidate of candidates) {
+    const timestamp = timestampMs(
+      candidate?.first_signal_at
+        || candidate?.first_obs_mcap_at
+        || candidate?.signal_at
         || null,
-    )
-    : 0;
-  if (monitorOriginMs) return monitorOriginMs;
+    );
+    if (timestamp) return timestamp;
+  }
+  return 0;
+}
+
+function dashboardSignalTimestampMs(record = {}, report = {}) {
+  const monitorOriginMs = dashboardMonitorOriginMs(record, report);
+  if (monitorOriginMs !== null) return monitorOriginMs;
   return timestampMs(
     record.signal_at
       || record.window_start
@@ -293,22 +319,19 @@ function dashboardSignalEpochMs(report = {}) {
 function isCurrentDashboardSignal(record = {}, report = {}) {
   const epochMs = dashboardSignalEpochMs(report);
   if (!epochMs) return true;
-  const signalMs = dashboardSignalTimestampMs(record);
+  const signalMs = dashboardSignalTimestampMs(record, report);
   return Boolean(signalMs && signalMs >= epochMs);
 }
 
 function isCurrentDashboardPool(record = {}, report = {}) {
   const pool = record?.pool && typeof record.pool === "object" ? record.pool : record;
-  if (String(pool?.source || "") !== "signal_thesis_monitor") return true;
+  const source = String(record?.source || pool?.source || record?.market_source || pool?.market_source || "");
+  if (source !== "signal_thesis_monitor") return true;
   return isCurrentDashboardSignal({ pool }, report);
 }
 
 function dashboardTokenFromRecord(record = {}) {
-  const pool = record?.pool || {};
-  return normalizeId(record?.token_address)
-    || normalizeId(pool.token_address)
-    || normalizeId(record?.pool_address)
-    || normalizeId(pool.pool_address);
+  return dashboardRecordTokenKey(record);
 }
 
 function dashboardRecordMatchesToken(record, tokenKey) {
