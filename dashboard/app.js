@@ -5,6 +5,10 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
 } from "./token-state.js?v=20260807-wallet-edge-1";
+import {
+  isCurrentFilterSignal,
+  marketWithCurrentFilterCatch,
+} from "./filter-scope.js?v=20260813-current-filter-scope-1";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const DELETE_SYNC_ENDPOINT = "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/deleted-token";
@@ -602,10 +606,12 @@ function pClass(value) {
 function sourceAlerts() {
   const current = (state.report?.alerts || [])
     .filter((alert) => ACTIVE_SCANNER_LANES.has(alert.lane))
+    .filter((alert) => isCurrentFilterSignal(alert, state.report))
     .map((alert) => ({ ...alert, _scope_source: "current" }));
   const history = (state.history || [])
     .filter((alert) => ACTIVE_SCANNER_LANES.has(alert.lane))
     .filter((alert) => ["actionable", "hot_reactivation", "watch", "late_chase"].includes(alertTier(alert)))
+    .filter((alert) => isCurrentFilterSignal(alert, state.report))
     .map((alert) => ({ ...alert, _scope_source: "history" }));
   return [...history, ...current];
 }
@@ -896,7 +902,8 @@ function buildTokenSignals() {
   const currentPools = currentPoolsByToken();
   const observationsByToken = poolObservationsByToken();
   const signalTheses = (state.report?.signal_theses || [])
-    .filter((thesis) => thesis && typeof thesis === "object");
+    .filter((thesis) => thesis && typeof thesis === "object")
+    .filter((thesis) => isCurrentFilterSignal(thesis, state.report));
   const thesesByKey = new Map();
   signalTheses.forEach((thesis) => {
     [thesis.token_address, thesis.pool_address].filter(Boolean).forEach((key) => {
@@ -994,8 +1001,9 @@ function buildTokenSignals() {
     const last = token.alerts[token.alerts.length - 1];
     const marketMeta = marketMetaForToken(token.key);
     const latestPool = mergeMarketMeta(currentPools.get(token.key) || last.pool || first.pool || {}, marketMeta);
+    const scopedCatchPool = marketWithCurrentFilterCatch(latestPool, state.report);
     token.signalThesis = thesesByKey.get(token.key)
-      || thesesByKey.get(latestPool.pool_address)
+      || thesesByKey.get(scopedCatchPool.pool_address)
       || thesesByKey.get(token.pool_address)
       || null;
     token.tokenIntel = [...token.alerts].reverse().find((alert) => alert.token_intel)?.token_intel || null;
@@ -1010,7 +1018,7 @@ function buildTokenSignals() {
     const firstPool = first.pool || {};
     const signalEpisodes = resolveSignalEpisodes({
       alerts: token.alerts,
-      market: latestPool,
+      market: scopedCatchPool,
       thesis: token.signalThesis,
     });
     const currentMarket = resolveCurrentMarket({
@@ -1624,7 +1632,7 @@ function applyDashboardPayload(payload, source, fallbackReason = null) {
   const tokens = buildTokenSignals();
   const visibleTokens = filteredTokens(tokens);
   if (!state.selectedTokenKey && visibleTokens.length) state.selectedTokenKey = visibleTokens[0].key;
-  if (!state.showHidden && isTokenHidden(state.selectedTokenKey)) {
+  if (!visibleTokens.some((token) => token.key === state.selectedTokenKey)) {
     state.selectedTokenKey = visibleTokens[0]?.key || null;
   }
   render();

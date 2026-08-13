@@ -24,6 +24,7 @@ const DISCOVERY_CRON = "*/5 * * * *";
 const DEEP_SCAN_CRON = "7 * * * *";
 const D1_IN_PARAMETER_LIMIT = 100;
 const GITHUB_STATUS_COMPONENTS_URL = "https://www.githubstatus.com/api/v2/components.json";
+const DEFAULT_DASHBOARD_SIGNAL_EPOCH = "2026-08-13T01:01:00Z";
 let accessCertCache = { expiresAt: 0, keys: new Map() };
 
 function corsHeaders(request, env) {
@@ -254,6 +255,37 @@ function parsePayload(value, fallback = {}) {
   }
 }
 
+function timestampMs(value) {
+  const parsed = Date.parse(value || "");
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function dashboardSignalTimestampMs(record = {}) {
+  return timestampMs(
+    record.signal_at
+      || record.window_start
+      || record.created_at
+      || record.captured_at
+      || record.window_end
+      || record.first_signal_at
+      || record.first_obs_mcap_at
+      || null,
+  );
+}
+
+function dashboardSignalEpochMs(report = {}) {
+  return timestampMs(
+    report?.config?.dashboard_signal_epoch || DEFAULT_DASHBOARD_SIGNAL_EPOCH,
+  );
+}
+
+function isCurrentDashboardSignal(record = {}, report = {}) {
+  const epochMs = dashboardSignalEpochMs(report);
+  if (!epochMs) return true;
+  const signalMs = dashboardSignalTimestampMs(record);
+  return Boolean(signalMs && signalMs >= epochMs);
+}
+
 function dashboardTokenFromRecord(record = {}) {
   const pool = record?.pool || {};
   return normalizeId(record?.token_address)
@@ -298,8 +330,12 @@ function compactDashboardReport(report = {}) {
   if (!report || typeof report !== "object" || Array.isArray(report)) return {};
   return {
     ...report,
-    alerts: (report.alerts || []).map(compactDashboardAlert),
-    signal_theses: (report.signal_theses || []).map(compactDashboardThesis),
+    alerts: (report.alerts || [])
+      .filter((alert) => isCurrentDashboardSignal(alert, report))
+      .map(compactDashboardAlert),
+    signal_theses: (report.signal_theses || [])
+      .filter((thesis) => isCurrentDashboardSignal(thesis, report))
+      .map(compactDashboardThesis),
     remote_compact: true,
   };
 }
@@ -676,8 +712,12 @@ async function dashboardData(env, historyLimit = 40) {
     env.RADAR_DB.prepare("SELECT payload_json FROM state_docs WHERE key = 'history_status'").first(),
     env.RADAR_DB.prepare("SELECT payload_json FROM alerts ORDER BY generated_at DESC LIMIT ?1").bind(limit).all(),
   ]);
-  const report = compactDashboardReport(parsePayload(reportDoc?.payload_json, {}));
-  const history = (alertsResult.results || []).map((row) => compactDashboardAlert(parsePayload(row.payload_json, {})));
+  const rawReport = parsePayload(reportDoc?.payload_json, {});
+  const report = compactDashboardReport(rawReport);
+  const history = (alertsResult.results || [])
+    .map((row) => parsePayload(row.payload_json, {}))
+    .filter((alert) => isCurrentDashboardSignal(alert, rawReport))
+    .map(compactDashboardAlert);
   const tokenKeys = dashboardTokenKeys(report, history);
   const discoveryRows = tokenKeys.length
     ? await discoveryStateForTokens(env.RADAR_DB, tokenKeys)
@@ -1229,6 +1269,7 @@ export {
   dashboardTokenDetail,
   compactDashboardAlert,
   compactDashboardReport,
+  isCurrentDashboardSignal,
   dashboardTokenKeys,
   discoveryStateForTokens,
   decodeCursor,

@@ -963,6 +963,10 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(payload["config"]["liquidity_min_usd"], effective["liquidity_min_usd"])
         self.assertEqual(payload["config"]["age_min_hours"], 24)
         self.assertEqual(payload["config"]["age_max_hours"], 360)
+        self.assertEqual(
+            payload["config"]["dashboard_signal_epoch"],
+            "2026-08-13T01:01:00Z",
+        )
 
     def test_scan_selection_reserves_capacity_for_recent_signals(self):
         pools = [

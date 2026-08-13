@@ -11361,6 +11361,7 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
         "profile": config.get("lane") or config.get("mode"),
         "config": {
             "config_version": effective_config_version(config),
+            "dashboard_signal_epoch": config.get("dashboard_signal_epoch"),
             "mcap_min_usd": config["mcap_min_usd"],
             "mcap_max_usd": config["mcap_max_usd"],
             "liquidity_min_usd": config["liquidity_min_usd"],

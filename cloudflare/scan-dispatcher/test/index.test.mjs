@@ -10,6 +10,7 @@ import {
   dashboardTokenKeys,
   decodeCursor,
   encodeCursor,
+  isCurrentDashboardSignal,
   requireCloudflareAccess,
   scanStatusPayload,
   schedulerBucket,
@@ -170,12 +171,14 @@ test("public dashboard payload excludes per-wallet event detail", () => {
   const compact = compactDashboardReport({
     alerts: [{
       pool: { token_address: "token-a" },
+      created_at: "2026-08-13T02:00:00Z",
       events: [{ signature: "private-event" }],
       common_funders: [{ source: "private-funder" }],
       wave: { net_buy_sol: 10, top_buyers: [{ owner: "wallet-a" }] },
     }],
     signal_theses: [{
       token_address: "token-a",
+      signal_at: "2026-08-13T02:00:00Z",
       cohort_wallets: [{ owner: "wallet-a" }],
       source_score: 80,
     }],
@@ -187,6 +190,31 @@ test("public dashboard payload excludes per-wallet event detail", () => {
   assert.equal(compact.alerts[0].wave.top_buyers_count, 1);
   assert.equal(compact.signal_theses[0].cohort_wallets, undefined);
   assert.equal(compact.signal_theses[0].source_score, 80);
+});
+
+test("dashboard excludes records from the previous scanner filter era", () => {
+  const report = {
+    alerts: [
+      { pool: { token_address: "old-alert" }, created_at: "2026-08-13T01:00:59Z" },
+      { pool: { token_address: "new-alert" }, created_at: "2026-08-13T01:01:00Z" },
+    ],
+    signal_theses: [
+      { token_address: "old-thesis", signal_at: "2026-08-12T12:00:00Z" },
+      { token_address: "new-thesis", signal_at: "2026-08-13T02:00:00Z" },
+    ],
+  };
+  const compact = compactDashboardReport(report);
+
+  assert.deepEqual(compact.alerts.map((item) => item.pool.token_address), ["new-alert"]);
+  assert.deepEqual(compact.signal_theses.map((item) => item.token_address), ["new-thesis"]);
+  assert.equal(isCurrentDashboardSignal({}, report), false);
+  assert.equal(
+    isCurrentDashboardSignal(
+      { created_at: "2026-08-12T00:00:00Z" },
+      { config: { dashboard_signal_epoch: "2026-08-12T00:00:00Z" } },
+    ),
+    true,
+  );
 });
 
 test("D1 dashboard chunks market lookups below the SQLite parameter limit", async () => {
