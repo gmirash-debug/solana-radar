@@ -316,16 +316,48 @@ function dashboardSignalEpochMs(report = {}) {
   );
 }
 
+function dashboardRecordAgeHours(record = {}) {
+  const pool = record?.pool && typeof record.pool === "object" ? record.pool : {};
+  const pairCreatedAt = Number(pool.pair_created_at ?? record?.pair_created_at);
+  if (Number.isFinite(pairCreatedAt) && pairCreatedAt > 0) {
+    const pairCreatedMs = pairCreatedAt > 10_000_000_000
+      ? pairCreatedAt
+      : pairCreatedAt * 1000;
+    return Math.max(0, (Date.now() - pairCreatedMs) / 3_600_000);
+  }
+  const reportedAgeHours = Number(pool.age_hours ?? record?.age_hours);
+  return Number.isFinite(reportedAgeHours) && reportedAgeHours >= 0
+    ? reportedAgeHours
+    : null;
+}
+
+function dashboardRecordMatchesAgeWindow(record = {}, report = {}) {
+  const minAgeHours = Number(report?.config?.age_min_hours);
+  const maxAgeHours = Number(report?.config?.age_max_hours);
+  const hasMin = Number.isFinite(minAgeHours);
+  const hasMax = Number.isFinite(maxAgeHours);
+  if (!hasMin && !hasMax) return true;
+
+  const ageHours = dashboardRecordAgeHours(record);
+  if (ageHours === null) return false;
+  if (hasMin && ageHours < minAgeHours) return false;
+  if (hasMax && ageHours > maxAgeHours) return false;
+  return true;
+}
+
 function isCurrentDashboardSignal(record = {}, report = {}) {
   const epochMs = dashboardSignalEpochMs(report);
-  if (!epochMs) return true;
   const signalMs = dashboardSignalTimestampMs(record, report);
-  return Boolean(signalMs && signalMs >= epochMs);
+  return Boolean(
+    dashboardRecordMatchesAgeWindow(record, report)
+    && (!epochMs || (signalMs && signalMs >= epochMs)),
+  );
 }
 
 function isCurrentDashboardPool(record = {}, report = {}) {
   const pool = record?.pool && typeof record.pool === "object" ? record.pool : record;
   const source = String(record?.source || pool?.source || record?.market_source || pool?.market_source || "");
+  if (!dashboardRecordMatchesAgeWindow(record, report)) return false;
   if (source !== "signal_thesis_monitor") return true;
   return isCurrentDashboardSignal({ pool }, report);
 }
