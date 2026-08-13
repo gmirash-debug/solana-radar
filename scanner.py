@@ -3802,6 +3802,19 @@ def select_reactivation_priority(candidates, limit, config):
     return selected
 
 
+def signal_thesis_is_current_filter_era(thesis, config):
+    """Keep operational monitoring scoped to the configuration that created it."""
+    epoch = parse_timestamp((config or {}).get("dashboard_signal_epoch"))
+    if not epoch:
+        return True
+    signal_at = parse_timestamp(
+        (thesis or {}).get("signal_at")
+        or (thesis or {}).get("captured_at")
+        or (thesis or {}).get("created_at")
+    )
+    return bool(signal_at and signal_at >= epoch)
+
+
 def due_signal_thesis_monitor_pools(state, config, now=None):
     now = int(now or time.time())
     latest_alert_pool = {}
@@ -3833,6 +3846,8 @@ def due_signal_thesis_monitor_pools(state, config, now=None):
             or not due_at
             or due_at > now
         ):
+            continue
+        if not signal_thesis_is_current_filter_era(thesis, config):
             continue
         pool_payload = dict(
             (latest_alert_pool.get(pool_address) or (0, {}))[1]
@@ -6811,7 +6826,7 @@ def bootstrap_signal_theses(state, alerts, config, now=None):
     }
 
 
-def signal_theses_for_report(state, deleted=None):
+def signal_theses_for_report(state, deleted=None, config=None):
     deleted = deleted or {"tokens": set(), "pools": set()}
     theses = []
     for pool_state in (state.get("pools") or {}).values():
@@ -6821,6 +6836,8 @@ def signal_theses_for_report(state, deleted=None):
             else None
         )
         if not isinstance(private_thesis, dict):
+            continue
+        if not signal_thesis_is_current_filter_era(private_thesis, config):
             continue
         if (
             private_thesis.get("token_address") in deleted.get("tokens", set())
@@ -11423,6 +11440,7 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
         "signal_theses": signal_theses_for_report(
             state,
             deleted_tokens,
+            config,
         ),
         "active_pools": active[:100],
         "universe": [apply_market_meta(pool.as_dict(), state) for pool in universe[:250]],

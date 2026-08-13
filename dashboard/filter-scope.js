@@ -20,6 +20,17 @@ const CATCH_FIELDS = [
 ];
 
 export function signalTimestampMs(record = {}) {
+  const pool = record?.pool && typeof record.pool === "object" ? record.pool : {};
+  const monitorOriginMs = String(record?.source || pool.source || "") === "signal_thesis_monitor"
+    ? timestampMs(
+      record.first_signal_at
+        || pool.first_signal_at
+        || record.first_obs_mcap_at
+        || pool.first_obs_mcap_at
+        || null,
+    )
+    : 0;
+  if (monitorOriginMs) return monitorOriginMs;
   return timestampMs(
     record.signal_at
       || record.window_start

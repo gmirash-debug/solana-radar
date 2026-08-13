@@ -197,17 +197,49 @@ test("dashboard excludes records from the previous scanner filter era", () => {
     alerts: [
       { pool: { token_address: "old-alert" }, created_at: "2026-08-13T01:00:59Z" },
       { pool: { token_address: "new-alert" }, created_at: "2026-08-13T01:01:00Z" },
+      {
+        pool: {
+          token_address: "old-monitor-alert",
+          source: "signal_thesis_monitor",
+          first_signal_at: "2026-08-02T19:46:56Z",
+        },
+        created_at: "2026-08-13T02:00:00Z",
+      },
     ],
     signal_theses: [
       { token_address: "old-thesis", signal_at: "2026-08-12T12:00:00Z" },
       { token_address: "new-thesis", signal_at: "2026-08-13T02:00:00Z" },
+    ],
+    summaries: [
+      {
+        pool: {
+          token_address: "old-monitor-summary",
+          source: "signal_thesis_monitor",
+          first_signal_at: "2026-08-02T19:46:56Z",
+        },
+      },
+      { pool: { token_address: "current-summary" } },
     ],
   };
   const compact = compactDashboardReport(report);
 
   assert.deepEqual(compact.alerts.map((item) => item.pool.token_address), ["new-alert"]);
   assert.deepEqual(compact.signal_theses.map((item) => item.token_address), ["new-thesis"]);
+  assert.deepEqual(compact.summaries.map((item) => item.pool.token_address), ["current-summary"]);
   assert.equal(isCurrentDashboardSignal({}, report), false);
+  assert.equal(
+    isCurrentDashboardSignal(
+      {
+        pool: {
+          source: "signal_thesis_monitor",
+          first_signal_at: "2026-08-02T19:46:56Z",
+        },
+        created_at: "2026-08-13T02:00:00Z",
+      },
+      report,
+    ),
+    false,
+  );
   assert.equal(
     isCurrentDashboardSignal(
       { created_at: "2026-08-12T00:00:00Z" },

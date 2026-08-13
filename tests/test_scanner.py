@@ -1166,6 +1166,7 @@ class ScannerCoreTests(unittest.TestCase):
                     "signal_recheck_due_at": "2026-07-29T12:00:00Z",
                     "signal_thesis": {
                         "status": "intact",
+                        "signal_at": "2026-07-29T12:00:00Z",
                         "pool_address": "pool",
                         "token_address": "token",
                         "symbol": "TEST",
@@ -1192,6 +1193,34 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(pools[0].pool_address, "pool")
         self.assertEqual(pools[0].mcap_usd, 42_000)
         self.assertEqual(pools[0].source, "signal_thesis_monitor")
+
+    def test_old_filter_era_thesis_is_not_restored_to_monitor_universe(self):
+        now = scanner.parse_timestamp("2026-08-13T13:00:00Z")
+        state = {
+            "pools": {
+                "pool": {
+                    "signal_recheck_due_at": "2026-08-13T12:00:00Z",
+                    "signal_thesis": {
+                        "status": "intact",
+                        "signal_at": "2026-08-02T19:46:56Z",
+                        "pool_address": "pool",
+                        "token_address": "token",
+                        "symbol": "OLD",
+                        "dex": "pumpswap",
+                    },
+                }
+            }
+        }
+        with mock.patch.object(scanner, "load_alert_history", return_value=[]):
+            pools = scanner.due_signal_thesis_monitor_pools(
+                state,
+                {
+                    "dex_allowlist": ["pumpswap"],
+                    "dashboard_signal_epoch": "2026-08-13T01:01:00Z",
+                },
+                now=now,
+            )
+        self.assertEqual(pools, [])
 
     def test_swap_buffer_compaction_drops_old_and_redundant_data(self):
         now = 1_000_000
@@ -1523,6 +1552,33 @@ class ScannerCoreTests(unittest.TestCase):
             {"tokens": {"token"}, "pools": set()},
         )
         self.assertEqual(theses, [])
+
+    def test_previous_filter_era_thesis_is_not_exported(self):
+        state = {
+            "pools": {
+                "old-pool": {
+                    "signal_thesis": {
+                        "status": "intact",
+                        "pool_address": "old-pool",
+                        "token_address": "old-token",
+                        "signal_at": "2026-08-02T19:46:56Z",
+                    }
+                },
+                "new-pool": {
+                    "signal_thesis": {
+                        "status": "intact",
+                        "pool_address": "new-pool",
+                        "token_address": "new-token",
+                        "signal_at": "2026-08-13T02:00:00Z",
+                    }
+                },
+            }
+        }
+        theses = scanner.signal_theses_for_report(
+            state,
+            config={"dashboard_signal_epoch": "2026-08-13T01:01:00Z"},
+        )
+        self.assertEqual([thesis["token_address"] for thesis in theses], ["new-token"])
 
     def test_public_signal_thesis_exports_checked_cohort_balances(self):
         public = scanner.public_signal_thesis(

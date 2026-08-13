@@ -261,6 +261,17 @@ function timestampMs(value) {
 }
 
 function dashboardSignalTimestampMs(record = {}) {
+  const pool = record?.pool && typeof record.pool === "object" ? record.pool : {};
+  const monitorOriginMs = String(record?.source || pool.source || "") === "signal_thesis_monitor"
+    ? timestampMs(
+      record.first_signal_at
+        || pool.first_signal_at
+        || record.first_obs_mcap_at
+        || pool.first_obs_mcap_at
+        || null,
+    )
+    : 0;
+  if (monitorOriginMs) return monitorOriginMs;
   return timestampMs(
     record.signal_at
       || record.window_start
@@ -284,6 +295,12 @@ function isCurrentDashboardSignal(record = {}, report = {}) {
   if (!epochMs) return true;
   const signalMs = dashboardSignalTimestampMs(record);
   return Boolean(signalMs && signalMs >= epochMs);
+}
+
+function isCurrentDashboardPool(record = {}, report = {}) {
+  const pool = record?.pool && typeof record.pool === "object" ? record.pool : record;
+  if (String(pool?.source || "") !== "signal_thesis_monitor") return true;
+  return isCurrentDashboardSignal({ pool }, report);
 }
 
 function dashboardTokenFromRecord(record = {}) {
@@ -336,6 +353,12 @@ function compactDashboardReport(report = {}) {
     signal_theses: (report.signal_theses || [])
       .filter((thesis) => isCurrentDashboardSignal(thesis, report))
       .map(compactDashboardThesis),
+    active_pools: (report.active_pools || [])
+      .filter((item) => isCurrentDashboardPool(item, report)),
+    universe: (report.universe || [])
+      .filter((pool) => isCurrentDashboardPool(pool, report)),
+    summaries: (report.summaries || [])
+      .filter((summary) => isCurrentDashboardPool(summary, report)),
     remote_compact: true,
   };
 }
