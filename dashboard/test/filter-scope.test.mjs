@@ -29,11 +29,19 @@ test("the current filter scope excludes historical alerts and theses", () => {
       {
         created_at: "2026-08-13T02:00:00Z",
         pool: {
+          token_address: "old-monitor-alert",
           source: "signal_thesis_monitor",
-          first_signal_at: "2026-08-02T19:46:56Z",
         },
       },
-      report,
+      {
+        summaries: [{
+          pool: {
+            token_address: "old-monitor-alert",
+            market_source: "signal_thesis_monitor",
+            first_signal_at: "2026-08-02T19:46:56Z",
+          },
+        }],
+      },
     ),
     false,
   );

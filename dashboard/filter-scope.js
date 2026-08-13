@@ -19,18 +19,47 @@ const CATCH_FIELDS = [
   "caught_obs_mcap_at",
 ];
 
-export function signalTimestampMs(record = {}) {
+function recordTokenKey(record = {}) {
   const pool = record?.pool && typeof record.pool === "object" ? record.pool : {};
-  const monitorOriginMs = String(record?.source || pool.source || "") === "signal_thesis_monitor"
-    ? timestampMs(
-      record.first_signal_at
-        || pool.first_signal_at
-        || record.first_obs_mcap_at
-        || pool.first_obs_mcap_at
+  return String(
+    record?.token_address
+      || pool.token_address
+      || record?.pool_address
+      || pool.pool_address
+      || "",
+  );
+}
+
+function monitorOriginMs(record = {}, report = {}) {
+  const pool = record?.pool && typeof record.pool === "object" ? record.pool : {};
+  const source = String(record?.source || pool.source || record?.market_source || pool.market_source || "");
+  if (source !== "signal_thesis_monitor") return null;
+
+  const tokenKey = recordTokenKey(record);
+  const candidates = [record, pool];
+  for (const item of [
+    ...(report?.summaries || []),
+    ...(report?.active_pools || []),
+    ...(report?.universe || []),
+  ]) {
+    if (recordTokenKey(item) !== tokenKey) continue;
+    candidates.push(item, item?.pool);
+  }
+  for (const candidate of candidates) {
+    const timestamp = timestampMs(
+      candidate?.first_signal_at
+        || candidate?.first_obs_mcap_at
+        || candidate?.signal_at
         || null,
-    )
-    : 0;
-  if (monitorOriginMs) return monitorOriginMs;
+    );
+    if (timestamp) return timestamp;
+  }
+  return 0;
+}
+
+export function signalTimestampMs(record = {}, report = {}) {
+  const originalMonitorSignalMs = monitorOriginMs(record, report);
+  if (originalMonitorSignalMs !== null) return originalMonitorSignalMs;
   return timestampMs(
     record.signal_at
       || record.window_start
@@ -52,13 +81,13 @@ export function dashboardSignalEpochMs(report = {}) {
 export function isCurrentFilterSignal(record = {}, report = {}) {
   const epochMs = dashboardSignalEpochMs(report);
   if (!epochMs) return true;
-  const signalMs = signalTimestampMs(record);
+  const signalMs = signalTimestampMs(record, report);
   return Boolean(signalMs && signalMs >= epochMs);
 }
 
 export function marketWithCurrentFilterCatch(market = {}, report = {}) {
   const epochMs = dashboardSignalEpochMs(report);
-  const catchMs = signalTimestampMs(market);
+  const catchMs = signalTimestampMs(market, report);
   if (!epochMs || (catchMs && catchMs >= epochMs)) return { ...market };
 
   const scoped = { ...market };
