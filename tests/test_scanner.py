@@ -1,6 +1,7 @@
 import json
 import unittest
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -960,6 +961,8 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(payload["config"]["mcap_min_usd"], effective["mcap_min_usd"])
         self.assertEqual(payload["config"]["mcap_max_usd"], effective["mcap_max_usd"])
         self.assertEqual(payload["config"]["liquidity_min_usd"], effective["liquidity_min_usd"])
+        self.assertEqual(payload["config"]["age_min_hours"], 24)
+        self.assertEqual(payload["config"]["age_max_hours"], 360)
 
     def test_scan_selection_reserves_capacity_for_recent_signals(self):
         pools = [
@@ -2881,25 +2884,62 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(early["reactivation_wave_min_buy_sol"], 35)
         self.assertEqual(early["volume_1h_to_mcap_max_watch"], 1.2)
 
-    def test_reactivation_universe_accepts_old_token_below_100k(self):
+    def test_reactivation_universe_accepts_low_cap_token_only_within_one_to_fifteen_days(self):
         config = scanner.apply_lane(
             scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {}),
             "reactivation",
         )
-        pool = scanner.Pool(
-            pool_address="pool",
-            token_address="token",
+        now = 1_750_000_000
+        at_minimum_age_pool = scanner.Pool(
+            pool_address="at-minimum-age",
+            token_address="at-minimum-age-token",
             dex="pumpswap",
             mcap_usd=20_000,
             liquidity_usd=4_000,
             volume_1h_usd=500,
-            pair_created_at=int(scanner.time.time() - 45 * 24 * 3600),
+            pair_created_at=now - 24 * 3600,
         )
-        self.assertTrue(scanner.pool_matches_config(pool, config))
-        self.assertEqual(
-            scanner.reactivation_stage_config(pool, config)["reactivation_stage"],
-            "ignition",
+        at_maximum_age_pool = scanner.Pool(
+            pool_address="at-maximum-age",
+            token_address="at-maximum-age-token",
+            dex="pumpswap",
+            mcap_usd=20_000,
+            liquidity_usd=4_000,
+            volume_1h_usd=500,
+            pair_created_at=now - 15 * 24 * 3600,
         )
+        too_new_pool = scanner.Pool(
+            pool_address="too-new",
+            token_address="too-new-token",
+            dex="pumpswap",
+            mcap_usd=20_000,
+            liquidity_usd=4_000,
+            volume_1h_usd=500,
+            pair_created_at=now - 23 * 3600,
+        )
+        too_old_pool = scanner.Pool(
+            pool_address="too-old",
+            token_address="too-old-token",
+            dex="pumpswap",
+            mcap_usd=20_000,
+            liquidity_usd=4_000,
+            volume_1h_usd=500,
+            pair_created_at=now - 15 * 24 * 3600 - 1,
+        )
+
+        with mock.patch.object(
+            scanner,
+            "utc_now",
+            return_value=datetime.fromtimestamp(now, tz=timezone.utc),
+        ):
+            self.assertTrue(scanner.pool_matches_config(at_minimum_age_pool, config))
+            self.assertTrue(scanner.pool_matches_config(at_maximum_age_pool, config))
+            self.assertFalse(scanner.pool_matches_config(too_new_pool, config))
+            self.assertFalse(scanner.pool_matches_config(too_old_pool, config))
+            self.assertEqual(
+                scanner.reactivation_stage_config(at_minimum_age_pool, config)["reactivation_stage"],
+                "ignition",
+            )
 
     def test_reactivation_priority_favors_low_cap_activation_velocity(self):
         low_cap_wave = scanner.Pool(
