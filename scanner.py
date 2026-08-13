@@ -11364,6 +11364,8 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "mcap_min_usd": config["mcap_min_usd"],
             "mcap_max_usd": config["mcap_max_usd"],
             "liquidity_min_usd": config["liquidity_min_usd"],
+            "age_min_hours": config.get("age_min_hours"),
+            "age_max_hours": config.get("age_max_hours"),
             "classify_buy_min_sol": config["classify_buy_min_sol"],
             "alert_window_minutes": config["alert_window_minutes"],
             "low_tx_support_only_alerts": config.get("low_tx_support_only_alerts", False),

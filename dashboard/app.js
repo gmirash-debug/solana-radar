@@ -124,8 +124,8 @@ const els = {
 const FILTER_META = {
   reactivation: {
     label: "Reactivation",
-    criteria: "15d+ / $0-$5m mcap / liq >= $3k / 5m burst + retained buy-wave",
-    thesis: "older migrated tokens ranked by renewed 5m and 1h activity, then confirmed by distributed net buying and balances that still retain the acquired supply. ATH is risk context, not a discovery gate.",
+    criteria: "1d-15d / $0-$5m mcap / liq >= $3k / 5m burst + retained buy-wave",
+    thesis: "migrated tokens aged 1d-15d ranked by renewed 5m and 1h activity, then confirmed by distributed net buying and balances that still retain the acquired supply. ATH is risk context, not a discovery gate.",
   },
 };
 
