@@ -24,6 +24,19 @@ test("the current filter scope excludes historical alerts and theses", () => {
     isCurrentFilterSignal({ created_at: "2026-08-13T02:00:00Z" }, report),
     true,
   );
+  assert.equal(
+    isCurrentFilterSignal(
+      {
+        created_at: "2026-08-13T02:00:00Z",
+        pool: {
+          source: "signal_thesis_monitor",
+          first_signal_at: "2026-08-02T19:46:56Z",
+        },
+      },
+      report,
+    ),
+    false,
+  );
   assert.equal(isCurrentFilterSignal({}, report), false);
 });
 
