@@ -389,12 +389,41 @@ function compactDashboardAlert(alert = {}) {
     if (Array.isArray(topBuyers)) wave.top_buyers_count = topBuyers.length;
     compact.wave = wave;
   }
+  if (alert.supply_integrity && typeof alert.supply_integrity === "object") {
+    const {
+      top_owners: topOwners,
+      linkage_groups: linkageGroups,
+      linked_clusters: linkedClusters,
+      limitations,
+      errors,
+      invariants,
+      ...summary
+    } = alert.supply_integrity;
+    compact.supply_integrity = summary;
+  }
   return compact;
 }
 
 function compactDashboardThesis(thesis = {}) {
   if (!thesis || typeof thesis !== "object" || Array.isArray(thesis)) return {};
-  const { cohort, cohort_wallets: cohortWallets, ...compact } = thesis;
+  const {
+    cohort,
+    cohort_wallets: cohortWallets,
+    supply_integrity_history: supplyIntegrityHistory,
+    ...compact
+  } = thesis;
+  if (thesis.supply_integrity && typeof thesis.supply_integrity === "object") {
+    const {
+      top_owners: topOwners,
+      linkage_groups: linkageGroups,
+      linked_clusters: linkedClusters,
+      limitations,
+      errors,
+      invariants,
+      ...summary
+    } = thesis.supply_integrity;
+    compact.supply_integrity = summary;
+  }
   return compact;
 }
 

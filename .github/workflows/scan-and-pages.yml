@@ -26,6 +26,7 @@ on:
       - "dashboard/**"
       - "cloudflare/**"
       - "NARRATIVE_PROTOCOL.md"
+      - "SUPPLY_INTEGRITY_PROTOCOL.md"
 
 concurrency:
   # Cloudflare Worker cron is the single scheduled scan source; runs share one

@@ -38,6 +38,7 @@ DEFAULT_CONFIG_PATH = ROOT / "config.example.json"
 STATE_SCHEMA_VERSION = 1
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
+SOLANA_INCINERATOR = "1nc1nerator11111111111111111111111111111111"
 SOLANA_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
@@ -590,6 +591,21 @@ def compact_alert_for_dashboard(alert):
         if isinstance(top_buyers, list):
             compact_wave["top_buyers_count"] = len(top_buyers)
         compact["wave"] = compact_wave
+    integrity = alert.get("supply_integrity")
+    if isinstance(integrity, dict):
+        detail_fields = {
+            "top_owners",
+            "linkage_groups",
+            "linked_clusters",
+            "limitations",
+            "errors",
+            "invariants",
+        }
+        compact["supply_integrity"] = {
+            key: value
+            for key, value in integrity.items()
+            if key not in detail_fields
+        }
     return compact
 
 
@@ -597,11 +613,27 @@ def compact_signal_thesis_for_dashboard(thesis):
     """Keep thesis state in the list response, but not the wallet-by-wallet cohort."""
     if not isinstance(thesis, dict):
         return {}
-    return {
+    compact = {
         key: value
         for key, value in thesis.items()
-        if key not in {"cohort", "cohort_wallets"}
+        if key not in {"cohort", "cohort_wallets", "supply_integrity_history"}
     }
+    integrity = thesis.get("supply_integrity")
+    if isinstance(integrity, dict):
+        detail_fields = {
+            "top_owners",
+            "linkage_groups",
+            "linked_clusters",
+            "limitations",
+            "errors",
+            "invariants",
+        }
+        compact["supply_integrity"] = {
+            key: value
+            for key, value in integrity.items()
+            if key not in detail_fields
+        }
+    return compact
 
 
 def compact_report_for_remote(report):
@@ -1645,6 +1677,8 @@ class SolanaRpcProvider:
         self.latency_seconds = defaultdict(list)
         self.token_supply_cache = {}
         self.token_balance_cache = {}
+        self.largest_token_accounts_cache = {}
+        self.multiple_accounts_cache = {}
         self.timeout_seconds = int(timeout_seconds)
         self.transactions_timeout_seconds = int(transactions_timeout_seconds)
         self.max_retries = max(0, int(max_retries))
@@ -1710,7 +1744,9 @@ class SolanaRpcProvider:
                 "getAccountInfo": 10,
                 "getBalance": 10,
                 "getTokenAccountsByOwner": 10,
+                "getMultipleAccounts": 10,
                 "getHealth": 20,
+                "getTokenLargestAccounts": 20,
                 "getTokenAccountBalance": 20,
                 "getTokenSupply": 20,
                 "getSignaturesForAddress": 40,
@@ -1984,6 +2020,40 @@ class SolanaRpcProvider:
         self.token_balance_cache[cache_key] = total
         return total
 
+    def largest_token_accounts(self, mint, limit=20):
+        limit = min(20, max(1, int(limit)))
+        cache_key = (mint, limit)
+        if cache_key in self.largest_token_accounts_cache:
+            return self.largest_token_accounts_cache[cache_key]
+        result = self.call("getTokenLargestAccounts", [mint]) or {}
+        rows = []
+        for item in (result.get("value") or [])[:limit]:
+            address = str(item.get("address") or "").strip()
+            if not address:
+                continue
+            rows.append(
+                {
+                    "address": address,
+                    "amount": rpc_token_amount(item),
+                }
+            )
+        self.largest_token_accounts_cache[cache_key] = rows
+        return rows
+
+    def multiple_accounts(self, addresses):
+        addresses = tuple(str(address) for address in addresses if address)
+        if not addresses:
+            return []
+        if addresses in self.multiple_accounts_cache:
+            return self.multiple_accounts_cache[addresses]
+        result = self.call(
+            "getMultipleAccounts",
+            [list(addresses), {"encoding": "jsonParsed"}],
+        ) or {}
+        rows = list(result.get("value") or [])
+        self.multiple_accounts_cache[addresses] = rows
+        return rows
+
 
 class HeliusRpc(SolanaRpcProvider):
     def __init__(
@@ -2097,6 +2167,8 @@ class RoutedSolanaRpc:
         self.health_results = {}
         self.token_supply_cache = {}
         self.token_balance_cache = {}
+        self.largest_token_accounts_cache = {}
+        self.multiple_accounts_cache = {}
 
     def _ordered_names(self, names, enhanced_only=False):
         ordered = []
@@ -2371,6 +2443,45 @@ class RoutedSolanaRpc:
             total += rpc_token_amount(info.get("tokenAmount"))
         self.token_balance_cache[cache_key] = total
         return total
+
+    def largest_token_accounts(self, mint, limit=20):
+        limit = min(20, max(1, int(limit)))
+        cache_key = (mint, limit)
+        if cache_key in self.largest_token_accounts_cache:
+            return self.largest_token_accounts_cache[cache_key]
+        result, _provider = self._route_call(
+            "getTokenLargestAccounts",
+            [mint],
+            order=self.standard_order,
+        )
+        rows = []
+        for item in ((result or {}).get("value") or [])[:limit]:
+            address = str(item.get("address") or "").strip()
+            if not address:
+                continue
+            rows.append(
+                {
+                    "address": address,
+                    "amount": rpc_token_amount(item),
+                }
+            )
+        self.largest_token_accounts_cache[cache_key] = rows
+        return rows
+
+    def multiple_accounts(self, addresses):
+        addresses = tuple(str(address) for address in addresses if address)
+        if not addresses:
+            return []
+        if addresses in self.multiple_accounts_cache:
+            return self.multiple_accounts_cache[addresses]
+        result, _provider = self._route_call(
+            "getMultipleAccounts",
+            [list(addresses), {"encoding": "jsonParsed"}],
+            order=self.standard_order,
+        )
+        rows = list((result or {}).get("value") or [])
+        self.multiple_accounts_cache[addresses] = rows
+        return rows
 
     def provider_stats(self):
         def percentile(values, ratio):
@@ -5275,6 +5386,15 @@ def parse_pool_swap(tx, pool):
     meta = tx.get("meta", {})
     keys = tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
     signer = next((key.get("pubkey") for key in keys if key.get("signer")), keys[0].get("pubkey") if keys else "")
+    signatures = tx.get("transaction", {}).get("signatures", []) or []
+    tx_fee_lamports = max(0, int(meta.get("fee") or 0))
+    signature_count = max(1, len(signatures))
+    # Solana's base signature fee is currently 5,000 lamports per signature.
+    # The remainder is useful only as a supporting execution fingerprint.
+    priority_fee_estimate_lamports = max(
+        0,
+        tx_fee_lamports - signature_count * 5_000,
+    )
 
     pre = {}
     post = {}
@@ -5359,7 +5479,7 @@ def parse_pool_swap(tx, pool):
         owner_resolution = "unresolved"
 
     return {
-        "signature": tx.get("transaction", {}).get("signatures", [""])[0],
+        "signature": signatures[0] if signatures else "",
         "block_time": tx.get("blockTime"),
         "time": iso(tx.get("blockTime")),
         "pool_address": pool.pool_address,
@@ -5377,6 +5497,9 @@ def parse_pool_swap(tx, pool):
         "sol_amount": sol_amount,
         "token_amount": token_amount_value,
         "price_native": sol_amount / token_amount_value if token_amount_value else 0.0,
+        "tx_fee_lamports": tx_fee_lamports,
+        "signature_count": signature_count,
+        "priority_fee_estimate_lamports": priority_fee_estimate_lamports,
     }
 
 
@@ -5934,6 +6057,9 @@ WAVE_SWAP_FIELDS = (
     "sol_amount",
     "token_amount",
     "price_native",
+    "tx_fee_lamports",
+    "signature_count",
+    "priority_fee_estimate_lamports",
 )
 
 
@@ -6227,6 +6353,11 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
         initial_totals["holders"] / len(cohort) * 100 if cohort else 0.0
     )
     initial_status = "intact" if wave_signal and initial_balance_coverage >= 80 else "unknown"
+    supply_integrity = copy.deepcopy(alert.get("supply_integrity"))
+    integrity_history = []
+    compact_integrity = compact_supply_integrity_snapshot(supply_integrity)
+    if compact_integrity:
+        integrity_history.append(compact_integrity)
     return {
         "version": 2,
         "cohort_id": "|".join(
@@ -6316,6 +6447,8 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
         ),
         "balance_coverage_pct": initial_balance_coverage,
         "invalidation_streak": 0,
+        "supply_integrity": supply_integrity,
+        "supply_integrity_history": integrity_history,
         "cohort": cohort,
     }
 
@@ -6660,6 +6793,8 @@ def public_signal_thesis(thesis):
         "balance_errors",
         "invalidation_candidate",
         "invalidation_streak",
+        "supply_integrity",
+        "supply_integrity_history",
     }
     public = {
         key: value
@@ -6767,6 +6902,20 @@ def refresh_signal_thesis(
                     config,
                     checked_at=checked_at,
                 )
+        if (
+            isinstance(thesis, dict)
+            and config.get("supply_integrity_enabled", False)
+            and supply_integrity_refresh_due(thesis, config)
+        ):
+            snapshot = analyze_supply_integrity(
+                pool,
+                rpc,
+                config,
+                thesis=thesis,
+                checked_at=checked_at,
+            )
+            if snapshot:
+                update_thesis_supply_integrity(thesis, snapshot, config)
         schedule_signal_recheck(pool_state, alerts, config)
     elif not isinstance(thesis, dict):
         schedule_signal_recheck(pool_state, alerts, config)
@@ -7269,6 +7418,674 @@ def analyze_wave_wallet_graph(rpc, buyers, config, state):
     }
 
 
+def claim_supply_integrity_budget(config, token_key=None):
+    budget = config.get("_supply_integrity_budget")
+    if not isinstance(budget, dict):
+        return True
+    claimed_tokens = budget.setdefault("claimed_tokens", {})
+    deferred_tokens = budget.setdefault("deferred_tokens", {})
+    token_key = str(token_key or "").strip()
+    if token_key and claimed_tokens.get(token_key):
+        return True
+    if token_key and deferred_tokens.get(token_key):
+        return False
+    remaining = max(0, int(budget.get("remaining") or 0))
+    if remaining <= 0:
+        budget["deferred"] = int(budget.get("deferred") or 0) + 1
+        if token_key:
+            deferred_tokens[token_key] = True
+        return False
+    budget["remaining"] = remaining - 1
+    budget["used"] = int(budget.get("used") or 0) + 1
+    if token_key:
+        claimed_tokens[token_key] = True
+    return True
+
+
+def supply_integrity_unverified(reason, checked_at=None, errors=None):
+    return {
+        "version": 1,
+        "checked_at": checked_at or utc_now().isoformat().replace("+00:00", "Z"),
+        "status": "unverified",
+        "data_quality_status": "unavailable",
+        "coordination_confirmed": False,
+        "evidence_family_count": 0,
+        "evidence_families": [],
+        "linkage_groups": [],
+        "reason": str(reason or "supply integrity data is unavailable")[:300],
+        "errors": [str(item)[:300] for item in (errors or []) if item],
+        "limitations": [
+            "CEX and terminal labels require a maintained address-label source",
+            "priority-fee matches are supporting evidence only",
+        ],
+    }
+
+
+def parsed_token_account_owner(account):
+    if not isinstance(account, dict):
+        return ""
+    info = (
+        account.get("data", {})
+        .get("parsed", {})
+        .get("info", {})
+    )
+    return str(info.get("owner") or "").strip()
+
+
+def supply_integrity_linkage_groups(alert, thesis, config):
+    groups = []
+    if isinstance(alert, dict):
+        for item in alert.get("common_funders") or []:
+            members = sorted({str(value) for value in item.get("members") or [] if value})
+            if len(members) >= 2 and item.get("source"):
+                groups.append(
+                    {
+                        "family": "common_funder",
+                        "key": str(item["source"]),
+                        "members": members,
+                        "wallets": len(members),
+                        "supporting_only": False,
+                    }
+                )
+        for item in alert.get("common_executors") or []:
+            members = sorted({str(value) for value in item.get("members") or [] if value})
+            if len(members) >= 2 and item.get("executor"):
+                groups.append(
+                    {
+                        "family": "common_executor",
+                        "key": str(item["executor"]),
+                        "members": members,
+                        "wallets": len(members),
+                        "supporting_only": False,
+                    }
+                )
+
+        fee_groups = defaultdict(set)
+        all_buyers = set()
+        for event in alert.get("events") or []:
+            if not isinstance(event, dict) or event.get("kind") != "buy":
+                continue
+            owner = wave_buy_owner(event)
+            if not owner:
+                continue
+            all_buyers.add(owner)
+            priority_fee = int(event.get("priority_fee_estimate_lamports") or 0)
+            if priority_fee > 0:
+                fee_groups[priority_fee].add(owner)
+        min_wallets = max(
+            2,
+            int(config.get("supply_integrity_priority_fee_min_wallets", 3)),
+        )
+        min_share = max(
+            0.0,
+            float(config.get("supply_integrity_priority_fee_min_wallet_share", 0.25)),
+        )
+        for priority_fee, members_set in fee_groups.items():
+            members = sorted(members_set)
+            share = len(members) / len(all_buyers) if all_buyers else 0.0
+            if len(members) >= min_wallets and share >= min_share:
+                groups.append(
+                    {
+                        "family": "priority_fee",
+                        "key": str(priority_fee),
+                        "members": members,
+                        "wallets": len(members),
+                        "wallet_share": share,
+                        "supporting_only": True,
+                    }
+                )
+
+    if isinstance(thesis, dict):
+        cohort = [row for row in thesis.get("cohort") or [] if isinstance(row, dict)]
+        by_family = {
+            "common_funder": defaultdict(set),
+            "common_executor": defaultdict(set),
+        }
+        for row in cohort:
+            owner = str(row.get("owner") or "").strip()
+            if not owner:
+                continue
+            if row.get("common_funder"):
+                by_family["common_funder"][str(row["common_funder"])].add(owner)
+            if row.get("common_executor"):
+                by_family["common_executor"][str(row["common_executor"])].add(owner)
+        for family, keyed_groups in by_family.items():
+            for key, members_set in keyed_groups.items():
+                members = sorted(members_set)
+                if len(members) >= 2:
+                    groups.append(
+                        {
+                            "family": family,
+                            "key": key,
+                            "members": members,
+                            "wallets": len(members),
+                            "supporting_only": False,
+                        }
+                    )
+        previous = thesis.get("supply_integrity") or {}
+        groups.extend(
+            item
+            for item in previous.get("linkage_groups") or []
+            if isinstance(item, dict)
+        )
+
+    unique = {}
+    for group in groups:
+        members = sorted({str(value) for value in group.get("members") or [] if value})
+        if len(members) < 2:
+            continue
+        key = (str(group.get("family") or ""), str(group.get("key") or ""), tuple(members))
+        normalized = dict(group)
+        normalized["members"] = members
+        normalized["wallets"] = len(members)
+        unique[key] = normalized
+    return sorted(
+        unique.values(),
+        key=lambda item: (item.get("family") or "", -int(item.get("wallets") or 0), item.get("key") or ""),
+    )
+
+
+def supply_integrity_cohort_rows(alert=None, thesis=None):
+    if isinstance(thesis, dict):
+        return [
+            row
+            for row in thesis.get("cohort") or []
+            if isinstance(row, dict) and row.get("owner")
+        ]
+    wave = (alert or {}).get("wave") or {}
+    return [
+        row
+        for row in wave.get("top_buyers") or []
+        if isinstance(row, dict) and row.get("owner")
+    ]
+
+
+def supply_integrity_linked_clusters(cohort, groups, supply):
+    balances = {}
+    for row in cohort or []:
+        owner = str(row.get("owner") or "").strip()
+        if not owner:
+            continue
+        current_balance_value = row.get("current_balance")
+        current_balance = (
+            max(0.0, float(current_balance_value or 0))
+            if current_balance_value is not None
+            else 0.0
+        )
+        retained_value = row.get("current_retained_tokens")
+        if retained_value is None:
+            retained_value = row.get("retained_from_wave")
+        if retained_value is None:
+            retained_value = row.get("attributed_tokens")
+        signal_retained = max(0.0, float(retained_value or 0))
+        balances[owner] = {
+            "current_balance": current_balance,
+            "signal_retained": signal_retained,
+        }
+
+    parents = {owner: owner for owner in balances}
+
+    def find(owner):
+        while parents[owner] != owner:
+            parents[owner] = parents[parents[owner]]
+            owner = parents[owner]
+        return owner
+
+    def union(left, right):
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    for group in groups or []:
+        if group.get("supporting_only"):
+            continue
+        members = [owner for owner in group.get("members") or [] if owner in parents]
+        if len(members) < 2:
+            continue
+        for owner in members[1:]:
+            union(members[0], owner)
+
+    clusters = defaultdict(list)
+    for owner in parents:
+        clusters[find(owner)].append(owner)
+    rows = []
+    for members in clusters.values():
+        if len(members) < 2:
+            continue
+        families = set()
+        member_set = set(members)
+        for group in groups or []:
+            if len(member_set.intersection(group.get("members") or [])) >= 2:
+                families.add(str(group.get("family") or "unknown"))
+        current_tokens = sum(balances[owner]["current_balance"] for owner in members)
+        signal_tokens = sum(balances[owner]["signal_retained"] for owner in members)
+        rows.append(
+            {
+                "wallets": len(members),
+                "members": sorted(members),
+                "families": sorted(families),
+                "current_tokens": current_tokens,
+                "signal_retained_tokens": signal_tokens,
+                "current_supply_pct": current_tokens / supply * 100 if supply else None,
+                "signal_retained_supply_pct": signal_tokens / supply * 100 if supply else None,
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda item: (
+            float(item.get("current_supply_pct") or 0),
+            float(item.get("signal_retained_supply_pct") or 0),
+            int(item.get("wallets") or 0),
+        ),
+        reverse=True,
+    )
+
+
+def analyze_supply_integrity(pool, rpc, config, alert=None, thesis=None, checked_at=None):
+    checked_at = checked_at or utc_now().isoformat().replace("+00:00", "Z")
+    if not config.get("supply_integrity_enabled", False):
+        return None
+    if not pool.token_address:
+        return supply_integrity_unverified("token mint is missing", checked_at)
+    if not claim_supply_integrity_budget(config, pool.token_address):
+        return supply_integrity_unverified("supply integrity scan budget deferred", checked_at)
+
+    errors = []
+    try:
+        supply = max(0.0, float(rpc.token_supply(pool.token_address) or 0))
+    except Exception as exc:
+        return supply_integrity_unverified(
+            "token supply could not be verified",
+            checked_at,
+            [exc],
+        )
+    if supply <= 0:
+        return supply_integrity_unverified("verified token supply is zero", checked_at)
+
+    limit = min(
+        20,
+        max(1, int(config.get("supply_integrity_top_accounts_limit", 20))),
+    )
+    try:
+        largest = rpc.largest_token_accounts(pool.token_address, limit=limit)
+    except Exception as exc:
+        return supply_integrity_unverified(
+            "largest token accounts could not be loaded",
+            checked_at,
+            [exc],
+        )
+    if not largest:
+        return supply_integrity_unverified("largest token account set is empty", checked_at)
+
+    addresses = [row.get("address") for row in largest if row.get("address")]
+    try:
+        accounts = rpc.multiple_accounts(addresses)
+    except Exception as exc:
+        accounts = []
+        errors.append(f"token-account owner resolution failed: {exc}")
+
+    resolved_rows = []
+    resolved_amount = 0.0
+    for index, row in enumerate(largest):
+        amount = max(0.0, float(row.get("amount") or 0))
+        account = accounts[index] if index < len(accounts) else None
+        owner = parsed_token_account_owner(account)
+        if owner:
+            resolved_amount += amount
+        excluded_reason = None
+        if owner == pool.pool_address or row.get("address") == pool.pool_address:
+            excluded_reason = "pool_reserve"
+        elif owner == SOLANA_INCINERATOR:
+            excluded_reason = "burn"
+        resolved_rows.append(
+            {
+                "token_account": row.get("address"),
+                "owner": owner or None,
+                "amount": amount,
+                "supply_pct": amount / supply * 100,
+                "excluded_reason": excluded_reason,
+            }
+        )
+
+    raw_amounts = [row["amount"] for row in resolved_rows]
+
+    def raw_top_pct(count):
+        return sum(raw_amounts[:count]) / supply * 100 if supply else None
+
+    observed_amount = sum(raw_amounts)
+    owner_resolution_pct = (
+        resolved_amount / observed_amount * 100 if observed_amount else 0.0
+    )
+    excluded_amount = sum(
+        row["amount"] for row in resolved_rows if row.get("excluded_reason")
+    )
+    pool_reserve_amount = sum(
+        row["amount"]
+        for row in resolved_rows
+        if row.get("excluded_reason") == "pool_reserve"
+    )
+    burn_amount = sum(
+        row["amount"]
+        for row in resolved_rows
+        if row.get("excluded_reason") == "burn"
+    )
+    circulating_estimate = max(0.0, supply - excluded_amount)
+    free_float_status = "approximate" if pool_reserve_amount > 0 and circulating_estimate > 0 else "unresolved"
+
+    owners = defaultdict(float)
+    for row in resolved_rows:
+        if row.get("owner") and not row.get("excluded_reason"):
+            owners[row["owner"]] += row["amount"]
+    owner_rows = sorted(owners.items(), key=lambda item: item[1], reverse=True)
+
+    def owner_top_pct(count):
+        if free_float_status != "approximate" or not circulating_estimate:
+            return None
+        return sum(amount for _owner, amount in owner_rows[:count]) / circulating_estimate * 100
+
+    cohort = supply_integrity_cohort_rows(alert=alert, thesis=thesis)
+    cohort_owners = {str(row.get("owner")) for row in cohort if row.get("owner")}
+    top_owner_rows = []
+    for owner, amount in owner_rows[:10]:
+        top_owner_rows.append(
+            {
+                "owner": owner,
+                "amount": amount,
+                "supply_pct": amount / supply * 100,
+                "estimated_circulating_pct": (
+                    amount / circulating_estimate * 100
+                    if free_float_status == "approximate" and circulating_estimate
+                    else None
+                ),
+                "signal_cohort": owner in cohort_owners,
+            }
+        )
+    cohort_top_amount = sum(
+        amount for owner, amount in owner_rows if owner in cohort_owners
+    )
+    cohort_top_supply_pct = cohort_top_amount / supply * 100 if supply else 0.0
+
+    linkage_groups = supply_integrity_linkage_groups(alert, thesis, config)
+    evidence_families = []
+    for family in ("common_funder", "common_executor", "priority_fee"):
+        family_groups = [group for group in linkage_groups if group.get("family") == family]
+        if not family_groups:
+            continue
+        evidence_families.append(
+            {
+                "family": family,
+                "groups": len(family_groups),
+                "wallets": len(
+                    {
+                        member
+                        for group in family_groups
+                        for member in group.get("members") or []
+                    }
+                ),
+                "supporting_only": family == "priority_fee",
+            }
+        )
+    family_count = len(evidence_families)
+    linked_clusters = supply_integrity_linked_clusters(cohort, linkage_groups, supply)
+    coordination_family_count = max(
+        (
+            len({family for family in row.get("families") or [] if family})
+            for row in linked_clusters
+        ),
+        default=0,
+    )
+    coordination_confirmed = coordination_family_count >= max(
+        2,
+        int(config.get("supply_integrity_coordination_min_families", 2)),
+    )
+    max_linked_current_pct = max(
+        (float(row.get("current_supply_pct") or 0) for row in linked_clusters),
+        default=0.0,
+    )
+    max_linked_signal_pct = max(
+        (float(row.get("signal_retained_supply_pct") or 0) for row in linked_clusters),
+        default=0.0,
+    )
+
+    raw_metrics = {
+        "top1_supply_pct": raw_top_pct(1),
+        "top5_supply_pct": raw_top_pct(5),
+        "top10_supply_pct": raw_top_pct(10),
+        "top20_supply_pct": raw_top_pct(20),
+    }
+    circulating_metrics = {
+        "top1_pct": owner_top_pct(1),
+        "top5_pct": owner_top_pct(5),
+        "top10_pct": owner_top_pct(10),
+    }
+    invariants = []
+    tolerance = max(1e-6, supply * 0.001)
+    if observed_amount > supply + tolerance:
+        invariants.append("largest-account total exceeds verified supply")
+    ordered_metrics = [
+        raw_metrics["top1_supply_pct"],
+        raw_metrics["top5_supply_pct"],
+        raw_metrics["top10_supply_pct"],
+        raw_metrics["top20_supply_pct"],
+    ]
+    if any(
+        left is not None and right is not None and left > right + 1e-9
+        for left, right in zip(ordered_metrics, ordered_metrics[1:])
+    ):
+        invariants.append("top-holder concentration is not monotonic")
+    if resolved_amount > observed_amount + tolerance:
+        invariants.append("resolved owner amount exceeds observed account amount")
+
+    min_resolution = max(
+        0.0,
+        float(config.get("supply_integrity_min_owner_resolution_pct", 80)),
+    )
+    if invariants:
+        data_quality_status = "invalid"
+    elif owner_resolution_pct >= min_resolution:
+        data_quality_status = "complete"
+    else:
+        data_quality_status = "partial"
+
+    estimated_top1 = circulating_metrics["top1_pct"]
+    estimated_top5 = circulating_metrics["top5_pct"]
+    concentrated = bool(
+        (
+            coordination_confirmed
+            and (
+                max_linked_current_pct
+                >= float(config.get("supply_integrity_concentrated_linked_supply_pct", 5))
+                or max_linked_signal_pct
+                >= float(config.get("supply_integrity_concentrated_signal_supply_pct", 3))
+            )
+        )
+        or (
+            estimated_top1 is not None
+            and estimated_top1
+            >= float(config.get("supply_integrity_concentrated_top1_pct", 20))
+        )
+        or (
+            estimated_top5 is not None
+            and estimated_top5
+            >= float(config.get("supply_integrity_concentrated_top5_pct", 50))
+        )
+    )
+    watch = bool(
+        family_count
+        or cohort_top_supply_pct
+        >= float(config.get("supply_integrity_watch_cohort_supply_pct", 3))
+        or (
+            estimated_top1 is not None
+            and estimated_top1
+            >= float(config.get("supply_integrity_watch_top1_pct", 10))
+        )
+        or (
+            estimated_top5 is not None
+            and estimated_top5
+            >= float(config.get("supply_integrity_watch_top5_pct", 30))
+        )
+    )
+    if data_quality_status in {"invalid", "unavailable"}:
+        status = "unverified"
+    elif concentrated:
+        status = "concentrated"
+    elif watch:
+        status = "watch"
+    elif free_float_status == "approximate" and data_quality_status == "complete":
+        status = "distributed"
+    else:
+        status = "unverified"
+
+    reasons = []
+    if coordination_confirmed:
+        reasons.append(
+            f"{coordination_family_count} independent wallet-link families agree "
+            "inside one connected cohort cluster"
+        )
+    elif family_count:
+        reasons.append(
+            f"{family_count} wallet-link families are present but do not confirm "
+            "the same connected cohort cluster"
+        )
+    if max_linked_current_pct:
+        reasons.append(f"largest linked cluster holds {max_linked_current_pct:.2f}% of supply")
+    if cohort_top_supply_pct:
+        reasons.append(f"signal cohort appears in the top-holder set with {cohort_top_supply_pct:.2f}% of supply")
+    if (
+        estimated_top1 is not None
+        and estimated_top1
+        >= float(config.get("supply_integrity_watch_top1_pct", 10))
+    ):
+        reasons.append(
+            f"estimated circulating top owner holds {estimated_top1:.2f}%"
+        )
+    if (
+        estimated_top5 is not None
+        and estimated_top5
+        >= float(config.get("supply_integrity_watch_top5_pct", 30))
+    ):
+        reasons.append(
+            f"estimated circulating top five hold {estimated_top5:.2f}%"
+        )
+    if free_float_status != "approximate":
+        reasons.append("pool reserve was not resolved, so free-float concentration is not asserted")
+    if data_quality_status != "complete":
+        reasons.append(f"owner resolution is {owner_resolution_pct:.0f}%")
+
+    return {
+        "version": 1,
+        "checked_at": checked_at,
+        "status": status,
+        "data_quality_status": data_quality_status,
+        "reason": "; ".join(reasons) or "no linked concentration was found in the checked holder set",
+        "token_supply": supply,
+        "largest_accounts_checked": len(resolved_rows),
+        "observed_top_accounts_supply_pct": observed_amount / supply * 100,
+        "owner_resolution_pct": owner_resolution_pct,
+        "raw_concentration": raw_metrics,
+        "free_float_status": free_float_status,
+        "excluded_supply_pct": excluded_amount / supply * 100,
+        "pool_reserve_supply_pct": pool_reserve_amount / supply * 100,
+        "burn_supply_pct": burn_amount / supply * 100,
+        "estimated_circulating_supply": (
+            circulating_estimate if free_float_status == "approximate" else None
+        ),
+        "estimated_circulating_concentration": circulating_metrics,
+        "cohort_top_holder_supply_pct": cohort_top_supply_pct,
+        "max_linked_cluster_current_supply_pct": max_linked_current_pct,
+        "max_linked_cluster_signal_supply_pct": max_linked_signal_pct,
+        "coordination_confirmed": coordination_confirmed,
+        "coordination_family_count": coordination_family_count,
+        "evidence_family_count": family_count,
+        "evidence_families": evidence_families,
+        "linkage_groups": linkage_groups,
+        "linked_clusters": linked_clusters[:5],
+        "top_owners": top_owner_rows,
+        "invariants": invariants,
+        "errors": errors,
+        "limitations": [
+            "free float is approximate only when a pool-controlled reserve is resolved",
+            "CEX and terminal labels require a maintained address-label source",
+            "priority-fee matches are supporting evidence only",
+        ],
+    }
+
+
+def compact_supply_integrity_snapshot(snapshot):
+    if not isinstance(snapshot, dict):
+        return None
+    fields = {
+        "checked_at",
+        "status",
+        "data_quality_status",
+        "owner_resolution_pct",
+        "observed_top_accounts_supply_pct",
+        "pool_reserve_supply_pct",
+        "free_float_status",
+        "cohort_top_holder_supply_pct",
+        "max_linked_cluster_current_supply_pct",
+        "max_linked_cluster_signal_supply_pct",
+        "coordination_confirmed",
+        "coordination_family_count",
+        "evidence_family_count",
+    }
+    return {key: snapshot.get(key) for key in fields if key in snapshot}
+
+
+def update_thesis_supply_integrity(thesis, snapshot, config):
+    if not isinstance(thesis, dict) or not isinstance(snapshot, dict):
+        return thesis
+    previous = thesis.get("supply_integrity")
+    if (
+        snapshot.get("data_quality_status") == "unavailable"
+        and isinstance(previous, dict)
+        and previous.get("data_quality_status") != "unavailable"
+    ):
+        preserved = copy.deepcopy(previous)
+        reason = str(snapshot.get("reason") or "supply integrity refresh failed")
+        preserved["refresh_status"] = (
+            "deferred" if "budget deferred" in reason else "failed"
+        )
+        preserved["refresh_attempted_at"] = snapshot.get("checked_at")
+        preserved["refresh_error"] = reason
+        thesis["supply_integrity"] = preserved
+        return thesis
+    thesis["supply_integrity"] = snapshot
+    compact = compact_supply_integrity_snapshot(snapshot)
+    history = [
+        item
+        for item in thesis.get("supply_integrity_history") or []
+        if isinstance(item, dict)
+        and item.get("checked_at") != compact.get("checked_at")
+    ]
+    history.append(compact)
+    limit = max(1, int(config.get("supply_integrity_history_limit", 56)))
+    thesis["supply_integrity_history"] = sorted(
+        history,
+        key=lambda item: parse_timestamp(item.get("checked_at")),
+    )[-limit:]
+    return thesis
+
+
+def supply_integrity_refresh_due(thesis, config, now=None):
+    snapshot = (thesis or {}).get("supply_integrity") or {}
+    attempted_at = parse_timestamp(snapshot.get("refresh_attempted_at"))
+    if snapshot.get("refresh_status") in {"deferred", "failed"} and attempted_at:
+        retry_minutes = float(config.get("supply_integrity_retry_minutes", 60))
+        return int(now or time.time()) - attempted_at >= max(5.0, retry_minutes) * 60
+    checked_at = parse_timestamp(snapshot.get("checked_at"))
+    if not checked_at:
+        return True
+    minutes = float(config.get("supply_integrity_refresh_minutes", 180))
+    if snapshot.get("data_quality_status") != "complete":
+        minutes = min(
+            minutes,
+            float(config.get("supply_integrity_retry_minutes", 60)),
+        )
+    return int(now or time.time()) - checked_at >= max(5.0, minutes) * 60
+
+
 def build_reactivation_wave_alerts(pool, swaps, config, rpc, state=None):
     if not reactivation_wave_enabled(config) or not pool.token_address:
         return []
@@ -7507,6 +8324,14 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc, state=None):
                 "quality_metrics": quality_metrics,
             }
         )
+        if config.get("supply_integrity_enabled", False):
+            alert["supply_integrity"] = analyze_supply_integrity(
+                pool,
+                rpc,
+                config,
+                alert=alert,
+                checked_at=created_at,
+            )
         alerts.append(alert)
     if not coverage_available:
         raise WaveDataUnavailable(
@@ -11423,6 +12248,18 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
                 "signal_thesis_invalidation_confirmations_required",
                 2,
             ),
+            "supply_integrity_enabled": config.get(
+                "supply_integrity_enabled",
+                False,
+            ),
+            "supply_integrity_refresh_minutes": config.get(
+                "supply_integrity_refresh_minutes",
+                180,
+            ),
+            "supply_integrity_min_owner_resolution_pct": config.get(
+                "supply_integrity_min_owner_resolution_pct",
+                80,
+            ),
         },
         "stats": {
             "universe_pools": len(universe),
@@ -11439,6 +12276,9 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "gmgn_ath": (state.get("maintenance") or {}).get("gmgn_ath", {}),
             "caught_market_refresh": (state.get("maintenance") or {}).get("caught_market_refresh", {}),
             "signal_outcomes": (state.get("maintenance") or {}).get("signal_outcomes", {}),
+            "supply_integrity": (
+                config.get("_selection_stats") or {}
+            ).get("supply_integrity", {}),
             "deleted_tokens": {
                 "tokens": len(deleted_tokens["tokens"]),
                 "pools": len(deleted_tokens["pools"]),
@@ -11673,6 +12513,16 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
         "remaining": int(config["max_wallet_classifications_per_scan"]),
         "deep_audits_remaining": int(config.get("helius_deep_audit_max_pools_per_scan", 0)),
     }
+    config["_supply_integrity_budget"] = {
+        "remaining": max(
+            0,
+            int(config.get("supply_integrity_max_tokens_per_scan", 12)),
+        ),
+        "used": 0,
+        "deferred": 0,
+        "claimed_tokens": {},
+        "deferred_tokens": {},
+    }
 
     all_alerts = []
     summaries = []
@@ -11780,6 +12630,11 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
         time.sleep(0.05)
 
     selection_stats["completed"] = len(summaries)
+    supply_budget = config.get("_supply_integrity_budget") or {}
+    selection_stats["supply_integrity"] = {
+        key: int(supply_budget.get(key) or 0)
+        for key in ("remaining", "used", "deferred")
+    }
     all_alerts = enrich_alerts_with_social(http, all_alerts, config, state)
     return universe, summaries, all_alerts
 
