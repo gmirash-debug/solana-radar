@@ -12706,6 +12706,10 @@ def run_once(config, lane_name=None):
             lane_config,
             base_universe=shared_universe,
         )
+        # scan_with_config attaches run-time diagnostics such as selection and
+        # supply-integrity budget usage. Keep the exported effective config in
+        # sync so the top-level report exposes those diagnostics too.
+        lane_configs[lane_key] = dict(lane_config)
         all_alerts.extend(lane_alerts)
         for key in ("_gmgn_error", "_discovery_stats"):
             if lane_config.get(key):
