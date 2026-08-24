@@ -85,11 +85,22 @@ class ScannerCoreTests(unittest.TestCase):
                 "events": [{"signature": "private-event"}],
                 "common_funders": [{"source": "private-funder", "wallets": 2}],
                 "wave": {"top_buyers": [{"owner": "private-wallet"}], "net_buy_sol": 10},
+                "supply_integrity": {
+                    "status": "watch",
+                    "top_owners": [{"owner": "private-holder"}],
+                },
             }],
             "signal_theses": [{
                 "token_address": mint,
                 "cohort_wallets": [{"owner": "private-wallet"}],
                 "source_score": 80,
+                "supply_integrity": {
+                    "status": "watch",
+                    "top_owners": [{"owner": "private-holder"}],
+                },
+                "supply_integrity_history": [
+                    {"checked_at": "2026-07-31T12:00:00Z"}
+                ],
             }],
             "universe": [{"token_address": mint, "mcap_usd": 100}],
             "active_pools": [],
@@ -132,9 +143,13 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(fallback["history"], [])
         self.assertNotIn("events", snapshot["report"]["alerts"][0])
         self.assertEqual(snapshot["report"]["alerts"][0]["events_count"], 1)
+        self.assertNotIn("top_owners", snapshot["report"]["alerts"][0]["supply_integrity"])
         self.assertNotIn("cohort_wallets", snapshot["report"]["signal_theses"][0])
+        self.assertNotIn("top_owners", snapshot["report"]["signal_theses"][0]["supply_integrity"])
+        self.assertNotIn("supply_integrity_history", snapshot["report"]["signal_theses"][0])
         self.assertEqual(detail["detail_current_alerts"][0]["events"][0]["signature"], "private-event")
         self.assertEqual(detail["detail_signal_theses"][0]["cohort_wallets"][0]["owner"], "private-wallet")
+        self.assertEqual(detail["detail_signal_theses"][0]["supply_integrity"]["top_owners"][0]["owner"], "private-holder")
 
     def test_history_ledger_is_authenticated_only_and_does_not_call_reduced_balance_a_sale(self):
         mint = "11111111111111111111111111111111"
@@ -641,6 +656,48 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(sum(chainstack.calls.values()), 0)
         self.assertEqual(alchemy.calls["getTokenAccountsByOwner"], 1)
 
+    def test_largest_accounts_and_owner_resolution_route_through_rpc(self):
+        chainstack = scanner.ChainstackRpc(
+            "https://chainstack.invalid",
+            max_retries=0,
+        )
+        chainstack.session.post = mock.Mock(
+            side_effect=[
+                rpc_response({
+                    "value": [
+                        {
+                            "address": "token-account-a",
+                            "amount": "2500",
+                            "decimals": 2,
+                        }
+                    ]
+                }),
+                rpc_response({
+                    "value": [
+                        {
+                            "data": {
+                                "parsed": {
+                                    "info": {"owner": "owner-a"}
+                                }
+                            }
+                        }
+                    ]
+                }),
+            ]
+        )
+        rpc = scanner.RoutedSolanaRpc(
+            [chainstack],
+            standard_order=["chainstack"],
+        )
+
+        largest = rpc.largest_token_accounts("mint")
+        accounts = rpc.multiple_accounts(["token-account-a"])
+
+        self.assertEqual(largest[0]["amount"], 25)
+        self.assertEqual(scanner.parsed_token_account_owner(accounts[0]), "owner-a")
+        self.assertEqual(chainstack.calls["getTokenLargestAccounts"], 1)
+        self.assertEqual(chainstack.calls["getMultipleAccounts"], 1)
+
     def test_gmgn_trenches_pool_normalization(self):
         pool = scanner.gmgn_pool_from_trenches_item(
             {
@@ -887,6 +944,44 @@ class ScannerCoreTests(unittest.TestCase):
             "token_sender": "buyer",
         }
         self.assertEqual(scanner.wave_sell_owner(delegated_sell, {"buyer"}), "buyer")
+
+    def test_pool_swap_preserves_priority_fee_fingerprint(self):
+        tx = {
+            "blockTime": 1_700_000_000,
+            "transaction": {
+                "signatures": ["signature-a"],
+                "message": {
+                    "accountKeys": [
+                        {"pubkey": "buyer", "signer": True},
+                        {"pubkey": "pool", "signer": False},
+                    ]
+                },
+            },
+            "meta": {
+                "err": None,
+                "fee": 12_000,
+                "preBalances": [2_000_000_000, 0],
+                "postBalances": [1_000_000_000, 0],
+                "preTokenBalances": [
+                    {"accountIndex": 0, "mint": "mint", "owner": "buyer", "uiTokenAmount": {"amount": "0", "decimals": 0}},
+                    {"accountIndex": 1, "mint": "mint", "owner": "pool", "uiTokenAmount": {"amount": "1000", "decimals": 0}},
+                    {"accountIndex": 1, "mint": scanner.SOL_MINT, "owner": "pool", "uiTokenAmount": {"amount": "100", "decimals": 0}},
+                ],
+                "postTokenBalances": [
+                    {"accountIndex": 0, "mint": "mint", "owner": "buyer", "uiTokenAmount": {"amount": "100", "decimals": 0}},
+                    {"accountIndex": 1, "mint": "mint", "owner": "pool", "uiTokenAmount": {"amount": "900", "decimals": 0}},
+                    {"accountIndex": 1, "mint": scanner.SOL_MINT, "owner": "pool", "uiTokenAmount": {"amount": "101", "decimals": 0}},
+                ],
+            },
+        }
+        swap = scanner.parse_pool_swap(
+            tx,
+            scanner.Pool(pool_address="pool", token_address="mint"),
+        )
+
+        self.assertEqual(swap["kind"], "buy")
+        self.assertEqual(swap["tx_fee_lamports"], 12_000)
+        self.assertEqual(swap["priority_fee_estimate_lamports"], 7_000)
 
     def test_routed_recipient_is_not_reported_as_wallet_link(self):
         score = scanner.score_events(
@@ -2970,6 +3065,319 @@ class ScannerCoreTests(unittest.TestCase):
                 {"lane": "reactivation", "reactivation_wave_enabled": True},
                 rpc,
             )
+
+    def test_supply_integrity_requires_two_independent_link_families(self):
+        class IntegrityRpc:
+            def token_supply(self, _mint):
+                return 1_000
+
+            def largest_token_accounts(self, _mint, limit=20):
+                amounts = [300, 120, 80, 50, 40, 30, 25, 20, 15, 10]
+                return [
+                    {"address": f"account-{index}", "amount": amount}
+                    for index, amount in enumerate(amounts[:limit])
+                ]
+
+            def multiple_accounts(self, addresses):
+                owners = ["pool", "wallet-a", "wallet-b", "wallet-c", "wallet-d", "wallet-e", "wallet-f", "wallet-g", "wallet-h", "wallet-i"]
+                return [
+                    {"data": {"parsed": {"info": {"owner": owners[index]}}}}
+                    for index, _address in enumerate(addresses)
+                ]
+
+        alert = {
+            "common_funders": [{
+                "source": "funder-a",
+                "members": ["wallet-a", "wallet-b"],
+            }],
+            "events": [
+                {
+                    "kind": "buy",
+                    "signer": owner,
+                    "token_recipient": owner,
+                    "priority_fee_estimate_lamports": 10_000,
+                }
+                for owner in ("wallet-a", "wallet-b", "wallet-c")
+            ],
+            "wave": {
+                "top_buyers": [
+                    {"owner": "wallet-a", "current_balance": 120, "retained_from_wave": 100},
+                    {"owner": "wallet-b", "current_balance": 80, "retained_from_wave": 70},
+                    {"owner": "wallet-c", "current_balance": 50, "retained_from_wave": 40},
+                ]
+            },
+        }
+        snapshot = scanner.analyze_supply_integrity(
+            scanner.Pool(pool_address="pool", token_address="mint"),
+            IntegrityRpc(),
+            {
+                "supply_integrity_enabled": True,
+                "supply_integrity_priority_fee_min_wallets": 3,
+                "supply_integrity_priority_fee_min_wallet_share": 0.25,
+            },
+            alert=alert,
+            checked_at="2026-08-25T12:00:00Z",
+        )
+
+        self.assertTrue(snapshot["coordination_confirmed"])
+        self.assertEqual(snapshot["coordination_family_count"], 2)
+        self.assertEqual(snapshot["evidence_family_count"], 2)
+        self.assertEqual(snapshot["status"], "concentrated")
+        self.assertEqual(snapshot["pool_reserve_supply_pct"], 30)
+        self.assertAlmostEqual(snapshot["cohort_top_holder_supply_pct"], 25)
+        self.assertAlmostEqual(snapshot["max_linked_cluster_current_supply_pct"], 20)
+
+    def test_priority_fee_alone_is_supporting_evidence_not_coordination(self):
+        class IntegrityRpc:
+            def token_supply(self, _mint):
+                return 1_000
+
+            def largest_token_accounts(self, _mint, limit=20):
+                return [
+                    {"address": "pool-account", "amount": 300},
+                    *[
+                        {"address": f"account-{index}", "amount": 50}
+                        for index in range(1, 11)
+                    ],
+                ][:limit]
+
+            def multiple_accounts(self, addresses):
+                owners = ["pool", *[f"wallet-{index}" for index in range(1, 11)]]
+                return [
+                    {"data": {"parsed": {"info": {"owner": owners[index]}}}}
+                    for index, _address in enumerate(addresses)
+                ]
+
+        owners = ["wallet-1", "wallet-2", "wallet-3"]
+        snapshot = scanner.analyze_supply_integrity(
+            scanner.Pool(pool_address="pool", token_address="mint"),
+            IntegrityRpc(),
+            {
+                "supply_integrity_enabled": True,
+                "supply_integrity_priority_fee_min_wallets": 3,
+                "supply_integrity_priority_fee_min_wallet_share": 0.25,
+            },
+            alert={
+                "events": [
+                    {
+                        "kind": "buy",
+                        "signer": owner,
+                        "token_recipient": owner,
+                        "priority_fee_estimate_lamports": 20_000,
+                    }
+                    for owner in owners
+                ],
+                "wave": {
+                    "top_buyers": [
+                        {"owner": owner, "current_balance": 50, "retained_from_wave": 40}
+                        for owner in owners
+                    ]
+                },
+            },
+        )
+
+        self.assertFalse(snapshot["coordination_confirmed"])
+        self.assertEqual(snapshot["coordination_family_count"], 0)
+        self.assertEqual(snapshot["evidence_family_count"], 1)
+        self.assertTrue(snapshot["evidence_families"][0]["supporting_only"])
+
+    def test_disjoint_link_families_do_not_confirm_coordination(self):
+        class IntegrityRpc:
+            def token_supply(self, _mint):
+                return 1_000
+
+            def largest_token_accounts(self, _mint, limit=20):
+                return [
+                    {"address": "pool-account", "amount": 300},
+                    *[
+                        {"address": f"account-{index}", "amount": 50}
+                        for index in range(1, 9)
+                    ],
+                ][:limit]
+
+            def multiple_accounts(self, addresses):
+                owners = ["pool", *[f"wallet-{index}" for index in range(1, 9)]]
+                return [
+                    {"data": {"parsed": {"info": {"owner": owners[index]}}}}
+                    for index, _address in enumerate(addresses)
+                ]
+
+        snapshot = scanner.analyze_supply_integrity(
+            scanner.Pool(pool_address="pool", token_address="mint"),
+            IntegrityRpc(),
+            {"supply_integrity_enabled": True},
+            alert={
+                "common_funders": [{
+                    "source": "funder-a",
+                    "members": ["wallet-1", "wallet-2"],
+                }],
+                "common_executors": [{
+                    "executor": "executor-b",
+                    "members": ["wallet-3", "wallet-4"],
+                }],
+                "wave": {
+                    "top_buyers": [
+                        {
+                            "owner": f"wallet-{index}",
+                            "current_balance": 50,
+                            "retained_from_wave": 40,
+                        }
+                        for index in range(1, 5)
+                    ]
+                },
+            },
+        )
+
+        self.assertEqual(snapshot["evidence_family_count"], 2)
+        self.assertEqual(snapshot["coordination_family_count"], 1)
+        self.assertFalse(snapshot["coordination_confirmed"])
+        self.assertIn("do not confirm the same connected cohort cluster", snapshot["reason"])
+
+    def test_holder_concentration_reason_names_the_trigger(self):
+        rpc = mock.Mock()
+        rpc.token_supply.return_value = 1_000
+        rpc.largest_token_accounts.return_value = [
+            {"address": "pool-account", "amount": 300},
+            {"address": "whale-account", "amount": 200},
+            {"address": "burn-account", "amount": 100},
+            {"address": "holder-a", "amount": 50},
+            {"address": "holder-b", "amount": 40},
+            {"address": "holder-c", "amount": 30},
+        ]
+        rpc.multiple_accounts.return_value = [
+            {"data": {"parsed": {"info": {"owner": "pool"}}}},
+            {"data": {"parsed": {"info": {"owner": "whale"}}}},
+            {"data": {"parsed": {"info": {"owner": scanner.SOLANA_INCINERATOR}}}},
+            {"data": {"parsed": {"info": {"owner": "wallet-a"}}}},
+            {"data": {"parsed": {"info": {"owner": "wallet-b"}}}},
+            {"data": {"parsed": {"info": {"owner": "wallet-c"}}}},
+        ]
+
+        snapshot = scanner.analyze_supply_integrity(
+            scanner.Pool(pool_address="pool", token_address="mint"),
+            rpc,
+            {"supply_integrity_enabled": True},
+        )
+
+        self.assertEqual(snapshot["status"], "concentrated")
+        self.assertEqual(snapshot["burn_supply_pct"], 10)
+        self.assertEqual(snapshot["estimated_circulating_supply"], 600)
+        self.assertIn("estimated circulating top owner holds", snapshot["reason"])
+
+    def test_supply_integrity_quarantines_impossible_holder_total(self):
+        rpc = mock.Mock()
+        rpc.token_supply.return_value = 100
+        rpc.largest_token_accounts.return_value = [
+            {"address": "account-a", "amount": 80},
+            {"address": "account-b", "amount": 30},
+        ]
+        rpc.multiple_accounts.return_value = [
+            {"data": {"parsed": {"info": {"owner": "wallet-a"}}}},
+            {"data": {"parsed": {"info": {"owner": "wallet-b"}}}},
+        ]
+
+        snapshot = scanner.analyze_supply_integrity(
+            scanner.Pool(pool_address="pool", token_address="mint"),
+            rpc,
+            {"supply_integrity_enabled": True},
+        )
+
+        self.assertEqual(snapshot["status"], "unverified")
+        self.assertEqual(snapshot["data_quality_status"], "invalid")
+        self.assertIn("largest-account total exceeds verified supply", snapshot["invariants"])
+
+    def test_supply_integrity_budget_counts_unique_tokens(self):
+        config = {
+            "_supply_integrity_budget": {
+                "remaining": 1,
+                "used": 0,
+                "deferred": 0,
+                "claimed_tokens": {},
+                "deferred_tokens": {},
+            }
+        }
+
+        self.assertTrue(scanner.claim_supply_integrity_budget(config, "mint-a"))
+        self.assertTrue(scanner.claim_supply_integrity_budget(config, "mint-a"))
+        self.assertFalse(scanner.claim_supply_integrity_budget(config, "mint-b"))
+        self.assertFalse(scanner.claim_supply_integrity_budget(config, "mint-b"))
+        self.assertEqual(config["_supply_integrity_budget"]["used"], 1)
+        self.assertEqual(config["_supply_integrity_budget"]["deferred"], 1)
+
+    def test_supply_integrity_refresh_failure_preserves_last_verified_snapshot(self):
+        thesis = {
+            "supply_integrity": {
+                "checked_at": "2026-08-25T10:00:00Z",
+                "status": "distributed",
+                "data_quality_status": "complete",
+            },
+            "supply_integrity_history": [{
+                "checked_at": "2026-08-25T10:00:00Z",
+                "status": "distributed",
+                "data_quality_status": "complete",
+            }],
+        }
+        failed = scanner.supply_integrity_unverified(
+            "largest token accounts could not be loaded",
+            "2026-08-25T13:00:00Z",
+        )
+
+        scanner.update_thesis_supply_integrity(thesis, failed, {})
+
+        self.assertEqual(thesis["supply_integrity"]["status"], "distributed")
+        self.assertEqual(thesis["supply_integrity"]["checked_at"], "2026-08-25T10:00:00Z")
+        self.assertEqual(thesis["supply_integrity"]["refresh_status"], "failed")
+        self.assertEqual(len(thesis["supply_integrity_history"]), 1)
+        self.assertFalse(
+            scanner.supply_integrity_refresh_due(
+                thesis,
+                {"supply_integrity_retry_minutes": 60},
+                now=scanner.parse_timestamp("2026-08-25T13:30:00Z"),
+            )
+        )
+        self.assertTrue(
+            scanner.supply_integrity_refresh_due(
+                thesis,
+                {"supply_integrity_retry_minutes": 60},
+                now=scanner.parse_timestamp("2026-08-25T14:01:00Z"),
+            )
+        )
+
+    def test_signal_thesis_persists_supply_integrity_snapshot(self):
+        snapshot = {
+            "checked_at": "2026-08-25T12:00:00Z",
+            "status": "watch",
+            "data_quality_status": "complete",
+            "cohort_top_holder_supply_pct": 4.2,
+            "top_owners": [{"owner": "wallet-a", "supply_pct": 4.2}],
+        }
+        thesis = scanner.signal_thesis_from_alert(
+            {
+                "created_at": "2026-08-25T12:00:00Z",
+                "signal_family": "reactivation_wave",
+                "pool": {"pool_address": "pool", "token_address": "mint"},
+                "wave": {
+                    "supply": 1_000,
+                    "balance_coverage_pct": 100,
+                    "top_buyers": [{
+                        "owner": "wallet-a",
+                        "token_bought": 42,
+                        "current_balance": 42,
+                        "retained_from_wave": 42,
+                    }],
+                },
+                "supply_integrity": snapshot,
+            },
+            {},
+        )
+        public = scanner.public_signal_thesis(thesis)
+
+        self.assertEqual(public["supply_integrity"]["status"], "watch")
+        self.assertEqual(len(public["supply_integrity_history"]), 1)
+        self.assertEqual(
+            public["supply_integrity_history"][0]["cohort_top_holder_supply_pct"],
+            4.2,
+        )
 
     def test_reactivation_stages_remove_mcap_floor_and_scale_thresholds(self):
         config = scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {})

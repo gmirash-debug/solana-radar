@@ -89,6 +89,11 @@ one primary narrative per caught token, optional secondary flavor, source-ranked
 token facts, and explicit labels for project/news overlays, ATH source, and
 social status.
 
+Holder concentration and wallet-link verification follow
+[`SUPPLY_INTEGRITY_PROTOCOL.md`](SUPPLY_INTEGRITY_PROTOCOL.md). The protocol
+keeps supply concentration, cohort retention, coordination evidence, and data
+quality separate instead of compressing them into one unexplained score.
+
 ## Keep watching
 
 ```bash
@@ -170,7 +175,7 @@ the deletion index to D1.
 
 Production lane:
 
-- `reactivation`: `15d+`, any positive mcap up to `$5m`, `liq >=3k`, and at least `$100` of reported hourly volume. The market rank combines 5-minute burst velocity with 1-hour activity. Stage-balanced scan capacity prevents `ignition` and `early` pools from being crowded out by larger tokens. A signal still requires distributed net buying and current holder retention. ATH is entry-risk context, not a discovery gate.
+- `reactivation`: `1d-15d`, any positive mcap up to `$5m`, `liq >=3k`, and at least `$100` of reported hourly volume. The market rank combines 5-minute burst velocity with 1-hour activity. Stage-balanced scan capacity prevents `ignition` and `early` pools from being crowded out by larger tokens. A signal still requires distributed net buying and current holder retention. ATH is entry-risk context, not a discovery gate.
 
 RPC roles and safeguards:
 
@@ -190,6 +195,17 @@ Signal quality:
   resolution is high-confidence.
 - Top wave buyers are checked for common funders and common routed executors.
   Connected addresses count as one effective buyer cluster.
+- Each caught cohort gets a separate Supply Integrity snapshot: verified token
+  supply, the 20 largest token accounts, resolved owners, raw concentration,
+  estimated circulating concentration when the pool reserve is identifiable,
+  cohort overlap with top holders, and linked-wallet supply concentration.
+- A matching priority fee is supporting evidence only. Coordinated supply is
+  asserted only when at least two independent evidence families converge in the
+  same connected cohort cluster; missing owner or pool-reserve data is shown as
+  unverified instead of being guessed.
+- Full holder and linkage evidence is stored in the token detail document in
+  D1. The main dashboard payload keeps only the compact decision fields, and up
+  to 56 point-in-time snapshots preserve roughly one week of three-hour checks.
 - A ready quiet-regime baseline is required for actionable Reactivation.
 - First-catch outcomes are tracked at 1h, 6h, 24h, and 72h, including maximum
   favorable and adverse movement.

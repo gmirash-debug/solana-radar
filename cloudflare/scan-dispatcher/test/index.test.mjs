@@ -175,12 +175,22 @@ test("public dashboard payload excludes per-wallet event detail", () => {
       events: [{ signature: "private-event" }],
       common_funders: [{ source: "private-funder" }],
       wave: { net_buy_sol: 10, top_buyers: [{ owner: "wallet-a" }] },
+      supply_integrity: {
+        status: "watch",
+        top_owners: [{ owner: "private-holder" }],
+        linkage_groups: [{ members: ["private-wallet-a", "private-wallet-b"] }],
+      },
     }],
     signal_theses: [{
       token_address: "token-a",
       signal_at: "2026-08-13T02:00:00Z",
       cohort_wallets: [{ owner: "wallet-a" }],
       source_score: 80,
+      supply_integrity: {
+        status: "watch",
+        top_owners: [{ owner: "private-holder" }],
+      },
+      supply_integrity_history: [{ checked_at: "2026-08-13T02:00:00Z" }],
     }],
   });
   assert.equal(compact.alerts[0].events, undefined);
@@ -188,7 +198,11 @@ test("public dashboard payload excludes per-wallet event detail", () => {
   assert.equal(compact.alerts[0].common_funders, undefined);
   assert.equal(compact.alerts[0].wave.top_buyers, undefined);
   assert.equal(compact.alerts[0].wave.top_buyers_count, 1);
+  assert.equal(compact.alerts[0].supply_integrity.status, "watch");
+  assert.equal(compact.alerts[0].supply_integrity.top_owners, undefined);
   assert.equal(compact.signal_theses[0].cohort_wallets, undefined);
+  assert.equal(compact.signal_theses[0].supply_integrity.top_owners, undefined);
+  assert.equal(compact.signal_theses[0].supply_integrity_history, undefined);
   assert.equal(compact.signal_theses[0].source_score, 80);
 });
 

@@ -201,6 +201,13 @@ const TIER_META = {
   },
 };
 
+const SUPPLY_INTEGRITY_META = {
+  distributed: { label: "Supply distributed", tone: "good" },
+  watch: { label: "Supply watch", tone: "warn" },
+  concentrated: { label: "Supply concentrated", tone: "bad" },
+  unverified: { label: "Supply unverified", tone: "warn" },
+};
+
 const WORKFLOW_META = {
   active: {
     label: "Active",
@@ -420,6 +427,21 @@ function normalizeFilterName(name) {
 
 function chip(text, tone = "") {
   return `<span class="chip ${tone}">${esc(text)}</span>`;
+}
+
+function supplyIntegrityMeta(value) {
+  const status = typeof value === "string"
+    ? value
+    : value?.supplyIntegrity?.status || value?.status || "unverified";
+  return SUPPLY_INTEGRITY_META[status] || SUPPLY_INTEGRITY_META.unverified;
+}
+
+function supplyIntegrityChip(token, compact = false) {
+  const integrity = token?.supplyIntegrity;
+  const meta = supplyIntegrityMeta(integrity);
+  const label = !integrity && compact ? "Supply pending" : meta.label;
+  const tone = integrity ? meta.tone : "warn";
+  return `<span class="chip ${esc(tone)} supply-integrity-chip" title="Holder concentration and wallet-link evidence">${esc(label)}</span>`;
 }
 
 function tokenAvatar(token, compact = false) {
@@ -1010,6 +1032,12 @@ function buildTokenSignals() {
       || thesesByKey.get(scopedCatchPool.pool_address)
       || thesesByKey.get(token.pool_address)
       || null;
+    token.supplyIntegrity = token.signalThesis?.supply_integrity
+      || [...token.alerts].reverse().find((alert) => alert.supply_integrity)?.supply_integrity
+      || null;
+    token.supplyIntegrityHistory = Array.isArray(token.signalThesis?.supply_integrity_history)
+      ? token.signalThesis.supply_integrity_history
+      : [];
     token.tokenIntel = [...token.alerts].reverse().find((alert) => alert.token_intel)?.token_intel || null;
     token.imageUrl = token.tokenIntel?.dex?.image || "";
     const observations = observationsByToken.get(token.key) || [];
@@ -1956,6 +1984,7 @@ function renderTokenRow(token) {
         </div>
         <div class="chips">
           ${primaryStatusChip(token)}
+          ${supplyIntegrityChip(token)}
           ${operationalFlagChips(token)}
           ${chip(`${token.narrative.primary} - ${token.narrative.tilt}`, narrativeTone(token.narrative))}
           ${token.narrative.secondary.slice(0, 1).map((name) => chip(`${name} flavor`)).join("")}
@@ -2552,6 +2581,12 @@ function renderScannerReason(token) {
 
 function renderRiskFlags(token) {
   const flags = [];
+  const integrity = token.supplyIntegrity || {};
+  if (integrity.status === "concentrated") flags.push(chip("linked supply concentration", "bad"));
+  if (integrity.status === "watch") flags.push(chip("supply needs review", "warn"));
+  if (!token.supplyIntegrity || integrity.status === "unverified") flags.push(chip("supply integrity unverified", "warn"));
+  if (integrity.data_quality_status === "invalid") flags.push(chip("holder snapshot failed validation", "bad"));
+  if (integrity.refresh_status) flags.push(chip("supply refresh pending", "warn"));
   if (token.currentSignalTier === "late_chase") flags.push(chip("late entry", "bad"));
   if (token.currentSignalTier === "noise") flags.push(chip("low-confidence event", "bad"));
   if (token.lifecycleStatus === "weakening") flags.push(chip("original buyers are reducing holdings", "warn"));
@@ -2673,6 +2708,7 @@ function renderOverviewTab(token) {
       ${token.activeEpisode ? `<div class="kv"><span>Original catch</span><span>${renderOriginalCatch(token)}</span></div>` : ""}
       <div class="kv"><span>Why caught</span><span>${esc(renderScannerReason(token))}</span></div>
       <div class="kv"><span>Cohort now</span><span>${renderThesisSummary(token)}</span></div>
+      <div class="kv"><span>Supply integrity</span><span>${supplyIntegrityChip(token)}${token.supplyIntegrity?.reason ? ` <span class="muted-inline">${esc(token.supplyIntegrity.reason)}</span>` : ""}</span></div>
       ${renderWaveLine(token)}
       <div class="kv"><span>Market phase</span><span>${renderMarketPhaseLine(token)}</span></div>
       <div class="kv"><span>Risk flags</span><span>${renderRiskFlags(token)}</span></div>
@@ -2683,6 +2719,166 @@ function renderOverviewTab(token) {
       <div class="kv"><span>Primary</span><span>${renderNarrativeLine(token)}</span></div>
       <div class="kv"><span>Thesis</span><span>${renderLoreProof(token)}</span></div>
       <div class="kv"><span>Proof basis</span><span>${renderEvidenceLine(token)}</span></div>
+    </section>
+  `;
+}
+
+function supplyPct(value, digits = 1) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "-";
+  return `${Math.max(0, Number(value)).toFixed(digits)}%`;
+}
+
+function supplyEvidenceLabel(family) {
+  return {
+    common_funder: "Common funder",
+    common_executor: "Common executor",
+    priority_fee: "Priority-fee fingerprint",
+  }[family] || family || "Unknown";
+}
+
+function renderSupplyTopOwners(token, integrity) {
+  const rows = Array.isArray(integrity.top_owners) ? integrity.top_owners : [];
+  if (!rows.length) {
+    return state.tokenDetailLoadingKeys.has(token.key)
+      ? `<div class="empty compact">Loading holder ownership...</div>`
+      : `<div class="empty compact">Holder ownership detail is not available in this snapshot.</div>`;
+  }
+  return `
+    <div class="table-wrap compact-table">
+      <table>
+        <thead><tr><th>Owner</th><th>Total supply</th><th>Est. circulating</th><th>Signal cohort</th></tr></thead>
+        <tbody>${rows.map((row) => `
+          <tr>
+            <td><a href="https://solscan.io/account/${encodeURIComponent(row.owner || "")}" target="_blank" rel="noreferrer"><code>${esc(short(row.owner))}</code></a></td>
+            <td>${esc(supplyPct(row.supply_pct, 2))}</td>
+            <td>${esc(supplyPct(row.estimated_circulating_pct, 2))}</td>
+            <td>${row.signal_cohort ? chip("matched", "warn") : "-"}</td>
+          </tr>
+        `).join("")}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderSupplyClusters(integrity) {
+  const rows = Array.isArray(integrity.linked_clusters) ? integrity.linked_clusters : [];
+  if (!rows.length) return `<div class="empty compact">No multi-wallet supply cluster is supported by the available link evidence.</div>`;
+  return `
+    <div class="table-wrap compact-table">
+      <table>
+        <thead><tr><th>Wallets</th><th>Evidence</th><th>Current supply</th><th>Signal-attributed</th></tr></thead>
+        <tbody>${rows.map((row) => `
+          <tr>
+            <td>${esc(row.wallets || 0)}</td>
+            <td>${esc((row.families || []).map(supplyEvidenceLabel).join(", ") || "-")}</td>
+            <td>${esc(supplyPct(row.current_supply_pct, 2))}</td>
+            <td>${esc(supplyPct(row.signal_retained_supply_pct, 2))}</td>
+          </tr>
+        `).join("")}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderSupplyLinkageGroups(integrity) {
+  const groups = Array.isArray(integrity.linkage_groups) ? integrity.linkage_groups : [];
+  const limitations = Array.isArray(integrity.limitations) ? integrity.limitations : [];
+  if (!groups.length && !limitations.length) return "";
+  return `
+    <details class="detail-section">
+      <summary><span>Relationship evidence</span><small>${esc(groups.length)} groups</small></summary>
+      <div class="detail-section-body">
+        ${groups.length ? `<div class="mini-list">${groups.map((group) => {
+          const family = String(group.family || "");
+          const key = String(group.key || "");
+          const keyLabel = family === "priority_fee"
+            ? `${compact(Number(key) || 0)} lamports priority fee`
+            : key
+              ? `<a href="https://solscan.io/account/${encodeURIComponent(key)}" target="_blank" rel="noreferrer"><code>${esc(short(key))}</code></a>`
+              : "unresolved";
+          const members = (group.members || []).slice(0, 4).map((owner) => `<a href="https://solscan.io/account/${encodeURIComponent(owner)}" target="_blank" rel="noreferrer"><code>${esc(short(owner))}</code></a>`).join(" ");
+          return `
+            <div class="mini-item">
+              <strong>${esc(supplyEvidenceLabel(family))} ${group.supporting_only ? chip("support only", "warn") : chip("direct link", "good")}</strong>
+              <span>${keyLabel} / ${esc(group.wallets || 0)} wallets</span>
+              ${members ? `<span class="supply-evidence-members">${members}</span>` : ""}
+            </div>
+          `;
+        }).join("")}</div>` : `<div class="empty compact">No wallet relationship group was resolved.</div>`}
+        ${limitations.length ? `<div class="supply-limitations"><strong>Boundaries</strong>${limitations.map((item) => `<span>${esc(item)}</span>`).join("")}</div>` : ""}
+      </div>
+    </details>
+  `;
+}
+
+function renderSupplyHistory(token) {
+  const rows = [...(token.supplyIntegrityHistory || [])].reverse().slice(0, 8);
+  if (!rows.length) return `<div class="empty compact">No earlier supply snapshots yet.</div>`;
+  return `
+    <div class="timeline">
+      ${rows.map((row) => `
+        <div class="timeline-item">
+          <strong>${esc(dateLabel(row.checked_at))} ${chip(supplyIntegrityMeta(row.status).label, supplyIntegrityMeta(row.status).tone)}</strong>
+          <span>${esc(supplyPct(row.cohort_top_holder_supply_pct, 2))} cohort in top holders / ${esc(supplyPct(row.max_linked_cluster_current_supply_pct, 2))} largest linked cluster / ${esc(row.coordination_family_count ?? row.evidence_family_count ?? 0)} converging evidence families</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderSupplyTab(token) {
+  const integrity = token.supplyIntegrity;
+  if (!integrity) {
+    return `<section class="detail-block"><div class="detail-block-title">Supply integrity</div><div class="empty compact">Supply snapshot pending.</div></section>`;
+  }
+  const raw = integrity.raw_concentration || {};
+  const circulating = integrity.estimated_circulating_concentration || {};
+  const evidence = Array.isArray(integrity.evidence_families) ? integrity.evidence_families : [];
+  const evidenceChips = evidence.length
+    ? evidence.map((item) => chip(`${supplyEvidenceLabel(item.family)} / ${item.wallets || 0} wallets${item.supporting_only ? " / support only" : ""}`, item.supporting_only ? "warn" : "good")).join(" ")
+    : chip("No independent wallet links", "good");
+  const dataTone = integrity.data_quality_status === "complete"
+    ? "good"
+    : integrity.data_quality_status === "invalid"
+      ? "bad"
+      : "warn";
+  const excludedSupplyDetail = integrity.free_float_status === "approximate"
+    ? [
+      `${supplyPct(integrity.excluded_supply_pct)} excluded`,
+      Number(integrity.pool_reserve_supply_pct || 0) > 0 ? `${supplyPct(integrity.pool_reserve_supply_pct)} pool` : "",
+      Number(integrity.burn_supply_pct || 0) > 0 ? `${supplyPct(integrity.burn_supply_pct)} burn` : "",
+    ].filter(Boolean).join(" / ")
+    : "pool reserve unresolved";
+  const validationIssues = [...(integrity.invariants || []), ...(integrity.errors || [])];
+  const refreshState = integrity.refresh_status
+    ? ` ${chip(`refresh ${integrity.refresh_status}`, "warn")} <span class="muted-inline">attempted ${esc(dateLabel(integrity.refresh_attempted_at))}${integrity.refresh_error ? ` / ${esc(integrity.refresh_error)}` : ""}</span>`
+    : "";
+  return `
+    <section class="detail-block">
+      <div class="detail-block-title">Supply decision</div>
+      <div class="supply-metrics">
+        ${detailMetric("Raw top 10", supplyPct(raw.top10_supply_pct), `${supplyPct(integrity.observed_top_accounts_supply_pct)} covered by checked top accounts`)}
+        ${detailMetric("Est. circulating top 5", supplyPct(circulating.top5_pct), excludedSupplyDetail, integrity.free_float_status === "approximate" ? "" : "warn")}
+        ${detailMetric("Signal cohort", supplyPct(integrity.cohort_top_holder_supply_pct, 2), "visible in resolved top holders")}
+        ${detailMetric("Linked cluster", supplyPct(integrity.max_linked_cluster_current_supply_pct, 2), `${supplyPct(integrity.max_linked_cluster_signal_supply_pct, 2)} signal-attributed`)}
+      </div>
+      <div class="kv"><span>Status</span><span>${supplyIntegrityChip(token)} <span class="muted-inline">${esc(integrity.reason || "")}</span></span></div>
+      <div class="kv"><span>Data quality</span><span>${chip(integrity.data_quality_status || "unavailable", dataTone)} ${esc(supplyPct(integrity.owner_resolution_pct, 0))} owner resolution / ${esc(integrity.largest_accounts_checked || 0)} accounts / checked ${esc(dateLabel(integrity.checked_at))}${refreshState}</span></div>
+      <div class="kv"><span>Coordination</span><span>${integrity.coordination_confirmed ? chip("Confirmed by independent evidence", "bad") : chip("Not confirmed", "good")} ${evidenceChips}</span></div>
+      ${validationIssues.length ? `<div class="kv"><span>Validation</span><span>${validationIssues.map((item) => chip(item, "bad")).join(" ")}</span></div>` : ""}
+      ${renderSupplyLinkageGroups(integrity)}
+    </section>
+    <section class="detail-block">
+      <div class="detail-block-title">Resolved top owners</div>
+      ${renderSupplyTopOwners(token, integrity)}
+    </section>
+    <section class="detail-block">
+      <div class="detail-block-title">Linked supply clusters</div>
+      ${renderSupplyClusters(integrity)}
+    </section>
+    <section class="detail-block">
+      <div class="detail-block-title">Snapshot history</div>
+      ${renderSupplyHistory(token)}
     </section>
   `;
 }
@@ -2768,11 +2964,13 @@ function renderTokenDetail(token) {
   const sourceLinks = renderTokenSourceLinks(token);
   const tabContent = state.detailTab === "wallets"
     ? renderWalletsTab(token)
-    : state.detailTab === "social"
-      ? renderSocialTab(token)
-      : state.detailTab === "evidence"
-        ? renderEvidenceTab(token, gmgnUrl, sourceLinks)
-        : renderOverviewTab(token);
+    : state.detailTab === "supply"
+      ? renderSupplyTab(token)
+      : state.detailTab === "social"
+        ? renderSocialTab(token)
+        : state.detailTab === "evidence"
+          ? renderEvidenceTab(token, gmgnUrl, sourceLinks)
+          : renderOverviewTab(token);
   return `
     <aside class="detail token-detail">
       <button class="detail-back" type="button">Back to tokens</button>
@@ -2784,6 +2982,7 @@ function renderTokenDetail(token) {
             <div class="detail-head-chips">
               ${workflowChip(token.workflowStatus)}
               ${currentSignalChip(token)}
+              ${supplyIntegrityChip(token)}
               ${state.tokenDetailLoadingKeys.has(token.key) ? chip("loading wallet evidence", "warn") : ""}
               ${token.activeEpisode && token.caughtFilter !== "reactivation" ? chip(`original ${filterMeta(token.caughtFilter).label}`) : ""}
             </div>
@@ -2803,6 +3002,7 @@ function renderTokenDetail(token) {
       <div class="detail-tabs" role="tablist" aria-label="Token research sections">
         ${detailTabButton("overview", "Overview")}
         ${detailTabButton("wallets", "Wallets", token.uniqueWallets)}
+        ${detailTabButton("supply", "Supply", token.supplyIntegrity?.evidence_family_count ?? null)}
         ${detailTabButton("social", "Social", tokenCallerGraph(token).length)}
         ${detailTabButton("evidence", "Evidence", token.alertCount)}
       </div>
@@ -3077,6 +3277,7 @@ function tokenFilterSubtitle(token) {
   }
   const phase = marketPhase(token);
   if (phase?.label) parts.push(phase.label);
+  if (token.supplyIntegrity?.coordination_confirmed) parts.push("linked wallets confirmed");
   if (token.hidden) parts.push("deleted");
   return parts.join(" / ");
 }
@@ -3161,6 +3362,7 @@ function renderFilterTokenRows(group) {
             <span class="filter-token-title">
               <strong>${esc(token.symbol)}</strong>
               ${primaryStatusChip(token, true)}
+              ${supplyIntegrityChip(token, true)}
             </span>
             <small>${esc(tokenFilterSubtitle(token) || token.name || token.narrative.primary || "-")}</small>
           </span>
