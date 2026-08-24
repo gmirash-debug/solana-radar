@@ -1040,6 +1040,9 @@ class ScannerCoreTests(unittest.TestCase):
     def test_report_uses_effective_reactivation_config(self):
         config = scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {})
         effective = scanner.apply_lane(config, "reactivation")
+        effective["_selection_stats"] = {
+            "supply_integrity": {"remaining": 0, "used": 12, "deferred": 6}
+        }
         report_config = scanner.report_config_for_lanes(
             config,
             {"reactivation": effective},
@@ -1061,6 +1064,10 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(
             payload["config"]["dashboard_signal_epoch"],
             "2026-08-13T01:01:00Z",
+        )
+        self.assertEqual(
+            payload["stats"]["supply_integrity"],
+            {"remaining": 0, "used": 12, "deferred": 6},
         )
 
     def test_scan_selection_reserves_capacity_for_recent_signals(self):
