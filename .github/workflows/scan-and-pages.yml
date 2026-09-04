@@ -209,7 +209,7 @@ jobs:
         run: |
           python -m unittest discover -s tests -v
           python -m json.tool config.example.json > /dev/null
-          node --test cloudflare/scan-dispatcher/test/index.test.mjs dashboard/test/data-source.test.mjs dashboard/test/token-state.test.mjs dashboard/test/filter-scope.test.mjs
+          node --test cloudflare/scan-dispatcher/test/index.test.mjs dashboard/test/*.test.mjs
           node --check dashboard/app.js
 
       - name: Run scanner
@@ -304,7 +304,8 @@ jobs:
           git archive FETCH_HEAD dashboard | tar -x
           rm -rf .pages
           mkdir -p .pages/data
-          cp dashboard/index.html dashboard/app.js dashboard/data-source.js dashboard/token-state.js dashboard/filter-scope.js dashboard/styles.css dashboard/config.js .pages/
+          cp dashboard/*.html dashboard/*.js dashboard/*.css .pages/
+          cp -R dashboard/icons .pages/
           python tools/build_pages.py
 
       - name: Configure Pages

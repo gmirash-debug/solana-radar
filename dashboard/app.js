@@ -1,4 +1,5 @@
 import { chooseDashboardPayload } from "./data-source.js?v=20260807-wallet-edge-1";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail } from "./decision-view.js?v=20260904-decision-1";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -90,15 +91,18 @@ const state = {
   tab: "filters",
   query: "",
   workflow: DEFAULT_WORKFLOW,
+  reviewQueue: "overview",
+  reviewSort: "caught",
+  expandedQueues: new Set(["review", "holding", "early"]),
   heat: "all",
   lane: "reactivation",
   minScore: 0,
   selectedTokenKey: null,
   selectedNarrative: null,
-  selectedFilter: null,
   selectedAlertId: null,
   detailTab: "overview",
   mobileDetailOpen: false,
+  reviewScrollY: 0,
   showHidden: false,
   hiddenTokenKeys: loadHiddenTokenKeys(),
   serverDeletedTokenKeys: new Set(),
@@ -111,6 +115,8 @@ const state = {
   tokenDetailLoadedKeys: new Set(),
   tokenDetailLoadingKeys: new Set(),
   tokenDetailRetryAt: new Map(),
+  tokenDetailErrors: new Map(),
+  tokenDetailCache: new Map(),
 };
 
 const els = {
@@ -1475,6 +1481,7 @@ function buildTokenSignals() {
     token.narrative = choosePrimaryNarrative(token);
     token.narratives = [token.narrative.primary];
     token.hidden = isTokenHidden(token);
+    token.decision = decisionView(token, state.report?.config);
     return token;
   });
 
@@ -1661,9 +1668,16 @@ function applyDashboardPayload(payload, source, fallbackReason = null) {
   if (snapshotChanged) {
     state.tokenDetailLoadedKeys.clear();
     state.tokenDetailRetryAt.clear();
+    state.tokenDetailErrors.clear();
+    state.tokenDetailCache.clear();
   }
+  if (!snapshotChanged) state.tokenDetailCache.forEach((detail, key) => {
+    const thesis = state.report?.signal_theses?.find((item) => detailRecordMatchesToken(item, key));
+    if (canApplyDetail(detail, key, nextGeneratedAt, nextGeneratedAt, thesis)) applyTokenDetail(detail);
+    else { state.tokenDetailCache.delete(key); state.tokenDetailLoadedKeys.delete(key); }
+  });
   const tokens = buildTokenSignals();
-  const visibleTokens = filteredTokens(tokens);
+  const visibleTokens = state.tab === "filters" ? tokens.filter(tokenMatchesBaseFilters) : filteredTokens(tokens);
   if (!state.selectedTokenKey && visibleTokens.length) state.selectedTokenKey = visibleTokens[0].key;
   if (!visibleTokens.some((token) => token.key === state.selectedTokenKey)) {
     state.selectedTokenKey = visibleTokens[0]?.key || null;
@@ -1793,7 +1807,9 @@ async function ensureTokenDetail(tokenKey) {
     || Number(state.tokenDetailRetryAt.get(key) || 0) > Date.now()
   ) return;
   state.tokenDetailLoadingKeys.add(key);
-  let refreshSelected = false;
+  state.tokenDetailErrors.delete(key);
+  const generation = state.report?.generated_at;
+  renderDetailLoadState(key);
   try {
     const response = await fetchWithTimeout(`${baseUrl}/api/dashboard/token?token_key=${encodeURIComponent(key)}`, {
       cache: "no-store",
@@ -1801,17 +1817,35 @@ async function ensureTokenDetail(tokenKey) {
     });
     const detail = await response.json().catch(() => null);
     if (!response.ok || !detail?.ok) throw new Error(detail?.error || `token detail ${response.status}`);
+    const thesis = state.report?.signal_theses?.find((item) => detailRecordMatchesToken(item, key));
+    if (!canApplyDetail(detail, key, generation, state.report?.generated_at, thesis)) {
+      throw new Error("Details belong to an older snapshot. The newer scan summary is retained.");
+    }
     applyTokenDetail(detail);
+    state.tokenDetailCache.set(key, detail);
     state.tokenDetailLoadedKeys.add(key);
     state.tokenDetailRetryAt.delete(key);
-    refreshSelected = state.selectedTokenKey === key;
   } catch (error) {
-    state.tokenDetailRetryAt.set(key, Date.now() + 5 * 60_000);
+    if (generation === state.report?.generated_at) {
+      state.tokenDetailRetryAt.set(key, Date.now() + 5 * 60_000);
+      state.tokenDetailErrors.set(key, error.message);
+    }
     console.warn("Token detail load failed", error);
   } finally {
     state.tokenDetailLoadingKeys.delete(key);
-    if (refreshSelected) render();
+    if (state.selectedTokenKey === key) render();
   }
+}
+
+function detailLoadMessage(key) {
+  if (state.tokenDetailLoadingKeys.has(key)) return `<span class="loading-dot"></span> Loading wallet details...`;
+  if (state.tokenDetailErrors.has(key)) return `Wallet details unavailable. Showing the scan summary. <button type="button" data-retry-detail="${esc(key)}">Retry</button>`;
+  return "";
+}
+
+function renderDetailLoadState(key) {
+  const notice = document.querySelector(".detail-load-state");
+  if (notice && state.selectedTokenKey === key) notice.innerHTML = detailLoadMessage(key);
 }
 
 function renderStatus() {
@@ -1859,8 +1893,17 @@ function renderStatus() {
   const discoveryFailed = discoveryStatus.status === "failed";
   const persistence = status.persistence || report.stats?.persistence || {};
   els.subtitle.textContent = report.generated_at
-    ? `Latest successful scan ${dateLabel(report.generated_at)} - ${report.profile || report.lane || report.mode || "unknown"}`
+    ? `Last scan ${dateLabel(report.generated_at)}`
     : "No scan report yet";
+  const summary = document.querySelector("#scannerSummary");
+  if (summary) {
+    summary.textContent = failed ? "Last scan attempt failed. Previous results are shown."
+      : freshness.tone !== "good" ? `Scan data is ${freshness.label}. Checks may be overdue.`
+        : state.dataSource === "static" ? "Published scan snapshot. Live wallet details may be unavailable."
+          : healthStatus !== "healthy" ? "Scan coverage is incomplete. Check each token's evidence."
+            : "Scanner is up to date";
+    summary.className = failed || freshness.tone === "bad" ? "negative" : "";
+  }
   els.runScan.disabled = running || state.publishedDashboard;
   els.runScan.title = state.publishedDashboard ? "Scanner runs by the hourly GitHub Actions schedule" : "";
   els.statusRow.innerHTML = [
@@ -1893,22 +1936,16 @@ function renderStatus() {
 function renderMetrics(tokens) {
   const report = state.report || {};
   const stats = report.stats || {};
-  const baseTokens = buildTokenSignals().filter(tokenMatchesBaseFilters);
-  const workflowCount = (workflow) => baseTokens.filter((token) => token.workflowStatus === workflow).length;
+  const baseTokens = tokens;
   const outcomes = stats.signal_outcomes || {};
   const outcomeSamples = outcomes.methodology_version === 2 ? Number(outcomes.with_24h || 0) : 0;
   const outcomeMedian = outcomes.median_return_24h_pct;
   const outcomePositive = outcomes.positive_24h_pct;
   els.metrics.innerHTML = [
-    metric("Tracked", baseTokens.filter((token) => matchesWorkflowFilter(token.workflowStatus, "tracked")).length, "tracked"),
-    metric("Hot", workflowCount("hot")),
-    metric("Watch", workflowCount("watch")),
-    metric("Candidates", workflowCount("candidate"), "candidate"),
-    metric("Check needed", workflowCount("recheck_due"), "recheck_due"),
-    metric("Weakening", workflowCount("weakening")),
-    metric("Inactive", workflowCount("inactive")),
     metric("Universe", stats.universe_pools ?? 0),
     metric("Scanned pools", stats.scanned_pools ?? 0),
+    metric("Open positions", baseTokens.filter((token) => token.decision.queue !== "inactive").length),
+    metric("Reduced positions", baseTokens.filter((token) => token.decision.queue === "reducing").length),
     metric(
       "24h median",
       outcomeSamples && outcomeMedian !== null && outcomeMedian !== undefined
@@ -1937,7 +1974,8 @@ function currentSignalChip(token) {
 }
 
 function primaryStatusChip(token, compact = false) {
-  return workflowChip(token.workflowStatus);
+  const view = token.decision || decisionView(token, state.report?.config);
+  return `<span class="position-status ${esc(view.tone)}">${esc(view.label)}</span>`;
 }
 
 function attentionReason(token) {
@@ -2040,11 +2078,12 @@ function bindTokenHideActions() {
       const key = button.dataset.tokenKey;
       const hidden = button.dataset.hidden !== "true";
       const token = buildTokenSignals().find((item) => item.key === key);
+      if (hidden && !window.confirm(`Delete ${token?.symbol || "this token"} and exclude it from future scans?`)) return;
       setTokenHidden(key, hidden);
       persistTokenDeletion(token, hidden)
-        .then(() => render())
+        .then(() => { render(); showNotice(hidden ? "Token deleted and excluded from future scans." : "Token restored."); })
         .catch((error) => {
-          els.statusRow.innerHTML += `<span class="status-pill freshness-bad">delete sync failed: ${esc(error.message)}</span>`;
+          showNotice(`Hidden in this browser only. Delete sync failed: ${error.message}. Retry Sync deleted in Diagnostics.`);
         });
       render();
     });
@@ -2074,6 +2113,9 @@ function walletHeldClass(wallet) {
 
 function renderWalletRows(token) {
   if (!token.wallets.length) {
+    if (state.publishedDashboard && !state.tokenDetailLoadedKeys.has(token.key)) {
+      return `<div class="empty compact">Individual wallet details are not available in this scan summary.</div>`;
+    }
     return state.tokenDetailLoadingKeys.has(token.key)
       ? `<div class="empty compact">Loading wallet evidence...</div>`
       : `<div class="empty compact">No wallet events.</div>`;
@@ -2707,7 +2749,7 @@ function renderTimeline(token) {
 function detailTabButton(id, label, count = null) {
   const selected = state.detailTab === id;
   const suffix = count === null ? "" : `<span>${esc(count)}</span>`;
-  return `<button class="detail-tab${selected ? " is-active" : ""}" type="button" role="tab" aria-selected="${selected}" data-detail-tab="${esc(id)}">${esc(label)}${suffix}</button>`;
+  return `<button class="detail-tab${selected ? " is-active" : ""}" type="button" role="tab" id="detail-tab-${esc(id)}" aria-controls="token-research-panel" tabindex="${selected ? 0 : -1}" aria-selected="${selected}" data-detail-tab="${esc(id)}">${esc(label)}${suffix}</button>`;
 }
 
 function latestTokenSocial(token) {
@@ -2715,25 +2757,44 @@ function latestTokenSocial(token) {
 }
 
 function renderOverviewTab(token) {
+  const view = token.decision;
+  const thesis = token.signalThesis || {};
+  const holdings = view.retained === null ? "Unknown" : `${view.retained.toFixed(0)}%`;
+  const known = [
+    ["Signal confirmation", view.confirmation],
+    ["Wallets still holding", thesis.holders_remaining != null && thesis.original_wallets != null ? `${thesis.holders_remaining} of ${thesis.original_wallets} stored wallets` : "Not verified"],
+    ["Original wallets covered", view.cohortCoverage === null ? "Unknown" : `${view.cohortCoverage.toFixed(0)}%`],
+    ["Stored balances checked", view.walletCoverage === null ? "Unknown" : `${view.walletCoverage.toFixed(0)}% wallets / ${view.tokenCoverage?.toFixed(0) ?? "?"}% tokens`],
+  ];
   return `
-    <section class="detail-block">
-      <div class="detail-block-title">Decision</div>
-      <div class="kv"><span>Caught as</span><span>${renderCaughtSignal(token)}</span></div>
-      ${token.activeEpisode ? `<div class="kv"><span>Original catch</span><span>${renderOriginalCatch(token)}</span></div>` : ""}
-      <div class="kv"><span>Why caught</span><span>${esc(renderScannerReason(token))}</span></div>
-      <div class="kv"><span>Cohort now</span><span>${renderThesisSummary(token)}</span></div>
-      <div class="kv"><span>Supply integrity</span><span>${supplyIntegrityChip(token)}${token.supplyIntegrity?.reason ? ` <span class="muted-inline">${esc(token.supplyIntegrity.reason)}</span>` : ""}</span></div>
+    <section class="position-evidence">
+      <div class="section-heading"><h3>Original position</h3><span class="evidence-time ${view.fresh ? "" : "warning"}">${view.checkedAt ? `Checked ${esc(dateLabel(view.checkedAt))}${view.fresh ? "" : " · overdue"}` : "Not checked"}</span></div>
+      <div class="retention-summary"><strong>${holdings}</strong><span>of acquired tokens retained${view.complete ? "" : " in the checked subset"}<small>${view.supply === null ? "Total supply share unverified" : `${view.supply.toFixed(2)}% of total token supply at last check`}</small></span></div>
+      ${view.retained === null ? "" : `<meter class="retention-meter ${esc(view.tone)}" min="0" max="100" value="${view.retained}" aria-label="Original position retained">${holdings}</meter>`}
+      <div class="evidence-facts">${known.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join("")}</div>
+    </section>
+    <section class="decision-caveats">
+      <h3>${view.blockers.length ? "What limits the conclusion" : "Evidence checks passed"}</h3>
+      ${view.blockers.length ? `<ul>${view.blockers.map((reason) => `<li>${esc(reason)}</li>`).join("")}</ul>` : `<p>Current confirmation, balances and market data are available. This does not establish a profitable entry.</p>`}
+      ${view.queue === "reducing" ? `<p>Reduced balances are not proof of a sale: transfers can also move tokens out of the original wallets.</p>` : ""}
+    </section>
+    <details class="research-fold"><summary>Why it was caught <span>${esc(dateLabel(token.firstSignalAt))}</span></summary>
+      <div class="kv"><span>Signal</span><span>${renderCaughtSignal(token)}</span></div>
+      <div class="kv"><span>Evidence</span><span>${esc(renderScannerReason(token))}</span></div>
       ${renderWaveLine(token)}
-      <div class="kv"><span>Market phase</span><span>${renderMarketPhaseLine(token)}</span></div>
-      <div class="kv"><span>Risk flags</span><span>${renderRiskFlags(token)}</span></div>
-      <div class="kv"><span>Token age</span><span>${esc(durationLabel(token.tokenAgeHours))}${token.tokenCreatedAt ? ` / launched ${esc(dateLabel(token.tokenCreatedAt))}` : ""}</span></div>
-    </section>
-    <section class="detail-block">
-      <div class="detail-block-title">Narrative</div>
-      <div class="kv"><span>Primary</span><span>${renderNarrativeLine(token)}</span></div>
-      <div class="kv"><span>Thesis</span><span>${renderLoreProof(token)}</span></div>
-      <div class="kv"><span>Proof basis</span><span>${renderEvidenceLine(token)}</span></div>
-    </section>
+      <div class="kv"><span>Observed flow</span><span>${sol(token.totalSuspiciousSol)} / ${token.uniqueWallets} wallets</span></div>
+    </details>
+    <details class="research-fold"><summary>Market context & ATH</summary>
+      <div class="kv"><span>Launch</span><span>${esc(durationLabel(token.tokenAgeHours))} / ${esc(dateLabel(token.tokenCreatedAt))}</span></div>
+      <div class="kv"><span>${esc(token.athLabel)}</span><span>${token.athMcapUsd ? `${esc(dateLabel(token.athMcapAt))} / ${money(token.athMcapUsd)}` : esc(athStatusLabel(token.athStatus))}</span></div>
+      <div class="kv"><span>Phase</span><span>${renderMarketPhaseLine(token)}</span></div>
+      <div class="kv"><span>Supply</span><span>${esc(token.supplyIntegrity?.reason || "Ownership not verified")}</span></div>
+    </details>
+    <details class="research-fold"><summary>Project & narrative</summary>
+      <div class="kv"><span>Narrative</span><span>${renderNarrativeLine(token)}</span></div>
+      <div class="kv"><span>Project</span><span>${renderLoreProof(token)}</span></div>
+      <div class="kv"><span>Evidence</span><span>${renderEvidenceLine(token)}</span></div>
+    </details>
   `;
 }
 
@@ -2959,15 +3020,8 @@ function renderEvidenceTab(token, gmgnUrl, sourceLinks) {
 }
 
 function renderTokenDetail(token) {
-  if (!token) return `<aside class="detail token-detail"><div class="empty compact">No token selected.</div></aside>`;
+  if (!token) return `<aside class="detail token-detail no-selection"><img src="icons/scan-search.svg" alt=""><h2>No token selected</h2><p>Select a token to inspect the original position and its latest check.</p></aside>`;
   const gmgnUrl = gmgnTokenUrl(token);
-  const phase = marketPhase(token);
-  const athValue = token.athMcapUsd
-    ? `${token.athMcapAt ? `${esc(dateLabel(token.athMcapAt))} / ` : ""}${money(token.athMcapUsd)}`
-    : athStatusLabel(token.athStatus, token.athError);
-  const athSub = token.athMcapUsd
-    ? `${phase ? `${esc(phase.detail)} / ` : ""}${athSourceLabel(token.athSource)}${token.athVerifiedAt ? ` / checked ${esc(dateLabel(token.athVerifiedAt))}` : ""}`
-    : "GMGN ATH not ready";
   const marketNowSub = token.currentMarket?.isFresh
     ? [`${moneyMaybe(token.liquidityUsd)} liq`, token.scanMcapAt ? dateLabel(token.scanMcapAt) : ""].filter(Boolean).join(" / ")
     : [
@@ -2987,31 +3041,29 @@ function renderTokenDetail(token) {
           : renderOverviewTab(token);
   return `
     <aside class="detail token-detail">
-      <button class="detail-back" type="button">Back to tokens</button>
+      <button class="detail-back" type="button"><img src="icons/arrow-left.svg" alt=""> Tokens</button>
       <div class="detail-head">
         <div class="detail-identity">
           ${tokenAvatar(token)}
           <div>
-            <h2>${esc(token.symbol)} <span class="muted">${esc(token.name)}</span>${token.hidden ? ` ${chip("deleted", "warn")}` : ""}</h2>
+            <h2>${esc(token.symbol)}${token.hidden ? ` ${chip("deleted", "warn")}` : ""}</h2>
+            <p class="token-identity-sub">${esc(token.name)} · ${esc(durationLabel(token.tokenAgeHours))} old</p>
             <div class="detail-head-chips">
-              ${workflowChip(token.workflowStatus)}
-              ${currentSignalChip(token)}
-              ${supplyIntegrityChip(token)}
-              ${state.tokenDetailLoadingKeys.has(token.key) ? chip("loading wallet evidence", "warn") : ""}
-              ${token.activeEpisode && token.caughtFilter !== "reactivation" ? chip(`original ${filterMeta(token.caughtFilter).label}`) : ""}
+              ${primaryStatusChip(token)}
             </div>
           </div>
         </div>
         <div class="detail-actions">
-          ${gmgnUrl ? `<a class="secondary-action detail-link" href="${esc(gmgnUrl)}" target="_blank" rel="noreferrer">Open GMGN</a>` : ""}
-          ${renderHiddenAction(token)}
+          ${gmgnUrl ? `<a class="secondary-action detail-link" href="${esc(gmgnUrl)}" target="_blank" rel="noreferrer">GMGN <img src="icons/arrow-up-right.svg" alt=""></a>` : ""}
+          <button type="button" class="icon-button copy-address" data-address="${esc(token.token_address)}" aria-label="Copy token address" title="Copy token address"><img src="icons/copy.svg" alt=""></button>
+          ${renderHiddenAction(token, true)}
         </div>
       </div>
+      <div class="detail-load-state" role="status">${detailLoadMessage(token.key)}</div>
       <div class="decision-grid">
-        ${detailMetric(token.activeEpisode ? "Reactivation" : "Caught", `${esc(dateLabel(token.firstSignalAt))} / ${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)}`, `${token.profitPct === null ? "market update pending" : `${pct(token.profitPct)} since signal`}`, "", pClass(token.profitPct))}
-        ${detailMetric("Market now", token.currentMarket?.isFresh ? `${moneyMaybe(token.currentMcap)} mcap` : "Update pending", marketNowSub, token.currentMarket?.isFresh ? "" : "warn")}
-        ${detailMetric(token.athLabel, athValue, athSub, token.athMcapUsd ? "" : "bad")}
-        ${detailMetric("Noticed flow", sol(token.totalSuspiciousSol), `${token.currentScore === null ? "caught" : "current"} score ${esc(token.currentScore ?? token.caughtScore)} / ${esc(token.uniqueWallets)} wallets`)}
+        ${detailMetric("Caught mcap", moneyMaybe(token.firstObsMcapUsd || token.firstMcap), esc(dateLabel(token.firstSignalAt)))}
+        ${detailMetric("Current mcap", token.currentMarket?.isFresh ? moneyMaybe(token.currentMcap) : "Unverified", marketNowSub, token.currentMarket?.isFresh ? "" : "warn")}
+        ${detailMetric("Since catch", pct(token.profitPct), "Token price change, not wallet PnL", pClass(token.profitPct))}
       </div>
       <div class="detail-tabs" role="tablist" aria-label="Token research sections">
         ${detailTabButton("overview", "Overview")}
@@ -3020,7 +3072,7 @@ function renderTokenDetail(token) {
         ${detailTabButton("social", "Social", tokenCallerGraph(token).length)}
         ${detailTabButton("evidence", "Evidence", token.alertCount)}
       </div>
-      <div class="detail-tab-panel" role="tabpanel">${tabContent}</div>
+      <div class="detail-tab-panel" id="token-research-panel" role="tabpanel" aria-labelledby="detail-tab-${esc(state.detailTab)}">${tabContent}</div>
     </aside>
   `;
 }
@@ -3030,11 +3082,39 @@ function bindDetailControls() {
     button.addEventListener("click", () => {
       state.detailTab = button.dataset.detailTab || "overview";
       render();
+      document.querySelector(`.detail-tab[data-detail-tab="${state.detailTab}"]`)?.focus({ preventScroll: true });
+    });
+    button.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const tabs = [...document.querySelectorAll(".detail-tab")];
+      const current = tabs.indexOf(button);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
+        : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+      tabs[next].click();
     });
   });
   document.querySelector(".detail-back")?.addEventListener("click", () => {
     state.mobileDetailOpen = false;
     render();
+    window.scrollTo(0, state.reviewScrollY);
+    document.querySelector(".review-row.is-selected")?.focus({ preventScroll: true });
+  });
+  document.querySelector("[data-retry-detail]")?.addEventListener("click", (event) => {
+    const key = event.currentTarget.dataset.retryDetail;
+    state.tokenDetailRetryAt.delete(key);
+    void ensureTokenDetail(key);
+  });
+  document.querySelector(".copy-address")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    try {
+      await navigator.clipboard.writeText(button.dataset.address);
+      button.title = "Address copied";
+      button.setAttribute("aria-label", "Address copied");
+      document.querySelector(".detail-load-state").textContent = "Token address copied.";
+    } catch {
+      document.querySelector(".detail-load-state").textContent = `Token address: ${button.dataset.address}`;
+    }
   });
 }
 
@@ -3218,257 +3298,94 @@ function renderNarratives() {
   });
 }
 
-function selectedFilterGroup(groups) {
-  return groups.find((group) => group.name === state.selectedFilter) || groups[0] || null;
-}
 
-function selectedFilterToken(group) {
-  if (!group?.tokens?.length) return null;
-  return group.tokens.find((token) => token.key === state.selectedTokenKey) || group.tokens[0];
-}
-
-function heldSupplyMetric(token) {
-  const trackedPct = token.signalThesis?.current_retained_supply_pct;
-  if (
-    trackedPct !== null
-    && trackedPct !== undefined
-    && Number.isFinite(Number(trackedPct))
-  ) {
-    return {
-      pct: Math.max(0, Number(trackedPct)),
-      basis: "signal cohort",
-    };
-  }
-
-  const currentWave = bestWaveAlert(token.currentScanAlerts || [])?.wave;
-  const currentWavePct = currentWave?.sticky_supply_pct;
-  if (
-    currentWavePct !== null
-    && currentWavePct !== undefined
-    && Number.isFinite(Number(currentWavePct))
-  ) {
-    return {
-      pct: Math.max(0, Number(currentWavePct)),
-      basis: "current wave",
-    };
-  }
-
-  const caughtWavePct = token.bestWave?.sticky_supply_pct;
-  if (
-    caughtWavePct !== null
-    && caughtWavePct !== undefined
-    && Number.isFinite(Number(caughtWavePct))
-  ) {
-    return {
-      pct: Math.max(0, Number(caughtWavePct)),
-      basis: "caught wave",
-    };
-  }
-
-  return {
-    pct: null,
-    basis: "pending",
-  };
-}
-
-function tokenFilterSubtitle(token) {
-  const parts = [];
-  const attention = attentionReason(token);
-  if (attention) parts.push(attention);
-  if (token.currentSignalAlerts.length) parts.push(`${token.currentSignalAlerts.length} latest`);
-  const wave = bestWaveAlert(token.currentSignalAlerts || [])?.wave || token.bestWave;
-  if (wave) {
-    const buyers = Number(
-      wave.effective_unique_buyers
-      || wave.unique_buyers
-      || 0,
-    );
-    if (buyers) parts.push(`${buyers} buyers`);
-  } else if (token.hardSignalCount) {
-    parts.push(`${token.hardSignalCount} hard`);
-  } else if (token.supportSignalCount) {
-    parts.push(`${token.supportSignalCount} support`);
-  }
-  const phase = marketPhase(token);
-  if (phase?.label) parts.push(phase.label);
-  if (token.supplyIntegrity?.coordination_confirmed) parts.push("linked wallets confirmed");
-  if (token.hidden) parts.push("deleted");
-  return parts.join(" / ");
-}
-
-function filterGroups(tokens) {
-  const groups = new Map();
-  tokens.forEach((token) => {
-    (token.filterCategories.length ? token.filterCategories : ["legacy"]).forEach((name) => {
-      if (!groups.has(name)) {
-        groups.set(name, {
-          name,
-          meta: filterMeta(name),
-          tokens: [],
-          tokenKeys: new Set(),
-          totalSol: 0,
-          bestPnl: null,
-          bestToken: null,
-          alerts: 0,
-          currentSignals: 0,
-          firstSignalAt: null,
-          latestSignalAt: null,
-          currentMaxScore: null,
-          wallets: new Set(),
-          rawEvents: 0,
-          uniqueEvents: 0,
-          noticedWallets: 0,
-        });
-      }
-      const group = groups.get(name);
-      if (!group.tokenKeys.has(token.key)) {
-        group.tokens.push(token);
-        group.tokenKeys.add(token.key);
-      }
-      const groupAlerts = token.alerts;
-      const groupEvents = uniqueAlertEvents(groupAlerts);
-      group.alerts += groupAlerts.length;
-      group.rawEvents += rawEventCount(groupAlerts);
-      group.uniqueEvents += groupEvents.length;
-      group.noticedWallets += sumAlertField(groupAlerts, "suspicious_wallets") || groupEvents.length;
-      group.totalSol += sumAlertField(groupAlerts, "suspicious_sol") || sumEventSol(groupEvents);
-      group.currentSignals += token.currentSignalAlerts.length;
-      if (token.currentScore !== null) {
-        group.currentMaxScore = Math.max(group.currentMaxScore ?? 0, token.currentScore);
-      }
-      if (token.profitPct !== null && (group.bestPnl === null || token.profitPct > group.bestPnl)) {
-        group.bestPnl = token.profitPct;
-        group.bestToken = token;
-      }
-      groupAlerts.forEach((alert) => {
-        const signalAt = alert.window_start || alert.created_at;
-        if (!group.firstSignalAt || new Date(signalAt) < new Date(group.firstSignalAt)) group.firstSignalAt = signalAt;
-        if (!group.latestSignalAt || new Date(signalAt) > new Date(group.latestSignalAt)) group.latestSignalAt = signalAt;
-      });
-      groupEvents.forEach((event) => {
-        const owner = eventOwner(event);
-        if (owner) group.wallets.add(owner);
-      });
-    });
-  });
-  return [...groups.values()].map((group) => {
-    group.tokens.sort(compareFilterTokens);
-    group.uniqueWallets = group.wallets.size;
-    return group;
-  }).sort((a, b) => {
-    const orderA = FILTER_ORDER.indexOf(a.name);
-    const orderB = FILTER_ORDER.indexOf(b.name);
-    return (orderA === -1 ? 999 : orderA) - (orderB === -1 ? 999 : orderB);
-  });
-}
-
-function renderFilterTokenRows(group) {
-  return group.tokens.map((token) => {
-    const flow = sumAlertField(token.alerts, "suspicious_sol") || sumEventSol(uniqueAlertEvents(token.alerts));
-    const heldSupply = heldSupplyMetric(token);
-    const selected = token.key === state.selectedTokenKey ? " is-selected" : "";
-    const hidden = token.hidden ? " is-hidden" : "";
-    return `
-      <button class="filter-token-row${selected}${hidden}" type="button" data-token-key="${esc(token.key)}">
-        <span class="filter-token-name">
-          ${tokenAvatar(token, true)}
-          <span class="filter-token-copy">
-            <span class="filter-token-title">
-              <strong>${esc(token.symbol)}</strong>
-              ${primaryStatusChip(token, true)}
-              ${supplyIntegrityChip(token, true)}
-            </span>
-            <small>${esc(tokenFilterSubtitle(token) || token.name || token.narrative.primary || "-")}</small>
-          </span>
-        </span>
-        <span class="filter-token-value filter-token-caught">
-          <strong>${moneyMaybe(token.firstObsMcapUsd || token.firstMcap)}</strong>
-          <small>mcap</small>
-        </span>
-        <span class="filter-token-value filter-token-pnl ${pClass(token.profitPct)}">
-          <strong>${pct(token.profitPct)}</strong>
-          <small>since catch</small>
-        </span>
-        <span class="filter-token-value filter-token-held">
-          <strong>${heldSupply.pct === null ? "-" : `${heldSupply.pct.toFixed(1)}%`}</strong>
-          <small>${esc(heldSupply.basis)}</small>
-        </span>
-        <span class="filter-token-value filter-token-flow">
-          <strong>${sol(flow)}</strong>
-          <small>noticed</small>
-        </span>
-      </button>
-    `;
-  }).join("");
-}
-
-function renderFilterTokenPanel(group) {
-  if (!group) return `<section class="filter-token-panel"><div class="empty">No filter selected.</div></section>`;
-  return `
-    <section class="filter-token-panel">
-      <div class="filter-panel-head">
-        <div>
-          <span class="section-eyebrow">Active lane</span>
-          <h2>${esc(group.meta.label)}</h2>
-          <p>${esc(group.meta.criteria)}</p>
-        </div>
-        <div class="filter-panel-kpis">
-          <span><strong>${esc(group.tokens.length)}</strong><small>tokens</small></span>
-          <span><strong>${esc(group.currentSignals)}</strong><small>new observations</small></span>
-          <span><strong>${esc(group.noticedWallets)}</strong><small>tracked wallets</small></span>
-          <span><strong>${sol(group.totalSol)}</strong><small>noticed flow</small></span>
-        </div>
-      </div>
-      <div class="filter-panel-note">
-        <span>${esc(group.meta.thesis)}</span>
-        <small>${esc(dateLabel(group.firstSignalAt))} -> ${esc(dateLabel(group.latestSignalAt))} / ${group.currentMaxScore === null ? "no fresh score" : `current score ${esc(group.currentMaxScore)}`}</small>
-      </div>
-      <div class="filter-token-head">
-        <span>Token</span>
-        <span class="filter-token-caught">Caught</span>
-        <span class="filter-token-pnl">PnL</span>
-        <span class="filter-token-held">Held supply</span>
-        <span class="filter-token-flow">Flow</span>
-      </div>
-      <div class="filter-token-list">
-        ${renderFilterTokenRows(group)}
-      </div>
-    </section>
-  `;
+function renderReviewRow(token) {
+  const view = token.decision;
+  return `<button class="review-row${token.key === state.selectedTokenKey ? " is-selected" : ""}${token.hidden ? " is-hidden" : ""}" type="button" data-token-key="${esc(token.key)}" aria-pressed="${token.key === state.selectedTokenKey}">
+    <span class="review-identity">${tokenAvatar(token, true)}<span class="review-copy"><strong>${esc(token.symbol)}</strong><span class="review-reason">${esc(view.reason)}</span><small>Caught ${esc(dateLabel(token.firstSignalAt))}</small></span></span>
+    <span class="review-position"><strong>${view.retained === null ? "Unknown" : `${view.retained.toFixed(0)}%`}</strong><small>${view.supply === null ? "supply unknown" : `${view.supply.toFixed(1)}% supply`}</small><small class="${view.fresh ? "" : "warning"}">${view.fresh ? "checked" : "check overdue"}${!view.complete ? " · partial" : ""}</small></span>
+    <span class="review-market"><strong>${token.currentMarket?.isFresh ? moneyMaybe(token.currentMcap) : "Unverified"}</strong><small class="${pClass(token.profitPct)}">${pct(token.profitPct)} since catch</small></span>
+  </button>`;
 }
 
 function renderFilters() {
-  const tokens = filteredTokens(buildTokenSignals());
-  renderMetrics(tokens);
-  const groups = filterGroups(tokens);
-  if (!groups.length) {
-    els.content.innerHTML = emptyMessage(state.workflow === "active" ? "No confirmed accumulation currently." : "No tokens match the current filters.");
-    return;
-  }
-  const group = selectedFilterGroup(groups);
-  state.selectedFilter = group.name;
-  const token = selectedFilterToken(group);
-  if (token) state.selectedTokenKey = token.key;
+  const all = buildTokenSignals().filter(tokenMatchesBaseFilters);
+  const minAge = state.report?.config?.age_min_hours;
+  const maxAge = state.report?.config?.age_max_hours;
+  const ageScope = minAge != null && maxAge != null ? `${durationLabel(minAge)}–${durationLabel(maxAge)}` : "age scope unavailable";
+  renderMetrics(all);
+  const tokens = all.filter((token) => matchesReviewQueue(token.decision, state.reviewQueue));
+  const queues = REVIEW_QUEUES.map((meta) => ({ ...meta,
+    tokens: tokens.filter((token) => token.decision.queue === meta.id).sort((a, b) => compareReviewTokens(a, b, state.reviewSort)),
+    count: all.filter((token) => token.decision.queue === meta.id).length,
+  }));
+  const flatList = queues.flatMap((queue) => queue.tokens);
+  const openList = queues.filter((queue) => state.reviewQueue !== "overview" || state.query || state.expandedQueues.has(queue.id)).flatMap((queue) => queue.tokens);
+  const token = openList.find((item) => item.key === state.selectedTokenKey) || openList[0] || null;
+  state.selectedTokenKey = token?.key || null;
+  const list = queues.filter((queue) => queue.tokens.length).map((queue) => {
+    const open = state.reviewQueue !== "overview" || state.query || state.expandedQueues.has(queue.id);
+    return `<section class="review-section"><button type="button" class="queue-heading ${queue.tone}" data-expand-queue="${queue.id}" aria-expanded="${Boolean(open)}"><span><img src="icons/chevron-down.svg" alt=""><strong>${queue.label}</strong><span class="queue-count">${queue.tokens.length}</span></span></button>
+      ${open ? `<p class="queue-description">${esc(queue.note)}</p>${queue.tokens.map(renderReviewRow).join("")}` : ""}</section>`;
+  }).join("");
   els.content.innerHTML = `
-    <div class="filter-workspace${state.mobileDetailOpen ? " is-detail-open" : ""}">
-      ${renderFilterTokenPanel(group)}
-      ${renderTokenDetail(token)}
+    <div class="radar-heading"><div><h2>Accumulation radar</h2><p>Migrated pump.fun · ${esc(ageScope)} · ${all.filter((item) => item.decision.queue !== "inactive").length} open positions</p></div><label class="sort-control">Sort within groups<select id="reviewSort" aria-label="Sort within groups"><option value="caught" ${state.reviewSort === "caught" ? "selected" : ""}>Newest catch</option><option value="retained" ${state.reviewSort === "retained" ? "selected" : ""}>Most retained</option></select></label></div>
+    <div class="queue-nav" role="group" aria-label="Position views">
+      <button type="button" data-review-queue="overview" aria-pressed="${state.reviewQueue === "overview"}">Overview</button>
+      ${queues.map((queue) => `<button type="button" data-review-queue="${queue.id}" aria-pressed="${state.reviewQueue === queue.id}">${queue.label}<span>${queue.count}</span></button>`).join("")}
     </div>
-  `;
-  document.querySelectorAll(".filter-token-row").forEach((row) => {
-    row.addEventListener("click", () => {
-      state.selectedTokenKey = row.dataset.tokenKey;
-      state.detailTab = "overview";
-      state.mobileDetailOpen = true;
-      render();
-    });
+    <div class="review-workspace${state.mobileDetailOpen && token ? " is-detail-open" : ""}">
+      <section class="review-list-panel" aria-label="Tokens by position state">
+        <div class="review-table-head"><span>Token / last observation</span><span title="Share of originally acquired tokens remaining at last check">Position left</span><span>Current mcap</span></div>
+        <div class="review-list">
+          ${state.reviewQueue === "overview" && !queues[0].count ? `<div class="no-confirmation"><span class="quiet-indicator"></span><span><strong>No ready-to-review signals</strong><small>Current confirmation and fresh checks are not available together.</small></span></div>` : ""}
+          ${list || `<div class="review-empty"><img src="icons/scan-search.svg" alt=""><h3>${state.reviewQueue === "review" ? "No confirmed signals ready" : "No matching tokens"}</h3><p>${state.reviewQueue === "review" ? "Unverified candidates remain in Early observations or Needs data." : "Try another view or clear the additional filters."}</p><button type="button" id="resetReview">All open positions</button></div>`}
+          <div class="list-footer">${flatList.length} tokens · ${state.reviewSort === "caught" ? "Newest catch first within each group" : "Highest retention first within each group"}</div>
+        </div>
+      </section>
+      ${renderTokenDetail(token)}
+    </div>`;
+  document.querySelectorAll("[data-review-queue]").forEach((button) => button.addEventListener("click", () => {
+    state.reviewQueue = button.dataset.reviewQueue;
+    state.detailTab = "overview";
+    state.selectedTokenKey = null;
+    state.mobileDetailOpen = false;
+    render();
+    document.querySelector(`[data-review-queue="${state.reviewQueue}"]`)?.focus({ preventScroll: true });
+  }));
+  document.querySelectorAll("[data-expand-queue]").forEach((button) => button.addEventListener("click", () => {
+    const queue = button.dataset.expandQueue;
+    if (state.reviewQueue !== "overview" || state.query) return;
+    if (state.expandedQueues.has(queue)) state.expandedQueues.delete(queue);
+    else state.expandedQueues.add(queue);
+    render();
+    document.querySelector(`[data-expand-queue="${queue}"]`)?.focus({ preventScroll: true });
+  }));
+  document.querySelectorAll(".review-row").forEach((row) => row.addEventListener("click", () => {
+    state.reviewScrollY = window.scrollY;
+    const changed = state.selectedTokenKey !== row.dataset.tokenKey;
+    state.selectedTokenKey = row.dataset.tokenKey;
+    state.detailTab = "overview";
+    state.mobileDetailOpen = true;
+    render();
+    if (changed) document.querySelector(".token-detail")?.scrollTo(0, 0);
+    if (matchMedia("(max-width: 1000px)").matches) {
+      document.querySelector(".detail-back")?.focus({ preventScroll: true });
+      document.querySelector(".review-workspace")?.scrollIntoView({ block: "start" });
+    }
+  }));
+  document.querySelector("#reviewSort")?.addEventListener("change", (event) => {
+    state.reviewSort = event.target.value;
+    render();
   });
-  document.querySelectorAll(".token-terminal-link").forEach((link) => {
-    link.addEventListener("click", (event) => event.stopPropagation());
+  document.querySelector("#resetReview")?.addEventListener("click", () => {
+    state.reviewQueue = "overview"; state.query = ""; state.heat = "all"; state.minScore = 0;
+    els.searchInput.value = ""; els.heatFilter.value = "all"; els.scoreInput.value = "0";
+    render();
   });
   bindTokenHideActions();
   bindDetailControls();
-  if (token) void ensureTokenDetail(token.key);
+  if (token && (state.mobileDetailOpen || matchMedia("(min-width: 1001px)").matches)) void ensureTokenDetail(token.key);
 }
 
 function alertMatches(alert) {
@@ -3669,7 +3586,17 @@ function updateTabs() {
   });
 }
 
+function showNotice(message) {
+  const notice = document.querySelector("#appNotice");
+  notice.hidden = false;
+  notice.querySelector("span").textContent = message;
+}
+
 function render() {
+  const listScroll = document.querySelector(".review-list")?.scrollTop || 0;
+  const detailScroll = document.querySelector(".review-workspace .token-detail")?.scrollTop || 0;
+  const openFolds = [...document.querySelectorAll(".research-fold[open]")].map((fold) => fold.querySelector("summary")?.textContent);
+  document.body.classList.toggle("is-radar", state.tab === "filters");
   renderStatus();
   updateTabs();
   if (!state.report?.generated_at) {
@@ -3682,6 +3609,13 @@ function render() {
   else if (state.tab === "filters") renderFilters();
   else if (state.tab === "alerts") renderRawAlerts();
   else renderTokens();
+  const list = document.querySelector(".review-list");
+  const detail = document.querySelector(".review-workspace .token-detail");
+  if (list) list.scrollTop = listScroll;
+  if (detail) detail.scrollTop = detailScroll;
+  document.querySelectorAll(".research-fold").forEach((fold) => {
+    if (openFolds.includes(fold.querySelector("summary")?.textContent)) fold.open = true;
+  });
 }
 
 async function runScan() {
@@ -3698,7 +3632,13 @@ async function runScan() {
   }
 }
 
-els.refresh.addEventListener("click", loadData);
+els.refresh.addEventListener("click", async () => {
+  els.refresh.disabled = true;
+  try { await loadData(); }
+  catch { document.querySelector("#scannerSummary").textContent = "Refresh failed. Previous results are still shown."; }
+  finally { els.refresh.disabled = false; }
+});
+document.querySelector("#dismissNotice")?.addEventListener("click", () => { document.querySelector("#appNotice").hidden = true; });
 els.runScan.addEventListener("click", runScan);
 els.filterToggle?.addEventListener("click", () => {
   const open = els.filters?.classList.toggle("is-open") || false;

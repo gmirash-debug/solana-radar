@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "python3 -m unittest discover -s tests -v && node --test cloudflare/scan-dispatcher/test/index.test.mjs dashboard/test/data-source.test.mjs dashboard/test/filter-scope.test.mjs dashboard/test/token-state.test.mjs && node --check dashboard/app.js",
+    "test": "python3 -m unittest discover -s tests -v && node --test cloudflare/scan-dispatcher/test/index.test.mjs dashboard/test/*.test.mjs && node --check dashboard/app.js",
     "replay": "python3 tools/replay_reactivation.py"
   },
   "dependencies": {},
