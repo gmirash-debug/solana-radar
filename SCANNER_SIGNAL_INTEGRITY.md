@@ -35,13 +35,22 @@ provider budgets.
 
 ## Validation
 
-- `npm test`: 142 Python and 32 JavaScript tests pass, plus dashboard syntax check.
+- `npm test`: 144 Python and 32 JavaScript tests pass, plus dashboard syntax check.
 - Regression fixtures cover the audit reproductions, cohort confirmation and
   replacement, bounded balance monitoring, outbox replay and derived-write failure.
 - Worker production bundle passes `wrangler deploy --dry-run`.
 - Browser checks use the saved 2026-09-04 production snapshot and a simulated
   unavailable cloud endpoint. Candidate records remain accessible; old records
   are not promoted to confirmed merely because they held tokens.
+- Live run 33916888647 completed all 40 selected pools with no failed pools or
+  transaction parse errors. All four providers remained available. Alchemy used
+  14,900 of its 25,000 per-scan credits; the balance-only pass checked 11 cohorts
+  with 200 balance attempts. Its one failed cloud write was saved to Actions cache
+  and the fresh 20:45 UTC snapshot was published through Pages.
+- UI-only pushes have a separate queue from discovery. Pages builds use current
+  main assets and preserve the newer published/local snapshot instead of restoring
+  the stale Git-tracked fallback. If the public fallback cannot be read, an old
+  Git snapshot cannot be republished silently.
 
 ## Operational caveats
 
