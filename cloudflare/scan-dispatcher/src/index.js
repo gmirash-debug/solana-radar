@@ -637,7 +637,12 @@ async function ingestDashboardSnapshot(env, payload) {
     throw new Error("compact_report_exceeds_1_5mb");
   }
   const accepted = await upsertStateDoc(env.RADAR_DB, "latest_report", report, generatedAt, now);
-  if (!accepted) return { ok: true, ignored: "stale_snapshot", generated_at: generatedAt, alerts_synced: 0 };
+  if (!accepted) {
+    // A newer dashboard must not discard historical events from an offline run.
+    const historyQueued = await enqueueHistoryEvents(env, payload, now);
+    await upsertScanRun(env.RADAR_DB, report, now);
+    return { ok: true, ignored: "stale_snapshot", generated_at: generatedAt, alerts_synced: 0, history_queued: historyQueued.queued };
+  }
   await upsertStateDoc(env.RADAR_DB, "deleted_tokens", deletedTokens, normalizeId(deletedTokens.updated_at) || now, now);
   await upsertScanRun(env.RADAR_DB, report, now);
   const fullAlertDetails = [...detailCurrentAlerts, ...detailHistory];
@@ -767,7 +772,7 @@ async function discoveryStatePage(env, limit, cursor) {
   const hasMore = results.length > pageSize;
   const rows = results.slice(0, pageSize).map(discoveryRow);
   const last = rows.at(-1);
-  return { ok: true, rows, is_done: !hasMore, next_cursor: hasMore && last ? encodeCursor(last) : null };
+  return { ok: true, rows, is_done: !hasMore, next_cursor: hasMore && last ? encodeCursor({ updatedAt: last.updatedAt, tokenKey: last.tokenKey }) : null };
 }
 
 async function upsertDiscoveryStateRows(db, rows) {

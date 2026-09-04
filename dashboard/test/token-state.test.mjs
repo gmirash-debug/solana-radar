@@ -6,7 +6,16 @@ import {
   resolveAthContext,
   resolveCurrentMarket,
   resolveSignalEpisodes,
+  resolveWorkflowStatus,
 } from "../token-state.js";
+
+test("workflow never substitutes an old holding thesis for a confirmed entry", () => {
+  assert.equal(resolveWorkflowStatus({lifecycle: "holding", dataStatus: "current", currentTier: "watch"}), "candidate");
+  assert.equal(resolveWorkflowStatus({lifecycle: "holding", dataStatus: "current", currentTier: "hot_reactivation", currentConfirmed: true}), "hot");
+  assert.equal(resolveWorkflowStatus({lifecycle: "holding", dataStatus: "current", thesisConfirmed: true}), "active");
+  assert.equal(resolveWorkflowStatus({lifecycle: "holding", dataStatus: "overdue", thesisConfirmed: true}), "recheck_due");
+  assert.equal(resolveWorkflowStatus({lifecycle: "closed", dataStatus: "overdue"}), "inactive");
+});
 
 test("newer catch sorts ahead of an older catch", () => {
   const newest = { firstSignalAt: "2026-07-31T09:00:00Z" };

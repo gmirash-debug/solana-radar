@@ -284,6 +284,22 @@ main {
   border-right: 0;
 }
 
+button.metric {
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.metric:hover,
+button.metric[aria-pressed="true"] {
+  background: var(--panel);
+  box-shadow: inset 0 -2px 0 currentColor;
+}
+
 .metric-label,
 .workspace-title,
 .section-eyebrow,

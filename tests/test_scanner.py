@@ -794,6 +794,7 @@ class ScannerCoreTests(unittest.TestCase):
                 "hourly": hourly,
                 "quiet_since": now - 8 * 3600,
                 "last_snapshot_at": now - 300,
+                "latest_context": {"version": 2},
             },
             scanner.Pool(
                 pool_address="pool",
@@ -3679,6 +3680,7 @@ class ScannerCoreTests(unittest.TestCase):
             "score": 90,
             "signal_family": "reactivation_wave",
             "suspicious_sol": 82.6,
+            "reactivation_baseline": {"version": 2, "status": "ready", "reactivation_confirmed": True},
             "wave": {
                 "net_buy_sol": 82.6,
                 "unique_buyers": 142,
@@ -3689,7 +3691,7 @@ class ScannerCoreTests(unittest.TestCase):
                 "top_buyer_share": 0.227,
                 "top3_buyer_share": 0.305,
                 "balance_coverage_pct": 100,
-                "hold_age_minutes": 0,
+                "hold_age_minutes": 60,
                 "min_hold_minutes": 45,
             },
         }

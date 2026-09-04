@@ -27,6 +27,7 @@ import {
   historyEventsFromPayload,
   mcapBand,
   normalizedOutcome,
+  flushHistoryOutbox,
 } from "../src/history.js";
 
 function githubContent(data, sha) {
@@ -360,6 +361,51 @@ test("history outcome uses the frozen horizon result, not a later all-time peak"
 test("history outbox accepts only explicit ledger events", () => {
   assert.deepEqual(historyEventsFromPayload({ history_ledger: { events: [{ episode: { token_address: "a" } }] } }).length, 1);
   assert.deepEqual(historyEventsFromPayload({ history: [{ episode: { token_address: "a" } }] }), []);
+});
+
+test("late outcome remains partial instead of becoming an eligible 24h result", () => {
+  const rows = normalizedOutcome({horizons: {"24h": {
+    at: "2026-08-04T00:00:00Z", target_at: "2026-08-02T00:00:00Z", return_pct: 100,
+  }}}, {caught_at: "2026-08-01T00:00:00Z"}, "2026-08-04T00:00:00Z");
+  assert.equal(rows.find(row => row.horizon_minutes === 1440).status, "partial");
+});
+
+test("outbox batches baseline refresh and acknowledges only after derived writes", async () => {
+  for (const failDerived of [false, true]) {
+    const queries = [];
+    const pending = ["a", "b"].map(token => ({event_id: token, payload_json: JSON.stringify({
+      episode: {token_address: token, caught_at: "2026-09-01T00:00:00Z"},
+      event: {event_type: "outcome_24h", observed_at: "2026-09-02T00:00:00Z"},
+      outcome: {},
+    })}));
+    let baselineReads = 0;
+    const db = {
+      prepare(sql) {
+        const statement = {
+          bind() { return statement; },
+          async all() {
+            queries.push(sql);
+            if (sql.includes("SELECT event_id, payload_json")) return {results: pending};
+            if (sql.includes("GROUP BY e.mcap_band")) {
+              baselineReads += 1;
+              if (failDerived) throw new Error("D1 quota");
+            }
+            return {results: []};
+          },
+          async first() { return {count: 0}; },
+          async run() { queries.push(sql); return {success: true}; },
+        };
+        return statement;
+      },
+      async batch(statements) { return Promise.all(statements.map(statement => statement.run())); },
+    };
+    const run = flushHistoryOutbox({RADAR_DB: db, RADAR_HISTORY_DB: db});
+    if (failDerived) await assert.rejects(run, /D1 quota/);
+    else assert.equal((await run).delivered, 2);
+    assert.equal(baselineReads, 1);
+    assert.equal(queries.filter(sql => sql.includes("SET status = 'delivered'")).length, failDerived ? 0 : 2);
+    assert.ok(queries.find(sql => sql.includes("SELECT event_id, payload_json")).includes("WHERE status = 'pending'"));
+  }
 });
 
 test("history event ids sort by their observation time for deterministic initial backfill", () => {

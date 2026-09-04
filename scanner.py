@@ -2,6 +2,7 @@
 import argparse
 import copy
 import hashlib
+import gzip
 import json
 import math
 import os
@@ -33,6 +34,7 @@ SCANNER_STATUS_PATH = DATA_DIR / "scanner_status.json"
 DISCOVERY_STATUS_PATH = DATA_DIR / "discovery_status.json"
 DISCOVERY_STATE_PATH = DATA_DIR / "discovery_state.json"
 DELETED_TOKENS_PATH = DATA_DIR / "deleted_tokens.json"
+REMOTE_OUTBOX_DIR = DATA_DIR / "remote_outbox"
 CONFIG_PATH = ROOT / "config.json"
 DEFAULT_CONFIG_PATH = ROOT / "config.example.json"
 STATE_SCHEMA_VERSION = 1
@@ -461,7 +463,7 @@ def write_jsonl(path, records):
     )
 
 
-def write_scanner_status(status, error=None, scan_health=None):
+def write_scanner_status(status, error=None, scan_health=None, persistence=None):
     previous = load_json(SCANNER_STATUS_PATH, {})
     now = utc_now().isoformat().replace("+00:00", "Z")
     payload = {
@@ -470,6 +472,7 @@ def write_scanner_status(status, error=None, scan_health=None):
         "last_success_at": previous.get("last_success_at"),
         "error": str(error or "")[:500] or None,
         "scan_health": scan_health or {},
+        "persistence": persistence or {},
     }
     if status == "ok":
         payload["last_success_at"] = now
@@ -1244,27 +1247,34 @@ def remote_api_call(method, path, config, payload=None, params=None):
 def sync_remote_snapshot(report_payload, state, config):
     base_url = remote_data_url_from_env()
     if not base_url:
-        return
-    secret = remote_ingest_secret()
-    if not secret:
-        message = "Remote sync skipped: RADAR_INGEST_SECRET is missing"
-        if remote_sync_required(config):
-            raise RuntimeError(message)
-        print(message, file=sys.stderr)
-        return
-
+        return {"status": "disabled", "pending": 0}
     body = build_dashboard_snapshot(report_payload, state, config, include_detail=True)
-    try:
-        result = remote_api_call("POST", "/api/ingest/snapshot", config, body)
-        print(
-            "Remote sync: "
-            f"{result.get('alerts_synced', len(body.get('history') or []))} alerts, "
-            f"generated_at={result.get('generated_at') or report_payload.get('generated_at')}"
-        )
-    except Exception as exc:
-        if remote_sync_required(config):
-            raise
-        print(f"Remote sync failed: {exc}", file=sys.stderr)
+    REMOTE_OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+    (REMOTE_OUTBOX_DIR / ".keep").touch()
+    generated_at = str(report_payload.get("generated_at") or utc_now().isoformat())
+    filename = re.sub(r"[^0-9]", "", generated_at) + ".json.gz"
+    current = REMOTE_OUTBOX_DIR / filename
+    temp = current.with_suffix(".tmp")
+    temp.write_bytes(gzip.compress(json.dumps(body, separators=(",", ":")).encode()))
+    temp.replace(current)
+    paths = sorted(REMOTE_OUTBOX_DIR.glob("*.json.gz"))
+    selected = list(dict.fromkeys([*paths[:2], current]))
+    error = None
+    for path in selected:
+        try:
+            if not remote_ingest_secret():
+                raise RuntimeError("Remote sync pending: RADAR_INGEST_SECRET is missing")
+            pending_body = json.loads(gzip.decompress(path.read_bytes()))
+            remote_api_call("POST", "/api/ingest/snapshot", config, pending_body)
+            path.unlink()
+        except Exception as exc:
+            error = str(exc)[:500]
+            print(f"Remote sync pending: {error}", file=sys.stderr)
+            if remote_sync_required(config):
+                raise
+            break
+    pending = len(list(REMOTE_OUTBOX_DIR.glob("*.json.gz")))
+    return {"status": "pending" if pending else "synced", "pending": pending, "error": error, "checked_at": utc_now().isoformat()}
 
 
 def sync_remote_discovery_status(status, config):
@@ -1773,6 +1783,13 @@ class SolanaRpcProvider:
 
     def error_category(self, status=None, code=None, detail=""):
         detail = str(detail or "").lower()
+        # Some providers return HTTP 403 for a method-specific plan restriction.
+        if code == -32601 or any(marker in detail for marker in (
+            "only available on dedicated nodes",
+            "indexed requests require a personal token",
+            "method is not available", "method not found",
+        )):
+            return "unsupported"
         if status in (401, 403) or any(marker in detail for marker in ("unauthorized", "forbidden", "invalid api key")):
             return "auth"
         if status == 402 or code == 35 or any(
@@ -1886,12 +1903,18 @@ class SolanaRpcProvider:
                 continue
             if not response.ok:
                 detail = (response.text or response.reason or "request failed").strip().replace("\n", " ")[:300]
-                category = self.error_category(status=response.status_code, detail=detail)
+                try:
+                    error_body = response.json().get("error") or {}
+                except (ValueError, AttributeError):
+                    error_body = {}
+                code = error_body.get("code") if isinstance(error_body, dict) else None
+                category = self.error_category(status=response.status_code, code=code, detail=detail)
                 error = HeliusRpcError(
                     method,
                     category,
                     detail,
                     status=response.status_code,
+                    code=code,
                     provider=self.provider_name,
                 )
                 self.record_failure(error)
@@ -3441,15 +3464,19 @@ def activity_context_from_history(entry, pool, now, config):
         / max(1.0, float(pool.volume_1h_usd or 0))
     )
     last_snapshot_at = int(entry.get("last_snapshot_at") or 0)
-    quiet_since = int(entry.get("quiet_since") or 0)
-    if not quiet_since and last_snapshot_at and now - last_snapshot_at > 3600:
-        quiet_since = last_snapshot_at + 3600
+    previous_context = entry.get("latest_context") or {}
+    contiguous = bool(
+        previous_context.get("version") == 2
+        and last_snapshot_at
+        and 0 <= now - last_snapshot_at <= int(config.get("reactivation_baseline_max_observation_gap_minutes", 90)) * 60
+    )
+    quiet_since = int(entry.get("quiet_since") or 0) if contiguous else 0
     quiet_hours = max(0.0, (now - quiet_since) / 3600) if quiet_since else 0.0
     min_samples = max(
         1,
         int(config.get("reactivation_baseline_min_samples", 12)),
     )
-    ready = int(stats["sample_count"]) >= min_samples
+    ready = int(stats["sample_count_24h"]) >= min_samples
     min_quiet_hours = float(
         config.get("reactivation_baseline_min_quiet_hours", 6)
     )
@@ -3476,6 +3503,8 @@ def activity_context_from_history(entry, pool, now, config):
     )
     result = {
         **stats,
+        "version": 2,
+        "observation_contiguous": contiguous,
         "status": "ready" if ready else "warming",
         "observed_at": iso(now),
         "quiet_since": iso(quiet_since),
@@ -3484,9 +3513,9 @@ def activity_context_from_history(entry, pool, now, config):
         "txns_1h_ratio": txns_ratio,
         "burst_acceleration": burst_acceleration,
         "reactivation_confirmed": confirmed,
+        "activation_observed_at": iso(now) if confirmed else None,
     }
-    previous_context = entry.get("latest_context") or {}
-    previous_context_at = parse_timestamp(previous_context.get("observed_at"))
+    activation_at = parse_timestamp(previous_context.get("activation_observed_at"))
     memory_seconds = int(
         float(
             config.get(
@@ -3498,16 +3527,17 @@ def activity_context_from_history(entry, pool, now, config):
     )
     if (
         not result["reactivation_confirmed"]
+        and contiguous
         and previous_context.get("reactivation_confirmed")
-        and previous_context_at
-        and now - previous_context_at <= memory_seconds
+        and activation_at
+        and 0 <= now - activation_at <= memory_seconds
     ):
         result["reactivation_confirmed"] = True
         result["quiet_hours"] = max(
             result["quiet_hours"],
             float(previous_context.get("quiet_hours") or 0),
         )
-        result["activation_observed_at"] = previous_context.get("observed_at")
+        result["activation_observed_at"] = iso(activation_at)
     return result
 
 
@@ -3550,7 +3580,7 @@ def record_market_activity_baselines(state, pools, observed_at, config):
             and float(pool.txns_1h or 0) <= quiet_txn_limit
         )
         if is_quiet:
-            entry["quiet_since"] = int(entry.get("quiet_since") or now)
+            entry["quiet_since"] = int(context.get("quiet_since") and parse_timestamp(context["quiet_since"]) or now)
         else:
             entry["quiet_since"] = 0
 
@@ -5708,8 +5738,7 @@ def is_hot_reactivation_signal(pool, alert, config):
     wave = alert.get("wave") or {}
     baseline = alert.get("reactivation_baseline") or {}
     baseline_allows_hot = bool(
-        baseline.get("status") != "ready"
-        or baseline.get("reactivation_confirmed")
+        (baseline.get("status") == "ready" and baseline.get("reactivation_confirmed"))
         or not config.get("reactivation_baseline_required_for_actionable", True)
     )
     mcap = float(getattr(pool, "mcap_usd", 0) or 0)
@@ -5750,6 +5779,7 @@ def is_hot_reactivation_signal(pool, alert, config):
         and balance_coverage
         >= float(config.get("actionable_min_balance_coverage_pct", 80))
         and baseline_allows_hot
+        and float(wave.get("hold_age_minutes") or 0) >= float(wave.get("min_hold_minutes") or 0)
     )
 
 
@@ -5917,8 +5947,7 @@ def classify_alert_tier(pool, alert, evidence, config):
         )
         classic_actionable = coordination and (hard_cluster or hard_flow or dormant)
         baseline_allows_actionable = (
-            not baseline_ready
-            or baseline_confirmed
+            (baseline_ready and baseline_confirmed)
             or not config.get("reactivation_baseline_required_for_actionable", True)
         )
         tier = (
@@ -6388,6 +6417,7 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
         "signal_liquidity_usd": float(pool.get("liquidity_usd") or 0),
         "signal_family": alert.get("signal_family") or "classified_wallets",
         "source_tier": alert.get("action_tier"),
+        "signal_confirmation": copy.deepcopy(alert.get("signal_confirmation")),
         "source_score": float(alert.get("score") or 0),
         "source_flow_sol": float(
             alert.get("suspicious_sol")
@@ -6485,10 +6515,13 @@ def capture_signal_thesis(
             candidates.append((alert_history_timestamp(alert), incoming))
     if not candidates:
         return existing, promoted
+    verified_candidates = [item for item in candidates if (item[1].get("signal_confirmation") or {}).get("status") == "confirmed"]
+    wave_candidates = [item for item in candidates if item[1].get("signal_family") == "reactivation_wave"]
+    preferred = verified_candidates or wave_candidates or candidates
     incoming = (
-        min(candidates, key=lambda item: item[0])[1]
+        min(preferred, key=lambda item: item[0])[1]
         if not isinstance(existing, dict)
-        else max(candidates, key=lambda item: item[0])[1]
+        else max(preferred, key=lambda item: item[0])[1]
     )
     replace = not isinstance(existing, dict)
     if isinstance(existing, dict):
@@ -6497,6 +6530,11 @@ def capture_signal_thesis(
             and parse_timestamp(incoming.get("signal_at"))
             > parse_timestamp(existing.get("signal_at"))
         )
+        if (existing.get("signal_confirmation") or {}).get("status") != "confirmed":
+            replace = replace or bool(
+                (incoming.get("signal_confirmation") or {}).get("status") == "confirmed"
+                or (existing.get("signal_family") != "reactivation_wave" and incoming.get("signal_family") == "reactivation_wave")
+            )
     if replace:
         pool_state["signal_thesis"] = incoming
         pool_state.pop("pending_signal_thesis", None)
@@ -6734,6 +6772,20 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
             ),
         }
     )
+    confirmation = thesis.get("signal_confirmation") or {}
+    eligible_at = parse_timestamp(confirmation.get("retention_check_after"))
+    if (
+        confirmation.get("status") == "candidate"
+        and confirmation.get("reasons") == ["retention not seasoned"]
+        and eligible_at and parse_timestamp(checked_at) >= eligible_at
+        and status == "intact" and balance_coverage_pct == 100
+        and token_balance_coverage_pct >= 99.99 and can_invalidate
+        and retention_pct >= 80 and holder_retention_pct >= 65
+    ):
+        thesis["signal_confirmation"] = {
+            **confirmation, "status": "confirmed", "reasons": [],
+            "checked_at": checked_at, "confirmed_by": "original_cohort_balance_recheck",
+        }
     if previous_status != status:
         thesis["status_changed_at"] = checked_at
     if status == "invalidated":
@@ -6759,6 +6811,7 @@ def public_signal_thesis(thesis):
         "signal_liquidity_usd",
         "signal_family",
         "source_tier",
+        "signal_confirmation",
         "source_score",
         "source_flow_sol",
         "source_wallets",
@@ -7400,6 +7453,8 @@ def analyze_wave_wallet_graph(rpc, buyers, config, state):
         default=0.0,
     )
     effective_wallets = len(cluster_rows)
+    verified_owners = {owner for owner, result in classifications.items() if not result.get("error")}
+    checked_flow = sum(buyer_sol[owner] for owner in verified_owners)
     classes = Counter(
         item.get("wallet_class")
         for item in classifications.values()
@@ -7412,6 +7467,9 @@ def analyze_wave_wallet_graph(rpc, buyers, config, state):
         "common_funders": common_funders,
         "common_executors": common_executors,
         "effective_wallets": effective_wallets,
+        "verified_effective_wallets": len({find(owner) for owner in verified_owners}),
+        "checked_flow_coverage_pct": checked_flow / total_sol * 100 if total_sol else 0.0,
+        "checked_wallet_coverage_pct": len(verified_owners) / len(buyer_sol) * 100 if buyer_sol else 0.0,
         "max_cluster_share": max_cluster_share,
         "clusters": [row for row in cluster_rows if row["wallets"] > 1],
         "wallets": classifications,
@@ -9681,15 +9739,18 @@ def apply_alert_data_quality(
             reasons.append("partial wallet classification")
         wave = alert.get("wave") or {}
         balance_coverage_value = wave.get("balance_coverage_pct")
-        balance_coverage_pct = 100.0 if balance_coverage_value is None else float(balance_coverage_value)
-        if balance_coverage_pct < float(
+        balance_coverage_pct = None if balance_coverage_value is None else float(balance_coverage_value)
+        if balance_coverage_pct is None:
+            reasons.append("balance verification missing")
+        elif balance_coverage_pct < float(
             config.get("actionable_min_balance_coverage_pct", 80)
         ):
             reasons.append("partial balance coverage")
-        owner_resolution_coverage_pct = float(
-            wave.get("owner_resolution_coverage_pct", 100.0)
-        )
-        if owner_resolution_coverage_pct < float(
+        owner_value = wave.get("owner_resolution_coverage_pct")
+        owner_resolution_coverage_pct = float(owner_value) if owner_value is not None else None
+        if owner_resolution_coverage_pct is None:
+            reasons.append("buyer attribution coverage missing")
+        elif owner_resolution_coverage_pct < float(
             config.get("actionable_min_owner_resolution_coverage_pct", 80)
         ):
             reasons.append("partial routed buyer attribution")
@@ -9712,7 +9773,43 @@ def apply_alert_data_quality(
             if "partial onchain coverage" not in penalties:
                 penalties.append("partial onchain coverage")
             alert["quality_penalties"] = penalties
+        apply_signal_confirmation(alert, config)
     return alerts
+
+
+def apply_signal_confirmation(alert, config):
+    if (alert.get("lane") or config.get("lane")) != "reactivation":
+        return alert
+    wave = alert.get("wave") or {}
+    baseline = alert.get("reactivation_baseline") or {}
+    graph = alert.get("wallet_graph") or {}
+    reasons = list((alert.get("data_quality") or {}).get("reasons") or [])
+    if (alert.get("data_quality") or {}).get("status") != "complete":
+        reasons.append("onchain verification incomplete")
+    if alert.get("signal_family") != "reactivation_wave":
+        reasons.append("wallet class alone does not confirm accumulation")
+    if baseline.get("version") != 2 or baseline.get("status") != "ready" or not baseline.get("reactivation_confirmed"):
+        reasons.append("quiet-regime break not verified")
+    if not wave.get("min_hold_minutes") or float(wave.get("hold_age_minutes") or 0) < float(wave["min_hold_minutes"]):
+        reasons.append("retention not seasoned")
+    if float(graph.get("checked_flow_coverage_pct") or 0) < float(config.get("actionable_min_graph_flow_coverage_pct", 60)):
+        reasons.append("buyer relationship coverage incomplete")
+    if int(graph.get("verified_effective_wallets") or 0) < int(config.get("reactivation_wallet_graph_min_effective_buyers", 6)):
+        reasons.append("too few verified buyer groups")
+    reasons = list(dict.fromkeys(reasons))
+    alert["signal_confirmation"] = {
+        "version": 1,
+        "status": "candidate" if reasons else "confirmed",
+        "reasons": reasons,
+        "checked_at": alert.get("created_at"),
+    }
+    if reasons == ["retention not seasoned"] and wave.get("min_hold_minutes") and parse_timestamp(alert.get("created_at")):
+        alert["signal_confirmation"]["retention_check_after"] = iso(
+            parse_timestamp(alert["created_at"]) + float(wave["min_hold_minutes"]) * 60
+        )
+    if reasons and alert.get("action_tier") not in ("noise", "late_chase"):
+        alert["action_tier"] = "candidate"
+    return alert
 
 
 def schedule_signal_recheck(pool_state, alerts, config):
@@ -10359,7 +10456,7 @@ def keep_strong_late_reactivation(alert, config):
 def compact_alert_history(existing_alerts, new_alerts, config):
     keep_tiers = set(
         config.get("alert_history_keep_tiers")
-        or ["actionable", "hot_reactivation", "watch"]
+        or ["actionable", "hot_reactivation", "watch", "candidate"]
     )
     retention_hours = float(config.get("alert_history_retention_hours", 168))
     max_tokens = int(config.get("alert_history_max_tokens", 40))
@@ -11236,15 +11333,22 @@ def outcome_market_snapshot(entry, observed_at):
 
 
 def outcome_return_pct(outcome, snapshot):
-    caught_mcap = to_float(outcome.get("caught_mcap_usd"))
-    current_mcap = to_float(snapshot.get("mcap_usd"))
-    if caught_mcap > 0 and current_mcap > 0:
-        return (current_mcap / caught_mcap - 1) * 100
     caught_price = to_float(outcome.get("caught_price_usd"))
     current_price = to_float(snapshot.get("price_usd"))
     if caught_price > 0 and current_price > 0:
         return (current_price / caught_price - 1) * 100
+    caught_mcap = to_float(outcome.get("caught_mcap_usd"))
+    current_mcap = to_float(snapshot.get("mcap_usd"))
+    if caught_mcap > 0 and current_mcap > 0:
+        return (current_mcap / caught_mcap - 1) * 100
     return None
+
+
+def outcome_checkpoint_eligible(checkpoint):
+    if not isinstance(checkpoint, dict) or not checkpoint.get("at") or not checkpoint.get("target_at"):
+        return False
+    delay = parse_timestamp(checkpoint["at"]) - parse_timestamp(checkpoint["target_at"])
+    return 0 <= delay <= 3600 and checkpoint.get("quality_status") not in ("partial", "delayed")
 
 
 def summarize_signal_outcomes(outcomes):
@@ -11254,13 +11358,15 @@ def summarize_signal_outcomes(outcomes):
         returns_24h = [
             to_float((row.get("horizons") or {}).get("24h", {}).get("return_pct"))
             for row in group
-            if (row.get("horizons") or {}).get("24h", {}).get("return_pct")
+            if outcome_checkpoint_eligible((row.get("horizons") or {}).get("24h"))
+            and (row.get("horizons") or {}).get("24h", {}).get("return_pct")
             is not None
         ]
         returns_72h = [
             to_float((row.get("horizons") or {}).get("72h", {}).get("return_pct"))
             for row in group
-            if (row.get("horizons") or {}).get("72h", {}).get("return_pct")
+            if outcome_checkpoint_eligible((row.get("horizons") or {}).get("72h"))
+            and (row.get("horizons") or {}).get("72h", {}).get("return_pct")
             is not None
         ]
         return {
@@ -11307,7 +11413,7 @@ def summarize_signal_outcomes(outcomes):
         summary[f"with_{horizon}"] = sum(
             1
             for row in rows
-            if (row.get("horizons") or {}).get(horizon)
+            if outcome_checkpoint_eligible((row.get("horizons") or {}).get(horizon))
         )
     overall = metrics(rows)
     summary.update(
@@ -11330,6 +11436,9 @@ def summarize_signal_outcomes(outcomes):
         key: metrics(group)
         for key, group in sorted(by_stage.items())
     }
+    summary["excluded_24h"] = sum(bool((row.get("horizons") or {}).get("24h")) and not outcome_checkpoint_eligible(row["horizons"]["24h"]) for row in rows)
+    summary["methodology_version"] = 2
+    summary["max_delay_seconds"] = 3600
     return summary
 
 
@@ -11374,6 +11483,8 @@ def update_signal_outcomes(state, alerts, observed_at, config):
             "caught_tier": alert.get("action_tier"),
             "caught_stage": alert.get("reactivation_stage"),
             "caught_score": int(alert.get("score") or 0),
+            "config_version": effective_config_version(config),
+            "confirmation_status": (alert.get("signal_confirmation") or {}).get("status", "unverified"),
             "signal_family": alert.get("signal_family"),
             "horizons": {},
         }
@@ -11414,6 +11525,7 @@ def update_signal_outcomes(state, alerts, observed_at, config):
                 **snapshot,
                 "target_at": iso(caught_ts + seconds),
                 "delay_seconds": max(0, snapshot_ts - caught_ts - seconds),
+                "quality_status": "complete" if snapshot_ts - caught_ts - seconds <= 3600 else "delayed",
                 # These fields are frozen at the first observation after the
                 # horizon is due. Later performance cannot leak backward into
                 # a historical 1h/6h/24h result.
@@ -11511,6 +11623,7 @@ def refresh_alert_tiers_with_market_ath(state, alerts, config):
         alert["quality_penalties"] = penalties
         alert["quality_metrics"] = quality_metrics
         alert["ath_recalculated_in_scan"] = True
+        apply_signal_confirmation(alert, pool_config)
     return alerts
 
 
@@ -12444,6 +12557,32 @@ def ath_filter_log_message(label, kept_pools, input_pools, max_ratio):
     )
 
 
+def monitor_due_cohorts(rpc, universe, state, config, observed_at):
+    remaining = max(0, int(config.get("signal_thesis_extra_balance_budget", 200)))
+    now = parse_timestamp(observed_at)
+    due = []
+    for pool in universe:
+        pool_state = (state.get("pools") or {}).get(pool.pool_address) or {}
+        thesis = pool_state.get("signal_thesis") or {}
+        last_checked = parse_timestamp(thesis.get("last_checked_at"))
+        due_at = parse_timestamp(pool_state.get("signal_recheck_due_at"))
+        if thesis and thesis.get("status") != "invalidated" and (due_at <= now if due_at else now - last_checked >= 3600):
+            due.append((last_checked, pool, pool_state))
+    checked, used = 0, 0
+    for _, pool, pool_state in sorted(due, key=lambda item: item[0]):
+        cost = len(pool_state["signal_thesis"].get("cohort") or [])
+        if not cost or cost > remaining:
+            continue
+        recheck_signal_thesis(rpc, pool, pool_state, reactivation_stage_config(pool, config), observed_at)
+        if pool_state["signal_thesis"].get("status") == "invalidated":
+            capture_signal_thesis(pool_state, [], config, captured_at=observed_at)
+        schedule_signal_recheck(pool_state, [], config)
+        checked += 1
+        used += cost
+        remaining -= cost
+    return {"due": len(due), "checked": checked, "balance_requests": used, "deferred": len(due) - checked}
+
+
 def scan_with_config(http, rpc, state, config, base_universe=None):
     label = config.get("lane") or config.get("mode") or "scan"
     if base_universe is None:
@@ -12505,7 +12644,9 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
             observed_at,
         )
         universe.extend(thesis_monitor_pools)
+    cohort_monitor = monitor_due_cohorts(rpc, universe, state, config, observed_at)
     scan_targets, selection_stats = select_scan_targets(universe, state, config)
+    selection_stats["cohort_monitor"] = cohort_monitor
     selection_stats["thesis_monitor_universe"] = len(thesis_monitor_pools)
     config["_selection_stats"] = selection_stats
     print(f"{label}: universe {len(universe)} pools, scanning {len(scan_targets)}", flush=True)
@@ -12795,7 +12936,10 @@ def run_once(config, lane_name=None):
     write_report_json(report_payload)
     write_dashboard_fallback(report_payload, state, config)
     render_report(report_payload)
-    sync_remote_snapshot(report_payload, state, config)
+    config["_persistence"] = sync_remote_snapshot(report_payload, state, config)
+    report_payload["stats"]["persistence"] = config["_persistence"]
+    write_report_json(report_payload)
+    write_dashboard_fallback(report_payload, state, config)
 
     print(f"Solana RPC: {health}")
     print(f"RPC providers: {', '.join(rpc.providers)}")
@@ -12967,7 +13111,7 @@ def main():
             )
             sync_remote_scan_status(status, config)
             raise
-        status = write_scanner_status("ok", scan_health=config.get("_scan_health"))
+        status = write_scanner_status("ok", scan_health=config.get("_scan_health"), persistence=config.get("_persistence"))
         sync_remote_scan_status(status, config)
         if not args.watch:
             break
