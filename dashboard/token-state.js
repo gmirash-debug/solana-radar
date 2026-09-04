@@ -1,5 +1,15 @@
 export const MARKET_SNAPSHOT_MAX_AGE_MS = 90 * 60 * 1000;
 
+export function resolveWorkflowStatus({ lifecycle, dataStatus, currentTier, currentConfirmed = false, thesisConfirmed = false }) {
+  if (lifecycle === "closed") return "inactive";
+  if (dataStatus !== "current") return "recheck_due";
+  if (lifecycle === "weakening") return thesisConfirmed ? "weakening" : "candidate";
+  if (currentConfirmed && ["actionable", "hot_reactivation"].includes(currentTier)) return "hot";
+  if (currentConfirmed && currentTier === "watch") return "watch";
+  if (thesisConfirmed && lifecycle === "holding") return "active";
+  return currentTier === "noise" ? "noise" : "candidate";
+}
+
 function positiveNumber(...values) {
   for (const value of values) {
     const number = Number(value);

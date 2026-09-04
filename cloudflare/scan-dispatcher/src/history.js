@@ -236,6 +236,9 @@ function normalizedOutcome(raw = {}, episode = {}, now = nowIso()) {
     const checkpoint = horizons[name];
     const dueAt = new Date(new Date(episode.caught_at).getTime() + minutes * 60_000).toISOString();
     const hasCheckpoint = checkpoint && typeof checkpoint === "object";
+    const delayMs = hasCheckpoint ? Date.parse(checkpoint.at) - Date.parse(checkpoint.target_at || dueAt) : NaN;
+    const timely = hasCheckpoint && Number.isFinite(delayMs) && delayMs >= 0 && delayMs <= 3_600_000
+      && !["delayed", "partial"].includes(checkpoint.quality_status);
     // Horizon values are frozen by the scanner when that horizon first becomes
     // due. Do not use the current all-time peak here: doing so would leak a
     // later pump into an earlier 1h/6h/24h outcome.
@@ -263,9 +266,9 @@ function normalizedOutcome(raw = {}, episode = {}, now = nowIso()) {
       tradable_2x: hit2x === null ? null : Number(Boolean(hit2x && endpointLiquidity && endpointLiquidity >= liquidityFloor)),
       market_data_coverage_pct: number(checkpoint?.market_data_coverage_pct ?? raw.market_data_coverage_pct),
       largest_gap_minutes: number(checkpoint?.largest_gap_minutes ?? raw.largest_gap_minutes),
-      status: hasCheckpoint ? "complete" : "pending",
+      status: timely ? "complete" : hasCheckpoint ? "partial" : "pending",
       source: text(raw.source) || "scanner_market_snapshot",
-      error: text(raw.error),
+      error: hasCheckpoint && !timely ? "horizon observation missing or more than 1h late" : text(raw.error),
       updated_at: now,
     });
   }
@@ -425,7 +428,7 @@ async function upsertOutcomes(db, episode, outcome, now) {
       tradable_2x = COALESCE(excluded.tradable_2x, signal_outcomes.tradable_2x),
       market_data_coverage_pct = COALESCE(excluded.market_data_coverage_pct, signal_outcomes.market_data_coverage_pct),
       largest_gap_minutes = COALESCE(excluded.largest_gap_minutes, signal_outcomes.largest_gap_minutes),
-      status = CASE WHEN excluded.status = 'complete' THEN 'complete' WHEN signal_outcomes.status = 'complete' THEN 'complete' ELSE excluded.status END,
+      status = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.status ELSE signal_outcomes.status END,
       source = COALESCE(excluded.source, signal_outcomes.source),
       error = COALESCE(excluded.error, signal_outcomes.error),
       updated_at = excluded.updated_at
@@ -503,6 +506,7 @@ async function refreshMarketBaselines(db, now) {
     FROM signal_episodes e
     JOIN signal_outcomes o ON o.episode_id = e.episode_id
     WHERE o.status = 'complete'
+      AND (julianday(o.evaluated_at) - julianday(o.due_at)) * 86400 BETWEEN 0 AND 3600.01
     GROUP BY e.mcap_band, e.liquidity_band, e.age_band, e.signal_family, o.horizon_minutes
   `).all();
   const statements = (result.results || []).map((row) => {
@@ -569,6 +573,7 @@ async function refreshWalletScores(db, walletAddresses, now) {
         AND w.cohort_role = 'at_catch'
         AND o.horizon_minutes = 4320
         AND o.status = 'complete'
+        AND (julianday(o.evaluated_at) - julianday(o.due_at)) * 86400 BETWEEN 0 AND 3600.01
     `).bind(wallet).all();
     const rows = result.results || [];
     if (!rows.length) continue;
@@ -707,7 +712,7 @@ async function refreshClusters(db, walletAddresses, now) {
   return count;
 }
 
-async function ingestHistoryEvent(env, rawEvent, now = nowIso()) {
+async function ingestHistoryEvent(env, rawEvent, now = nowIso(), derived = null) {
   if (!hasHistoryDb(env)) throw new Error("history_db_not_configured");
   const episode = normalizedEpisode(rawEvent?.episode, now);
   if (!episode) throw new Error("history_episode_token_required");
@@ -753,10 +758,16 @@ async function ingestHistoryEvent(env, rawEvent, now = nowIso()) {
       WHERE episode_id = ?1 AND cohort_role = 'at_catch'
     `).bind(episode.episode_id).all();
     relatedWallets = (episodeWalletRows.results || []).map((row) => row.wallet_address);
-    await refreshMarketBaselines(env.RADAR_HISTORY_DB, now);
-    scoresUpdated = await refreshWalletScores(env.RADAR_HISTORY_DB, relatedWallets, now);
+    if (derived) {
+      derived.refreshBaseline = true;
+      relatedWallets.forEach((wallet) => derived.scoreWallets.add(wallet));
+    } else {
+      await refreshMarketBaselines(env.RADAR_HISTORY_DB, now);
+      scoresUpdated = await refreshWalletScores(env.RADAR_HISTORY_DB, relatedWallets, now);
+    }
   }
-  const clustersUpdated = effects.refreshesClusters
+  if (derived && effects.refreshesClusters) relatedWallets.forEach((wallet) => derived.clusterWallets.add(wallet));
+  const clustersUpdated = effects.refreshesClusters && !derived
     ? await refreshClusters(env.RADAR_HISTORY_DB, relatedWallets, now)
     : 0;
   return { event_id: eventId, episode_id: episode.episode_id, wallets: wallets.length, scores_updated: scoresUpdated, clusters_updated: clustersUpdated };
@@ -802,21 +813,18 @@ export async function flushHistoryOutbox(env, { limit = OUTBOX_BATCH_SIZE } = {}
   const page = await env.RADAR_DB.prepare(`
     SELECT event_id, payload_json, attempts
     FROM history_outbox
-    WHERE status != 'delivered' AND next_attempt_at <= ?1
-    ORDER BY next_attempt_at ASC, event_id ASC
+    WHERE status = 'pending' AND next_attempt_at <= ?1
+    ORDER BY next_attempt_at ASC, created_at ASC
     LIMIT ?2
   `).bind(now, Math.max(1, Math.min(50, Number(limit) || OUTBOX_BATCH_SIZE))).all();
   let delivered = 0;
   let failed = 0;
+  const derived = { refreshBaseline: false, scoreWallets: new Set(), clusterWallets: new Set() };
+  const ingested = [];
   for (const row of page.results || []) {
     try {
-      await ingestHistoryEvent(env, parsePayload(row.payload_json, {}), now);
-      await env.RADAR_DB.prepare(`
-        UPDATE history_outbox
-        SET status = 'delivered', delivered_at = ?2, updated_at = ?2, last_error = NULL
-        WHERE event_id = ?1
-      `).bind(row.event_id, now).run();
-      delivered += 1;
+      await ingestHistoryEvent(env, parsePayload(row.payload_json, {}), now, derived);
+      ingested.push(row);
     } catch (error) {
       const attempts = (Number(row.attempts) || 0) + 1;
       await env.RADAR_DB.prepare(`
@@ -827,7 +835,17 @@ export async function flushHistoryOutbox(env, { limit = OUTBOX_BATCH_SIZE } = {}
       failed += 1;
     }
   }
-  const pending = await env.RADAR_DB.prepare("SELECT COUNT(*) AS count FROM history_outbox WHERE status != 'delivered'").first();
+  // Compute derived analytics once per batch, not a full-table baseline per event.
+  // Leave events pending if derived writes fail so the whole operation is retryable.
+  if (derived.refreshBaseline) await refreshMarketBaselines(env.RADAR_HISTORY_DB, now);
+  await refreshWalletScores(env.RADAR_HISTORY_DB, [...derived.scoreWallets], now);
+  if (derived.clusterWallets.size) await refreshClusters(env.RADAR_HISTORY_DB, [...derived.clusterWallets], now);
+  await runBatch(env.RADAR_DB, ingested.map((row) => env.RADAR_DB.prepare(`
+    UPDATE history_outbox SET status = 'delivered', delivered_at = ?2, updated_at = ?2, last_error = NULL
+    WHERE event_id = ?1
+  `).bind(row.event_id, now)));
+  delivered = ingested.length;
+  const pending = await env.RADAR_DB.prepare("SELECT COUNT(*) AS count FROM history_outbox WHERE status = 'pending'").first();
   const status = {
     updated_at: now,
     last_flush_at: now,
@@ -1095,7 +1113,7 @@ export async function historyStatus(env) {
   if (!hasHistoryDb(env)) return { configured: false, healthy: false };
   const [episode, outbox] = await Promise.all([
     env.RADAR_HISTORY_DB.prepare("SELECT COUNT(*) AS count, MAX(updated_at) AS updated_at FROM signal_episodes").first(),
-    env?.RADAR_DB?.prepare("SELECT COUNT(*) AS count, MIN(created_at) AS oldest_at FROM history_outbox WHERE status != 'delivered'").first(),
+    env?.RADAR_DB?.prepare("SELECT COUNT(*) AS count, MIN(created_at) AS oldest_at FROM history_outbox WHERE status = 'pending'").first(),
   ]);
   return {
     configured: true,

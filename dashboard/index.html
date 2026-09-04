@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Solana Radar</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="styles.css?v=20260825-supply-integrity-1">
+    <link rel="stylesheet" href="styles.css?v=20260904-signal-integrity-1">
   </head>
   <body>
     <header class="topbar">
@@ -46,7 +46,9 @@
             <label class="field-control">
               <span class="visually-hidden">Workflow</span>
               <select id="workflowFilter" aria-label="Workflow">
-              <option value="active">active</option>
+              <option value="active">confirmed + holding</option>
+              <option value="candidate">candidates</option>
+              <option value="recheck_due">check needed</option>
               <option value="hot">hot</option>
               <option value="watch">watch</option>
               <option value="weakening">weakening</option>
@@ -82,6 +84,6 @@
     </main>
 
     <script src="config.js?v=20260807-wallet-edge-1"></script>
-    <script type="module" src="app.js?v=20260825-supply-integrity-1"></script>
+    <script type="module" src="app.js?v=20260904-signal-integrity-1"></script>
   </body>
 </html>

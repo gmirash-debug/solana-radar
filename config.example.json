@@ -237,6 +237,8 @@
       "reactivation_ath_preload_max_tokens_per_scan": 16,
       "reactivation_wave_enabled": true,
       "reactivation_baseline_enabled": true,
+      "reactivation_baseline_max_observation_gap_minutes": 90,
+      "actionable_min_graph_flow_coverage_pct": 60,
       "reactivation_baseline_required_for_actionable": true,
       "reactivation_baseline_min_samples": 12,
       "reactivation_baseline_min_quiet_hours": 6,
@@ -410,6 +412,7 @@
   "signal_thesis_recheck_minutes": 60,
   "signal_thesis_priority_recheck_minutes": 30,
   "signal_thesis_recheck_grace_minutes": 15,
+  "signal_thesis_extra_balance_budget": 200,
   "signal_thesis_wallet_holder_min_pct": 10,
   "signal_thesis_min_balance_coverage_pct": 80,
   "signal_thesis_min_token_balance_coverage_pct": 80,
@@ -561,6 +564,7 @@
   "alert_event_export_limit": 80,
   "state_json_compact": true,
   "alert_history_keep_tiers": [
+    "candidate",
     "actionable",
     "hot_reactivation",
     "watch"

@@ -206,11 +206,26 @@ Signal quality:
 - Full holder and linkage evidence is stored in the token detail document in
   D1. The main dashboard payload keeps only the compact decision fields, and up
   to 56 point-in-time snapshots preserve roughly one week of three-hour checks.
-- A ready quiet-regime baseline is required for actionable Reactivation.
+- A ready, continuous quiet-regime baseline with a confirmed activity break is
+  required for confirmed Reactivation. Version-1 quiet periods are not trusted;
+  after an observation gap over 90 minutes, quiet duration starts again.
 - First-catch outcomes are tracked at 1h, 6h, 24h, and 72h, including maximum
   favorable and adverse movement.
 
 Signal lifecycle:
+
+- `Candidate` preserves early observations without calling them confirmed
+  accumulation. A wallet class or a high score alone is insufficient. Complete
+  onchain coverage, a verified quiet-regime break, at least six checked buyer
+  groups covering 60% of observed buy flow, and seasoned retention are required.
+- A wave waiting only for retention seasoning can become confirmed after a
+  complete later balance check of its original cohort, with at least 80% of
+  attributed tokens and 65% of holders remaining. This produces `Holding`, not
+  a new entry recommendation. Missing baseline/graph/history evidence cannot
+  be repaired by checking balances alone.
+- The default view contains confirmed signals and previously confirmed holding
+  cohorts. Candidates and overdue checks remain accessible through visible
+  counters and the Workflow menu; historical records are not deleted.
 
 - The first Reactivation alert persists its qualifying buyer cohort and the
   number of signal-attributed tokens each wallet retained.
@@ -219,6 +234,10 @@ Signal lifecycle:
   automatically instead of losing the newer Reactivation setup.
 - The scanner rechecks that same cohort on a reserved hourly monitor queue.
   Due cohort rechecks take priority over new discovery-queue candidates.
+  A separate balance-only pass checks the oldest due cohorts, capped at 200
+  wallet balance attempts per scan within the existing provider credit limits.
+  An unconfirmed cohort may be replaced by a newly confirmed wave, but its
+  confirmation must never be copied onto a different older cohort.
 - `Accumulation intact` means the tracked cohort still retains the original
   accumulation, while `Weakening` means it has distributed a material share.
 - `Recheck due` is used when the scan is stale or wallet coverage is
@@ -227,6 +246,28 @@ Signal lifecycle:
   confirms on two consecutive checks that both the retained token amount and
   the breadth of original holders have collapsed. A low balance alone or a
   single incomplete check cannot invalidate the signal.
+
+Persistence and outcome integrity:
+
+- Failed cloud snapshot writes remain in a compressed local outbox, preserved
+  across Actions runs in a separate cache. Each scan retries two oldest writes
+  and its current snapshot; an entry is removed only after acknowledgement.
+  `Cloud save pending` is separate from successful scanning. GitHub cache is a
+  recovery mechanism, not a permanent archive; sustained outages still need
+  operator attention. No paid-plan change is made automatically.
+- D1 history delivery uses the existing pending-status index and recalculates
+  baselines once per batch, not once per event. Derived-write failures leave
+  events pending. A stale snapshot can still deliver historical ledger events.
+- Endpoint outcomes more than one hour late are excluded from horizon metrics
+  and new wallet-score calculations. Prices take precedence over market cap for
+  returns. Historical cached scores are not a validated trading backtest.
+- Method-specific RPC plan restrictions disable only that method on that
+  provider; real authentication/quota errors still block the provider route.
+
+Run `npm test` for regression coverage of these contracts. The age window,
+pool migration requirement, hourly deep scan and five-minute discovery cadence
+remain unchanged. Fewer confirmed results immediately after rollout are
+expected while fresh baseline and cohort evidence accumulates.
 
 Disabled filters: `micro_sticky`, `cheap_sticky`, `breakout`, `incubation`, and
 `young` are not scanned or shown in the production dashboard. Their old alert

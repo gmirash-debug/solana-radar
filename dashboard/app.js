@@ -4,7 +4,8 @@ import {
   resolveAthContext,
   resolveCurrentMarket,
   resolveSignalEpisodes,
-} from "./token-state.js?v=20260807-wallet-edge-1";
+  resolveWorkflowStatus,
+} from "./token-state.js?v=20260904-signal-integrity-1";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
@@ -145,6 +146,7 @@ const CLASS_LABELS = {
   sticky_buyer: "sticky buyer",
 };
 const TIER_META = {
+  candidate: { label: "Candidate", tone: "", rank: 1.2, summary: "early observation; accumulation has not been confirmed" },
   actionable: {
     label: "Strong signal",
     tone: "good",
@@ -209,11 +211,13 @@ const SUPPLY_INTEGRITY_META = {
 };
 
 const WORKFLOW_META = {
+  candidate: { label: "Candidate", tone: "", rank: 1.2, summary: "accumulation is not confirmed" },
+  recheck_due: { label: "Check needed", tone: "warn", rank: 1.1, summary: "verification is missing or overdue" },
   active: {
-    label: "Active",
+    label: "Holding",
     tone: "good",
     rank: 5,
-    summary: "a live signal or intact tracked cohort",
+    summary: "a previously confirmed cohort still holds; not an entry recommendation",
   },
   hot: {
     label: "Hot",
@@ -1396,8 +1400,12 @@ function buildTokenSignals() {
     const scannerFailed = state.scanStatus?.status === "failed";
     const scannerOperational = !scannerFailed && reportAgeHours !== null && reportAgeHours <= 2;
     token.currentSignalAlerts = scannerOperational ? token.currentScanAlerts : [];
+    const confirmedAlerts = token.currentSignalAlerts.filter((alert) => alert.signal_confirmation?.status === "confirmed");
     token.currentSignalTier = token.currentSignalAlerts.length
-      ? bestTier(token.currentSignalAlerts.map(alertTier))
+      ? bestTier((confirmedAlerts.length ? confirmedAlerts : token.currentSignalAlerts).map((alert) => {
+          const tier = alertTier(alert);
+          return alert.signal_confirmation?.status !== "confirmed" && ["watch", "actionable", "hot_reactivation"].includes(tier) ? "candidate" : tier;
+        }))
       : null;
     token.currentScore = token.currentSignalAlerts.length
       ? Math.max(...token.currentSignalAlerts.map((alert) => Number(alert.score || 0)))
@@ -1426,22 +1434,16 @@ function buildTokenSignals() {
       : thesisCheckDue
         ? "check_needed"
         : "current";
-    if (token.lifecycleStatus === "closed") {
-      token.workflowStatus = "inactive";
-    } else if (token.lifecycleStatus === "weakening") {
-      token.workflowStatus = "weakening";
-    } else if (["actionable", "hot_reactivation"].includes(token.currentSignalTier)) {
-      token.workflowStatus = "hot";
-    } else if (token.currentSignalTier === "watch" || token.dataStatus === "check_needed") {
-      token.workflowStatus = "watch";
-    } else if (token.lifecycleStatus === "holding") {
-      token.workflowStatus = "active";
-    } else {
-      token.workflowStatus = token.currentSignalTier === "noise" ? "noise" : "watch";
-    }
+    token.workflowStatus = resolveWorkflowStatus({
+      lifecycle: token.lifecycleStatus,
+      dataStatus: token.dataStatus,
+      currentTier: token.currentSignalTier,
+      currentConfirmed: token.currentSignalAlerts.some((alert) => alert.signal_confirmation?.status === "confirmed"),
+      thesisConfirmed: token.signalThesis?.signal_confirmation?.status === "confirmed",
+    });
     token.signalLifecycle = {
       scannerOperational,
-      currentConfirmed: token.currentSignalAlerts.length > 0,
+      currentConfirmed: token.currentSignalAlerts.some((alert) => alert.signal_confirmation?.status === "confirmed"),
       scannedCleanThisRun: token.scannedCleanThisRun,
       lastSignalAgeHours,
       historicalTier: token.historicalTier,
@@ -1506,12 +1508,13 @@ function filteredTokens(tokens) {
   ));
 }
 
-function metric(label, value) {
+function metric(label, value, workflow = null) {
+  const tag = workflow ? "button" : "div";
   return `
-    <div class="metric">
+    <${tag} class="metric" ${workflow ? `type="button" data-workflow="${esc(workflow)}" aria-pressed="${state.workflow === workflow}"` : ""}>
       <div class="metric-label">${esc(label)}</div>
       <div class="metric-value">${esc(value)}</div>
-    </div>
+    </${tag}>
   `;
 }
 
@@ -1856,6 +1859,7 @@ function renderStatus() {
     ? reportFreshness(discoveryAt)
     : null;
   const discoveryFailed = discoveryStatus.status === "failed";
+  const persistence = status.persistence || report.stats?.persistence || {};
   els.subtitle.textContent = report.generated_at
     ? `Latest successful scan ${dateLabel(report.generated_at)} - ${report.profile || report.lane || report.mode || "unknown"}`
     : "No scan report yet";
@@ -1866,6 +1870,7 @@ function renderStatus() {
     failed ? `<span class="status-pill freshness-bad" title="${esc(status.error || "Scanner failed")}"><span class="dot bad"></span>last attempt failed ${esc(dateLabel(status.last_attempt_at))}</span>` : "",
     `<span class="status-pill freshness-${freshness.tone}"><span class="dot ${freshness.tone === "good" ? "" : freshness.tone}"></span>${esc(freshness.label)}</span>`,
     `<span class="status-pill freshness-${healthTone}" title="${esc(healthReason)}"><span class="dot ${healthTone === "good" ? "" : healthTone}"></span>scan ${esc(healthStatus)}</span>`,
+    persistence.status === "pending" ? `<span class="status-pill freshness-warn" title="${esc(persistence.error || "Cloud storage unavailable; retry queued")}">Cloud save pending: ${esc(persistence.pending)}</span>` : "",
     discoveryFailed
       ? `<span class="status-pill freshness-bad" title="${esc(discoveryStatus.error || "Discovery pulse failed")}"><span class="dot bad"></span>discovery failed</span>`
       : discoveryFreshness
@@ -1893,13 +1898,15 @@ function renderMetrics(tokens) {
   const baseTokens = buildTokenSignals().filter(tokenMatchesBaseFilters);
   const workflowCount = (workflow) => baseTokens.filter((token) => token.workflowStatus === workflow).length;
   const outcomes = stats.signal_outcomes || {};
-  const outcomeSamples = Number(outcomes.with_24h || 0);
+  const outcomeSamples = outcomes.methodology_version === 2 ? Number(outcomes.with_24h || 0) : 0;
   const outcomeMedian = outcomes.median_return_24h_pct;
   const outcomePositive = outcomes.positive_24h_pct;
   els.metrics.innerHTML = [
     metric("Tracked", baseTokens.filter((token) => ["active", "hot", "watch", "weakening"].includes(token.workflowStatus)).length),
     metric("Hot", workflowCount("hot")),
     metric("Watch", workflowCount("watch")),
+    metric("Candidates", workflowCount("candidate"), "candidate"),
+    metric("Check needed", workflowCount("recheck_due"), "recheck_due"),
     metric("Weakening", workflowCount("weakening")),
     metric("Inactive", workflowCount("inactive")),
     metric("Universe", stats.universe_pools ?? 0),
@@ -1918,6 +1925,11 @@ function renderMetrics(tokens) {
     ),
     metric("Data age", reportFreshness(report.generated_at).label),
   ].join("");
+  els.metrics.querySelectorAll("[data-workflow]").forEach((button) => button.addEventListener("click", () => {
+    state.workflow = button.dataset.workflow;
+    if (els.workflowFilter) els.workflowFilter.value = state.workflow;
+    render();
+  }));
 }
 
 function currentSignalChip(token) {
@@ -1930,6 +1942,9 @@ function primaryStatusChip(token, compact = false) {
 }
 
 function attentionReason(token) {
+  if (token.workflowStatus === "candidate") return token.signalThesis?.signal_confirmation?.reasons?.[0]
+    || token.currentSignalAlerts.flatMap((alert) => alert.signal_confirmation?.reasons || [])[0]
+    || "accumulation unverified";
   if (token.currentSignalTier === "late_chase") return "late entry";
   if (token.lifecycleStatus === "weakening") return "cohort reduced";
   if (token.dataStatus === "check_needed") return "wallet check needed";
@@ -1942,7 +1957,7 @@ function operationalFlagChips(token) {
   const flags = [];
   if (token.dataStatus === "check_needed") flags.push(chip("recheck due", "warn"));
   if (token.currentSignalTier === "late_chase") flags.push(chip("late entry", "warn"));
-  if (token.dataStatus === "scanner_stale" || token.currentQualityReasons.length || token.currentQualityPenalties.length) {
+  if (token.dataStatus === "scanner_stale" || token.currentSignalAlerts.some((alert) => alert.data_quality?.status !== "complete")) {
     flags.push(chip("data incomplete", "warn"));
   }
   if (!token.currentMarket?.isFresh) flags.push(chip("market update pending", "warn"));
@@ -3400,7 +3415,7 @@ function renderFilterTokenPanel(group) {
         </div>
         <div class="filter-panel-kpis">
           <span><strong>${esc(group.tokens.length)}</strong><small>tokens</small></span>
-          <span><strong>${esc(group.currentSignals)}</strong><small>fresh signals</small></span>
+          <span><strong>${esc(group.currentSignals)}</strong><small>new observations</small></span>
           <span><strong>${esc(group.noticedWallets)}</strong><small>tracked wallets</small></span>
           <span><strong>${sol(group.totalSol)}</strong><small>noticed flow</small></span>
         </div>
@@ -3428,7 +3443,7 @@ function renderFilters() {
   renderMetrics(tokens);
   const groups = filterGroups(tokens);
   if (!groups.length) {
-    els.content.innerHTML = emptyMessage("No scanner filters match the current filters.");
+    els.content.innerHTML = emptyMessage(state.workflow === "active" ? "No confirmed accumulation currently." : "No tokens match the current filters.");
     return;
   }
   const group = selectedFilterGroup(groups);
