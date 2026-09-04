@@ -5,9 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Solana Radar</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="styles.css?v=20260904-signal-integrity-2">
+    <link rel="stylesheet" href="styles.css?v=20260904-decision-1">
+    <link rel="stylesheet" href="workspace.css?v=20260904-decision-1">
   </head>
-  <body>
+  <body class="decision-ui">
     <header class="topbar">
       <div class="brand-lockup">
         <div class="brand-mark" aria-hidden="true">SR</div>
@@ -17,33 +18,33 @@
         </div>
       </div>
       <div class="actions">
-        <button id="runScan" type="button">Run scan</button>
-        <button id="refresh" type="button">Refresh</button>
+        <button id="runScan" class="icon-button" type="button" aria-label="Run scan" title="Run scan"><img src="icons/play.svg" alt=""></button>
+        <button id="refresh" class="icon-button" type="button" aria-label="Refresh data" title="Refresh data"><img src="icons/refresh-cw.svg" alt=""></button>
       </div>
     </header>
 
     <main>
-      <section class="overview-band" aria-label="Scanner overview">
+      <details class="scanner-diagnostics" id="scannerDiagnostics">
+        <summary><span id="scannerSummary">Scanner status</span><span class="diagnostics-label">Diagnostics</span></summary>
         <div class="status-row" id="statusRow"></div>
         <div class="metrics" id="metrics"></div>
-      </section>
+      </details>
 
       <section class="toolbar">
         <div class="tabs" role="tablist">
-          <button class="tab is-active" data-tab="filters" id="tab-radar" type="button" role="tab" aria-selected="true" aria-controls="dashboardContent">Radar</button>
-          <button class="tab" data-tab="tokens" id="tab-tokens" type="button" role="tab" aria-selected="false" aria-controls="dashboardContent">Tokens</button>
-          <button class="tab" data-tab="narratives" id="tab-narratives" type="button" role="tab" aria-selected="false" aria-controls="dashboardContent">Narratives</button>
-          <button class="tab" data-tab="intelligence" id="tab-intelligence" type="button" role="tab" aria-selected="false" aria-controls="dashboardContent">Learning</button>
-          <button class="tab" data-tab="alerts" id="tab-events" type="button" role="tab" aria-selected="false" aria-controls="dashboardContent">Events</button>
+          <button class="tab is-active" data-tab="filters" id="tab-radar" type="button" role="tab" aria-selected="true" aria-controls="content">Radar</button>
+          <button class="tab" data-tab="intelligence" id="tab-intelligence" type="button" role="tab" aria-selected="false" aria-controls="content">Learning</button>
+          <button class="tab" data-tab="alerts" id="tab-events" type="button" role="tab" aria-selected="false" aria-controls="content">Events</button>
+          <button class="tab" data-tab="narratives" id="tab-narratives" type="button" role="tab" aria-selected="false" aria-controls="content">Narratives</button>
         </div>
         <div class="filters">
           <label class="search-control">
             <span class="visually-hidden">Search tokens and wallets</span>
             <input id="searchInput" type="search" placeholder="Search token or wallet">
           </label>
-          <button class="filter-toggle" id="filterToggle" type="button" aria-expanded="false">Filters</button>
+          <button class="filter-toggle icon-button" id="filterToggle" type="button" aria-expanded="false" aria-controls="advancedFilters" aria-label="Additional filters" title="Additional filters"><img src="icons/sliders-horizontal.svg" alt=""></button>
           <div class="advanced-filters" id="advancedFilters">
-            <label class="field-control">
+            <label class="field-control legacy-workflow-control">
               <span class="visually-hidden">Workflow</span>
               <select id="workflowFilter" aria-label="Workflow">
               <option value="tracked">all tracked</option>
@@ -83,8 +84,9 @@
 
       <section id="content" class="content" role="tabpanel" aria-live="polite" aria-labelledby="tab-radar"></section>
     </main>
+    <div id="appNotice" class="app-notice" role="status" hidden><span></span><button id="dismissNotice" class="icon-button" type="button" aria-label="Dismiss notification" title="Dismiss notification"><img src="icons/x.svg" alt=""></button></div>
 
     <script src="config.js?v=20260807-wallet-edge-1"></script>
-    <script type="module" src="app.js?v=20260904-tracked-default-1"></script>
+    <script type="module" src="app.js?v=20260904-decision-1"></script>
   </body>
 </html>
