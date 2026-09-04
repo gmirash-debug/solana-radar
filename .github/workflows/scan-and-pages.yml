@@ -23,6 +23,7 @@ on:
       - "config.json"
       - "requirements.txt"
       - "tests/**"
+      - "tools/build_pages.py"
       - "dashboard/**"
       - "cloudflare/**"
       - "NARRATIVE_PROTOCOL.md"
@@ -30,8 +31,9 @@ on:
 
 concurrency:
   # Cloudflare Worker cron is the single scheduled scan source; runs share one
-  # runtime-state writer lock without a duplicate GitHub cron competing for it.
-  group: solana-radar-state-writer
+  # runtime-state writer lock. UI-only pushes use their own queue so discovery
+  # cannot continually replace pending publications.
+  group: ${{ github.event_name == 'push' && 'solana-radar-ui-publish' || 'solana-radar-state-writer' }}
   cancel-in-progress: false
 
 permissions:
@@ -298,11 +300,12 @@ jobs:
       - name: Build Pages artifact
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
         run: |
+          git fetch origin main
+          git archive FETCH_HEAD dashboard | tar -x
           rm -rf .pages
           mkdir -p .pages/data
           cp dashboard/index.html dashboard/app.js dashboard/data-source.js dashboard/token-state.js dashboard/filter-scope.js dashboard/styles.css dashboard/config.js .pages/
-          test -f data/dashboard_fallback.json
-          cp data/dashboard_fallback.json .pages/data/dashboard_fallback.json
+          python tools/build_pages.py
 
       - name: Configure Pages
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
@@ -330,6 +333,9 @@ jobs:
     if: always() && github.ref == 'refs/heads/main' && needs.scan.outputs.pages_ready == 'true'
     needs: scan
     runs-on: ubuntu-latest
+    concurrency:
+      group: solana-radar-pages-deployment
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
