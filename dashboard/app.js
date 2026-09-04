@@ -1934,6 +1934,7 @@ function renderMetrics(tokens) {
 
 function currentSignalChip(token) {
   if (!token.currentSignalTier || token.currentSignalTier === "noise") return "";
+  if (tierMeta(token.currentSignalTier).label === WORKFLOW_META[token.workflowStatus]?.label) return "";
   return tierChip(token.currentSignalTier);
 }
 

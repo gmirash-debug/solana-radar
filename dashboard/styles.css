@@ -686,6 +686,7 @@ button.metric[aria-pressed="true"] {
 .filter-token-title {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 5px;
   min-width: 0;
 }
@@ -698,6 +699,8 @@ button.metric[aria-pressed="true"] {
 }
 
 .filter-token-title strong {
+  flex: 0 0 100%;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1893,6 +1896,7 @@ tr:last-child td {
   }
 
   .filter-token-title strong {
+    flex-basis: auto;
     max-width: 100%;
   }
 
