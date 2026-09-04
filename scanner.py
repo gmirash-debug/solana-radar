@@ -6561,9 +6561,6 @@ def capture_signal_thesis(
 
     existing["last_signal_at"] = incoming.get("last_signal_at")
     existing["updated_at"] = captured_at or incoming.get("last_signal_at")
-    existing["source_tier"] = incoming.get("source_tier") or existing.get(
-        "source_tier"
-    )
     return existing, False
 
 
