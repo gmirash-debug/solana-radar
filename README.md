@@ -223,9 +223,11 @@ Signal lifecycle:
   attributed tokens and 65% of holders remaining. This produces `Holding`, not
   a new entry recommendation. Missing baseline/graph/history evidence cannot
   be repaired by checking balances alone.
-- The default view contains confirmed signals and previously confirmed holding
-  cohorts. Candidates and overdue checks remain accessible through visible
-  counters and the Workflow menu; historical records are not deleted.
+- The default `all tracked` view contains confirmed signals, holding cohorts,
+  candidates and overdue checks with their distinct statuses. Closed signals
+  and noise stay outside this view. `confirmed + holding` is an optional strict
+  view; the Tracked counter returns to the full tracked list. Candidate alerts
+  remain available from history even when absent from the latest scan.
 
 - The first Reactivation alert persists its qualifying buyer cohort and the
   number of signal-attributed tokens each wallet retained.

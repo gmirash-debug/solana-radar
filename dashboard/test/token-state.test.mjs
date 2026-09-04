@@ -2,12 +2,52 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
+  isTrackedAlertTier,
+  matchesWorkflowFilter,
   resolveAthContext,
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
 } from "../token-state.js";
+
+test("default list retains candidates and due checks without claiming confirmation", () => {
+  const statuses = [
+    resolveWorkflowStatus({ lifecycle: "holding", dataStatus: "current", currentTier: "watch" }),
+    resolveWorkflowStatus({ lifecycle: "holding", dataStatus: "overdue", currentTier: "watch" }),
+    resolveWorkflowStatus({ lifecycle: "closed", dataStatus: "overdue" }),
+    "noise",
+  ];
+  assert.equal(DEFAULT_WORKFLOW, "tracked");
+  assert.deepEqual(statuses.filter((status) => matchesWorkflowFilter(status)), ["candidate", "recheck_due"]);
+  assert.deepEqual(statuses.filter((status) => matchesWorkflowFilter(status, "active")), []);
+});
+
+test("tracked contains all confirmed workflows and excludes closed and noise", () => {
+  for (const status of ["active", "hot", "watch", "weakening"]) {
+    assert.equal(matchesWorkflowFilter(status, "tracked"), true);
+    assert.equal(matchesWorkflowFilter(status, "active"), true);
+  }
+  for (const status of ["inactive", "noise", "unknown"]) {
+    assert.equal(matchesWorkflowFilter(status, "tracked", true), false);
+  }
+});
+
+test("specific workflow filters and raw noise opt-in retain their semantics", () => {
+  for (const status of ["candidate", "recheck_due", "hot", "watch", "weakening", "inactive"]) {
+    assert.equal(matchesWorkflowFilter(status, status), true);
+    assert.equal(matchesWorkflowFilter(status, "all"), true);
+  }
+  assert.equal(matchesWorkflowFilter("candidate", "recheck_due"), false);
+  assert.equal(matchesWorkflowFilter("noise", "all"), false);
+  assert.equal(matchesWorkflowFilter("noise", "all", true), true);
+});
+
+test("candidate alerts survive history loading when absent from the next scan", () => {
+  const history = ["candidate", "watch", "actionable", "hot_reactivation", "late_chase", "noise", "unknown"];
+  assert.deepEqual(history.filter(isTrackedAlertTier), history.slice(0, 5));
+});
 
 test("workflow never substitutes an old holding thesis for a confirmed entry", () => {
   assert.equal(resolveWorkflowStatus({lifecycle: "holding", dataStatus: "current", currentTier: "watch"}), "candidate");

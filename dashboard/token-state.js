@@ -1,4 +1,18 @@
 export const MARKET_SNAPSHOT_MAX_AGE_MS = 90 * 60 * 1000;
+export const DEFAULT_WORKFLOW = "tracked";
+
+export function matchesWorkflowFilter(status, filter = DEFAULT_WORKFLOW, includeNoise = false) {
+  if (status === "noise") return includeNoise && filter === "all";
+  if (filter === "all") return true;
+  const confirmed = ["active", "hot", "watch", "weakening"];
+  if (filter === "active") return confirmed.includes(status);
+  if (filter === "tracked") return [...confirmed, "candidate", "recheck_due"].includes(status);
+  return status === filter;
+}
+
+export function isTrackedAlertTier(tier) {
+  return ["candidate", "actionable", "hot_reactivation", "watch", "late_chase"].includes(tier);
+}
 
 export function resolveWorkflowStatus({ lifecycle, dataStatus, currentTier, currentConfirmed = false, thesisConfirmed = false }) {
   if (lifecycle === "closed") return "inactive";
