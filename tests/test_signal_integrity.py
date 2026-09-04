@@ -122,6 +122,12 @@ class SignalIntegrityTests(unittest.TestCase):
         s.capture_signal_thesis(state, [new], self.config)
         self.assertEqual(state["signal_thesis"]["cohort"][0]["owner"], "old")
         self.assertEqual(state["signal_thesis"]["signal_confirmation"]["checked_at"], old["created_at"])
+        later_candidate = self.alert("third", 120)
+        later_candidate["data_quality"]["status"] = "partial"
+        s.apply_signal_confirmation(later_candidate, self.config)
+        s.capture_signal_thesis(state, [later_candidate], self.config)
+        self.assertEqual(state["signal_thesis"]["source_tier"], "watch")
+        self.assertEqual(state["signal_thesis"]["cohort"][0]["owner"], "old")
 
     def test_method_plan_restriction_is_not_global_auth_failure(self):
         provider = object.__new__(s.SolanaRpcProvider)
