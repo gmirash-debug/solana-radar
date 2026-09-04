@@ -1,11 +1,14 @@
 import { chooseDashboardPayload } from "./data-source.js?v=20260807-wallet-edge-1";
 import {
+  DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
+  isTrackedAlertTier,
+  matchesWorkflowFilter,
   resolveAthContext,
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20260904-signal-integrity-1";
+} from "./token-state.js?v=20260904-tracked-default-1";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
@@ -86,7 +89,7 @@ const state = {
   },
   tab: "filters",
   query: "",
-  workflow: "active",
+  workflow: DEFAULT_WORKFLOW,
   heat: "all",
   lane: "reactivation",
   minScore: 0,
@@ -607,12 +610,7 @@ function bestTier(tiers = []) {
 }
 
 function workflowMatches(token, includeNoise = false) {
-  if (token.workflowStatus === "noise") return includeNoise && state.workflow === "all";
-  if (state.workflow === "all") return true;
-  if (state.workflow === "active") {
-    return ["active", "hot", "watch", "weakening"].includes(token.workflowStatus);
-  }
-  return token.workflowStatus === state.workflow;
+  return matchesWorkflowFilter(token.workflowStatus, state.workflow, includeNoise);
 }
 
 function aggregateAlertLabels(alerts = [], field) {
@@ -637,7 +635,7 @@ function sourceAlerts() {
     .map((alert) => ({ ...alert, _scope_source: "current" }));
   const history = (state.history || [])
     .filter((alert) => ACTIVE_SCANNER_LANES.has(alert.lane))
-    .filter((alert) => ["actionable", "hot_reactivation", "watch", "late_chase"].includes(alertTier(alert)))
+    .filter((alert) => isTrackedAlertTier(alertTier(alert)))
     .filter((alert) => isCurrentFilterSignal(alert, state.report))
     .map((alert) => ({ ...alert, _scope_source: "history" }));
   return [...history, ...current];
@@ -1902,7 +1900,7 @@ function renderMetrics(tokens) {
   const outcomeMedian = outcomes.median_return_24h_pct;
   const outcomePositive = outcomes.positive_24h_pct;
   els.metrics.innerHTML = [
-    metric("Tracked", baseTokens.filter((token) => ["active", "hot", "watch", "weakening"].includes(token.workflowStatus)).length),
+    metric("Tracked", baseTokens.filter((token) => matchesWorkflowFilter(token.workflowStatus, "tracked")).length, "tracked"),
     metric("Hot", workflowCount("hot")),
     metric("Watch", workflowCount("watch")),
     metric("Candidates", workflowCount("candidate"), "candidate"),

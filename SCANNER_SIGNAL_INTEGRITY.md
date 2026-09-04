@@ -31,7 +31,10 @@ provider budgets.
 9. Outcome endpoints over one hour late are excluded from horizon statistics and
    future score computations. Price-based returns take priority over market cap.
 10. The dashboard separates candidates, overdue checks and confirmed holdings.
-    Old unversioned signals do not inherit the new confirmation label.
+    Old unversioned signals do not inherit the new confirmation label. Its default
+    `all tracked` list includes candidates and overdue checks, without closed
+    signals or noise. Strict confirmation remains an optional filter; historical
+    candidate alerts are not dropped between scans.
 
 ## Validation
 
