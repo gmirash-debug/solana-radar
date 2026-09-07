@@ -1,9 +1,9 @@
-import { validSnapshot, isFresh, selectTokens } from "./robinhood-state.js?v=20260907-rh1";
+import { validSnapshot, isFresh, selectTokens, formatSupplyPercent } from "./robinhood-state.js?v=20260907-rh2";
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[c]));
 const money = value => value == null ? "Unknown" : new Intl.NumberFormat("en", {style:"currency", currency:"USD", notation:"compact", maximumFractionDigits:1}).format(value);
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "Not checked";
-const pct = value => value == null ? "Unknown" : `${Number(value).toFixed(2)}%`;
+const pct = value => esc(formatSupplyPercent(value));
 const labels = {buy_wave:"Buy wave", observed:"Observed activity", queued:"Queued", check_failed:"Check failed"};
 let payload = null, selected = null;
 function render() {

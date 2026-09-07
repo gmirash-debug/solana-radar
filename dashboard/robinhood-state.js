@@ -1,4 +1,9 @@
 export const CHAIN_ID = 4663;
+export function formatSupplyPercent(value) {
+  if (value == null || !Number.isFinite(Number(value))) return "Unknown";
+  const number = Number(value);
+  return number > 0 && number < 0.01 ? "<0.01%" : `${number.toFixed(2)}%`;
+}
 export const addressOk = value => /^0x[0-9a-f]{40}$/.test(value || "");
 const counters = ["window_from_block", "window_to_block", "buy_swaps", "sell_swaps", "receipts_checked", "swap_transactions", "buy_transactions"];
 export function validSnapshot(payload) {
