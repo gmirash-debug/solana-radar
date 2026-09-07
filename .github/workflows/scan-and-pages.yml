@@ -17,6 +17,7 @@ on:
     paths:
       - ".github/workflows/scan-and-pages.yml"
       - "scanner.py"
+      - "robinhood.py"
       - "package.json"
       - "package-lock.json"
       - "config.example.json"
@@ -44,7 +45,7 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     outputs:
       pages_ready: ${{ steps.pages_artifact.outcome == 'success' }}
 
@@ -87,6 +88,10 @@ jobs:
           except Exception:
               pass
           dispatch_source = (event.get("inputs") or {}).get("source", "")
+          if event_name == "workflow_dispatch" and dispatch_source == "robinhood":
+              print("should_scan=false")
+              print("reason=robinhood_only")
+              raise SystemExit
           if event_name == "workflow_dispatch" and not dispatch_source.startswith("cloudflare-"):
               print("should_scan=true")
               print("reason=manual_dispatch")
@@ -199,7 +204,7 @@ jobs:
             ${{ runner.os }}-solana-radar-outbox-v1-
 
       - name: Install dependencies
-        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
+        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         run: |
           python -m pip install -r requirements.txt
           npm install -g gmgn-cli@1.5.4
@@ -297,8 +302,33 @@ jobs:
             data/discovery_status.json
           key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}
 
+      - name: Restore independent Robinhood observations
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/cache/restore@v4
+        with:
+          path: data/robinhood.json
+          key: ${{ runner.os }}-robinhood-observations-v1-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-robinhood-observations-v1-
+
+      - name: Observe Robinhood mainnet
+        id: robinhood
+        if: github.event_name == 'workflow_dispatch'
+        timeout-minutes: 7
+        continue-on-error: true
+        env:
+          ROBINHOOD_RPC_URL: ${{ secrets.ROBINHOOD_RPC_URL }}
+        run: python robinhood.py
+
+      - name: Preserve Robinhood observations
+        if: steps.robinhood.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: data/robinhood.json
+          key: ${{ runner.os }}-robinhood-observations-v1-${{ github.run_id }}
+
       - name: Build Pages artifact
-        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
+        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         run: |
           git fetch origin main
           git archive FETCH_HEAD dashboard | tar -x
@@ -309,14 +339,14 @@ jobs:
           python tools/build_pages.py
 
       - name: Configure Pages
-        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
+        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: actions/configure-pages@v5
         with:
           enablement: true
 
       - name: Upload Pages artifact
         id: pages_artifact
-        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
+        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-pages-artifact@v3
         with:
           # A unique name prevents a stale Pages artifact from another queued
