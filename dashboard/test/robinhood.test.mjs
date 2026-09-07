@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {validSnapshot, isFresh, selectTokens} from "../robinhood-state.js";
+import {validSnapshot, isFresh, selectTokens, formatSupplyPercent} from "../robinhood-state.js";
+test("small positive holdings never look like a zero balance", () => {
+  assert.equal(formatSupplyPercent(0.00002), "<0.01%");
+  assert.equal(formatSupplyPercent(0), "0.00%");
+  assert.equal(formatSupplyPercent(null), "Unknown");
+});
 const token = {token:`0x${"1".repeat(40)}`, pool:`0x${"2".repeat(40)}`, symbol:"Test", status:"observed", wallets:[]};
 token.key = `4663:${token.token}`;
 test("network isolation and valid addresses", () => {
