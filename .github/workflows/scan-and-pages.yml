@@ -18,6 +18,7 @@ on:
       - ".github/workflows/scan-and-pages.yml"
       - "scanner.py"
       - "robinhood.py"
+      - "robinhood_store.py"
       - "package.json"
       - "package-lock.json"
       - "config.example.json"
@@ -38,6 +39,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: write
   pages: write
   id-token: write
@@ -306,26 +308,50 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: actions/cache/restore@v4
         with:
-          path: data/robinhood.json
-          key: ${{ runner.os }}-robinhood-observations-v1-${{ github.run_id }}
+          path: |
+            data/robinhood.json
+            data/robinhood.sqlite
+          key: ${{ runner.os }}-robinhood-state-v2-${{ github.run_id }}
           restore-keys: |
-            ${{ runner.os }}-robinhood-observations-v1-
+            ${{ runner.os }}-robinhood-state-v2-
+
+      - name: Recover durable Robinhood backup
+        id: robinhood_backup
+        if: github.event_name == 'workflow_dispatch'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/restore_robinhood_state.py
 
       - name: Observe Robinhood mainnet
         id: robinhood
-        if: github.event_name == 'workflow_dispatch'
-        timeout-minutes: 7
+        if: github.event_name == 'workflow_dispatch' && steps.robinhood_backup.outcome == 'success'
+        timeout-minutes: 10
         continue-on-error: true
         env:
           ROBINHOOD_RPC_URL: ${{ secrets.ROBINHOOD_RPC_URL }}
+          ROBINHOOD_ARCHIVE_RPC_URL: ${{ secrets.ROBINHOOD_ARCHIVE_RPC_URL }}
         run: python robinhood.py
 
       - name: Preserve Robinhood observations
         if: steps.robinhood.outcome == 'success'
         uses: actions/cache/save@v4
         with:
-          path: data/robinhood.json
-          key: ${{ runner.os }}-robinhood-observations-v1-${{ github.run_id }}
+          path: |
+            data/robinhood.json
+            data/robinhood.sqlite
+          key: ${{ runner.os }}-robinhood-state-v2-${{ github.run_id }}
+
+      - name: Daily Robinhood database backup
+        if: steps.robinhood.outcome == 'success' && steps.robinhood.outputs.persisted == 'true' && steps.robinhood_backup.outputs.backup_due == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: robinhood-state
+          path: data/robinhood.sqlite
+          retention-days: 14
+          compression-level: 9
+          if-no-files-found: error
 
       - name: Build Pages artifact
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
