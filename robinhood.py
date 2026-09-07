@@ -74,6 +74,7 @@ class Rpc:
         self.verified = set()
         self.disabled = set()
         self.failures = Counter()
+        self.last_errors = {}
         self.method_route = {}
         self.stats = Counter()
         self.head = None
@@ -116,9 +117,19 @@ class Rpc:
                 if method == "eth_blockNumber":
                     self.head = int(value, 16)
                 return value
-            except RpcError:
+            except RpcError as exc:
                 self.failures[self.route_names[endpoint]] += 1
-        raise RpcError(f"No healthy RPC supports {method} for this block/range")
+                self.last_errors[endpoint] = str(exc)
+        reasons = "; ".join(f"{self.route_names[u]}: {self.last_errors[u]}" for u in routes if u in self.last_errors)
+        raise RpcError(f"No healthy RPC supports {method} for this block/range" + (f" ({reasons})" if reasons else ""))
+
+    def backoff(self, endpoint, attempt, headers):
+        try:
+            retry_after = min(60, max(0, float(headers.get("Retry-After", 0))))
+        except (TypeError, ValueError):
+            retry_after = 0
+        delay = max(retry_after, (5, 15)[min(attempt, 1)])
+        self.next_by_endpoint[endpoint] = time.monotonic() + delay
 
     def request(self, endpoint, method, params):
         for attempt in range(3):
@@ -126,7 +137,10 @@ class Rpc:
                 raise RpcError("RPC budget exhausted")
             if time.monotonic() >= self.deadline:
                 raise RpcError("RPC time budget exhausted")
-            time.sleep(max(0, self.next_by_endpoint.get(endpoint, 0) - time.monotonic()))
+            delay = max(0, self.next_by_endpoint.get(endpoint, 0) - time.monotonic())
+            if time.monotonic() + delay >= self.deadline:
+                raise RpcError("RPC time budget exhausted")
+            time.sleep(delay)
             self.calls += 1
             self.next_by_endpoint[endpoint] = time.monotonic() + (0.9 if endpoint in (PUBLIC_RPC, ORDO_RPC) else 0.15)
             self.stats[self.route_names[endpoint]] += 1
@@ -134,14 +148,22 @@ class Rpc:
                 result = self.session.post(endpoint, json={"jsonrpc": "2.0", "id": self.calls,
                     "method": method, "params": params}, timeout=15)
                 if result.status_code in (429, 502, 503, 504) and attempt < 2:
-                    self.next_by_endpoint[endpoint] = time.monotonic() + 2 ** (attempt + 1)
+                    self.backoff(endpoint, attempt, result.headers)
                     continue
+                if result.status_code >= 400:
+                    raise RpcError(f"HTTP {result.status_code} during {method}")
                 result.raise_for_status()
                 payload = result.json()
                 error = payload.get("error") if isinstance(payload, dict) else None
-                if isinstance(error, dict) and (error.get("code") == 429 or "too many requests" in str(error.get("message", "")).lower()) and attempt < 2:
-                    self.next_by_endpoint[endpoint] = time.monotonic() + 2 ** (attempt + 1)
+                message = str(error.get("message", "")).lower() if isinstance(error, dict) else ""
+                busy = isinstance(error, dict) and (error.get("code") == 429 or any(x in message for x in ("too many requests", "network is busy", "rate limit")))
+                if busy and attempt < 2:
+                    self.backoff(endpoint, attempt, result.headers)
                     continue
+                if isinstance(error, dict):
+                    code = error.get("code")
+                    safe_code = str(code) if isinstance(code, int) else "unknown"
+                    raise RpcError(f"RPC {safe_code}{' throttled' if busy else ''} during {method}")
                 break
             except (requests.RequestException, ValueError):
                 # Never persist provider URLs, which may contain credentials.
@@ -225,8 +247,17 @@ def window_start(rpc, head, seconds):
 
 def verify_pool(rpc, pool, block):
     if pool.get("protocol") == "v4":
-        logs = rpc.call("eth_getLogs", [{"address": POOL_MANAGER, "fromBlock": "0x0", "toBlock": block,
-            "topics": [INITIALIZE, pool["pool"]]}])
+        if not isinstance(pool.get("pool_created_at"), str):
+            raise RpcError("V4 pool creation time is unavailable")
+        created = timestamp(pool.get("pool_created_at"))
+        head = int(block, 16)
+        head_time = int(rpc.call("eth_getBlockByNumber", [block, False])["timestamp"], 16)
+        if not created or created > head_time + 600:
+            raise RpcError("V4 pool creation time is unavailable or invalid")
+        # Bound the log lookup around discovery metadata, then verify the on-chain identity.
+        left, _ = window_start(rpc, head, max(0, head_time - created + 600))
+        right, _ = window_start(rpc, head, max(0, head_time - created - 600))
+        logs = get_logs(rpc, {"address": POOL_MANAGER, "topics": [INITIALIZE, pool["pool"]]}, left, right)
         if len(logs) != 1:
             raise RpcError("V4 pool initialization could not be verified")
         log = logs[0]

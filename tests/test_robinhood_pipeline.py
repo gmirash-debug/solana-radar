@@ -68,6 +68,30 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(rpc.request(rh.PUBLIC_RPC, "eth_chainId", []), "0x1237")
         self.assertEqual(rpc.calls, 2)
 
+    def test_busy_log_provider_retries_without_leaking_error_details(self):
+        response = Mock(status_code=200, headers={"Retry-After": "12"})
+        response.json.side_effect = [{"error": {"code": -32005, "message": "the network is busy, please try again"}}, {"result": []}]
+        session = Mock()
+        session.post.return_value = response
+        rpc = rh.Rpc(session=session, budget=3)
+        with patch.object(rh.time, "sleep") as sleep:
+            self.assertEqual(rpc.request(rh.ORDO_RPC, "eth_getLogs", []), [])
+        self.assertGreater(sleep.call_args_list[1].args[0], 11)
+        response.json.side_effect = None
+        response.json.return_value = {"error": {"code": -32602, "message": "invalid key secret-do-not-publish"}}
+        with patch.object(rh.time, "sleep"), self.assertRaises(rh.RpcError) as error:
+            rpc.request(rh.ORDO_RPC, "eth_getLogs", [])
+        self.assertNotIn("secret", str(error.exception))
+        self.assertIn("-32602", str(error.exception))
+
+    def test_backoff_does_not_exceed_deadline(self):
+        rpc = rh.Rpc(session=Mock())
+        rpc.deadline = rh.time.monotonic() + 1
+        rpc.backoff(rh.PUBLIC_RPC, 0, {"Retry-After": "30"})
+        with self.assertRaisesRegex(rh.RpcError, "time budget"):
+            rpc.request(rh.PUBLIC_RPC, "eth_getLogs", [])
+        self.assertEqual(rpc.calls, 0)
+
     def test_routed_buy_requires_full_custody_and_beneficiary_net(self):
         self.assertEqual(rh.routed_buy(fixture(ROUTER), {"pool": POOL, "token": TOKEN}, 0), (WALLET, 100))
         r = fixture(received=99)
@@ -91,15 +115,18 @@ class PipelineTests(unittest.TestCase):
     def test_v4_poolkey_verified_not_just_provider_label(self):
         key = [TOKEN, QUOTE, 3000, 60, rh.ZERO]
         pool_id = "0x" + keccak(encode(["address", "address", "uint24", "int24", "address"], key)).hex()
-        event = {"address": rh.POOL_MANAGER, "blockNumber": "0x1", "topics": [rh.INITIALIZE, pool_id, topic(TOKEN), topic(QUOTE)],
+        event = {"address": rh.POOL_MANAGER, "blockNumber": "0xf", "transactionHash": "tx1", "logIndex": "0x0", "topics": [rh.INITIALIZE, pool_id, topic(TOKEN), topic(QUOTE)],
             "data": "0x" + encode(["uint24", "int24", "address", "uint160", "int24"], key[2:] + [1, 0]).hex()}
         rpc = Mock()
-        rpc.call.return_value = [event]
-        p = {"pool": pool_id, "token": TOKEN, "quote": QUOTE, "protocol": "v4"}
-        self.assertEqual(rh.verify_pool(rpc, p, "0x10"), 0)
+        rpc.call.side_effect = lambda method, args: {"timestamp": "0x7d0"} if method == "eth_getBlockByNumber" else [event]
+        p = {"pool": pool_id, "token": TOKEN, "quote": QUOTE, "protocol": "v4", "pool_created_at": "1970-01-01T00:16:40Z"}
+        with patch.object(rh, "window_start", side_effect=[(10, {}), (20, {})]):
+            self.assertEqual(rh.verify_pool(rpc, p, "0x20"), 0)
+        query = [call.args[1][0] for call in rpc.call.call_args_list if call.args[0] == "eth_getLogs"][0]
+        self.assertEqual((query["fromBlock"], query["toBlock"]), ("0xa", "0x14"))
         self.assertEqual(p["hooks"], rh.ZERO)
         event["data"] = "0x" + encode(["uint24", "int24", "address", "uint160", "int24"], [4000, 60, rh.ZERO, 1, 0]).hex()
-        with self.assertRaisesRegex(rh.RpcError, "identity"):
+        with patch.object(rh, "window_start", side_effect=[(10, {}), (20, {})]), self.assertRaisesRegex(rh.RpcError, "identity"):
             rh.verify_pool(rpc, p, "0x10")
 
     def test_archive_failure_is_not_young_token(self):

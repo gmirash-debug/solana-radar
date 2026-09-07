@@ -24,6 +24,8 @@ connected and no transactions are sent.
   a shared hard budget: 900 calls and 510 seconds. Pools wait when the
   remaining budget is too small. This is a bounded free-tier setup, not an SLA
   or unlimited network history. Alchemy quota is shared with the Solana app.
+- Retry-After and JSON-RPC network-busy responses back off within the same
+  deadline. Failure diagnostics include provider and numeric codes, not keys.
 
 Sources:
 - https://docs.robinhood.com/chain/connecting/
@@ -55,6 +57,9 @@ and Alchemy's unrestricted log range are NOT claimed as free capabilities.
   `0x8366a39cc670b4001a1121b8f6a443a643e40951`. Recompute the PoolKey hash;
   verify currencies and inspect the hook address. Bytes32 pool IDs never
   become EVM wallet addresses.
+  Initialization lookup is bounded to a 20-minute interval around the reported
+  pool creation time, not the entire chain. Incorrect discovery timestamps fail
+  verification rather than creating an unverified pool identity.
 - One selected pool per token. Other DEXs, v2 and complete network launch
   discovery are outside this coverage. Existing frozen cohorts remain tracked
   when a pool drops from discovery; old market quotes are marked stale.
