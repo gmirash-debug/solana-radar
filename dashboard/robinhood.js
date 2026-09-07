@@ -77,8 +77,11 @@ function detail(t) {
     <div class="detail-tab-panel" id="token-research-panel" role="tabpanel" aria-labelledby="detail-tab-${state.detailTab}">${content}</div></aside>`;
 }
 
-function render() {
+function render({resetList = false} = {}) {
   if (!state.payload) return;
+  const listScroll = resetList ? 0 : $(".review-list")?.scrollTop || 0;
+  const detailScroll = $(".token-detail")?.scrollTop || 0;
+  const previousKey = $(".review-row.is-selected")?.dataset.tokenKey;
   const p = state.payload, fresh = isFresh(p);
   $("#subtitle").textContent = `Last scan ${date(p.generated_at)}${fresh ? "" : " / stale"}`;
   $("#scannerSummary").textContent = state.error || `${p.checked_pools ?? 0} checked / ${p.eligible_tokens ?? 0} candidates${p.errors?.length ? ` / ${p.errors.length} incomplete checks` : " / hourly scans"}`;
@@ -90,7 +93,8 @@ function render() {
   const open = visible.flatMap(g => state.group !== "overview" || state.expanded.has(g.id) || state.query ? g.tokens : []);
   if (!open.some(t => t.key === state.selected)) state.selected = open[0]?.key ?? null;
   const t = open.find(t => t.key === state.selected);
-  const heading = `<div class="radar-heading"><div><h2>${state.tab === "alerts" ? "Latest checks" : "Accumulation radar"}</h2><p>Uniswap v3 + v4 / 1-15d / ${all.length} observed tokens</p></div><label class="sort-control">Sort within groups<select id="reviewSort" aria-label="Sort within groups"><option value="caught" ${state.sort === "caught" ? "selected" : ""}>Newest catch</option><option value="retained" ${state.sort === "retained" ? "selected" : ""}>Most retained</option></select></label></div>`;
+  const sortControl = state.tab === "alerts" ? "" : `<label class="sort-control">Sort within groups<select id="reviewSort" aria-label="Sort within groups"><option value="caught" ${state.sort === "caught" ? "selected" : ""}>Newest catch</option><option value="retained" ${state.sort === "retained" ? "selected" : ""}>Most retained</option></select></label>`;
+  const heading = `<div class="radar-heading"><div><h2>${state.tab === "alerts" ? "Latest checks" : "Accumulation radar"}</h2><p>Uniswap v3 + v4 / 1-15d / ${all.length} observed tokens</p></div>${sortControl}</div>`;
   const list = visible.filter(g => g.tokens.length).map(g => {
     const expanded = state.group !== "overview" || state.expanded.has(g.id) || Boolean(state.query);
     return `<section class="review-section"><button class="queue-heading ${g.tone}" data-expand-queue="${g.id}" aria-expanded="${expanded}"><span><img src="icons/chevron-down.svg" alt=""><strong>${g.label}</strong><span class="queue-count">${g.tokens.length}</span></span></button>${expanded ? g.tokens.map(row).join("") : ""}</section>`;
@@ -101,6 +105,8 @@ function render() {
     ${state.group === "overview" && !counts.buy_wave ? '<div class="no-confirmation"><span class="quiet-indicator"></span><span><strong>No new buy waves</strong><small>Observed tokens remain listed below.</small></span></div>' : ""}
     ${list || '<div class="review-empty"><img src="icons/scan-search.svg" alt=""><h3>No matching tokens</h3><button id="resetReview" type="button">All tokens</button></div>'}<div class="list-footer">${visible.reduce((sum,g) => sum + g.tokens.length,0)} tokens / ${state.sort === "caught" ? "Newest observation" : "Highest retention"} first within groups</div></div></section>${detail(t)}</div>`);
   bind();
+  if ($(".review-list")) $(".review-list").scrollTop = listScroll;
+  if (previousKey === state.selected && $(".token-detail")) $(".token-detail").scrollTop = detailScroll;
 }
 
 function openToken(key) {
@@ -114,9 +120,9 @@ function openToken(key) {
 function bind() {
   document.querySelectorAll("[data-token-key]").forEach(b => b.onclick = () => openToken(b.dataset.tokenKey));
   document.querySelectorAll("[data-open-token]").forEach(b => b.onclick = () => { setTab("filters"); state.group = "overview"; state.expanded = new Set(REVIEW_GROUPS.map(g => g.id)); openToken(b.dataset.openToken); });
-  document.querySelectorAll("[data-review-queue]").forEach(b => b.onclick = () => { state.group = b.dataset.reviewQueue; state.mobile = false; state.selected = null; render(); document.querySelector(`[data-review-queue="${state.group}"]`)?.focus({preventScroll:true}); });
+  document.querySelectorAll("[data-review-queue]").forEach(b => b.onclick = () => { state.group = b.dataset.reviewQueue; state.mobile = false; state.selected = null; render({resetList:true}); document.querySelector(`[data-review-queue="${state.group}"]`)?.focus({preventScroll:true}); });
   document.querySelectorAll("[data-expand-queue]").forEach(b => b.onclick = () => { if (state.group !== "overview" || state.query) return; const id = b.dataset.expandQueue; state.expanded.has(id) ? state.expanded.delete(id) : state.expanded.add(id); render(); document.querySelector(`[data-expand-queue="${id}"]`)?.focus({preventScroll:true}); });
-  $("#reviewSort").onchange = e => { state.sort = e.target.value; render(); $("#reviewSort").focus(); };
+  if ($("#reviewSort")) $("#reviewSort").onchange = e => { state.sort = e.target.value; render({resetList:true}); $("#reviewSort").focus(); };
   if ($("#resetReview")) $("#resetReview").onclick = () => { state.group = "overview"; state.query = ""; state.protocol = "all"; $("#searchInput").value = ""; $("#protocolFilter").value = "all"; render(); };
   if ($(".detail-back")) $(".detail-back").onclick = () => { state.mobile = false; render(); window.scrollTo(0, state.scrollY); $(".review-row.is-selected")?.focus({preventScroll:true}); };
   document.querySelectorAll(".detail-tab").forEach(b => {
@@ -162,10 +168,10 @@ $(".brand-mark").textContent = "RR";
 $("#runScan").disabled = true;
 for (const id of ["#tab-intelligence", "#tab-narratives"]) { $(id).disabled = true; $(id).title = "Not available on Robinhood"; $(id).setAttribute("aria-label", `${$(id).textContent}: not available on Robinhood`); }
 $("#advancedFilters").innerHTML = '<label class="field-control"><span>Protocol</span><select id="protocolFilter" aria-label="Protocol"><option value="all">All protocols</option><option value="v3">Uniswap v3</option><option value="v4">Uniswap v4</option></select></label>';
-$("#protocolFilter").onchange = e => { state.protocol = e.target.value; state.mobile = false; render(); };
+$("#protocolFilter").onchange = e => { state.protocol = e.target.value; state.mobile = false; render({resetList:true}); };
 $("#filterToggle").onclick = () => { const open = $(".filters").classList.toggle("is-open"); $("#filterToggle").setAttribute("aria-expanded",String(open)); };
 document.addEventListener("keydown", e => { if (e.key === "Escape") { $(".filters").classList.remove("is-open"); $("#filterToggle").setAttribute("aria-expanded","false"); } });
-$("#searchInput").oninput = e => { state.query = e.target.value; state.mobile = false; render(); };
+$("#searchInput").oninput = e => { state.query = e.target.value; state.mobile = false; render({resetList:true}); };
 $("#refresh").onclick = load;
 $("#dismissNotice").onclick = () => { $("#appNotice").hidden = true; };
 document.querySelectorAll(".tab:not(:disabled)").forEach(b => {
