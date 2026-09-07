@@ -6,7 +6,7 @@ export function formatSupplyPercent(value) {
 }
 export const addressOk = value => /^0x[0-9a-f]{40}$/.test(value || "");
 export const poolOk = t => t.protocol === "v4" ? /^0x[0-9a-f]{64}$/.test(t.pool || "") : (!t.protocol || t.protocol === "v3") && addressOk(t.pool);
-const counters = ["window_from_block", "window_to_block", "buy_swaps", "sell_swaps", "receipts_checked", "swap_transactions", "buy_transactions"];
+const counters = ["window_from_block", "window_to_block", "buy_swaps", "sell_swaps", "receipts_checked", "swap_transactions", "buy_transactions", "attributed_buy_transactions", "cohort_checks", "backlog_blocks"];
 export function validSnapshot(payload) {
   return payload?.chain_id === CHAIN_ID && Array.isArray(payload.tokens)
     && payload.tokens.every(t => addressOk(t.token) && poolOk(t) && t.key === `${CHAIN_ID}:${t.token}`
@@ -31,6 +31,51 @@ export function supplyRange(token) {
 }
 export function selectTokens(tokens, query = "", status = "all") {
   return tokens.filter(t => (status === "all" || t.status === status)
-    && `${t.symbol} ${t.name} ${t.token}`.toLowerCase().includes(query.toLowerCase()))
+    && `${t.symbol} ${t.name} ${t.token} ${(t.wallets || []).map(w => w.address).join(" ")}`.toLowerCase().includes(query.trim().toLowerCase()))
     .sort((a, b) => (Date.parse(b.first_observed_at) || 0) - (Date.parse(a.first_observed_at) || 0) || a.key.localeCompare(b.key));
+}
+
+export const REVIEW_GROUPS = [
+  {id:"buy_wave", label:"New buy waves", tone:"info"},
+  {id:"retained", label:"Holding", tone:"positive"},
+  {id:"observed", label:"Early observations", tone:"info"},
+  {id:"reduced", label:"Reduced positions", tone:"negative"},
+  {id:"needs_data", label:"Needs data", tone:"warning"},
+  {id:"risk", label:"Contract risk", tone:"negative"},
+];
+
+export function reviewGroup(token, payload, now = Date.now()) {
+  if (token.status === "risk" || token.security?.status === "risk") return "risk";
+  if (!isFresh(payload, now) || !walletFresh(token, now)) return "needs_data";
+  if (["retained", "buy_wave"].includes(token.status) && !(token.cohort_checks >= (token.status === "retained" ? 2 : 1) && token.cohort_created_at)) return "needs_data";
+  return REVIEW_GROUPS.some(g => g.id === token.status) ? token.status : "needs_data";
+}
+
+export function positionBounds(token) {
+  const wallets = token?.wallets || [];
+  if (!wallets.length) return null;
+  let bought = 0, lower = 0, upper = 0, lowerKnown = true;
+  for (const w of wallets) {
+    if (![w.bought_raw, w.retained_upper_bound_raw].every(n => /^\d+$/.test(String(n)))) return null;
+    if (w.retained_lower_bound_raw != null && !/^\d+$/.test(String(w.retained_lower_bound_raw))) return null;
+    const b = Number(w.bought_raw), hi = Number(w.retained_upper_bound_raw), lo = Number(w.retained_lower_bound_raw);
+    if (w.bought_raw == null || w.retained_upper_bound_raw == null || !Number.isFinite(b + hi) || b <= 0 || hi < 0 || hi > b) return null;
+    if (w.retained_lower_bound_raw == null) lowerKnown = false;
+    else if (!Number.isFinite(lo) || lo < 0 || lo > hi) return null;
+    bought += b; upper += hi; lower += lo;
+  }
+  return {lower:lowerKnown ? 100 * lower / bought : null, upper:100 * upper / bought};
+}
+
+export function marketFresh(token, now = Date.now()) {
+  const checked = Date.parse(token?.market_checked_at);
+  return !token?.market_stale && Number.isFinite(checked) && now - checked >= -300000 && now - checked < 90 * 60000;
+}
+
+export function comparePositions(a, b, mode = "caught") {
+  if (mode === "retained") {
+    const av = positionBounds(a)?.lower ?? -1, bv = positionBounds(b)?.lower ?? -1;
+    if (av !== bv) return bv - av;
+  }
+  return (Date.parse(b.first_observed_at) || 0) - (Date.parse(a.first_observed_at) || 0) || a.key.localeCompare(b.key);
 }

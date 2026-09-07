@@ -132,6 +132,11 @@ No database or credentials are published to Pages.
 
 The public snapshot is independently versioned and published to
 https://gmirash-debug.github.io/solana-radar/robinhood.html .
+The legacy URL redirects to `index.html?network=robinhood`. Both networks use
+the same HTML shell, workspace styles, list/detail layout and mobile navigation.
+Only the selected network's controller loads. Robinhood's Learning/Narratives
+remain disabled; Events shows the latest exported checks, not an invented
+lifetime event history. Wallet retention is a range, never substituted for PnL.
 API keys stay in Actions secrets; never include them in the dashboard or logs.
 No new paid plan or automatic paid overage was enabled.
 
