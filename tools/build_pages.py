@@ -8,6 +8,41 @@ import requests
 
 
 PUBLISHED_SNAPSHOT = "https://gmirash-debug.github.io/solana-radar/data/dashboard_fallback.json"
+ROBINHOOD_SNAPSHOT = "https://gmirash-debug.github.io/solana-radar/data/robinhood.json"
+
+
+def choose_robinhood(local, published):
+    valid = []
+    for payload in (local, published):
+        try:
+            if payload["chain_id"] != 4663 or not isinstance(payload.get("tokens"), list):
+                continue
+            updated = datetime.fromisoformat(payload["attempted_at"].replace("Z", "+00:00"))
+            if updated.tzinfo and updated <= datetime.now(timezone.utc) + timedelta(minutes=5):
+                valid.append((updated, payload))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+    return max(valid, key=lambda item: item[0])[1] if valid else None
+
+
+def publish_robinhood():
+    try:
+        local = json.loads(Path("data/robinhood.json").read_text())
+    except (OSError, ValueError):
+        local = None
+    try:
+        response = requests.get(ROBINHOOD_SNAPSHOT, timeout=20)
+        response.raise_for_status()
+        published = response.json()
+    except (requests.RequestException, ValueError):
+        published = None
+    selected = choose_robinhood(local, published)
+    if selected:
+        Path(".pages/data/robinhood.json").write_text(json.dumps(selected, separators=(",", ":")))
+    else:
+        # Absence must not be rendered as a successful empty scan.
+        Path(".pages/data/robinhood.json").write_text(json.dumps({"chain_id": 4663,
+            "tokens": [], "status": "unavailable", "errors": ["No Robinhood scan has been published"]}))
 
 
 def snapshot_time(payload):
@@ -48,6 +83,7 @@ def main():
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(selected, separators=(",", ":")))
     print(f"Pages snapshot: {selected['report']['generated_at']}")
+    publish_robinhood()
 
 
 if __name__ == "__main__":
