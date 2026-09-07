@@ -3632,9 +3632,6 @@ async function runScan() {
   }
 }
 
-document.querySelector("#network")?.addEventListener("change", event => {
-  if (event.target.value === "robinhood") location.href = "robinhood.html";
-});
 els.refresh.addEventListener("click", async () => {
   els.refresh.disabled = true;
   try { await loadData(); }

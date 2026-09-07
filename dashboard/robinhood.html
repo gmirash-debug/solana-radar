@@ -1,26 +1,8 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Robinhood | Radar</title>
-  <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="styles.css?v=20260907-rh1">
-  <link rel="stylesheet" href="robinhood.css?v=20260907-rh3">
-</head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Robinhood | Radar</title></head>
 <body>
-  <header class="topbar">
-    <div class="brand-lockup"><div><h1>Robinhood Radar</h1><p id="subtitle">Loading observations</p></div></div>
-    <div class="actions">
-      <select id="network" aria-label="Network"><option value="solana">Solana</option><option value="robinhood" selected>Robinhood</option></select>
-      <button id="refresh" class="icon-button" aria-label="Refresh data" title="Refresh data"><img src="icons/refresh-cw.svg" alt=""></button>
-    </div>
-  </header>
-  <main class="rh-main">
-    <section class="rh-summary" aria-label="Network coverage"><h2>Uniswap v3 + v4</h2><p id="coverage">Checking data availability</p><p id="limits"></p><p id="health" role="status"></p></section>
-    <section class="rh-controls"><input id="search" type="search" placeholder="Search token or address" aria-label="Search token or address"><select id="status" aria-label="Observation status"><option value="all">All tokens</option><option value="retained">Holding confirmed</option><option value="buy_wave">New buy wave</option><option value="reduced">Cohort reduced</option><option value="risk">Contract risk</option><option value="observed">Activity only</option><option value="queued">Waiting for check</option><option value="check_failed">Check unavailable</option></select></section>
-    <div class="rh-workspace"><section id="tokens" aria-label="Tokens" aria-live="polite"></section><aside id="detail" aria-label="Token evidence"><p>Select a token</p></aside></div>
-  </main>
-  <script type="module" src="robinhood.js?v=20260907-rh3"></script>
+  <a href="index.html?network=robinhood">Open Robinhood Radar</a>
+  <script>location.replace(new URL("index.html?network=robinhood", location.href).href);</script>
 </body>
 </html>

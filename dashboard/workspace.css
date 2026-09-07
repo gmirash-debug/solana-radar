@@ -34,6 +34,17 @@
 .decision-ui .tabs { gap: 6px; flex: 0 0 auto; }
 .decision-ui .tab { background: transparent; border: 0; border-radius: 5px; padding: 0 12px; min-height: 34px; font-size: 13px; font-weight: 600; }
 .decision-ui .tab.is-active { background: #e4eeeb; color: #245a51; box-shadow: none; }
+.decision-ui .tab:disabled { color: var(--muted); opacity: 0.55; cursor: not-allowed; }
+.network-wallet-table { table-layout: fixed; width: 100%; }
+.network-wallet-table td, .network-wallet-table th { white-space: normal; overflow-wrap: anywhere; padding: 12px 8px; }
+.network-wallet-table th:first-child { width: 40%; }
+.network-checks { margin-top: 4px; border-radius: 0; }
+.network-checks table { width: 100%; }
+.network-checks td, .network-checks th { white-space: normal; overflow-wrap: anywhere; }
+.network-token-link { border: 0; background: none; color: var(--accent); padding: 0; min-height: 28px; text-align: left; font-weight: 600; }
+.decision-ui[data-network="robinhood"] .evidence-facts strong { min-width: 0; overflow-wrap: anywhere; }
+.decision-ui[data-network="robinhood"] .review-position strong { overflow-wrap: anywhere; }
+.decision-ui[data-network="robinhood"] .scanner-diagnostics .status-row { overflow-wrap: anywhere; font-size: 11px; }
 .decision-ui .filters { display: flex; position: relative; flex: 0 1 420px; gap: 8px; min-width: 0; overflow: visible; }
 .decision-ui .search-control { flex: 1; min-width: 0; }
 .decision-ui #searchInput { width: 100%; min-width: 0; font-size: 13px; height: 36px; }
@@ -181,6 +192,10 @@
   .decision-ui h1 { font-size: 16px; }
   .decision-ui #subtitle { font-size: 10px; }
   .decision-ui .actions { width: auto; }
+  .decision-ui #network { max-width: 104px; min-width: 0; padding-left: 7px; padding-right: 7px; font-size: 11px; }
+  .decision-ui[data-network="robinhood"] .brand-lockup { flex: 1; }
+  .decision-ui[data-network="robinhood"] .retention-summary { flex-wrap: wrap; }
+  .network-checks table { min-width: 540px; }
   .scanner-diagnostics > summary { font-size: 10px; gap: 12px; line-height: 1.5; min-height: 38px; }
   .decision-ui .toolbar { display: flex; flex-wrap: wrap; gap: 9px; padding: 9px 0; }
   .decision-ui .tabs { width: 100%; justify-content: space-between; overflow-x: auto; }
