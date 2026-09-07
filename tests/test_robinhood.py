@@ -28,32 +28,32 @@ class RobinhoodTests(unittest.TestCase):
             rh.token_key("SolanaMintpump")
 
     def test_direct_buy(self):
-        self.assertEqual(rh.attributed_buy(fixture(), {"pool": POOL, "token": TOKEN}, 0), (WALLET, 100))
+        self.assertEqual(rh.routed_buy(fixture(), {"pool": POOL, "token": TOKEN}, 0), (WALLET, 100))
 
     def test_router_not_treated_as_wallet(self):
-        self.assertIsNone(rh.attributed_buy(fixture(ROUTER), {"pool": POOL, "token": TOKEN}, 0))
+        self.assertEqual(rh.routed_buy(fixture(ROUTER), {"pool": POOL, "token": TOKEN}, 0), (WALLET, 100))
 
     def test_fee_on_transfer_not_full_buy(self):
-        self.assertIsNone(rh.attributed_buy(fixture(received=90), {"pool": POOL, "token": TOKEN}, 0))
+        self.assertIsNone(rh.routed_buy(fixture(received=90), {"pool": POOL, "token": TOKEN}, 0))
 
     def test_failed_transaction(self):
-        self.assertIsNone(rh.attributed_buy(fixture(status="0x0"), {"pool": POOL, "token": TOKEN}, 0))
+        self.assertIsNone(rh.routed_buy(fixture(status="0x0"), {"pool": POOL, "token": TOKEN}, 0))
 
     def test_transfer_alone_is_not_buy(self):
         receipt = fixture()
         receipt["logs"] = receipt["logs"][1:]
-        self.assertIsNone(rh.attributed_buy(receipt, {"pool": POOL, "token": TOKEN}, 0))
+        self.assertIsNone(rh.routed_buy(receipt, {"pool": POOL, "token": TOKEN}, 0))
 
     def test_buy_and_forward_excluded(self):
         receipt = fixture()
         receipt["logs"].append({"address": TOKEN, "topics": [rh.TRANSFER, topic(WALLET), topic(ROUTER)],
             "data": "0x" + encode(["uint256"], [100]).hex()})
-        self.assertIsNone(rh.attributed_buy(receipt, {"pool": POOL, "token": TOKEN}, 0))
+        self.assertIsNone(rh.routed_buy(receipt, {"pool": POOL, "token": TOKEN}, 0))
 
     def test_multi_swap_ambiguous(self):
         receipt = fixture()
         receipt["logs"].append(receipt["logs"][0])
-        self.assertIsNone(rh.attributed_buy(receipt, {"pool": POOL, "token": TOKEN}, 0))
+        self.assertIsNone(rh.routed_buy(receipt, {"pool": POOL, "token": TOKEN}, 0))
 
     def test_budget_is_hard(self):
         session = Mock()
@@ -96,7 +96,7 @@ class RobinhoodTests(unittest.TestCase):
         rpc.call.side_effect = rh.RpcError("history unavailable")
         with patch.object(rh, "verify_pool", return_value=0):
             with self.assertRaisesRegex(rh.RpcError, "history"):
-                rh.inspect_pool(rpc, {"pool": POOL, "token": TOKEN}, 1, 100, rh.CONFIG)
+                rh.inspect_incremental(rpc, {"pool": POOL, "token": TOKEN}, 1, 100, rh.CONFIG, rh.Store(), Mock(), 0)
 
     def test_publication_does_not_roll_back_or_mix_network(self):
         old = {"chain_id":4663,"tokens":[],"attempted_at":"2026-09-06T00:00:00Z"}
@@ -106,12 +106,13 @@ class RobinhoodTests(unittest.TestCase):
 
     def test_same_block_balance_and_retention_bound(self):
         receipt = fixture()
-        swap = dict(receipt["logs"][0], blockNumber="0x64", transactionHash="tx", logIndex="0x1")
+        receipt.update(transactionHash="tx", blockHash="hash")
+        swap = dict(receipt["logs"][0], blockNumber="0x64", blockHash="hash", transactionHash="tx", logIndex="0x1")
         rpc = Mock()
         rpc.contract.side_effect = [(6,), (1000,), (30,)]
-        rpc.call.side_effect = [[swap, swap], receipt]
-        with patch.object(rh, "verify_pool", return_value=0):
-            result = rh.inspect_pool(rpc, {"pool": POOL, "token": TOKEN}, 1, 100, rh.CONFIG)
+        rpc.call.side_effect = [{"hash": "hash"}, receipt]
+        with patch.object(rh, "verify_pool", return_value=0), patch.object(rh, "get_logs", side_effect=[[swap], []]), patch.object(rh, "security_check", return_value={"status":"unknown", "flags":[]}):
+            result = rh.inspect_incremental(rpc, {"pool": POOL, "token": TOKEN, "key": rh.token_key(TOKEN)}, 1, 100, rh.CONFIG, rh.Store(), Mock(), 0)
         self.assertEqual(result["retained_supply_upper_bound_pct"], 3)
         self.assertEqual(result["wallets"][0]["retention_upper_bound_pct"], 30)
         self.assertEqual(result["swap_transactions"], 1)

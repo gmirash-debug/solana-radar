@@ -14,18 +14,28 @@ import requests
 from eth_abi import decode, encode
 from eth_abi.exceptions import DecodingError
 from eth_utils import keccak
+from robinhood_store import Store
 
 CHAIN_ID = 4663
 FACTORY = "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
 PUBLIC_RPC = "https://rpc.mainnet.chain.robinhood.com"
+PUBLIC_NODE = "https://robinhood-rpc.publicnode.com"
+ORDO_RPC = "https://rpc.ordofi.network"
+POOL_MANAGER = "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+ZERO = "0x" + "0" * 40
+WRAPPED = {ZERO, "0x0bd7d308f8e1639fab988df18a8011f41eacad73", "0x5fc5360d0400a0fd4f2af552add042d716f1d168"}
 GECKO = "https://api.geckoterminal.com/api/v2/networks/robinhood"
 SWAP = "0x" + keccak(text="Swap(address,address,int256,int256,uint160,uint128,int24)").hex()
+SWAP_V4 = "0x" + keccak(text="Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)").hex()
+INITIALIZE = "0x" + keccak(text="Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)").hex()
 TRANSFER = "0x" + keccak(text="Transfer(address,address,uint256)").hex()
 ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
-CONFIG = {"discovery_pages": 3, "max_pools": 6, "rpc_budget": 300,
-          "max_receipts_per_pool": 24, "window_seconds": 3600,
+CONFIG = {"discovery_pages": 3, "max_pools": 16, "rpc_budget": 900,
+          "max_receipts_per_pool": 48, "window_seconds": 3600,
           "min_pool_age_hours": 24, "max_pool_age_hours": 360,
-          "min_liquidity_usd": 3000, "max_fdv_usd": 5_000_000}
+          "min_liquidity_usd": 3000, "max_fdv_usd": 5_000_000,
+          "max_log_blocks_per_pool": 720_000, "min_cohort_supply_pct": 0.25,
+          "min_cohort_wallets": 3, "retention_check_seconds": 1800}
 
 
 def address(value):
@@ -52,36 +62,91 @@ class RpcError(RuntimeError):
 
 class Rpc:
     def __init__(self, url=None, budget=300, session=None):
-        self.url = url or os.environ.get("ROBINHOOD_RPC_URL") or PUBLIC_RPC
+        configured = url or os.environ.get("ROBINHOOD_RPC_URL")
+        archive = os.environ.get("ROBINHOOD_ARCHIVE_RPC_URL")
+        self.routes = list(dict.fromkeys(x for x in (configured, archive, PUBLIC_NODE, PUBLIC_RPC, ORDO_RPC) if x))
+        self.url = self.routes[0]
         self.budget = budget
         self.calls = 0
         self.session = session or requests.Session()
-        self.provider = "configured RPC" if self.url != PUBLIC_RPC else "rate-limited public RPC"
+        self.provider = "Alchemy/configured + PublicNode + Robinhood + Ordo" if configured else "PublicNode + Robinhood + Ordo"
+        self.route_names = {u: ("PublicNode" if u == PUBLIC_NODE else "Robinhood public" if u == PUBLIC_RPC else "Ordo" if u == ORDO_RPC else f"configured-{i + 1}") for i, u in enumerate(self.routes)}
+        self.verified = set()
+        self.disabled = set()
+        self.failures = Counter()
+        self.method_route = {}
+        self.stats = Counter()
+        self.head = None
+        self.next_by_endpoint = {}
         self.next_request_at = 0
-        self.deadline = time.monotonic() + 330
+        self.deadline = time.monotonic() + 510
 
     def call(self, method, params):
+        if self.calls >= self.budget:
+            raise RpcError("RPC budget exhausted")
+        block_tag = params[-1] if params and isinstance(params[-1], str) else "latest"
+        historical = method in ("eth_getCode", "eth_call", "eth_getStorageAt") and block_tag.startswith("0x") and self.head is not None and int(block_tag, 16) < self.head - 256
+        route_key = (method, historical)
+        preferred = self.method_route.get(route_key)
+        if preferred is None:
+            preferred = self.routes[0] if historical else PUBLIC_RPC if method == "eth_getLogs" else PUBLIC_NODE
+        routes = sorted(self.routes, key=lambda u: u != preferred)
+        if method == "eth_getLogs":
+            # PublicNode gates historical logs; Alchemy Free caps ranges at ten blocks.
+            span = int(params[0].get("toBlock", "0x0"), 16) - int(params[0].get("fromBlock", "0x0"), 16) + 1
+            routes = [u for u in routes if u != PUBLIC_NODE and not (".g.alchemy.com/" in u and span > 10)]
+        for endpoint in routes:
+            if endpoint in self.disabled:
+                continue
+            if endpoint not in self.verified and method != "eth_chainId":
+                try:
+                    if int(self.request(endpoint, "eth_chainId", []), 16) != CHAIN_ID:
+                        self.disabled.add(endpoint)
+                        continue
+                    self.verified.add(endpoint)
+                except (RpcError, ValueError):
+                    continue
+            try:
+                value = self.request(endpoint, method, params)
+                if method == "eth_chainId" and int(value, 16) != CHAIN_ID:
+                    self.disabled.add(endpoint)
+                    continue
+                self.verified.add(endpoint)
+                self.method_route[route_key] = endpoint
+                if method == "eth_blockNumber":
+                    self.head = int(value, 16)
+                return value
+            except RpcError:
+                self.failures[self.route_names[endpoint]] += 1
+        raise RpcError(f"No healthy RPC supports {method} for this block/range")
+
+    def request(self, endpoint, method, params):
         for attempt in range(3):
             if self.calls >= self.budget:
                 raise RpcError("RPC budget exhausted")
             if time.monotonic() >= self.deadline:
                 raise RpcError("RPC time budget exhausted")
-            time.sleep(max(0, self.next_request_at - time.monotonic()))
+            time.sleep(max(0, self.next_by_endpoint.get(endpoint, 0) - time.monotonic()))
             self.calls += 1
-            self.next_request_at = time.monotonic() + (0.8 if self.url == PUBLIC_RPC else 0.2)
+            self.next_by_endpoint[endpoint] = time.monotonic() + (0.9 if endpoint in (PUBLIC_RPC, ORDO_RPC) else 0.15)
+            self.stats[self.route_names[endpoint]] += 1
             try:
-                result = self.session.post(self.url, json={"jsonrpc": "2.0", "id": self.calls,
+                result = self.session.post(endpoint, json={"jsonrpc": "2.0", "id": self.calls,
                     "method": method, "params": params}, timeout=15)
                 if result.status_code in (429, 502, 503, 504) and attempt < 2:
-                    self.next_request_at = time.monotonic() + 2 ** (attempt + 1)
+                    self.next_by_endpoint[endpoint] = time.monotonic() + 2 ** (attempt + 1)
                     continue
                 result.raise_for_status()
                 payload = result.json()
+                error = payload.get("error") if isinstance(payload, dict) else None
+                if isinstance(error, dict) and (error.get("code") == 429 or "too many requests" in str(error.get("message", "")).lower()) and attempt < 2:
+                    self.next_by_endpoint[endpoint] = time.monotonic() + 2 ** (attempt + 1)
+                    continue
                 break
             except (requests.RequestException, ValueError):
                 # Never persist provider URLs, which may contain credentials.
                 raise RpcError(f"RPC unavailable during {method}") from None
-        if payload.get("error") or payload.get("result") is None:
+        if not isinstance(payload, dict) or payload.get("error") or payload.get("result") is None:
             raise RpcError(f"RPC rejected {method}")
         return payload["result"]
 
@@ -96,9 +161,9 @@ class Rpc:
 
 def discover(session, config, now):
     pools, errors = {}, []
-    for page in range(1, config["discovery_pages"] + 1):
+    for protocol, page in [(version, page) for version in ("v3", "v4") for page in range(1, config["discovery_pages"] + 1)]:
         try:
-            response = session.get(f"{GECKO}/dexes/uniswap-v3-robinhood/pools",
+            response = session.get(f"{GECKO}/dexes/uniswap-{protocol}-robinhood/pools",
                 params={"page": page, "include": "base_token,quote_token"}, timeout=15)
             response.raise_for_status()
             payload = response.json()
@@ -107,20 +172,26 @@ def discover(session, config, now):
             metadata = {t["id"]: t.get("attributes", {}) for t in payload.get("included", [])}
             for item in payload["data"]:
                 a, rel = item["attributes"], item["relationships"]
-                if rel["dex"]["data"]["id"] != "uniswap-v3-robinhood":
+                if rel["dex"]["data"]["id"] != f"uniswap-{protocol}-robinhood":
                     continue
                 base_id = rel["base_token"]["data"]["id"]
                 quote_id = rel["quote_token"]["data"]["id"]
-                pool = address(a["address"])
+                pool = a["address"].lower()
+                if not re.fullmatch(r"0x[0-9a-f]{64}" if protocol == "v4" else r"0x[0-9a-f]{40}", pool):
+                    raise ValueError("Invalid pool identifier")
                 base = address(base_id.removeprefix("robinhood_"))
                 quote = address(quote_id.removeprefix("robinhood_"))
                 age = (now - timestamp(a["pool_created_at"])) / 3600
                 fdv = float(a.get("fdv_usd") or 0)
                 liquidity = float(a.get("reserve_in_usd") or 0)
+                prices = [float(a.get(k) or 0) for k in ("base_token_price_usd", "market_cap_usd")]
+                volume = float(a.get("volume_usd", {}).get("h1") or 0)
+                if not all(math.isfinite(v) and v >= 0 for v in prices + [volume]):
+                    raise ValueError("Non-finite market data")
                 eligible = (all(math.isfinite(v) for v in (age, fdv, liquidity))
-                    and config["min_pool_age_hours"] <= age <= config["max_pool_age_hours"]
+                    and 0 <= age <= config["max_pool_age_hours"] and base not in WRAPPED
                     and liquidity >= config["min_liquidity_usd"] and 0 < fdv <= config["max_fdv_usd"])
-                pools[pool] = {"pool": pool, "token": base, "key": token_key(base), "quote": quote,
+                pools[pool] = {"pool": pool, "protocol": protocol, "token": base, "key": token_key(base), "quote": quote,
                     "symbol": metadata.get(base_id, {}).get("symbol", a["name"].split(" / ")[0]),
                     "name": metadata.get(base_id, {}).get("name", a["name"]),
                     "quote_symbol": metadata.get(quote_id, {}).get("symbol", "quote"),
@@ -128,10 +199,11 @@ def discover(session, config, now):
                     "liquidity_usd": liquidity, "fdv_usd": fdv,
                     "market_cap_usd": float(a["market_cap_usd"]) if a.get("market_cap_usd") else None,
                     "pool_created_at": a["pool_created_at"], "token_age_verified": False,
+                    "market_checked_at": utc_now(),
                     "volume_h1_usd": float(a.get("volume_usd", {}).get("h1") or 0),
                     "eligible": eligible}
         except (requests.RequestException, KeyError, TypeError, ValueError):
-            errors.append(f"Discovery page {page} unavailable or invalid")
+            errors.append(f"Discovery {protocol} page {page} unavailable or invalid")
         time.sleep(0.25)
     return list(pools.values()), errors
 
@@ -152,6 +224,24 @@ def window_start(rpc, head, seconds):
 
 
 def verify_pool(rpc, pool, block):
+    if pool.get("protocol") == "v4":
+        logs = rpc.call("eth_getLogs", [{"address": POOL_MANAGER, "fromBlock": "0x0", "toBlock": block,
+            "topics": [INITIALIZE, pool["pool"]]}])
+        if len(logs) != 1:
+            raise RpcError("V4 pool initialization could not be verified")
+        log = logs[0]
+        if log.get("removed") or address(log["address"]) != POOL_MANAGER or len(log["topics"]) != 4 or log["topics"][:2] != [INITIALIZE, pool["pool"]]:
+            raise RpcError("Invalid V4 initialization event")
+        tokens = [address("0x" + t[-40:]) for t in log["topics"][2:]]
+        try:
+            fee, spacing, hooks, _, _ = decode(["uint24", "int24", "address", "uint160", "int24"], bytes.fromhex(log["data"][2:]))
+        except (ValueError, DecodingError):
+            raise RpcError("Invalid V4 initialization data") from None
+        identity = "0x" + keccak(encode(["address", "address", "uint24", "int24", "address"], tokens + [fee, spacing, hooks])).hex()
+        if identity != pool["pool"] or set(tokens) != {pool["token"], pool["quote"]}:
+            raise RpcError("V4 PoolKey identity mismatch")
+        pool.update(hooks=address(hooks), fee=fee, pool_creation_block=int(log["blockNumber"], 16))
+        return tokens.index(pool["token"])
     actual = address(rpc.contract(pool["pool"], "factory()", ["address"], block=block)[0])
     if actual != FACTORY:
         raise RpcError("Pool factory is not the verified Uniswap v3 deployment")
@@ -166,6 +256,10 @@ def verify_pool(rpc, pool, block):
 
 def swap_amounts(log):
     try:
+        if log.get("topics", [None])[0] == SWAP_V4:
+            amounts = decode(["int128", "int128", "uint160", "uint128", "int24", "uint24"], bytes.fromhex(log["data"][2:]))
+            # V4 emits the caller's delta; normalize to V3's pool-side sign.
+            return -amounts[0], -amounts[1]
         return decode(["int256", "int256", "uint160", "uint128", "int24"], bytes.fromhex(log["data"][2:]))[:2]
     except (DecodingError, ValueError):
         raise RpcError("Invalid swap data") from None
@@ -188,99 +282,271 @@ def transfer_net(receipt, token, wallet):
     return net
 
 
-def attributed_buy(receipt, pool, base_index):
-    """Conservative direct-beneficiary buys only; transfers alone are not trades."""
+
+
+def pool_log(log, pool):
+    topics = log.get("topics", [])
+    if pool.get("protocol") == "v4":
+        return log["address"].lower() == POOL_MANAGER and len(topics) == 3 and topics[:2] == [SWAP_V4, pool["pool"]]
+    return log["address"].lower() == pool["pool"] and len(topics) == 3 and topics[0] == SWAP
+
+
+def routed_buy(receipt, pool, base_index):
+    """Attribute the transaction sender only when pool output reaches them in full."""
     if int(receipt.get("status", "0x0"), 16) != 1:
         return None
-    wallet = address(receipt["from"])
-    swaps = [log for log in receipt.get("logs", []) if log["address"].lower() == pool["pool"]
-             and log.get("topics", [None])[0] == SWAP]
+    swaps = [x for x in receipt.get("logs", []) if pool_log(x, pool)]
     if len(swaps) != 1:
         return None
-    swap = swaps[0]
-    if len(swap["topics"]) != 3 or address("0x" + swap["topics"][2][-40:]) != wallet:
-        return None
-    amounts = swap_amounts(swap)
+    amounts = swap_amounts(swaps[0])
     bought, paid = -amounts[base_index], amounts[1 - base_index]
-    net = transfer_net(receipt, pool["token"], wallet)
-    if bought <= 0 or paid <= 0 or net != bought:
+    wallet = address(receipt["from"])
+    custody = POOL_MANAGER if pool.get("protocol") == "v4" else pool["pool"]
+    if bought <= 0 or paid <= 0 or wallet in (custody, pool["token"], ZERO):
+        return None
+    if transfer_net(receipt, pool["token"], wallet) != bought or transfer_net(receipt, pool["token"], custody) != -bought:
         return None
     return wallet, bought
 
 
-def inspect_pool(rpc, pool, start, head, config):
-    block = hex(head)
-    result = dict(pool, status="observed", checked_at=utc_now(), wallets=[],
-        history_complete=False, attribution_complete=False, security_checked=False,
-        retained_supply_upper_bound_pct=None)
-    base_index = verify_pool(rpc, pool, block)
-    decimals = rpc.contract(pool["token"], "decimals()", ["uint8"], block=block)[0]
-    supply = rpc.contract(pool["token"], "totalSupply()", ["uint256"], block=block)[0]
-    if not 0 <= decimals <= 36 or supply <= 0:
-        raise RpcError("Invalid token supply or decimals")
-    logs = {}
-    for left in range(start, head + 1, 10000):
-        chunk = rpc.call("eth_getLogs", [{"address": pool["pool"], "fromBlock": hex(left),
-            "toBlock": hex(min(head, left + 9999)), "topics": [SWAP]}])
-        if not isinstance(chunk, list) or len(chunk) >= 1000:
-            raise RpcError("Log response may be capped; history is incomplete")
+def get_logs(rpc, query, start, end, chunk_size=10000):
+    output = {}
+    for left in range(start, end + 1, chunk_size):
+        right = min(end, left + chunk_size - 1)
+        chunk = rpc.call("eth_getLogs", [dict(query, fromBlock=hex(left), toBlock=hex(right))])
+        if not isinstance(chunk, list):
+            raise RpcError("Invalid log response")
+        if len(chunk) >= 1000:
+            if left == right:
+                raise RpcError("Single-block log response may be truncated")
+            chunk = get_logs(rpc, query, left, right, max(1, chunk_size // 2))
         for log in chunk:
-            if log.get("removed"):
-                continue
-            if (log["address"].lower() != pool["pool"] or log.get("topics", [None])[0] != SWAP
-                    or not left <= int(log["blockNumber"], 16) <= min(head, left + 9999)):
-                raise RpcError("Log does not match requested pool/window")
-            logs[(log["transactionHash"], log["logIndex"])] = log
-    result["history_complete"] = True
-    txs = list(dict.fromkeys(log["transactionHash"] for log in logs.values()))
-    result["swap_transactions"] = len(txs)
-    result["buy_swaps"] = sum(swap_amounts(log)[base_index] < 0 for log in logs.values())
-    result["sell_swaps"] = sum(swap_amounts(log)[base_index] > 0 for log in logs.values())
-    buy_txs = list(dict.fromkeys(log["transactionHash"] for log in logs.values()
-        if swap_amounts(log)[base_index] < 0))
-    result["buy_transactions"] = len(buy_txs)
-    cohort = Counter()
-    checked, attributed = 0, 0
-    for tx in buy_txs[-config["max_receipts_per_pool"]:]:
-        receipt = rpc.call("eth_getTransactionReceipt", [tx])
-        if not start <= int(receipt["blockNumber"], 16) <= head:
-            raise RpcError("Receipt outside requested block window")
-        checked += 1
-        buy = attributed_buy(receipt, pool, base_index)
-        if buy:
-            wallet, amount = buy
-            cohort[wallet] += amount
-            attributed += 1
-    result.update(receipts_checked=checked, attributed_buy_transactions=attributed,
-        attribution_complete=(checked == len(buy_txs) and attributed == result["buy_swaps"]))
-    held = 0
-    for wallet, bought in cohort.items():
-        balance = rpc.contract(pool["token"], "balanceOf(address)", ["uint256"],
-            [wallet], ["address"], block)[0]
-        retained = min(balance, bought)
-        held += retained
-        result["wallets"].append({"address": wallet, "bought_raw": str(bought),
-            "balance_raw": str(balance), "retained_upper_bound_raw": str(retained),
-            "retention_upper_bound_pct": 100 * retained / bought,
-            "supply_upper_bound_pct": 100 * retained / supply})
-    result.update(decimals=decimals, total_supply_raw=str(supply),
-        retained_supply_upper_bound_pct=100 * held / supply if cohort else None,
-        balance_block=head, window_from_block=start, window_to_block=head)
-    # This is a measurable buy wave, not proof of collusion, insider identity or safety.
-    if len(cohort) >= 3 and result["attribution_complete"] and result["buy_swaps"] >= 2 * max(1, result["sell_swaps"]):
-        result["status"] = "buy_wave"
+            if log.get("removed") or address(log["address"]) != query["address"] or not left <= int(log["blockNumber"], 16) <= right:
+                raise RpcError("Log outside requested canonical range")
+            for i, expected in enumerate(query.get("topics", [])):
+                if expected is not None and (i >= len(log["topics"]) or log["topics"][i] not in (expected if isinstance(expected, list) else [expected])):
+                    raise RpcError("Log topic does not match filter")
+            output[(log["transactionHash"], log["logIndex"])] = log
+    return sorted(output.values(), key=lambda x: (int(x["blockNumber"], 16), int(x.get("transactionIndex", "0x0"), 16), int(x["logIndex"], 16)))
+
+
+def stock_registry(session, store):
+    cached = store.get("stocks", 86400)
+    if cached:
+        return set(cached)
+    try:
+        r = session.get("https://api.robinhood.com/rhj/assets", timeout=15)
+        r.raise_for_status()
+        assets = r.json()["assets"]
+        stocks = {address(d["contractAddress"]) for a in assets for d in a["deployments"] if d["chainId"] == CHAIN_ID}
+        if not stocks:
+            raise ValueError("Empty stock registry")
+        store.put("stocks", sorted(stocks))
+        return stocks
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        raise RpcError("Official stock registry unavailable; new-token discovery paused") from None
+
+
+def token_age(rpc, token, head, oldest_block, youngest_block, store):
+    cached = store.get("birth:" + token)
+    if cached:
+        return cached
+    def exists(block):
+        code = rpc.call("eth_getCode", [token, hex(block)])
+        if not isinstance(code, str) or not re.fullmatch(r"0x(?:[0-9a-fA-F]{2})*", code):
+            raise RpcError("Invalid historical bytecode")
+        return code != "0x"
+    if exists(oldest_block):
+        return {"age_status": "too_old", "token_age_verified": True}
+    if not exists(youngest_block):
+        return {"age_status": "too_young", "token_age_verified": True}
+    lo, hi = oldest_block + 1, youngest_block
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if exists(mid):
+            hi = mid
+        else:
+            lo = mid + 1
+    birth = rpc.call("eth_getBlockByNumber", [hex(lo), False])
+    result = {"token_age_verified": True, "age_status": "eligible", "token_creation_block": lo,
+        "token_created_at": datetime.fromtimestamp(int(birth["timestamp"], 16), timezone.utc).isoformat()}
+    store.put("birth:" + token, result)
     return result
 
 
-def scan(previous=None, config=None, rpc=None, session=None):
+def security_check(session, token, store):
+    cached = store.get("risk:" + token, 3600)
+    if cached:
+        return cached
+    result = {"status": "unknown", "source": "GoPlus", "checked_at": utc_now(), "flags": [], "unknown": []}
+    flags = ("is_honeypot", "cannot_buy", "cannot_sell_all", "is_blacklisted", "is_mintable", "hidden_owner", "owner_change_balance", "transfer_pausable", "slippage_modifiable", "is_proxy")
+    try:
+        r = session.get(f"https://api.gopluslabs.io/api/v1/token_security/{CHAIN_ID}", params={"contract_addresses": token}, timeout=15)
+        r.raise_for_status()
+        payload = r.json()
+        data = payload.get("result", {}).get(token) if isinstance(payload, dict) and payload.get("code") == 1 and isinstance(payload.get("result"), dict) else None
+        if not isinstance(data, dict) or not data:
+            raise ValueError("No token risk evidence")
+        for flag in flags:
+            if data.get(flag) == "1":
+                result["flags"].append(flag)
+            elif data.get(flag) != "0":
+                result["unknown"].append(flag)
+        for key in ("buy_tax", "sell_tax"):
+            raw = data.get(key)
+            tax = float(raw) if raw not in (None, "") else None
+            result[key] = tax if tax is not None and math.isfinite(tax) and tax >= 0 else None
+            if result[key] is None:
+                result["unknown"].append(key)
+            elif tax > 0.05:
+                result["flags"].append(key + "_over_5pct")
+        if data.get("is_open_source") != "1":
+            result["unknown"].append("source_unverified")
+        result["status"] = "risk" if result["flags"] else "unknown" if result["unknown"] else "no_flags"
+        store.put("risk:" + token, result)
+    except (requests.RequestException, ValueError, TypeError):
+        result["unknown"].append("provider_unavailable")
+    return result
+
+
+def recheck_cohort(rpc, pool, cohort, head, supply, now, config):
+    result = copy.deepcopy(cohort)
+    if head <= cohort["balance_block"]:
+        return result
+    wallets = {w["address"]: w for w in result["wallets"]}
+    outgoing = get_logs(rpc, {"address": pool["token"], "topics": [TRANSFER, ["0x" + w[2:].rjust(64, "0") for w in wallets]]}, cohort["balance_block"] + 1, head)
+    for log in outgoing:
+        sender = address("0x" + log["topics"][1][-40:])
+        recipient = address("0x" + log["topics"][2][-40:])
+        if sender != recipient:
+            w = wallets[sender]
+            amount = int(log["data"], 16)
+            w["retained_lower_bound_raw"] = str(max(0, int(w["retained_lower_bound_raw"]) - amount))
+    for wallet, w in wallets.items():
+        balance = rpc.contract(pool["token"], "balanceOf(address)", ["uint256"], [wallet], ["address"], hex(head))[0]
+        upper = min(balance, int(w["bought_raw"]))
+        lower = min(upper, int(w["retained_lower_bound_raw"]))
+        w.update(balance_raw=str(balance), retained_lower_bound_raw=str(lower), retained_upper_bound_raw=str(upper),
+            retention_upper_bound_pct=100 * upper / int(w["bought_raw"]), supply_upper_bound_pct=100 * upper / supply)
+    if now - cohort["last_check_timestamp"] >= config["retention_check_seconds"]:
+        result["checks"] += 1
+        result["last_check_timestamp"] = now
+    result.update(balance_block=head, checked_at=utc_now())
+    return result
+
+
+def inspect_incremental(rpc, pool, start, head, config, store, session, now):
+    identity = store.get("pool:" + pool["pool"])
+    if identity:
+        if identity["token"] != pool["token"] or identity["quote"] != pool["quote"]:
+            raise RpcError("Cached pool token identity changed")
+        index = identity["base_index"]
+        pool.update({k: identity[k] for k in ("hooks", "fee", "pool_creation_block") if k in identity})
+    else:
+        index = verify_pool(rpc, pool, hex(head))
+        store.put("pool:" + pool["pool"], dict(pool, base_index=index))
+    cursor = store.get("cursor:" + pool["pool"])
+    if cursor:
+        if head < cursor["block"]:
+            raise RpcError("RPC head behind persisted history checkpoint")
+        canonical = rpc.call("eth_getBlockByNumber", [hex(cursor["block"]), False])
+        if canonical["hash"] != cursor["hash"]:
+            # Never continue a thesis derived from a replaced block.
+            raise RpcError("History checkpoint reorganized; manual historical rebuild required")
+    left = cursor["block"] + 1 if cursor else start
+    end = min(head, left + config["max_log_blocks_per_pool"] - 1)
+    query = {"address": POOL_MANAGER if pool.get("protocol") == "v4" else pool["pool"],
+        "topics": [SWAP_V4, pool["pool"]] if pool.get("protocol") == "v4" else [SWAP]}
+    logs = get_logs(rpc, query, left, end)
+    store.add_logs(pool["pool"], logs)
+    checkpoint = rpc.call("eth_getBlockByNumber", [hex(end), False])
+    store.put("cursor:" + pool["pool"], {"block": end, "hash": checkpoint["hash"], "from_block": cursor["from_block"] if cursor else start})
+    decimals = rpc.contract(pool["token"], "decimals()", ["uint8"], block=hex(head))[0]
+    supply = rpc.contract(pool["token"], "totalSupply()", ["uint256"], block=hex(head))[0]
+    if not 0 <= decimals <= 36 or supply <= 0:
+        raise RpcError("Invalid token supply")
+    window = store.logs(pool["pool"], start, head)
+    buys = [x for x in window if swap_amounts(x)[index] < 0]
+    txs = list(dict.fromkeys(x["transactionHash"] for x in buys))
+    cohort = Counter()
+    receipts, attributed = [], 0
+    for tx in txs[:config["max_receipts_per_pool"]]:
+        receipt = store.get("receipt:" + tx)
+        if receipt is None:
+            receipt = rpc.call("eth_getTransactionReceipt", [tx])
+            store.put("receipt:" + tx, receipt)
+        matching = [x for x in buys if x["transactionHash"] == tx]
+        if receipt.get("transactionHash") != tx or any(receipt.get("blockHash") != x["blockHash"] or receipt["blockNumber"] != x["blockNumber"] for x in matching):
+            raise RpcError("Receipt does not match canonical swap")
+        receipts.append(receipt)
+        buy = routed_buy(receipt, pool, index)
+        if buy:
+            cohort[buy[0]] += buy[1]
+            attributed += 1
+    risk = security_check(session, pool["token"], store)
+    if pool.get("hooks", ZERO) != ZERO:
+        risk = dict(risk, status="risk", flags=risk["flags"] + ["v4_hook_contract"])
+    row = dict(pool, status="observed", wallets=[], checked_at=utc_now(), history_complete=end == head,
+        attribution_complete=len(receipts) == len(txs) == attributed, security=risk, security_checked=risk["status"] != "unknown",
+        decimals=decimals, total_supply_raw=str(supply), buy_transactions=len(txs), receipts_checked=len(receipts),
+        attributed_buy_transactions=attributed, buy_swaps=len(buys), sell_swaps=len(window) - len(buys),
+        swap_transactions=len({x["transactionHash"] for x in window}), window_from_block=start, window_to_block=head,
+        indexed_through_block=end, history_from_block=cursor["from_block"] if cursor else start,
+        backlog_blocks=max(0, head - end), balance_block=head, retained_supply_upper_bound_pct=None)
+    frozen = store.get("cohort:" + pool["key"])
+    if not frozen and cohort:
+        outflows = get_logs(rpc, {"address": pool["token"], "topics": [TRANSFER, ["0x" + w[2:].rjust(64, "0") for w in cohort]]}, start, head)
+        spent = Counter()
+        for log in outflows:
+            sender, recipient = [address("0x" + t[-40:]) for t in log["topics"][1:3]]
+            if sender != recipient:
+                spent[sender] += int(log["data"], 16)
+        for wallet, bought in cohort.items():
+            balance = rpc.contract(pool["token"], "balanceOf(address)", ["uint256"], [wallet], ["address"], hex(head))[0]
+            upper, lower = min(balance, bought), min(balance, max(0, bought - spent[wallet]))
+            row["wallets"].append({"address": wallet, "bought_raw": str(bought), "balance_raw": str(balance),
+                "retained_lower_bound_raw": str(lower), "retained_upper_bound_raw": str(upper),
+                "retention_upper_bound_pct": 100 * upper / bought, "supply_upper_bound_pct": 100 * upper / supply})
+        lower_supply = 100 * sum(int(w["retained_lower_bound_raw"]) for w in row["wallets"]) / supply
+        enough = len(cohort) >= config["min_cohort_wallets"] and lower_supply >= config["min_cohort_supply_pct"]
+        if enough and row["history_complete"] and row["attribution_complete"] and len(buys) >= 2 * max(1, row["sell_swaps"]):
+            frozen = {"wallets": row["wallets"], "checks": 1, "created_at": utc_now(), "checked_at": utc_now(),
+                "balance_block": head, "last_check_timestamp": now, "reason": "Distributed net buy wave",
+                "initial_supply_raw": str(supply), "initial_retained_raw": str(sum(int(w["retained_lower_bound_raw"]) for w in row["wallets"]))}
+    elif frozen:
+        frozen = recheck_cohort(rpc, pool, frozen, head, supply, now, config)
+    if frozen:
+        store.put("cohort:" + pool["key"], frozen)
+        row.update(wallets=frozen["wallets"], cohort_created_at=frozen["created_at"], cohort_checks=frozen["checks"],
+            cohort_reason=frozen["reason"], status="buy_wave" if frozen["checks"] < 2 else "retained")
+        lower = sum(int(w["retained_lower_bound_raw"]) for w in frozen["wallets"])
+        if lower < 0.6 * int(frozen["initial_retained_raw"]):
+            row["status"] = "reduced"
+        if str(supply) != frozen["initial_supply_raw"]:
+            row["status"] = "risk"
+            row["security"] = dict(risk, flags=risk["flags"] + ["supply_changed"], status="risk")
+    if row["wallets"]:
+        row["retained_supply_lower_bound_pct"] = 100 * sum(int(w["retained_lower_bound_raw"]) for w in row["wallets"]) / supply
+        row["retained_supply_upper_bound_pct"] = 100 * sum(int(w["retained_upper_bound_raw"]) for w in row["wallets"]) / supply
+    if risk["status"] == "risk":
+        row["status"] = "risk"
+    store.summarize(pool["pool"], row)
+    # Retention evidence is independent of an investment recommendation or contract safety.
+    return row
+
+
+
+
+def scan(previous=None, config=None, rpc=None, session=None, store=None):
     config = config or CONFIG
     rpc = rpc or Rpc(budget=config["rpc_budget"])
     session = session or requests.Session()
+    store = store or Store()
     previous = previous if (previous or {}).get("chain_id") == CHAIN_ID else {}
     output = copy.deepcopy(previous)
     output.setdefault("tokens", [])
     output.update(chain_id=CHAIN_ID, chain="robinhood", attempted_at=utc_now(), config=config,
-        mode="research", scope="Uniswap v3 only; bounded GeckoTerminal discovery; not network-wide",
+        schema_version=2, mode="evidence", scope="Uniswap v3 + v4; bounded discovery; not network-wide",
         provider=rpc.provider)
     try:
         if int(rpc.call("eth_chainId", []), 16) != CHAIN_ID:
@@ -290,60 +556,115 @@ def scan(previous=None, config=None, rpc=None, session=None):
         if not -60 <= time.time() - int(block["timestamp"], 16) <= 900:
             raise RpcError("RPC head is stale or ahead of wall clock")
         pools, errors = discover(session, config, time.time())
+        stocks = stock_registry(session, store)
+        oldest, _ = window_start(rpc, head, config["max_pool_age_hours"] * 3600)
+        youngest, _ = window_start(rpc, head, config["min_pool_age_hours"] * 3600)
         observed_at = utc_now()
         if not pools and errors:
             raise RpcError("All discovery pages failed")
         old = {p["key"]: p for p in previous.get("tokens", [])}
-        eligible = [p for p in pools if p["eligible"]]
+        eligible = [p for p in pools if p["eligible"] and p["token"] not in stocks
+                    and (store.get("excluded:" + p["key"]) or {}).get("age_status") != "too_old"]
+        discovered_ids = {p["key"] for p in eligible}
+        for key, previous_row in old.items():
+            if key not in discovered_ids and store.get("cohort:" + key) and previous_row["token"] not in stocks:
+                eligible.append(dict(previous_row, market_stale=True, eligible=True))
         # Oldest checked first; a popular pool cannot monopolize the request budget.
-        eligible.sort(key=lambda p: (old.get(p["key"], {}).get("checked_at", ""), -p["volume_h1_usd"]))
+        eligible.sort(key=lambda p: (old.get(p["key"], store.get("excluded:" + p["key"]) or {}).get("last_attempt_at", ""), -p["volume_h1_usd"]))
         selected, seen = [], set()
         for pool in eligible:
             if pool["key"] not in seen:
                 selected.append(pool)
                 seen.add(pool["key"])
         results = []
+        excluded = Counter()
+        checked = 0
         # Reserve a request to validate the snapshot block after all balance reads.
         rpc.budget -= 1
-        for pool in selected[:config["max_pools"]]:
+        attempted = 0
+        deep_attempts = 0
+        for pool in selected[:config["max_pools"] * 2]:
+            if deep_attempts >= config["max_pools"] or rpc.budget - rpc.calls < 100 or rpc.deadline - time.monotonic() < 70:
+                break
+            attempted += 1
             try:
-                row = inspect_pool(rpc, pool, start, head, config)
+                frozen = store.get("cohort:" + pool["key"])
+                age = token_age(rpc, pool["token"], head, oldest, youngest, store)
+                pool.update(age)
+                if age.get("token_created_at"):
+                    hours = (time.time() - timestamp(age["token_created_at"])) / 3600
+                    pool["age_status"] = "eligible" if config["min_pool_age_hours"] <= hours <= config["max_pool_age_hours"] else "out_of_range"
+                if pool["age_status"] != "eligible" and not frozen:
+                    excluded[pool["age_status"]] += 1
+                    # Remember attempts so excluded assets cannot starve later candidates.
+                    store.put("excluded:" + pool["key"], {"last_attempt_at": utc_now(), **age})
+                    continue
+                deep_attempts += 1
+                row = inspect_incremental(rpc, pool, start, head, config, store, session, time.time())
+                checked += 1
             except (RpcError, ValueError, KeyError) as exc:
-                row = dict(pool, status="check_failed", error=str(exc), checked_at=utc_now(), wallets=[])
+                row = dict(old.get(pool["key"], {}), **pool)
+                row.update(status="check_failed", error=str(exc))
+                row.setdefault("wallets", [])
                 errors.append(f"{pool['pool']}: {exc}")
+            row["last_attempt_at"] = utc_now()
             row["first_observed_at"] = old.get(pool["key"], {}).get("first_observed_at") or observed_at
             results.append(row)
         # Keep pending eligible tokens visible without presenting previous balances as fresh.
-        for pool in selected[config["max_pools"]:]:
-            results.append(dict(pool, status="queued", wallets=[],
-                first_observed_at=old.get(pool["key"], {}).get("first_observed_at") or observed_at))
+        for pool in selected[attempted:]:
+            previous_row = old.get(pool["key"], {})
+            exclusion = store.get("excluded:" + pool["key"])
+            if exclusion and exclusion.get("age_status") in ("too_young", "too_old"):
+                continue
+            row = dict(previous_row, **pool)
+            row.update(status="queued", wallets=previous_row.get("wallets", []),
+                first_observed_at=previous_row.get("first_observed_at") or observed_at)
+            results.append(row)
         rpc.budget += 1
         rpc.deadline += 20
         if rpc.call("eth_getBlockByNumber", [hex(head), False])["hash"] != block["hash"]:
             raise RpcError("Block changed during scan; observations discarded")
         output.update(generated_at=utc_now(), status="partial" if errors else "ok", tokens=results,
-            discovered_pools=len(pools), eligible_tokens=len(selected), checked_pools=min(len(selected), config["max_pools"]),
+            discovered_pools=len(pools), eligible_tokens=len(results), checked_pools=checked,
+            excluded_stocks=sum(p["token"] in stocks for p in pools), excluded_age=dict(excluded),
             errors=errors, window_from_block=start, window_to_block=head,
             block_hash=block["hash"], block_timestamp=int(block["timestamp"], 16))
     except (RpcError, ValueError, KeyError) as exc:
         output.update(status="unavailable", errors=[str(exc)])
+        store.finish(False)
     output["rpc_calls"] = rpc.calls
+    if isinstance(rpc, Rpc):
+        output["provider_requests"] = dict(rpc.stats)
+        output["provider_failures"] = dict(rpc.failures)
+    if output["status"] != "unavailable":
+        store.put("snapshot", output)
+        store.finish()
     return output
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default="data/robinhood.json")
+    parser.add_argument("--db", default="data/robinhood.sqlite")
     args = parser.parse_args()
     path = Path(args.output)
     try:
         previous = json.loads(path.read_text())
     except (OSError, ValueError):
         previous = {}
-    result = scan(previous)
+    Path(args.db).parent.mkdir(parents=True, exist_ok=True)
+    store = Store(args.db)
+    cached = store.get("snapshot")
+    if cached and cached.get("generated_at", "") > previous.get("generated_at", ""):
+        previous = cached
+    result = scan(previous, store=store)
+    if os.environ.get("GITHUB_OUTPUT"):
+        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"persisted={'true' if store.get('snapshot') else 'false'}\n")
+    store.close()
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(result, separators=(",", ":")))
+    temporary.write_text(json.dumps(result, separators=(",", ":"), allow_nan=False))
     temporary.replace(path)
     print(json.dumps({key: result.get(key) for key in ("status", "rpc_calls", "discovered_pools", "eligible_tokens", "checked_pools")}))
 

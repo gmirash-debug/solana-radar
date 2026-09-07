@@ -16,3 +16,4 @@ data/latest_report.md
 data/scanner_status.json
 data/remote_outbox/
 data/robinhood.json
+data/robinhood.sqlite*
