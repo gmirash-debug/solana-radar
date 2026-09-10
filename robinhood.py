@@ -15,6 +15,7 @@ from eth_abi import decode, encode
 from eth_abi.exceptions import DecodingError
 from eth_utils import keccak
 from robinhood_store import Store
+from gmgn_context import enrich as enrich_gmgn
 
 CHAIN_ID = 4663
 FACTORY = "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
@@ -668,6 +669,7 @@ def scan(previous=None, config=None, rpc=None, session=None, store=None):
         output["provider_requests"] = dict(rpc.stats)
         output["provider_failures"] = dict(rpc.failures)
     if output["status"] != "unavailable":
+        output["gmgn_status"] = enrich_gmgn(output["tokens"], store)
         store.put("snapshot", output)
         store.finish()
     return output

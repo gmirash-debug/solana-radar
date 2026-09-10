@@ -1,5 +1,6 @@
 import {validSnapshot, isFresh, selectTokens, formatSupplyPercent, walletFresh, supplyRange,
   REVIEW_GROUPS, reviewGroup, positionBounds, marketFresh, comparePositions} from "./robinhood-state.js?v=20260907-unified-1";
+import {gmgnUrl, renderGmgnMarket, renderGmgnHolders, renderGmgnSecurity} from "./gmgn-context.js?v=20260910-gmgn-2";
 
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[c]));
@@ -67,10 +68,10 @@ function detail(t) {
   if (!t) return `<aside class="detail token-detail no-selection"><img src="icons/scan-search.svg" alt=""><h2>No token selected</h2></aside>`;
   const group = REVIEW_GROUPS.find(g => g.id === reviewGroup(t, state.payload));
   const tabs = [["overview","Overview"], ["wallets","Wallets"], ["supply","Supply"], ["evidence","Evidence"]];
-  const content = state.detailTab === "wallets" ? wallets(t) : state.detailTab === "supply" ? supply(t) : state.detailTab === "evidence" ? evidence(t) : overview(t);
+  const content = state.detailTab === "wallets" ? wallets(t) + renderGmgnHolders(t) : state.detailTab === "supply" ? supply(t) + renderGmgnSecurity(t) : state.detailTab === "evidence" ? evidence(t) : overview(t) + renderGmgnMarket(t);
   return `<aside class="detail token-detail"><button class="detail-back" type="button"><img src="icons/arrow-left.svg" alt=""> Tokens</button>
     <div class="detail-head"><div class="detail-identity">${avatar(t)}<div><h2>${esc(t.symbol)}</h2><p class="token-identity-sub">${esc(t.name)} / Uniswap ${esc(t.protocol || "v3")}</p><span class="position-status ${group.tone}">${esc(labels[group.id])}</span></div></div>
-    <div class="detail-actions"><a class="secondary-action detail-link" href="https://dexscreener.com/robinhood/${t.pool}" target="_blank" rel="noopener noreferrer">Chart <img src="icons/arrow-up-right.svg" alt=""></a><a class="icon-button" href="https://robinhoodchain.blockscout.com/token/${t.token}" aria-label="Token explorer" title="Token explorer" target="_blank" rel="noopener noreferrer"><img src="icons/arrow-up-right.svg" alt=""></a><button class="icon-button copy-address" data-address="${t.token}" aria-label="Copy token address" title="Copy token address"><img src="icons/copy.svg" alt=""></button></div></div>
+    <div class="detail-actions"><a class="secondary-action detail-link" href="${gmgnUrl(t.token)}" target="_blank" rel="noopener noreferrer">GMGN <img src="icons/arrow-up-right.svg" alt=""></a><a class="icon-button" href="https://robinhoodchain.blockscout.com/token/${t.token}" aria-label="Token explorer" title="Token explorer" target="_blank" rel="noopener noreferrer"><img src="icons/arrow-up-right.svg" alt=""></a><button class="icon-button copy-address" data-address="${t.token}" aria-label="Copy token address" title="Copy token address"><img src="icons/copy.svg" alt=""></button></div></div>
     <div class="detail-load-state" role="status">${!isFresh(state.payload) || !walletFresh(t) ? `Wallet evidence is not current. Last check: ${esc(date(t.checked_at))}.` : ""}</div>
     <div class="decision-grid">${metric("Current FDV", marketFresh(t) ? money(t.fdv_usd) : "Unverified", `${money(t.liquidity_usd)} liquidity${marketFresh(t) ? "" : " / last quote"}`)}${metric("Position left", positionText(positionBounds(t)), "Bounds on attributed buys")}${metric(t.cohort_created_at ? "Cohort supply" : "Observed supply", supplyRange(t), `${t.wallets.length} attributed wallets`)}</div>
     <div class="detail-tabs" role="tablist" aria-label="Token research sections">${tabs.map(([id,label]) => `<button class="detail-tab${state.detailTab === id ? " is-active" : ""}" id="detail-tab-${id}" data-detail-tab="${id}" role="tab" aria-selected="${state.detailTab === id}" tabindex="${state.detailTab === id ? 0 : -1}" aria-controls="token-research-panel">${label}${id === "wallets" ? `<span>${t.wallets.length}</span>` : ""}</button>`).join("")}</div>
@@ -85,7 +86,7 @@ function render({resetList = false} = {}) {
   const p = state.payload, fresh = isFresh(p);
   $("#subtitle").textContent = `Last scan ${date(p.generated_at)}${fresh ? "" : " / stale"}`;
   $("#scannerSummary").textContent = state.error || `${p.checked_pools ?? 0} checked / ${p.eligible_tokens ?? 0} candidates${p.errors?.length ? ` / ${p.errors.length} incomplete checks` : " / hourly scans"}`;
-  $("#statusRow").textContent = (p.errors || []).join(" | ") || p.provider || "Provider information unavailable";
+  $("#statusRow").textContent = [(p.errors || []).join(" | ") || p.provider || "Provider information unavailable", `GMGN: ${p.gmgn_status?.status || "not checked"} / ${p.gmgn_status?.requests ?? 0} requests`].join(" | ");
   $("#metrics").innerHTML = [metric("Pools discovered", p.discovered_pools ?? 0, "Uniswap v3 + v4"), metric("Stock pools excluded", p.excluded_stocks ?? 0, "Official contract registry"), metric("RPC requests", p.rpc_calls ?? 0, "Current scan"), metric("Last attempt", date(p.attempted_at), "Bounded discovery")].join("");
   const all = filtered(), counts = Object.fromEntries(REVIEW_GROUPS.map(g => [g.id, all.filter(t => reviewGroup(t, p) === g.id).length]));
   const groups = REVIEW_GROUPS.map(g => ({...g, tokens:all.filter(t => reviewGroup(t, p) === g.id).sort((a,b) => comparePositions(a,b,state.sort))}));

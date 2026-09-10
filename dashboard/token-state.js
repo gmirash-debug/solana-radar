@@ -154,13 +154,17 @@ export function resolveAthContext({ market = {}, currentMarket = {} } = {}) {
   const value = positiveNumber(market.ath_mcap_usd);
   const suspect = market.ath_status === "suspect" || market.ath_validation_status === "suspect";
   const sourceAllowed = ["gmgn", "ohlcv_high", "solana_tracker"].includes(source);
-  const trusted = Boolean(value && sourceAllowed && !suspect);
+  const identityChecked = source !== "gmgn" || (market.ath_identity_version === 2
+    && market.ath_mcap_basis === "matching_token_reported" && market.ath_token_address
+    && market.ath_token_address === market.token_address);
+  const trusted = Boolean(value && sourceAllowed && !suspect && identityChecked);
   const legacy = trusted && source === "solana_tracker" && market.ath_validation_status !== "valid";
   return {
     mcapUsd: trusted ? value : null,
     at: trusted ? market.ath_mcap_at || null : null,
     source: trusted ? source : "missing",
-    status: trusted ? (legacy ? "legacy" : market.ath_status || "ready") : market.ath_status || (market.ath_error ? "error" : "pending"),
+    status: trusted ? (legacy ? "legacy" : market.ath_status || "ready") : !identityChecked && source === "gmgn" && market.ath_status !== "price_only" ? "unverified" : market.ath_status || (market.ath_error ? "error" : "pending"),
+    priceUsd: source === "gmgn" && market.ath_identity_version === 2 && market.ath_token_address === market.token_address ? positiveNumber(market.ath_price_usd) : null,
     error: market.ath_error || "",
     verifiedAt: market.ath_verified_at || market.ath_latest_checked_at || market.ath_checked_at || null,
     poolAddress: market.ath_pool_address || null,
