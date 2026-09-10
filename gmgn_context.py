@@ -58,6 +58,7 @@ class Client:
         self.max_calls = max_calls
         self.deadline = time.monotonic() + seconds
         self.stopped = None
+        self.next_request_at = 0
         self.enabled = bool(os.environ.get("GMGN_API_KEY"))
         self.prefix = ["gmgn-cli"] if shutil.which("gmgn-cli") else ["npx", "-y", f"gmgn-cli@{VERSION}"]
 
@@ -67,6 +68,13 @@ class Client:
         remaining = self.deadline - time.monotonic()
         if not self.enabled or self.stopped or self.calls >= self.max_calls or remaining < 1:
             raise Unavailable(self.stopped or ("missing_api_key" if not self.enabled else "budget_exhausted"))
+        delay = max(0, self.next_request_at - time.monotonic())
+        if delay + 1 >= remaining:
+            raise Unavailable("budget_exhausted")
+        if delay:
+            time.sleep(delay)
+        remaining = self.deadline - time.monotonic()
+        self.next_request_at = time.monotonic() + 1.1
         args = [*self.prefix, "token", kind, "--chain", "robinhood", "--address", token, "--raw"]
         if kind == "holders":
             args += ["--limit", "30"]

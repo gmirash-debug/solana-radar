@@ -102,6 +102,18 @@ class GmgnTests(unittest.TestCase):
                     client.query("info", TOKEN)
             self.assertEqual(run.call_count, 1)
 
+    def test_cli_spaces_requests_without_exceeding_deadline(self):
+        with patch.dict("os.environ", {"GMGN_API_KEY": "test"}), patch.object(gm.subprocess, "run") as run, patch.object(gm.time, "monotonic", return_value=100), patch.object(gm.time, "sleep") as sleep:
+            run.return_value = Mock(returncode=0, stdout=json.dumps(info()))
+            client = gm.Client()
+            client.query("info", TOKEN)
+            client.query("info", TOKEN)
+            self.assertAlmostEqual(sleep.call_args.args[0], 1.1)
+            client.deadline = 101
+            with self.assertRaisesRegex(gm.Unavailable, "budget_exhausted"):
+                client.query("holders", TOKEN)
+            self.assertEqual(run.call_count, 2)
+
     def test_legacy_cache_is_quarantined_losslessly_for_other_data(self):
         state = {"market": {TOKEN: {"token_address": TOKEN, "ath_source": "gmgn", "ath_mcap_usd": 5000, "ath_checked_at": 99, "latest_mcap_usd": 1000}}}
         self.assertEqual(scanner.trusted_ath_mcap(state["market"][TOKEN]), 0)
