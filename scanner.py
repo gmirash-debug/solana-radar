@@ -20,6 +20,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
+from gmgn_context import token_ath
 
 
 ROOT = Path(__file__).resolve().parent
@@ -292,6 +293,12 @@ def migrate_scanner_state(state):
     """Apply lossless state migrations before a scan mutates persisted data."""
     if not isinstance(state, dict):
         raise TypeError("scanner runtime state must be a mapping")
+    for entry in (state.get("market") or {}).values():
+        if isinstance(entry, dict) and entry.get("ath_source") == "gmgn" and entry.get("ath_identity_version") != 2:
+            for key in ("ath_mcap_usd", "ath_mcap_at", "ath_price_usd", "ath_checked_at", "ath_error_checked_at"):
+                entry.pop(key, None)
+            entry.update(ath_status="unverified", ath_validation_status="suspect",
+                         ath_error="Legacy GMGN ATH requires token-identity verification")
     legacy_remote_updates = state.pop("convex_discovery_updated_at", None)
     if isinstance(legacy_remote_updates, dict):
         remote_updates = state.setdefault("remote_discovery_updated_at", {})
@@ -683,6 +690,10 @@ def compact_report_for_remote(report):
         "ath_source",
         "ath_status",
         "ath_validation_status",
+        "ath_identity_version",
+        "ath_token_address",
+        "ath_mcap_basis",
+        "ath_price_at",
         "ath_latest_checked_at",
         "ath_verified_at",
     }
@@ -801,6 +812,10 @@ def compact_market_for_dashboard(entry):
         "ath_source",
         "ath_status",
         "ath_validation_status",
+        "ath_identity_version",
+        "ath_token_address",
+        "ath_mcap_basis",
+        "ath_price_at",
         "ath_error",
         "ath_error_checked_at",
         "ath_current_ratio",
@@ -10658,13 +10673,15 @@ def gmgn_peak_candle(rows):
     )
 
 
-def fetch_gmgn_ath_timestamp(config, token_address, creation_timestamp=0):
+def fetch_gmgn_ath_timestamp(config, token_address, creation_timestamp=0, expected_price=0):
     now = int(time.time())
     start = parse_timestamp(creation_timestamp) or now - 1_000 * 24 * 60 * 60
     day = gmgn_peak_candle(
         fetch_gmgn_kline(config, token_address, "1d", start, now + 60)
     )
     if not day:
+        return 0
+    if expected_price and abs(to_float(day.get("high")) / expected_price - 1) > 0.01:
         return 0
     day_start = parse_timestamp(day.get("time"))
     hour = gmgn_peak_candle(
@@ -10694,36 +10711,28 @@ def fetch_gmgn_ath_timestamp(config, token_address, creation_timestamp=0):
 def fetch_gmgn_ath(config, token_address, include_timestamp=True):
     result_cache = config.setdefault("_gmgn_ath_result_cache", {})
     cached = result_cache.get(token_address)
-    if cached and (not include_timestamp or cached.get("timestamp")):
+    if cached and (not include_timestamp or cached.get("timestamp_requested")):
         return dict(cached)
     data = fetch_gmgn_raw_token_info(config, token_address)
     if not data:
         return None
-    dev = data.get("dev") or {}
-    ath_token_info = dev.get("ath_token_info") or {}
-    ath_price = to_float(data.get("ath_price"))
-    ath_mcap = to_float(ath_token_info.get("ath_mc"))
+    ath = token_ath(data, token_address, "sol")
     supply = to_float(
         data.get("circulating_supply")
         or data.get("total_supply")
         or data.get("max_supply")
     )
-    if ath_mcap <= 0 and ath_price > 0 and supply > 0:
-        ath_mcap = ath_price * supply
-    if ath_mcap <= 0:
+    if not ath["highest_market_cap"] and not ath["highest_price"]:
         return None
-    ath = {
-        "highest_market_cap": ath_mcap,
-        "highest_price": ath_price,
-        "supply": supply,
-        "pool_id": data.get("biggest_pool_address") or data.get("migrated_pool"),
-    }
-    if include_timestamp:
+    ath.update(supply=supply, pool_id=data.get("biggest_pool_address") or data.get("migrated_pool"))
+    if include_timestamp and ath["highest_price"]:
+        ath["timestamp_requested"] = True
         try:
-            ath["timestamp"] = fetch_gmgn_ath_timestamp(
+            ath["price_timestamp"] = fetch_gmgn_ath_timestamp(
                 config,
                 token_address,
                 data.get("creation_timestamp"),
+                ath["highest_price"],
             )
         except Exception as exc:
             ath["timestamp_error"] = str(exc)
@@ -10774,6 +10783,28 @@ def validate_ath_candidate(entry, ath, current_mcap=0, config=None):
 
 def apply_gmgn_ath(entry, ath, observed_at, current_mcap=0, config=None):
     previous_source = entry.get("ath_source")
+    if ath.get("identity_version") != 2 or not ath.get("token_address") or ath.get("token_address") != entry.get("token_address"):
+        entry.update(ath_status="unverified", ath_validation_status="suspect")
+        return False
+    if previous_source == "gmgn" and entry.get("ath_identity_version") != 2:
+        entry.pop("ath_mcap_usd", None)
+    entry["ath_identity_version"] = ath.get("identity_version")
+    entry["ath_token_address"] = ath.get("token_address")
+    entry["ath_mcap_basis"] = ath.get("mcap_basis")
+    # Candles locate a PRICE peak, not necessarily the historical market-cap peak.
+    entry.pop("ath_mcap_at", None)
+    entry.pop("ath_price_at", None)
+    if ath.get("price_timestamp"):
+        entry["ath_price_at"] = iso(int(ath["price_timestamp"]))
+    if ath.get("identity_version") == 2 and not ath.get("highest_market_cap"):
+        entry.pop("ath_mcap_usd", None)
+        entry.update(ath_source="gmgn", ath_status="price_only", ath_price_usd=ath.get("highest_price"),
+                     ath_validation_status="price_only", ath_latest_checked_at=observed_at,
+                     ath_verified_at=observed_at)
+        entry.pop("ath_error", None)
+        entry.pop("ath_error_checked_at", None)
+        entry.pop("ath_error_source", None)
+        return False
     valid, validation_error = validate_ath_candidate(
         entry,
         ath,
@@ -10833,7 +10864,12 @@ def trusted_ath_mcap(entry):
         return 0.0
     if entry.get("ath_source") not in ("gmgn", "solana_tracker", "ohlcv_high"):
         return 0.0
-    if entry.get("ath_status") == "suspect":
+    if entry.get("ath_source") == "gmgn" and (
+        entry.get("ath_identity_version") != 2 or entry.get("ath_mcap_basis") != "matching_token_reported"
+        or not entry.get("ath_token_address") or entry.get("ath_token_address") != entry.get("token_address")
+    ):
+        return 0.0
+    if entry.get("ath_status") == "suspect" or entry.get("ath_validation_status") == "suspect":
         return 0.0
     value = to_float(entry.get("ath_mcap_usd"))
     if not math.isfinite(value) or value <= 0 or value > 100_000_000_000:
@@ -11065,12 +11101,11 @@ def enrich_market_ath(http, state, pools, alerts, config, observed_at):
         return
     for token in candidates:
         entry = market.setdefault(token, {"token_address": token})
-        has_gmgn_ath = entry.get("ath_source") == "gmgn" and entry.get("ath_mcap_usd")
+        has_gmgn_ath = entry.get("ath_source") == "gmgn" and entry.get("ath_identity_version") == 2
         if has_gmgn_ath and not entry.get("ath_status"):
             entry["ath_status"] = "ready"
         if (
             has_gmgn_ath
-            and entry.get("ath_mcap_at")
             and entry.get("ath_checked_at")
             and now - int(entry.get("ath_checked_at", 0)) < ttl
         ):
@@ -12041,6 +12076,10 @@ def apply_market_meta(pool_dict, state):
         "ath_source",
         "ath_status",
         "ath_validation_status",
+        "ath_identity_version",
+        "ath_token_address",
+        "ath_mcap_basis",
+        "ath_price_at",
         "ath_candidate_mcap_usd",
         "ath_candidate_price_usd",
         "ath_candidate_source",

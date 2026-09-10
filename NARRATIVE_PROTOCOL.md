@@ -176,6 +176,17 @@ Every caught token must show a GMGN ATH metric:
 - `GMGN ATH date/time`
 - `GMGN ATH source`
 - `GMGN ATH status`: `ready`, `market cap ready/date pending`, `pending`, `retry pending`, or `missing API key`.
+- `price_only`: provider price ATH exists, but historical market-cap ATH is unknown.
+
+GMGN identity contract (v2): `dev.ath_token_info` describes the creator's
+best-performing token, not necessarily the requested token. Accept `ath_mc`
+only when `ath_token` exactly matches the Solana mint (case sensitive).
+Verify the top-level response address as well. Never use ATH price multiplied
+by today's supply as a historical market-cap ATH. A candle peak locates a
+price peak, not a market-cap peak; incomplete windows cannot establish a
+lifetime peak date. Unverified legacy GMGN ATH values are hidden from the
+dashboard and excluded from scoring until refreshed. Preserve identity version,
+token address and value basis through compaction and remote publication.
 
 This is a required token-card and token-detail field. It should not be hidden behind fallback values.
 

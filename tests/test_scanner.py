@@ -724,6 +724,7 @@ class ScannerCoreTests(unittest.TestCase):
 
     def test_apply_gmgn_ath_marks_timestamp_pending_without_losing_mcap(self):
         entry = {
+            "token_address": "token",
             "ath_source": "solana_tracker",
             "ath_mcap_at": "2026-05-10T10:43:00Z",
         }
@@ -731,6 +732,9 @@ class ScannerCoreTests(unittest.TestCase):
             entry,
             {
                 "highest_market_cap": 1_270_134,
+                "token_address": "token",
+                "identity_version": 2,
+                "mcap_basis": "matching_token_reported",
                 "highest_price": 0.00127,
                 "pool_id": "pool",
             },
@@ -744,6 +748,7 @@ class ScannerCoreTests(unittest.TestCase):
 
     def test_implausible_gmgn_ath_is_quarantined_from_scoring(self):
         entry = {
+            "token_address": "token",
             "latest_mcap_usd": 500_000,
             "scan_mcap_usd": 500_000,
         }
@@ -751,6 +756,9 @@ class ScannerCoreTests(unittest.TestCase):
             entry,
             {
                 "highest_market_cap": 1_073_754_389_621_439,
+                "token_address": "token",
+                "identity_version": 2,
+                "mcap_basis": "matching_token_reported",
                 "highest_price": 1_000_000,
                 "supply": 1_000_000_000,
             },
@@ -3639,6 +3647,10 @@ class ScannerCoreTests(unittest.TestCase):
                     "token": {
                         "ath_source": "gmgn",
                         "ath_mcap_usd": 1_000_000,
+                        "token_address": "token",
+                        "ath_token_address": "token",
+                        "ath_identity_version": 2,
+                        "ath_mcap_basis": "matching_token_reported",
                     }
                 }
             },

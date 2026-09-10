@@ -140,7 +140,30 @@ lifetime event history. Wallet retention is a range, never substituted for PnL.
 API keys stay in Actions secrets; never include them in the dashboard or logs.
 No new paid plan or automatic paid overage was enabled.
 
-## Remaining limits
+## GMGN context (2026-09-10)
+
+The Robinhood job receives `GMGN_API_KEY` from the existing Actions secret.
+Read-only CLI version 1.6.1 is pinned in both workflows. No private key is
+required. `gmgn_context.py` bounds enrichment to 24 calls and 45 seconds:
+token info for at most 16 observations, then security and a top-30 holder
+sample for at most four original cohorts or distributed-buy candidates.
+Info/holder caches last 55 minutes; security caches last six hours. Authentication
+or rate-limit failures stop further calls in that run. Enrichment failure does
+not fail the on-chain scan; dated cached context is marked stale.
+
+GMGN price, reported price ATH, activity, holder counts and labels appear in
+Overview. Provider holder samples appear separately in Wallets; provider risk
+flags in Supply. PoolManager, known pool/token addresses, exchange-labelled
+addresses and non-wallet/unknown address types are excluded from the sample.
+Transfers are not buys. These samples never overwrite RPC balances, the frozen
+signal cohort, retained supply or signal status. Tags are provider hypotheses.
+GMGN is supplemental context, not a new discovery source or trading executor.
+
+ATH price is not ATH market cap. A creator's `ath_token_info.ath_mc` is usable
+only if its `ath_token` matches the requested token. Price times current supply
+is not exported as a historical market-cap ATH. Missing peak dates stay unknown.
+
+## Coverage limits
 
 No free setup can guarantee unlimited archival/indexed queries and uptime.
 There is no automatic deep-reorg reconstruction, full chain backfill, complete

@@ -9,7 +9,7 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20260904-tracked-default-1";
+} from "./token-state.js?v=20260910-gmgn-2";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
@@ -422,6 +422,7 @@ function athStatusLabel(status, error = "") {
     return "ATH retry pending";
   }
   if (status === "unverified") return "ATH unverified";
+  if (status === "price_only") return "Price ATH available / cap unknown";
   if (status === "legacy") return "legacy ATH, recheck pending";
   return "pending";
 }
@@ -1323,6 +1324,7 @@ function buildTokenSignals() {
         : null;
     token.tokenCreatedAt = createdAt ? createdAt.toISOString() : null;
     token.athMcapUsd = athContext.mcapUsd;
+    token.athPriceUsd = athContext.priceUsd;
     token.athMcapAt = athContext.at;
     token.athSource = athContext.source;
     token.athStatus = athContext.status;
@@ -2787,6 +2789,7 @@ function renderOverviewTab(token) {
     <details class="research-fold"><summary>Market context & ATH</summary>
       <div class="kv"><span>Launch</span><span>${esc(durationLabel(token.tokenAgeHours))} / ${esc(dateLabel(token.tokenCreatedAt))}</span></div>
       <div class="kv"><span>${esc(token.athLabel)}</span><span>${token.athMcapUsd ? `${esc(dateLabel(token.athMcapAt))} / ${money(token.athMcapUsd)}` : esc(athStatusLabel(token.athStatus))}</span></div>
+      ${token.athPriceUsd ? `<div class="kv"><span>GMGN ATH price</span><span>$${Number(token.athPriceUsd).toPrecision(5)} / token price, not market cap</span></div>` : ""}
       <div class="kv"><span>Phase</span><span>${renderMarketPhaseLine(token)}</span></div>
       <div class="kv"><span>Supply</span><span>${esc(token.supplyIntegrity?.reason || "Ownership not verified")}</span></div>
     </details>
