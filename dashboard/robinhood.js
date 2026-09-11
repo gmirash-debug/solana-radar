@@ -1,5 +1,5 @@
 import {validSnapshot, isFresh, selectTokens, formatSupplyPercent, walletFresh, supplyRange,
-  REVIEW_GROUPS, reviewGroup, positionBounds, marketFresh, comparePositions} from "./robinhood-state.js?v=20260907-unified-1";
+  REVIEW_GROUPS, reviewGroup, positionBounds, marketFresh, comparePositions, ageFilterLabel, relaySignalLabel} from "./robinhood-state.js?v=20260911-relay-1";
 import {gmgnUrl, renderGmgnMarket, renderGmgnHolders, renderGmgnSecurity} from "./gmgn-context.js?v=20260910-gmgn-2";
 
 const $ = selector => document.querySelector(selector);
@@ -24,6 +24,7 @@ function reason(t) {
   if (group === "retained") return "Original buyers still retain tokens";
   if (group === "reduced") return "Original buyer position reduced";
   if (group === "buy_wave") return "Buy wave; retention not yet confirmed";
+  if (t.relay?.wave) return "Relay wave; holding threshold not confirmed";
   return t.attribution_complete ? "Activity only; no confirmed buy wave" : "Partial buy attribution";
 }
 function filtered() {
@@ -33,10 +34,15 @@ function filtered() {
 function row(t) {
   const fresh = isFresh(state.payload) && walletFresh(t);
   return `<button class="review-row${t.key === state.selected ? " is-selected" : ""}" data-token-key="${esc(t.key)}" aria-pressed="${t.key === state.selected}" type="button">
-    <span class="review-identity">${avatar(t, true)}<span class="review-copy"><strong>${esc(t.symbol)}</strong><span class="review-reason">${esc(reason(t))}</span><small>Observed ${esc(date(t.first_observed_at))}</small></span></span>
+    <span class="review-identity">${avatar(t, true)}<span class="review-copy"><strong>${esc(t.symbol)}</strong><span class="review-reason">${esc(reason(t))}</span>${relaySignalLabel(t) ? `<small>${esc(relaySignalLabel(t))}</small>` : ""}<small>Observed ${esc(date(t.first_observed_at))}</small></span></span>
     <span class="review-position"><strong>${esc(positionText(positionBounds(t)))}</strong><small>${esc(supplyRange(t))} supply</small><small class="${fresh ? "" : "warning"}">${fresh ? "checked" : "check overdue"}${!t.attribution_complete && !t.cohort_created_at ? " / partial" : ""}</small></span>
     <span class="review-market"><strong>${marketFresh(t) ? money(t.fdv_usd) : "Unverified"}</strong><small class="muted">FDV / ${esc(t.protocol || "v3")}</small></span>
   </button>`;
+}
+function relayEvidence(t) {
+  const wave = t.relay?.signal_wave || t.relay?.wave;
+  if (!wave) return "";
+  return `<section><div class="section-heading"><h3>Relay buy wave</h3><span class="evidence-time">${esc(date(new Date(wave.to_timestamp * 1000).toISOString()))}</span></div><div class="evidence-facts">${fact("Trigger window", `${wave.window_seconds / 60} min / ${wave.buyers} recipients / ${wave.buy_transactions} buys`)}${fact("Gross purchases", `${formatSupplyPercent(wave.gross_bought_supply_pct)} of supply`)}${fact("Holding now", t.cohort_reason === "Relay buy wave" ? supplyRange(t) : "Not confirmed")}${fact("Relative to normal", "Baseline not established")}${fact("Attribution coverage", t.relay.coverage === "complete" ? "Selected pool window complete" : "Verified subset / partial window")}</div><p class="muted">Gross purchases can include repeat buys. A shared route does not establish common ownership.</p></section>`;
 }
 function overview(t) {
   const bounds = positionBounds(t), fresh = isFresh(state.payload) && walletFresh(t);
@@ -44,7 +50,7 @@ function overview(t) {
     <div class="retention-summary"><strong>${esc(positionText(bounds))}</strong><span>of attributed buys remaining<small>${fresh ? "Checked" : "Previous check"} / ${t.wallets.length} wallets</small></span></div>
     ${bounds?.lower != null ? `<meter class="retention-meter" min="0" max="100" value="${bounds.lower}" aria-label="Conservative retained position">${bounds.lower}%</meter>` : ""}
     <div class="evidence-facts">${fact("Retained supply", supplyRange(t))}${fact("Original cohort", t.cohort_created_at ? date(t.cohort_created_at) : "Not confirmed")}${fact("Retention checks", t.cohort_checks ?? 0)}${fact("Buy attribution", `${t.attributed_buy_transactions ?? 0} / ${t.buy_transactions ?? "?"} transactions`)}${fact("History window", t.history_complete ? "Latest window complete" : "Incomplete")}</div>
-    </section><section class="decision-caveats"><h3>Assessment</h3><p>${esc(reason(t))}. ${t.cohort_created_at ? "Later unrelated buyers do not replace this cohort." : "Observed activity has not established a retained accumulation signal."}</p><p>Transfers and sales both reduce the conservative holding bound. Holding is not a new entry signal.</p>${t.error ? `<p class="warning">${esc(t.error)}</p>` : ""}</section>`;
+    </section>${relayEvidence(t)}<section class="decision-caveats"><h3>Assessment</h3><p>${esc(reason(t))}. ${t.cohort_created_at ? "Later unrelated buyers do not replace this cohort." : "Observed activity has not established a retained accumulation signal."}</p><p>Transfers and sales both reduce the conservative holding bound. Holding is not a new entry signal.</p>${t.error ? `<p class="warning">${esc(t.error)}</p>` : ""}</section>`;
 }
 function wallets(t) {
   if (!t.wallets.length) return `<div class="review-empty"><img src="icons/scan-search.svg" alt=""><h3>No attributed buyers</h3><p>Available evidence does not establish buyer balances. This does not mean that no purchases occurred.</p></div>`;
@@ -86,7 +92,7 @@ function render({resetList = false} = {}) {
   const p = state.payload, fresh = isFresh(p);
   $("#subtitle").textContent = `Last scan ${date(p.generated_at)}${fresh ? "" : " / stale"}`;
   $("#scannerSummary").textContent = state.error || `${p.checked_pools ?? 0} checked / ${p.eligible_tokens ?? 0} candidates${p.errors?.length ? ` / ${p.errors.length} incomplete checks` : " / hourly scans"}`;
-  $("#statusRow").textContent = [(p.errors || []).join(" | ") || p.provider || "Provider information unavailable", `GMGN: ${p.gmgn_status?.status || "not checked"} / ${p.gmgn_status?.requests ?? 0} requests`].join(" | ");
+  $("#statusRow").textContent = [(p.errors || []).join(" | ") || p.provider || "Provider information unavailable", `GMGN: ${p.gmgn_status?.status || "not checked"} / ${p.gmgn_status?.requests ?? 0} requests`, `Relay: ${p.relay_status?.status || "not checked"} / ${p.relay_status?.requests ?? 0} requests${p.relay_status?.deprecated ? " / API upgrade required by 24 Nov" : ""}`].join(" | ");
   $("#metrics").innerHTML = [metric("Pools discovered", p.discovered_pools ?? 0, "Uniswap v3 + v4"), metric("Stock pools excluded", p.excluded_stocks ?? 0, "Official contract registry"), metric("RPC requests", p.rpc_calls ?? 0, "Current scan"), metric("Last attempt", date(p.attempted_at), "Bounded discovery")].join("");
   const all = filtered(), counts = Object.fromEntries(REVIEW_GROUPS.map(g => [g.id, all.filter(t => reviewGroup(t, p) === g.id).length]));
   const groups = REVIEW_GROUPS.map(g => ({...g, tokens:all.filter(t => reviewGroup(t, p) === g.id).sort((a,b) => comparePositions(a,b,state.sort))}));
@@ -95,7 +101,7 @@ function render({resetList = false} = {}) {
   if (!open.some(t => t.key === state.selected)) state.selected = open[0]?.key ?? null;
   const t = open.find(t => t.key === state.selected);
   const sortControl = state.tab === "alerts" ? "" : `<label class="sort-control">Sort within groups<select id="reviewSort" aria-label="Sort within groups"><option value="caught" ${state.sort === "caught" ? "selected" : ""}>Newest catch</option><option value="retained" ${state.sort === "retained" ? "selected" : ""}>Most retained</option></select></label>`;
-  const heading = `<div class="radar-heading"><div><h2>${state.tab === "alerts" ? "Latest checks" : "Accumulation radar"}</h2><p>Uniswap v3 + v4 / 1-15d / ${all.length} observed tokens</p></div>${sortControl}</div>`;
+  const heading = `<div class="radar-heading"><div><h2>${state.tab === "alerts" ? "Latest checks" : "Accumulation radar"}</h2><p>Uniswap v3 + v4 / ${esc(ageFilterLabel(p.config))} / ${all.length} observed tokens</p></div>${sortControl}</div>`;
   const list = visible.filter(g => g.tokens.length).map(g => {
     const expanded = state.group !== "overview" || state.expanded.has(g.id) || Boolean(state.query);
     return `<section class="review-section"><button class="queue-heading ${g.tone}" data-expand-queue="${g.id}" aria-expanded="${expanded}"><span><img src="icons/chevron-down.svg" alt=""><strong>${g.label}</strong><span class="queue-count">${g.tokens.length}</span></span></button>${expanded ? g.tokens.map(row).join("") : ""}</section>`;

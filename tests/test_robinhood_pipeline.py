@@ -13,7 +13,7 @@ from tests.test_robinhood import TOKEN, QUOTE, POOL, WALLET, ROUTER, fixture, to
 class PipelineTests(unittest.TestCase):
     def test_cohort_freezes_then_holds_then_weakens_without_new_buyers_replacing_it(self):
         store = Store()
-        p = {"pool": POOL, "token": TOKEN, "quote": QUOTE, "key": rh.token_key(TOKEN)}
+        p = {"pool": POOL, "token": TOKEN, "quote": QUOTE, "key": rh.token_key(TOKEN), "token_created_at": "1969-12-30T00:00:00Z"}
         swaps, receipts = [], {}
         buyers = [WALLET, "0x" + "6" * 40, "0x" + "7" * 40]
         for n, wallet in enumerate(buyers):

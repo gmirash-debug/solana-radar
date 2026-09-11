@@ -16,6 +16,7 @@ from eth_abi.exceptions import DecodingError
 from eth_utils import keccak
 from robinhood_store import Store
 from gmgn_context import enrich as enrich_gmgn
+from relay_context import RelayClient, SOLVER, request_output, buy_wave
 
 CHAIN_ID = 4663
 FACTORY = "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
@@ -31,12 +32,16 @@ SWAP_V4 = "0x" + keccak(text="Swap(bytes32,address,int128,int128,uint160,uint128
 INITIALIZE = "0x" + keccak(text="Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)").hex()
 TRANSFER = "0x" + keccak(text="Transfer(address,address,uint256)").hex()
 ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
-CONFIG = {"discovery_pages": 3, "max_pools": 16, "rpc_budget": 900,
-          "max_receipts_per_pool": 48, "window_seconds": 3600,
-          "min_pool_age_hours": 24, "max_pool_age_hours": 360,
+CONFIG = {"discovery_pages": 3, "new_pool_pages": 2, "max_pools": 16, "rpc_budget": 900,
+          "max_receipts_per_pool": 160, "window_seconds": 3600,
+          "min_pool_age_hours": 0, "max_pool_age_hours": 360,
+          "ordinary_wave_min_age_hours": 24,
           "min_liquidity_usd": 3000, "max_fdv_usd": 5_000_000,
           "max_log_blocks_per_pool": 720_000, "min_cohort_supply_pct": 0.25,
-          "min_cohort_wallets": 3, "retention_check_seconds": 1800}
+          "min_cohort_wallets": 3, "retention_check_seconds": 1800,
+          "relay_max_calls": 96, "relay_windows": [(300, 5, 1.0), (900, 8, 2.0), (3600, 15, 5.0)],
+          "relay_min_wallet_supply_pct": 0.01, "relay_max_buyer_share": 0.4,
+          "relay_min_retained_supply_pct": 0.5, "relay_min_retained_fraction": 0.6}
 
 
 def address(value):
@@ -184,9 +189,11 @@ class Rpc:
 
 def discover(session, config, now):
     pools, errors = {}, []
-    for protocol, page in [(version, page) for version in ("v3", "v4") for page in range(1, config["discovery_pages"] + 1)]:
+    routes = [("new_pools", page) for page in range(1, config["new_pool_pages"] + 1)]
+    routes += [(f"dexes/uniswap-{version}-robinhood/pools", page) for version in ("v3", "v4") for page in range(1, config["discovery_pages"] + 1)]
+    for route, page in routes:
         try:
-            response = session.get(f"{GECKO}/dexes/uniswap-{protocol}-robinhood/pools",
+            response = session.get(f"{GECKO}/{route}",
                 params={"page": page, "include": "base_token,quote_token"}, timeout=15)
             response.raise_for_status()
             payload = response.json()
@@ -195,7 +202,8 @@ def discover(session, config, now):
             metadata = {t["id"]: t.get("attributes", {}) for t in payload.get("included", [])}
             for item in payload["data"]:
                 a, rel = item["attributes"], item["relationships"]
-                if rel["dex"]["data"]["id"] != f"uniswap-{protocol}-robinhood":
+                protocol = {"uniswap-v3-robinhood": "v3", "uniswap-v4-robinhood": "v4"}.get(rel["dex"]["data"]["id"])
+                if protocol is None:
                     continue
                 base_id = rel["base_token"]["data"]["id"]
                 quote_id = rel["quote_token"]["data"]["id"]
@@ -226,7 +234,7 @@ def discover(session, config, now):
                     "volume_h1_usd": float(a.get("volume_usd", {}).get("h1") or 0),
                     "eligible": eligible}
         except (requests.RequestException, KeyError, TypeError, ValueError):
-            errors.append(f"Discovery {protocol} page {page} unavailable or invalid")
+            errors.append(f"Discovery {route} page {page} unavailable or invalid")
         time.sleep(0.25)
     return list(pools.values()), errors
 
@@ -339,6 +347,39 @@ def routed_buy(receipt, pool, base_index):
     if transfer_net(receipt, pool["token"], wallet) != bought or transfer_net(receipt, pool["token"], custody) != -bought:
         return None
     return wallet, bought
+
+
+def relay_buy(receipt, pool, base_index, relay):
+    """Bind Relay's executed recipient/amount to a canonical pool buy receipt."""
+    if relay is None or int(receipt.get("status", "0x0"), 16) != 1:
+        return None
+    # Infrastructure is only a lookup hint, never evidence of common ownership.
+    solver_topic = "0x" + SOLVER[2:].rjust(64, "0")
+    if receipt.get("from", "").lower() != SOLVER and not any(
+            solver_topic in [t.lower() for t in log.get("topics", [])[1:]] for log in receipt.get("logs", [])):
+        return None
+    swaps = [x for x in receipt.get("logs", []) if pool_log(x, pool)]
+    if len(swaps) != 1:
+        return None
+    amounts = swap_amounts(swaps[0])
+    bought, paid = -amounts[base_index], amounts[1 - base_index]
+    custody = POOL_MANAGER if pool.get("protocol") == "v4" else pool["pool"]
+    if bought <= 0 or paid <= 0 or transfer_net(receipt, pool["token"], custody) != -bought:
+        return None
+    match = request_output(relay.lookup(receipt["transactionHash"]), receipt["transactionHash"], pool["token"], CHAIN_ID)
+    if not match:
+        return None
+    wallet, amount = address(match["recipient"]), int(match["bought_raw"])
+    if wallet in (custody, pool["token"], ZERO, SOLVER, receipt.get("from", "").lower()) or not 0 < amount <= bought:
+        return None
+    if transfer_net(receipt, pool["token"], wallet) != amount:
+        return None
+    # Reject mixed token sources; allow a receipt-reconciled net amount after token fees.
+    senders = {address("0x" + x["topics"][1][-40:]) for x in receipt.get("logs", [])
+        if x["address"].lower() == pool["token"] and len(x.get("topics", [])) == 3 and x["topics"][0] == TRANSFER}
+    if any(w != custody and transfer_net(receipt, pool["token"], w) < 0 for w in senders):
+        return None
+    return match
 
 
 def get_logs(rpc, query, start, end, chunk_size=10000):
@@ -467,7 +508,7 @@ def recheck_cohort(rpc, pool, cohort, head, supply, now, config):
     return result
 
 
-def inspect_incremental(rpc, pool, start, head, config, store, session, now):
+def inspect_incremental(rpc, pool, start, head, config, store, session, now, relay=None):
     identity = store.get("pool:" + pool["pool"])
     if identity:
         if identity["token"] != pool["token"] or identity["quote"] != pool["quote"]:
@@ -501,8 +542,10 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now):
     buys = [x for x in window if swap_amounts(x)[index] < 0]
     txs = list(dict.fromkeys(x["transactionHash"] for x in buys))
     cohort = Counter()
-    receipts, attributed = [], 0
+    receipts, attributed, relay_events = [], 0, []
     for tx in txs[:config["max_receipts_per_pool"]]:
+        if isinstance(rpc, Rpc) and (rpc.budget - rpc.calls < 70 or rpc.deadline - time.monotonic() < 45):
+            break
         receipt = store.get("receipt:" + tx)
         if receipt is None:
             receipt = rpc.call("eth_getTransactionReceipt", [tx])
@@ -512,6 +555,18 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now):
             raise RpcError("Receipt does not match canonical swap")
         receipts.append(receipt)
         buy = routed_buy(receipt, pool, index)
+        routed = relay_buy(receipt, pool, index, relay) if buy is None else None
+        if routed:
+            block_key = "block-time:" + receipt["blockHash"]
+            block_time = store.get(block_key)
+            if block_time is None:
+                block_data = rpc.call("eth_getBlockByNumber", [receipt["blockNumber"], False])
+                if block_data["hash"] != receipt["blockHash"]:
+                    raise RpcError("Relay timestamp block does not match receipt")
+                block_time = int(block_data["timestamp"], 16)
+                store.put(block_key, block_time)
+            relay_events.append(dict(routed, timestamp=block_time, block=int(receipt["blockNumber"], 16)))
+            buy = routed["recipient"], int(routed["bought_raw"])
         if buy:
             cohort[buy[0]] += buy[1]
             attributed += 1
@@ -526,8 +581,23 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now):
         indexed_through_block=end, history_from_block=cursor["from_block"] if cursor else start,
         backlog_blocks=max(0, head - end), balance_block=head, retained_supply_upper_bound_pct=None)
     frozen = store.get("cohort:" + pool["key"])
+    wave = buy_wave(relay_events, supply, config)
+    if wave:
+        birth_time = timestamp(pool["token_created_at"]) if pool.get("token_age_verified") and pool.get("token_created_at") else None
+        wave["launch_phase"] = "unknown" if birth_time is None else "first_hour" if wave["from_timestamp"] - birth_time < 3600 else "post_launch"
+    row["relay"] = {"matched_buys": len(relay_events), "buyers": len({e["recipient"] for e in relay_events}),
+        "gross_bought_supply_pct": 100 * sum(int(e["bought_raw"]) for e in relay_events) / supply,
+        "coverage": "complete" if row["attribution_complete"] and row["history_complete"] else "partial",
+        "baseline_status": "not_established", "wave": wave}
+    cohort_start = start
+    if not frozen and wave:
+        # Freeze only the triggering Relay buyers, not unrelated later buyers.
+        cohort = Counter()
+        for event in wave["events"]:
+            cohort[event["recipient"]] += int(event["bought_raw"])
+        cohort_start = wave["from_block"]
     if not frozen and cohort:
-        outflows = get_logs(rpc, {"address": pool["token"], "topics": [TRANSFER, ["0x" + w[2:].rjust(64, "0") for w in cohort]]}, start, head)
+        outflows = get_logs(rpc, {"address": pool["token"], "topics": [TRANSFER, ["0x" + w[2:].rjust(64, "0") for w in cohort]]}, cohort_start, head)
         spent = Counter()
         for log in outflows:
             sender, recipient = [address("0x" + t[-40:]) for t in log["topics"][1:3]]
@@ -541,16 +611,30 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now):
                 "retention_upper_bound_pct": 100 * upper / bought, "supply_upper_bound_pct": 100 * upper / supply})
         lower_supply = 100 * sum(int(w["retained_lower_bound_raw"]) for w in row["wallets"]) / supply
         enough = len(cohort) >= config["min_cohort_wallets"] and lower_supply >= config["min_cohort_supply_pct"]
-        if enough and row["history_complete"] and row["attribution_complete"] and len(buys) >= 2 * max(1, row["sell_swaps"]):
+        retained = sum(int(w["retained_lower_bound_raw"]) for w in row["wallets"])
+        relay_enough = bool(wave and lower_supply >= config["relay_min_retained_supply_pct"]
+            and retained / int(wave["gross_bought_raw"]) >= config["relay_min_retained_fraction"])
+        if wave:
+            wave.update(retained_supply_lower_bound_pct=lower_supply,
+                retained_fraction=retained / int(wave["gross_bought_raw"]), retention_status="first_check" if relay_enough else "insufficient")
+        min_ordinary_age = config["ordinary_wave_min_age_hours"] * 3600
+        ordinary_age_ok = min_ordinary_age == 0 or bool(pool.get("token_created_at")
+            and now - timestamp(pool["token_created_at"]) >= min_ordinary_age)
+        ordinary_enough = not wave and ordinary_age_ok and enough and row["attribution_complete"] and len(buys) >= 2 * max(1, row["sell_swaps"])
+        if row["history_complete"] and (relay_enough or ordinary_enough):
             frozen = {"wallets": row["wallets"], "checks": 1, "created_at": utc_now(), "checked_at": utc_now(),
-                "balance_block": head, "last_check_timestamp": now, "reason": "Distributed net buy wave",
+                "balance_block": head, "last_check_timestamp": now, "reason": "Relay buy wave" if relay_enough else "Distributed net buy wave",
                 "initial_supply_raw": str(supply), "initial_retained_raw": str(sum(int(w["retained_lower_bound_raw"]) for w in row["wallets"]))}
+            if relay_enough:
+                frozen["relay_wave"] = copy.deepcopy(wave)
     elif frozen:
         frozen = recheck_cohort(rpc, pool, frozen, head, supply, now, config)
     if frozen:
         store.put("cohort:" + pool["key"], frozen)
         row.update(wallets=frozen["wallets"], cohort_created_at=frozen["created_at"], cohort_checks=frozen["checks"],
             cohort_reason=frozen["reason"], status="buy_wave" if frozen["checks"] < 2 else "retained")
+        if frozen.get("relay_wave"):
+            row["relay"]["signal_wave"] = frozen["relay_wave"]
         lower = sum(int(w["retained_lower_bound_raw"]) for w in frozen["wallets"])
         if lower < 0.6 * int(frozen["initial_retained_raw"]):
             row["status"] = "reduced"
@@ -615,6 +699,7 @@ def scan(previous=None, config=None, rpc=None, session=None, store=None):
         rpc.budget -= 1
         attempted = 0
         deep_attempts = 0
+        relay = RelayClient(session, store, rpc.deadline, max_calls=config["relay_max_calls"])
         for pool in selected[:config["max_pools"] * 2]:
             if deep_attempts >= config["max_pools"] or rpc.budget - rpc.calls < 100 or rpc.deadline - time.monotonic() < 70:
                 break
@@ -632,7 +717,7 @@ def scan(previous=None, config=None, rpc=None, session=None, store=None):
                     store.put("excluded:" + pool["key"], {"last_attempt_at": utc_now(), **age})
                     continue
                 deep_attempts += 1
-                row = inspect_incremental(rpc, pool, start, head, config, store, session, time.time())
+                row = inspect_incremental(rpc, pool, start, head, config, store, session, time.time(), relay=relay)
                 checked += 1
             except (RpcError, ValueError, KeyError) as exc:
                 row = dict(old.get(pool["key"], {}), **pool)
@@ -656,7 +741,7 @@ def scan(previous=None, config=None, rpc=None, session=None, store=None):
         rpc.deadline += 20
         if rpc.call("eth_getBlockByNumber", [hex(head), False])["hash"] != block["hash"]:
             raise RpcError("Block changed during scan; observations discarded")
-        output.update(generated_at=utc_now(), status="partial" if errors else "ok", tokens=results,
+        output.update(generated_at=utc_now(), status="partial" if errors else "ok", tokens=results, relay_status=relay.summary(),
             discovered_pools=len(pools), eligible_tokens=len(results), checked_pools=checked,
             excluded_stocks=sum(p["token"] in stocks for p in pools), excluded_age=dict(excluded),
             errors=errors, window_from_block=start, window_to_block=head,

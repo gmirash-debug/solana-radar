@@ -41,9 +41,10 @@ and Alchemy's unrestricted log range are NOT claimed as free capabilities.
 
 ## Universe and identity
 
-- GeckoTerminal: three pages each for Uniswap v3 and v4, currently at most 120
-  discovered pools, at most 16 new-token/cohort checks per run.
-- New discovery: contract age 24-360 hours, liquidity >= $3,000,
+- GeckoTerminal: two network new-pool pages plus three pages each for Uniswap
+  v3 and v4. Deduplicate pools, exclude unsupported DEXs. This is bounded
+  discovery, not a complete launch feed; at most 16 new-token/cohort checks per run.
+- New discovery: contract age 0-360 hours (from launch through 15 days), liquidity >= $3,000,
   FDV > 0 and <= $5 million. Pool age is only an inexpensive prefilter.
 - Archive bytecode at age boundaries and a binary deployment-block search
   establish contract age. Unsupported archive reads yield unknown, never
@@ -74,17 +75,75 @@ and Alchemy's unrestricted log range are NOT claimed as free capabilities.
   the original thesis. The scan head is checked again before committing.
 - Successful transaction receipts must match the observed swap hash/block.
   V4 deltas are normalized to the V3 sign convention.
-- Direct and routed buys are attributed to the transaction sender only if
+- Direct and ordinary routed buys are attributed to the transaction sender only if
   the full pool/custody token output equals that sender's positive net receipt.
   Ambiguous routes, transfer-only activity, transfer-tax discrepancies,
-  smart-account beneficiaries and same-pool multi-swaps are excluded.
-- Up to 48 buy receipts per pool/window. Partial attribution is shown as
-  partial; it cannot create a new confirmed buy wave. Sell event counts are
-  not proof that the original buyers sold.
+  smart-account beneficiaries and same-pool multi-swaps are excluded, except
+  independently reconciled Relay recipients described below.
+- Up to 160 buy receipts per pool/window, bounded by the shared RPC/time budget.
+  Partial attribution is shown as partial; ordinary distributed waves require
+  complete attribution. A verified Relay subset can meet its own conservative
+  thresholds without claiming all buyers were attributed. Sell event counts
+  are not proof that the original buyers sold.
 - Initial coverage begins one hour before the first observation, NOT launch.
   Indexing continuity is distinct from complete receipt attribution. Old
   indexed logs are compacted after the current window into hourly summaries;
   this is not a permanent raw chain archive.
+
+## Relay waves (2026-09-11)
+
+Watch as soon as an eligible trading pool is discoverable and contract age can
+be verified. There is no 24-hour waiting period. The scheduler is still hourly:
+5/15-minute analysis windows do NOT mean scans run every five minutes.
+During the first 24 hours, only the stronger Relay path can create a cohort;
+ordinary three-buyer waves remain observations. This prevents lifting the age
+gate from turning routine launch buys into confirmed accumulation candidates.
+
+The known Relay solver is only a lookup hint. Each accepted buy needs a
+successful Relay order for this destination chain, token and transaction;
+successful source/destination legs; positive paid quote and bought base in a
+verified pool swap; and the executed output exactly matching the recipient's
+receipt net token gain. Pool custody loss must reconcile, and unrelated net
+token sources, refunds, transfer-only receipts and ambiguous multi-swaps are
+rejected. Origin-chain funding is provider-attributed, not an independently
+audited origin-chain history. Final recipients, not relayers, count as buyers.
+
+Initial, unvalidated detection thresholds (not fit for a profitability claim):
+
+| Window | Material recipients | Gross supply purchased |
+| --- | --- | --- |
+| 5 minutes | 5 | 1% |
+| 15 minutes | 8 | 2% |
+| 60 minutes | 15 | 5% |
+
+Each counted recipient must buy >=0.01% supply; no recipient may account for
+more than 40% of that window's material gross purchases. Duplicate transaction
+hashes count once. Windows use canonical destination block timestamps, not
+interpolated price times. The first qualifying observed window is selected.
+Gross buys can include turnover; they are never labelled retained supply.
+Comparison with a normal baseline remains explicitly `not_established`.
+
+A Relay cohort is frozen only after complete log indexing plus same-block
+balance/outflow checks retain >=60% of its attributed purchases and >=0.5% of
+total supply conservatively. The initial check is a new wave, NOT holding
+confirmation. Rechecks use the existing frozen-cohort rules below; later
+buyers never replace the original recipients. Contract risks remain visible
+and override the status. A gross wave without sufficient holding remains an
+observation. Partial receipt coverage may establish a verified subset, never
+a claim of exhaustive market coverage or coordinated ownership.
+
+Relay lookups are cached seven days and capped at 96 requests and 90 seconds
+of request time per scan, also respecting the scan deadline. Errors/rate limits
+stop new Relay lookups without failing the whole scan. No new paid plan.
+`RELAY_API_KEY` in GitHub Actions secrets selects v3 (`fillTxHash`, actual route
+output only). Without it the currently working public v2 is used. v2 retires
+on 2026-11-24 and has progressively reduced limits; the snapshot/UI expose this
+migration warning. v3 schema handling is unit-tested; authenticated live v3
+has not been verified without a key. No automatic fallback bypasses a v3
+authentication error.
+
+Sources: https://docs.relay.link/references/api/get-requests and
+https://docs.relay.link/references/api/api_guides/migrating-to-requests-v3 .
 
 ## Cohorts and interpretation
 

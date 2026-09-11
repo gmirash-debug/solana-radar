@@ -1,4 +1,15 @@
 export const CHAIN_ID = 4663;
+export function ageFilterLabel(config) {
+  const low = config?.min_pool_age_hours, high = config?.max_pool_age_hours;
+  if (![low, high].every(n => typeof n === "number" && Number.isFinite(n) && n >= 0)) return "Age filter unavailable";
+  const age = n => n >= 24 && n % 24 === 0 ? `${n / 24}d` : `${n}h`;
+  return `${low === 0 ? "From launch" : age(low)} - ${age(high)}`;
+}
+export function relaySignalLabel(token) {
+  if (token.cohort_reason === "Relay buy wave") return "Relay buy wave";
+  if (token.relay?.wave) return "Relay wave / holding unconfirmed";
+  return "";
+}
 export function formatSupplyPercent(value) {
   if (value == null || !Number.isFinite(Number(value))) return "Unknown";
   const number = Number(value);
@@ -7,10 +18,16 @@ export function formatSupplyPercent(value) {
 export const addressOk = value => /^0x[0-9a-f]{40}$/.test(value || "");
 export const poolOk = t => t.protocol === "v4" ? /^0x[0-9a-f]{64}$/.test(t.pool || "") : (!t.protocol || t.protocol === "v3") && addressOk(t.pool);
 const counters = ["window_from_block", "window_to_block", "buy_swaps", "sell_swaps", "receipts_checked", "swap_transactions", "buy_transactions", "attributed_buy_transactions", "cohort_checks", "backlog_blocks"];
+function validWave(w) {
+  return w == null || ["window_seconds", "buyers", "buy_transactions", "from_timestamp", "to_timestamp"].every(k => Number.isSafeInteger(w[k]) && w[k] >= 0)
+    && w.from_timestamp <= w.to_timestamp && w.to_timestamp < 8640000000000
+    && Number.isFinite(w.gross_bought_supply_pct) && w.gross_bought_supply_pct >= 0;
+}
 export function validSnapshot(payload) {
   return payload?.chain_id === CHAIN_ID && Array.isArray(payload.tokens)
     && payload.tokens.every(t => addressOk(t.token) && poolOk(t) && t.key === `${CHAIN_ID}:${t.token}`
       && counters.every(key => t[key] == null || (Number.isSafeInteger(t[key]) && t[key] >= 0))
+      && validWave(t.relay?.wave) && validWave(t.relay?.signal_wave)
       && Array.isArray(t.wallets) && t.wallets.every(w => addressOk(w.address)));
 }
 export function isFresh(payload, now = Date.now()) {

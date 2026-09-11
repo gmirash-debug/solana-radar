@@ -20,6 +20,7 @@ on:
       - "robinhood.py"
       - "robinhood_store.py"
       - "gmgn_context.py"
+      - "relay_context.py"
       - "package.json"
       - "package-lock.json"
       - "config.example.json"
@@ -332,6 +333,7 @@ jobs:
         env:
           ROBINHOOD_RPC_URL: ${{ secrets.ROBINHOOD_RPC_URL }}
           ROBINHOOD_ARCHIVE_RPC_URL: ${{ secrets.ROBINHOOD_ARCHIVE_RPC_URL }}
+          RELAY_API_KEY: ${{ secrets.RELAY_API_KEY }}
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
         run: python robinhood.py
 
