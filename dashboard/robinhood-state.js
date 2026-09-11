@@ -6,8 +6,9 @@ export function ageFilterLabel(config) {
   return `${low === 0 ? "From launch" : age(low)} - ${age(high)}`;
 }
 export function relaySignalLabel(token) {
+  if (token.cohort_reason === "Cross-chain buy wave") return "Cross-chain buy wave";
   if (token.cohort_reason === "Relay buy wave") return "Relay buy wave";
-  if (token.relay?.wave) return "Relay wave / holding unconfirmed";
+  if (token.relay?.wave) return token.relay.wave.services?.includes("LI.FI") ? "Cross-chain wave / holding unconfirmed" : "Relay wave / holding unconfirmed";
   return "";
 }
 export function formatSupplyPercent(value) {

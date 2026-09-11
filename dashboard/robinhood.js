@@ -1,6 +1,6 @@
 import {validSnapshot, isFresh, selectTokens, formatSupplyPercent, walletFresh, supplyRange,
-  REVIEW_GROUPS, reviewGroup, positionBounds, marketFresh, comparePositions, ageFilterLabel, relaySignalLabel} from "./robinhood-state.js?v=20260911-evidence-1";
-import {renderAccumulationEvidence, accumulationSummary} from "./accumulation-evidence.js?v=20260911-evidence-1";
+  REVIEW_GROUPS, reviewGroup, positionBounds, marketFresh, comparePositions, ageFilterLabel, relaySignalLabel} from "./robinhood-state.js?v=20260911-evidence-2";
+import {renderAccumulationEvidence, accumulationSummary} from "./accumulation-evidence.js?v=20260911-evidence-2";
 import {gmgnUrl, renderGmgnMarket, renderGmgnHolders, renderGmgnSecurity} from "./gmgn-context.js?v=20260910-gmgn-2";
 
 const $ = selector => document.querySelector(selector);
@@ -25,7 +25,7 @@ function reason(t) {
   if (group === "retained") return "Original buyers still retain tokens";
   if (group === "reduced") return "Original buyer position reduced";
   if (group === "buy_wave") return "Buy wave; retention not yet confirmed";
-  if (t.relay?.wave) return "Relay wave; holding threshold not confirmed";
+  if (t.relay?.wave) return "Routed buy wave; holding threshold not confirmed";
   return t.attribution_complete ? "Activity only; no confirmed buy wave" : "Partial buy attribution";
 }
 function filtered() {
@@ -43,7 +43,7 @@ function row(t) {
 function relayEvidence(t) {
   const wave = t.relay?.signal_wave || t.relay?.wave;
   if (!wave) return "";
-  return `<section><div class="section-heading"><h3>Relay buy wave</h3><span class="evidence-time">${esc(date(new Date(wave.to_timestamp * 1000).toISOString()))}</span></div><div class="evidence-facts">${fact("Trigger window", `${wave.window_seconds / 60} min / ${wave.buyers} recipients / ${wave.buy_transactions} buys`)}${fact("Gross purchases", `${formatSupplyPercent(wave.gross_bought_supply_pct)} of supply`)}${fact("Holding now", t.cohort_reason === "Relay buy wave" ? supplyRange(t) : "Not confirmed")}${fact("Relative to normal", "Baseline not established")}${fact("Attribution coverage", t.relay.coverage === "complete" ? "Selected pool window complete" : "Verified subset / partial window")}</div><p class="muted">Gross purchases can include repeat buys. A shared route does not establish common ownership.</p></section>`;
+  return `<section><div class="section-heading"><h3>${wave.services?.includes("LI.FI") ? "Cross-chain buy wave" : "Relay buy wave"}</h3><span class="evidence-time">${esc(date(new Date(wave.to_timestamp * 1000).toISOString()))}</span></div><div class="evidence-facts">${fact("Trigger window", `${wave.window_seconds / 60} min / ${wave.buyers} recipients / ${wave.buy_transactions} buys`)}${fact("Gross purchases", `${formatSupplyPercent(wave.gross_bought_supply_pct)} of supply`)}${fact("Holding now", ["Relay buy wave", "Cross-chain buy wave"].includes(t.cohort_reason) ? supplyRange(t) : "Not confirmed")}${fact("Relative to normal", "Baseline not established")}${fact("Attribution coverage", t.relay.coverage === "complete" ? "Selected pool window complete" : "Verified subset / partial window")}</div><p class="muted">Gross purchases can include repeat buys. A shared route does not establish common ownership.</p></section>`;
 }
 function overview(t) {
   const bounds = positionBounds(t), fresh = isFresh(state.payload) && walletFresh(t);
@@ -93,7 +93,7 @@ function render({resetList = false} = {}) {
   const p = state.payload, fresh = isFresh(p);
   $("#subtitle").textContent = `Last scan ${date(p.generated_at)}${fresh ? "" : " / stale"}`;
   $("#scannerSummary").textContent = state.error || `${p.checked_pools ?? 0} checked / ${p.eligible_tokens ?? 0} candidates${p.errors?.length ? ` / ${p.errors.length} incomplete checks` : " / hourly scans"}`;
-  $("#statusRow").textContent = [(p.errors || []).join(" | ") || p.provider || "Provider information unavailable", `GMGN: ${p.gmgn_status?.status || "not checked"} / ${p.gmgn_status?.requests ?? 0} requests`, `Relay: ${p.relay_status?.status || "not checked"} / ${p.relay_status?.requests ?? 0} requests${p.relay_status?.deprecated ? " / API upgrade required by 24 Nov" : ""}`].join(" | ");
+  $("#statusRow").textContent = [(p.errors || []).join(" | ") || p.provider || "Provider information unavailable", `GMGN: ${p.gmgn_status?.status || "not checked"} / ${p.gmgn_status?.requests ?? 0} requests`, `Relay: ${p.relay_status?.status || "not checked"} / ${p.relay_status?.requests ?? 0} requests${p.relay_status?.deprecated ? " / API upgrade required by 24 Nov" : ""}`, `LI.FI: ${p.lifi_status?.status || "not checked"} / ${p.lifi_status?.requests ?? 0} requests`].join(" | ");
   $("#metrics").innerHTML = [metric("Pools discovered", p.discovered_pools ?? 0, "Uniswap v3 + v4"), metric("Stock pools excluded", p.excluded_stocks ?? 0, "Official contract registry"), metric("RPC requests", p.rpc_calls ?? 0, "Current scan"), metric("Last attempt", date(p.attempted_at), "Bounded discovery")].join("");
   const all = filtered(), counts = Object.fromEntries(REVIEW_GROUPS.map(g => [g.id, all.filter(t => reviewGroup(t, p) === g.id).length]));
   const groups = REVIEW_GROUPS.map(g => ({...g, tokens:all.filter(t => reviewGroup(t, p) === g.id).sort((a,b) => comparePositions(a,b,state.sort))}));

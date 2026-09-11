@@ -18,6 +18,7 @@ from robinhood_store import Store
 from gmgn_context import enrich as enrich_gmgn
 from relay_context import RelayClient, SOLVER, request_output, buy_wave
 from position_evidence import seed_position, replay_position, position_summary, cross_chain_summary, preparation_summary
+from lifi_context import LifiClient
 
 CHAIN_ID = 4663
 FACTORY = "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
@@ -359,6 +360,13 @@ def relay_buy(receipt, pool, base_index, relay, allow_lookup=False):
     if not allow_lookup and receipt.get("from", "").lower() != SOLVER and not any(
             solver_topic in [t.lower() for t in log.get("topics", [])[1:]] for log in receipt.get("logs", [])):
         return None
+    match = request_output(relay.lookup(receipt["transactionHash"]), receipt["transactionHash"], pool["token"], CHAIN_ID)
+    return verified_route_buy(receipt, pool, base_index, match)
+
+
+def verified_route_buy(receipt, pool, base_index, match):
+    if not match or int(receipt.get("status", "0x0"), 16) != 1:
+        return None
     swaps = [x for x in receipt.get("logs", []) if pool_log(x, pool)]
     if len(swaps) != 1:
         return None
@@ -367,10 +375,10 @@ def relay_buy(receipt, pool, base_index, relay, allow_lookup=False):
     custody = POOL_MANAGER if pool.get("protocol") == "v4" else pool["pool"]
     if bought <= 0 or paid <= 0 or transfer_net(receipt, pool["token"], custody) != -bought:
         return None
-    match = request_output(relay.lookup(receipt["transactionHash"]), receipt["transactionHash"], pool["token"], CHAIN_ID)
-    if not match:
+    try:
+        wallet, amount = address(match["recipient"]), int(match["bought_raw"])
+    except (KeyError, ValueError, TypeError):
         return None
-    wallet, amount = address(match["recipient"]), int(match["bought_raw"])
     if wallet in (custody, pool["token"], ZERO, SOLVER, receipt.get("from", "").lower()) or not 0 < amount <= bought:
         return None
     if transfer_net(receipt, pool["token"], wallet) != amount:
@@ -667,7 +675,7 @@ def recheck_cohort(rpc, pool, cohort, head, supply, now, config):
     return result
 
 
-def inspect_incremental(rpc, pool, start, head, config, store, session, now, relay=None):
+def inspect_incremental(rpc, pool, start, head, config, store, session, now, relay=None, lifi=None):
     identity = store.get("pool:" + pool["pool"])
     if identity:
         if identity["token"] != pool["token"] or identity["quote"] != pool["quote"]:
@@ -703,6 +711,7 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
     cohort = Counter()
     receipts, attributed, relay_events, buy_events = [], 0, [], []
     unknown_route_lookups = 0
+    lifi_lookups = 0
     for tx in txs[:config["max_receipts_per_pool"]]:
         if isinstance(rpc, Rpc) and (rpc.budget - rpc.calls < 70 or rpc.deadline - time.monotonic() < 45):
             break
@@ -719,6 +728,9 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
         if buy is None and routed is None and relay is not None and unknown_route_lookups < 2:
             unknown_route_lookups += 1
             routed = relay_buy(receipt, pool, index, relay, allow_lookup=True)
+        if buy is None and routed is None and lifi is not None and lifi_lookups < 8:
+            lifi_lookups += 1
+            routed = verified_route_buy(receipt, pool, index, lifi.lookup(tx, pool["token"], CHAIN_ID))
         if routed:
             block_key = "block-time:" + receipt["blockHash"]
             block_time = store.get(block_key)
@@ -749,6 +761,8 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
         backlog_blocks=max(0, head - end), balance_block=head, retained_supply_upper_bound_pct=None)
     frozen = store.get("cohort:" + pool["key"])
     wave = buy_wave(relay_events, supply, config)
+    if wave:
+        wave["services"] = sorted({e.get("service", "Relay") for e in wave["events"]})
     if wave:
         birth_time = timestamp(pool["token_created_at"]) if pool.get("token_age_verified") and pool.get("token_created_at") else None
         wave["launch_phase"] = "unknown" if birth_time is None else "first_hour" if wave["from_timestamp"] - birth_time < 3600 else "post_launch"
@@ -791,7 +805,7 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
         ordinary_enough = not wave and ordinary_age_ok and enough and row["attribution_complete"] and len(buys) >= 2 * max(1, row["sell_swaps"])
         if row["history_complete"] and (relay_enough or ordinary_enough):
             frozen = {"wallets": row["wallets"], "checks": 1, "created_at": utc_now(), "checked_at": utc_now(),
-                "balance_block": head, "last_check_timestamp": now, "reason": "Relay buy wave" if relay_enough else "Distributed net buy wave",
+                "balance_block": head, "last_check_timestamp": now, "reason": ("Cross-chain buy wave" if "LI.FI" in wave.get("services", []) else "Relay buy wave") if relay_enough else "Distributed net buy wave",
                 "initial_supply_raw": str(supply), "initial_retained_raw": str(sum(int(w["retained_lower_bound_raw"]) for w in row["wallets"]))}
             if relay_enough:
                 frozen["relay_wave"] = copy.deepcopy(wave)
@@ -904,6 +918,7 @@ def scan(previous=None, config=None, rpc=None, session=None, store=None):
         attempted = 0
         deep_attempts = 0
         relay = RelayClient(session, store, rpc.deadline, max_calls=config["relay_max_calls"])
+        lifi = LifiClient(session, store, rpc.deadline)
         for pool in selected[:config["max_pools"] * 2]:
             if deep_attempts >= config["max_pools"] or rpc.budget - rpc.calls < 100 or rpc.deadline - time.monotonic() < 70:
                 break
@@ -921,7 +936,7 @@ def scan(previous=None, config=None, rpc=None, session=None, store=None):
                     store.put("excluded:" + pool["key"], {"last_attempt_at": utc_now(), **age})
                     continue
                 deep_attempts += 1
-                row = inspect_incremental(rpc, pool, start, head, config, store, session, time.time(), relay=relay)
+                row = inspect_incremental(rpc, pool, start, head, config, store, session, time.time(), relay=relay, lifi=lifi)
                 checked += 1
             except (RpcError, ValueError, KeyError) as exc:
                 row = dict(old.get(pool["key"], {}), **pool)
@@ -945,7 +960,7 @@ def scan(previous=None, config=None, rpc=None, session=None, store=None):
         rpc.deadline += 20
         if rpc.call("eth_getBlockByNumber", [hex(head), False])["hash"] != block["hash"]:
             raise RpcError("Block changed during scan; observations discarded")
-        output.update(generated_at=utc_now(), status="partial" if errors else "ok", tokens=results, relay_status=relay.summary(),
+        output.update(generated_at=utc_now(), status="partial" if errors else "ok", tokens=results, relay_status=relay.summary(), lifi_status=lifi.summary(),
             discovered_pools=len(pools), eligible_tokens=len(results), checked_pools=checked,
             excluded_stocks=sum(p["token"] in stocks for p in pools), excluded_age=dict(excluded),
             errors=errors, window_from_block=start, window_to_block=head,

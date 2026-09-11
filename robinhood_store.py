@@ -34,7 +34,7 @@ class Store:
         if success:
             # Receipt cache is disposable; frozen cohorts and checkpoints are not.
             self.db.execute("DELETE FROM cache WHERE key LIKE 'receipt:%' AND updated<?", (time.time() - 7 * 86400,))
-            self.db.execute("DELETE FROM cache WHERE (key LIKE 'relay:%' OR key LIKE 'block-time:%') AND updated<?", (time.time() - 7 * 86400,))
+            self.db.execute("DELETE FROM cache WHERE (key LIKE 'relay:%' OR key LIKE 'lifi:%' OR key LIKE 'block-time:%') AND updated<?", (time.time() - 7 * 86400,))
             self.db.commit()
         else:
             self.db.rollback()

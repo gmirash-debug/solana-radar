@@ -1,4 +1,4 @@
-import {formatSupplyPercent} from "./robinhood-state.js?v=20260911-evidence-1";
+import {formatSupplyPercent} from "./robinhood-state.js?v=20260911-evidence-2";
 
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[c]));
 const fact = (label, value) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
@@ -29,7 +29,7 @@ export function renderAccumulationEvidence(token) {
     ${recipients.length ? `<details><summary>${recipients.length} transfer recipients</summary><div class="table-wrap"><table><thead><tr><th>Recipient</th><th>Supply min.</th><th>Hops</th></tr></thead><tbody>${recipients.map(w => `<tr><td>${walletLink(w.address)}</td><td>${formatSupplyPercent(w.supply_pct)}</td><td>${esc(w.depth)}</td></tr>`).join("")}</tbody></table></div></details>` : ""}</section>
     <section class="accumulation-evidence"><div class="section-heading"><h3>Cross-chain inflow</h3><span class="evidence-time">${token.cross_chain_at_catch ? "At catch" : "Current window"}</span></div><div class="evidence-facts">
     ${fact("Verified purchases", cross ? `${cross.verified_buys} / ${cross.recipients} recipients` : "Not checked")}${fact("Gross bought supply", cross ? formatSupplyPercent(cross.gross_bought_supply_pct) : "Unknown")}${fact("Source chains", cross?.source_chains?.map(chainName).join(", ") || "Not established")}${fact("Verified routes", cross?.verified_services?.join(", ") || "None in checked subset")}</div>
-    <p class="muted">Verified Relay routes only; other services and normal-activity baseline are unverified. Gross purchases are not current holdings. Shared infrastructure is not an ownership link.</p></section>
+    <p class="muted">Bounded Relay and LI.FI checks; other services and normal-activity baseline are unverified. Gross purchases are not current holdings. Shared infrastructure is not an ownership link.</p></section>
     <section class="accumulation-evidence"><div class="section-heading"><h3>Buyer preparation</h3></div><div class="evidence-facts">${fact("Result", groups.length ? `${groups.length} funding / timing coincidences` : prep?.status === "no_match_in_checked_subset" ? "No match in checked subset" : "Not verified")}${fact("Coverage", prep?.scope || "Source-chain funding not checked")}</div>
     ${groups.map(g => `<details><summary>${esc(g.wallet_count)} buyers / unclassified funding source</summary><p>${walletLink(g.source)}</p><p>Funding span ${esc(g.funding_span_seconds)}s / buy span ${esc(g.buy_span_seconds)}s</p><p>${g.wallets.map(walletLink).join(" / ")}</p></details>`).join("")}
     <p class="muted">Partial Robinhood quote-token history before selected buys. Native funding and funding on source chains are not covered. A shared payer may be a service; no common owner is established.</p></section>`;

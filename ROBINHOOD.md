@@ -178,9 +178,15 @@ invalidate ordinary ERC20 assumptions; there is no production trade simulation.
 Three evidence layers augment an existing cohort; preparation coincidences do
 not independently promote a token or assert insider ownership. Solana is unchanged.
 
-- Cross-chain inflow: receipt-reconciled Relay source/destination chains, distinct
+- Cross-chain inflow: receipt-reconciled Relay / LI.FI source/destination chains, distinct
   recipients, gross bought supply, and frozen at-catch context. Same-chain Relay
   swaps are excluded from the cross-chain count. Other services remain unverified.
+  LI.FI's public `/v1/chains` includes Robinhood 4663; `/v1/status` accepts receiving
+  hashes. Only DONE/COMPLETED, exact destination/token/amount and a reconciled receipt
+  qualify; partial/refunded/pending routes never do. At most eight lookups per pool,
+  16 per scan and 30 seconds, inside the main deadline. HTTP 429 stops the provider.
+  A live non-LI.FI Robinhood transaction correctly returned 404; positive-route
+  matching is fixture-tested, not a claim of an observed live LI.FI buy wave.
   Two extra unresolved-route lookups per pool remove the single-solver lookup
   dependency without making unlimited API requests. Generic single-beneficiary
   EOA routes can be attributed through receipt reconciliation, but their source
