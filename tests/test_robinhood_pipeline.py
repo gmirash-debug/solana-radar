@@ -28,7 +28,7 @@ class PipelineTests(unittest.TestCase):
         rpc.call.side_effect = lambda m, args: receipts[args[0]] if m == "eth_getTransactionReceipt" else {"hash": "hash" + str(int(args[0], 16))}
         balance = [100]
         rpc.contract.side_effect = lambda target, sig, *args, **kwargs: ((6,) if sig == "decimals()" else (10000,) if sig == "totalSupply()" else (balance[0],))
-        with patch.object(rh, "verify_pool", return_value=0), patch.object(rh, "security_check", return_value={"status": "no_flags", "flags": []}):
+        with patch.object(rh, "verify_pool", return_value=0), patch.object(rh, "security_check", return_value={"status": "no_flags", "flags": []}), patch.object(rh, "position_check", return_value={"status":"pending"}):
             with patch.object(rh, "get_logs", side_effect=[swaps, []]):
                 first = rh.inspect_incremental(rpc, p, 100, 200, rh.CONFIG, store, Mock(), 1000)
             self.assertEqual(first["status"], "buy_wave")

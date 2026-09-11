@@ -130,7 +130,7 @@ class RelayTests(unittest.TestCase):
             "hash": f"hash{int(params[0],16)}", "timestamp": hex(1000 + (int(params[0],16)-100)*40)}
         balance = [200]
         rpc.contract.side_effect = lambda target, sig, *a, **kw: (6,) if sig == "decimals()" else (100000,) if sig == "totalSupply()" else (balance[0],)
-        with patch.object(rh, "verify_pool", return_value=0), patch.object(rh, "security_check", return_value={"status":"no_flags", "flags":[]}), patch.object(rh, "relay_buy", side_effect=lambda r,*a: matches.get(r["transactionHash"])):
+        with patch.object(rh, "verify_pool", return_value=0), patch.object(rh, "security_check", return_value={"status":"no_flags", "flags":[]}), patch.object(rh, "relay_buy", side_effect=lambda r,*a,**kw: matches.get(r["transactionHash"])), patch.object(rh, "position_check", return_value={"status":"pending"}), patch.object(rh, "preparation_check", return_value={"status":"not_checked"}):
             with patch.object(rh, "get_logs", side_effect=[swaps, []]):
                 row = rh.inspect_incremental(rpc, p, 100, 200, rh.CONFIG, store, Mock(), 2000, relay=Mock())
             self.assertFalse(row["attribution_complete"])

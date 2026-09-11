@@ -152,6 +152,10 @@
 .evidence-facts span { color: var(--muted); }
 .evidence-facts strong { font-weight: 500; text-align: right; }
 .decision-caveats { border-top: 1px solid var(--line); margin-top: 18px; padding: 18px 0; }
+.accumulation-evidence { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 18px; }
+.accumulation-evidence p { font-size: 12px; line-height: 1.6; margin: 8px 0; overflow-wrap: anywhere; }
+.accumulation-evidence details { font-size: 12px; margin-top: 10px; }
+.accumulation-evidence summary { cursor: pointer; padding: 8px 0; }
 .decision-caveats ul { padding: 0 0 0 16px; margin: 10px 0 0; }
 .decision-caveats li, .decision-caveats p { color: #5c6570; font-size: 12px; line-height: 1.6; margin-top: 7px; }
 .research-fold { border-top: 1px solid var(--line); padding: 14px 0; }

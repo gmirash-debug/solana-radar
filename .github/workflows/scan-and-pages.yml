@@ -21,6 +21,7 @@ on:
       - "robinhood_store.py"
       - "gmgn_context.py"
       - "relay_context.py"
+      - "position_evidence.py"
       - "package.json"
       - "package-lock.json"
       - "config.example.json"

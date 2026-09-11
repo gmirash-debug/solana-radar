@@ -1,5 +1,6 @@
 import {validSnapshot, isFresh, selectTokens, formatSupplyPercent, walletFresh, supplyRange,
-  REVIEW_GROUPS, reviewGroup, positionBounds, marketFresh, comparePositions, ageFilterLabel, relaySignalLabel} from "./robinhood-state.js?v=20260911-relay-1";
+  REVIEW_GROUPS, reviewGroup, positionBounds, marketFresh, comparePositions, ageFilterLabel, relaySignalLabel} from "./robinhood-state.js?v=20260911-evidence-1";
+import {renderAccumulationEvidence, accumulationSummary} from "./accumulation-evidence.js?v=20260911-evidence-1";
 import {gmgnUrl, renderGmgnMarket, renderGmgnHolders, renderGmgnSecurity} from "./gmgn-context.js?v=20260910-gmgn-2";
 
 const $ = selector => document.querySelector(selector);
@@ -34,7 +35,7 @@ function filtered() {
 function row(t) {
   const fresh = isFresh(state.payload) && walletFresh(t);
   return `<button class="review-row${t.key === state.selected ? " is-selected" : ""}" data-token-key="${esc(t.key)}" aria-pressed="${t.key === state.selected}" type="button">
-    <span class="review-identity">${avatar(t, true)}<span class="review-copy"><strong>${esc(t.symbol)}</strong><span class="review-reason">${esc(reason(t))}</span>${relaySignalLabel(t) ? `<small>${esc(relaySignalLabel(t))}</small>` : ""}<small>Observed ${esc(date(t.first_observed_at))}</small></span></span>
+    <span class="review-identity">${avatar(t, true)}<span class="review-copy"><strong>${esc(t.symbol)}</strong><span class="review-reason">${esc(reason(t))}</span>${accumulationSummary(t) || relaySignalLabel(t) ? `<small>${esc(accumulationSummary(t) || relaySignalLabel(t))}</small>` : ""}<small>Observed ${esc(date(t.first_observed_at))}</small></span></span>
     <span class="review-position"><strong>${esc(positionText(positionBounds(t)))}</strong><small>${esc(supplyRange(t))} supply</small><small class="${fresh ? "" : "warning"}">${fresh ? "checked" : "check overdue"}${!t.attribution_complete && !t.cohort_created_at ? " / partial" : ""}</small></span>
     <span class="review-market"><strong>${marketFresh(t) ? money(t.fdv_usd) : "Unverified"}</strong><small class="muted">FDV / ${esc(t.protocol || "v3")}</small></span>
   </button>`;
@@ -50,7 +51,7 @@ function overview(t) {
     <div class="retention-summary"><strong>${esc(positionText(bounds))}</strong><span>of attributed buys remaining<small>${fresh ? "Checked" : "Previous check"} / ${t.wallets.length} wallets</small></span></div>
     ${bounds?.lower != null ? `<meter class="retention-meter" min="0" max="100" value="${bounds.lower}" aria-label="Conservative retained position">${bounds.lower}%</meter>` : ""}
     <div class="evidence-facts">${fact("Retained supply", supplyRange(t))}${fact("Original cohort", t.cohort_created_at ? date(t.cohort_created_at) : "Not confirmed")}${fact("Retention checks", t.cohort_checks ?? 0)}${fact("Buy attribution", `${t.attributed_buy_transactions ?? 0} / ${t.buy_transactions ?? "?"} transactions`)}${fact("History window", t.history_complete ? "Latest window complete" : "Incomplete")}</div>
-    </section>${relayEvidence(t)}<section class="decision-caveats"><h3>Assessment</h3><p>${esc(reason(t))}. ${t.cohort_created_at ? "Later unrelated buyers do not replace this cohort." : "Observed activity has not established a retained accumulation signal."}</p><p>Transfers and sales both reduce the conservative holding bound. Holding is not a new entry signal.</p>${t.error ? `<p class="warning">${esc(t.error)}</p>` : ""}</section>`;
+    </section>${relayEvidence(t)}${t.cohort_created_at ? renderAccumulationEvidence(t) : ""}<section class="decision-caveats"><h3>Assessment</h3><p>${esc(reason(t))}. ${t.cohort_created_at ? "Later unrelated buyers do not replace this cohort." : "Observed activity has not established a retained accumulation signal."}</p><p>A reduced original-wallet balance does not mean a sale. Transfer provenance is shown separately and does not establish ownership. Holding is not a new entry signal.</p>${t.error ? `<p class="warning">${esc(t.error)}</p>` : ""}</section>`;
 }
 function wallets(t) {
   if (!t.wallets.length) return `<div class="review-empty"><img src="icons/scan-search.svg" alt=""><h3>No attributed buyers</h3><p>Available evidence does not establish buyer balances. This does not mean that no purchases occurred.</p></div>`;

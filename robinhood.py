@@ -17,6 +17,7 @@ from eth_utils import keccak
 from robinhood_store import Store
 from gmgn_context import enrich as enrich_gmgn
 from relay_context import RelayClient, SOLVER, request_output, buy_wave
+from position_evidence import seed_position, replay_position, position_summary, cross_chain_summary, preparation_summary
 
 CHAIN_ID = 4663
 FACTORY = "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
@@ -349,13 +350,13 @@ def routed_buy(receipt, pool, base_index):
     return wallet, bought
 
 
-def relay_buy(receipt, pool, base_index, relay):
+def relay_buy(receipt, pool, base_index, relay, allow_lookup=False):
     """Bind Relay's executed recipient/amount to a canonical pool buy receipt."""
     if relay is None or int(receipt.get("status", "0x0"), 16) != 1:
         return None
     # Infrastructure is only a lookup hint, never evidence of common ownership.
     solver_topic = "0x" + SOLVER[2:].rjust(64, "0")
-    if receipt.get("from", "").lower() != SOLVER and not any(
+    if not allow_lookup and receipt.get("from", "").lower() != SOLVER and not any(
             solver_topic in [t.lower() for t in log.get("topics", [])[1:]] for log in receipt.get("logs", [])):
         return None
     swaps = [x for x in receipt.get("logs", []) if pool_log(x, pool)]
@@ -380,6 +381,164 @@ def relay_buy(receipt, pool, base_index, relay):
     if any(w != custody and transfer_net(receipt, pool["token"], w) < 0 for w in senders):
         return None
     return match
+
+
+def beneficiary_buy(receipt, pool, base_index, rpc):
+    """Unknown route: prove the sole EOA beneficiary, not its source chain."""
+    if int(receipt.get("status", "0x0"), 16) != 1:
+        return None
+    swaps = [x for x in receipt.get("logs", []) if pool_log(x, pool)]
+    if len(swaps) != 1:
+        return None
+    amounts = swap_amounts(swaps[0])
+    bought = -amounts[base_index]
+    custody = POOL_MANAGER if pool.get("protocol") == "v4" else pool["pool"]
+    if bought <= 0 or amounts[1 - base_index] <= 0:
+        return None
+    participants = {address("0x" + t[-40:]) for log in receipt.get("logs", [])
+        if log["address"].lower() == pool["token"] and len(log.get("topics", [])) == 3 and log["topics"][0] == TRANSFER
+        for t in log["topics"][1:]}
+    net = {w: transfer_net(receipt, pool["token"], w) for w in participants}
+    recipients = [w for w, amount in net.items() if amount > 0]
+    if len(recipients) != 1 or net.get(custody) != -bought or any(n < 0 for w, n in net.items() if w != custody):
+        return None
+    wallet = recipients[0]
+    if wallet in (ZERO, SOLVER, pool["token"], custody) or net[wallet] != bought:
+        return None
+    if rpc.call("eth_getCode", [wallet, receipt["blockNumber"]]) != "0x":
+        return None
+    return wallet, bought
+
+
+def transfer_event(log):
+    return {"sender": address("0x" + log["topics"][1][-40:]), "recipient": address("0x" + log["topics"][2][-40:]),
+        "amount": int(log["data"], 16), "tx": log["transactionHash"], "index": int(log["logIndex"], 16),
+        "block": int(log["blockNumber"], 16), "block_hash": log["blockHash"]}
+
+
+class EvidenceBudget:
+    """Share the main deadline; optional research must not exhaust discovery."""
+    def __init__(self, rpc):
+        self.rpc, self.calls = rpc, 0
+
+    def guard(self):
+        if self.calls >= 64:
+            raise RpcError("Evidence request limit reached")
+        if isinstance(self.rpc, Rpc) and (self.rpc.budget - self.rpc.calls < 90
+                or self.rpc.deadline - time.monotonic() < 60
+                or getattr(self.rpc, "evidence_calls", 0) >= 120):
+            raise RpcError("Evidence deferred to preserve scan budget")
+        self.calls += 1
+        if isinstance(self.rpc, Rpc):
+            self.rpc.evidence_calls = getattr(self.rpc, "evidence_calls", 0) + 1
+
+    def call(self, method, params):
+        self.guard()
+        return self.rpc.call(method, params)
+
+    def contract(self, *args, **kwargs):
+        self.guard()
+        return self.rpc.contract(*args, **kwargs)
+
+
+def position_check(rpc, pool, cohort, head, supply, store, index):
+    key = "position:" + pool["key"]
+    state = store.get(key)
+    budget = EvidenceBudget(rpc)
+    if not state:
+        block = budget.call("eth_getBlockByNumber", [hex(head), False])
+        state = seed_position(cohort["wallets"], head, block["hash"], supply)
+        # Large cohorts remain bounded; omitted original balances stay unresolved.
+        selected = sorted(state["nodes"], key=lambda w: -int(state["nodes"][w]["known"]))[:12]
+        state["nodes"] = {w: state["nodes"][w] for w in selected}
+        store.put(key, state)
+    elif int(state["supply_raw"]) != supply:
+        return {"status": "unavailable", "reason": "Token supply changed"}
+    elif head > state["block"]:
+        old = budget.call("eth_getBlockByNumber", [hex(state["block"]), False])
+        if old["hash"] != state["block_hash"]:
+            raise RpcError("Position checkpoint reorganized")
+        nodes = copy.deepcopy(state["nodes"])
+        excluded = {ZERO, SOLVER, POOL_MANAGER, pool["pool"], pool["token"], pool["quote"]}
+        logs, fetched = {}, set()
+        # Two transfer hops, at most eight new recipients, bounded logs and RPC calls.
+        for depth in range(3):
+            batch = [w for w, n in nodes.items() if w not in fetched and n["depth"] <= depth]
+            if not batch:
+                continue
+            topics = ["0x" + w[2:].rjust(64, "0") for w in batch]
+            for query in ([TRANSFER, topics], [TRANSFER, None, topics]):
+                for log in get_logs(budget, {"address": pool["token"], "topics": query}, state["block"] + 1, head):
+                    logs[(log["transactionHash"], log["logIndex"])] = log
+                    if len(logs) > 1500:
+                        raise RpcError("Position transfer limit reached")
+            fetched.update(batch)
+            for log in list(logs.values()):
+                e = transfer_event(log)
+                sender, recipient = e["sender"], e["recipient"]
+                if sender not in batch or nodes[sender]["depth"] >= 2 or recipient in nodes or recipient in excluded or e["amount"] == 0:
+                    continue
+                if nodes[sender]["depth"] == 0 and int(nodes[sender]["known"]) == 0:
+                    continue
+                if len(nodes) >= 20 or len(set(nodes) - set(state["originals"])) >= 8:
+                    break
+                if budget.call("eth_getCode", [recipient, hex(head)]) != "0x":
+                    excluded.add(recipient)
+                    continue
+                balance = budget.contract(pool["token"], "balanceOf(address)", ["uint256"], [recipient], ["address"], hex(state["block"]))[0]
+                nodes[recipient] = {"balance": str(balance), "known": "0", "depth": nodes[sender]["depth"] + 1}
+        # Any node without full incoming/outgoing coverage cannot receive proven provenance.
+        nodes = {w: n for w, n in nodes.items() if w in fetched}
+        sold_events = set()
+        custody = POOL_MANAGER if pool.get("protocol") == "v4" else pool["pool"]
+        for log in logs.values():
+            e = transfer_event(log)
+            if e["sender"] not in nodes or e["recipient"] != custody:
+                continue
+            receipt = budget.call("eth_getTransactionReceipt", [e["tx"]])
+            if receipt.get("blockHash") != e["block_hash"] or receipt.get("transactionHash") != e["tx"] or int(receipt.get("status", "0x0"), 16) != 1:
+                raise RpcError("Sale receipt does not match transfer")
+            swaps = [x for x in receipt.get("logs", []) if pool_log(x, pool)]
+            if len(swaps) == 1:
+                amounts = swap_amounts(swaps[0])
+                if amounts[index] == e["amount"] and amounts[1-index] < 0 and transfer_net(receipt, pool["token"], custody) == e["amount"] \
+                        and transfer_net(receipt, pool["token"], e["sender"]) == -e["amount"]:
+                    sold_events.add((e["tx"], e["index"]))
+        balances = {w: budget.contract(pool["token"], "balanceOf(address)", ["uint256"], [w], ["address"], hex(head))[0] for w in nodes}
+        block = budget.call("eth_getBlockByNumber", [hex(head), False])
+        state = replay_position(state, [transfer_event(x) for x in logs.values()], nodes, balances, sold_events, head, block["hash"])
+        store.put(key, state)
+    elif head < state["block"]:
+        raise RpcError("Position checkpoint ahead of RPC")
+    return dict(position_summary(state), checked_at=utc_now(), limits="Two hops / 12 original buyers / 8 recipients; other flows remain unknown")
+
+
+def preparation_check(rpc, pool, events, start, head):
+    selected = sorted(events, key=lambda e: -int(e["bought_raw"]))
+    wallets = list(dict.fromkeys(e["recipient"] for e in selected))[:12]
+    if len(wallets) < 3 or pool["quote"] == ZERO:
+        return {"status": "not_checked", "reason": "Fewer than three buyers or native quote", "source_chain_funding": "not_checked"}
+    budget = EvidenceBudget(rpc)
+    funding = get_logs(budget, {"address": pool["quote"], "topics": [TRANSFER, None, ["0x" + w[2:].rjust(64, "0") for w in wallets]]}, start, head)
+    if len(funding) > 300:
+        raise RpcError("Preparation transfer limit reached")
+    first = {w: min(e["block"] for e in events if e["recipient"] == w) for w in wallets}
+    candidates = [transfer_event(x) for x in funding if int(x["blockNumber"], 16) < first[address("0x" + x["topics"][2][-40:])]]
+    sources = Counter(e["sender"] for e in candidates)
+    excluded = {ZERO, SOLVER, POOL_MANAGER, pool["pool"], pool["token"], pool["quote"]}
+    checked = []
+    for sender, _ in sources.most_common(8):
+        if sender in excluded or len({e["recipient"] for e in candidates if e["sender"] == sender}) < 3:
+            continue
+        if budget.call("eth_getCode", [sender, hex(head)]) != "0x":
+            continue
+        for event in (e for e in candidates if e["sender"] == sender):
+            block = budget.call("eth_getBlockByNumber", [hex(event["block"]), False])
+            if block["hash"] != event["block_hash"]:
+                raise RpcError("Funding timestamp does not match block")
+            checked.append(dict(event, timestamp=int(block["timestamp"], 16)))
+    return dict(preparation_summary(events, checked, excluded), checked_at=utc_now(), coverage="partial",
+        buyers_checked=len(wallets), from_block=start, to_block=head)
 
 
 def get_logs(rpc, query, start, end, chunk_size=10000):
@@ -542,7 +701,8 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
     buys = [x for x in window if swap_amounts(x)[index] < 0]
     txs = list(dict.fromkeys(x["transactionHash"] for x in buys))
     cohort = Counter()
-    receipts, attributed, relay_events = [], 0, []
+    receipts, attributed, relay_events, buy_events = [], 0, [], []
+    unknown_route_lookups = 0
     for tx in txs[:config["max_receipts_per_pool"]]:
         if isinstance(rpc, Rpc) and (rpc.budget - rpc.calls < 70 or rpc.deadline - time.monotonic() < 45):
             break
@@ -556,6 +716,9 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
         receipts.append(receipt)
         buy = routed_buy(receipt, pool, index)
         routed = relay_buy(receipt, pool, index, relay) if buy is None else None
+        if buy is None and routed is None and relay is not None and unknown_route_lookups < 2:
+            unknown_route_lookups += 1
+            routed = relay_buy(receipt, pool, index, relay, allow_lookup=True)
         if routed:
             block_key = "block-time:" + receipt["blockHash"]
             block_time = store.get(block_key)
@@ -567,9 +730,13 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
                 store.put(block_key, block_time)
             relay_events.append(dict(routed, timestamp=block_time, block=int(receipt["blockNumber"], 16)))
             buy = routed["recipient"], int(routed["bought_raw"])
+        if buy is None:
+            buy = beneficiary_buy(receipt, pool, index, rpc)
         if buy:
             cohort[buy[0]] += buy[1]
             attributed += 1
+            buy_events.append({"recipient": buy[0], "bought_raw": str(buy[1]), "transaction": tx,
+                "block": int(receipt["blockNumber"], 16), "block_hash": receipt["blockHash"]})
     risk = security_check(session, pool["token"], store)
     if pool.get("hooks", ZERO) != ZERO:
         risk = dict(risk, status="risk", flags=risk["flags"] + ["v4_hook_contract"])
@@ -589,6 +756,7 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
         "gross_bought_supply_pct": 100 * sum(int(e["bought_raw"]) for e in relay_events) / supply,
         "coverage": "complete" if row["attribution_complete"] and row["history_complete"] else "partial",
         "baseline_status": "not_established", "wave": wave}
+    row["cross_chain"] = cross_chain_summary(relay_events, CHAIN_ID, supply, row["relay"]["coverage"])
     cohort_start = start
     if not frozen and wave:
         # Freeze only the triggering Relay buyers, not unrelated later buyers.
@@ -627,9 +795,14 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
                 "initial_supply_raw": str(supply), "initial_retained_raw": str(sum(int(w["retained_lower_bound_raw"]) for w in row["wallets"]))}
             if relay_enough:
                 frozen["relay_wave"] = copy.deepcopy(wave)
+            frozen["evidence_buys"] = [e for e in buy_events if e["recipient"] in cohort]
+            frozen["evidence_from_block"] = start
+            frozen["evidence_to_block"] = head
+            frozen["cross_chain_at_catch"] = copy.deepcopy(row["cross_chain"])
     elif frozen:
         frozen = recheck_cohort(rpc, pool, frozen, head, supply, now, config)
     if frozen:
+        row["cross_chain_at_catch"] = frozen.get("cross_chain_at_catch")
         store.put("cohort:" + pool["key"], frozen)
         row.update(wallets=frozen["wallets"], cohort_created_at=frozen["created_at"], cohort_checks=frozen["checks"],
             cohort_reason=frozen["reason"], status="buy_wave" if frozen["checks"] < 2 else "retained")
@@ -646,6 +819,37 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
         row["retained_supply_upper_bound_pct"] = 100 * sum(int(w["retained_upper_bound_raw"]) for w in row["wallets"]) / supply
     if risk["status"] == "risk":
         row["status"] = "risk"
+    if frozen:
+        try:
+            row["position_flow"] = position_check(rpc, pool, frozen, head, supply, store, index)
+        except (RpcError, ValueError, KeyError, TypeError):
+            previous_position = store.get("position:" + pool["key"])
+            row["position_flow"] = dict(position_summary(previous_position) if previous_position else {},
+                status="pending", reason="Position trace incomplete; previous checkpoint retained")
+        prep_key = "preparation:" + pool["key"]
+        prep = store.get(prep_key)
+        if not prep:
+            try:
+                # Freeze preparation evidence for the signal buyers, not later unrelated inflows.
+                originals = {w["address"] for w in frozen["wallets"]}
+                selected = [e for e in frozen.get("evidence_buys", []) if e["recipient"] in originals]
+                timed = []
+                budget = EvidenceBudget(rpc)
+                for event in selected[:24]:
+                    cached_time = store.get("block-time:" + event["block_hash"])
+                    if cached_time is None:
+                        block = budget.call("eth_getBlockByNumber", [hex(event["block"]), False])
+                        if block["hash"] != event["block_hash"]:
+                            raise RpcError("Buyer timestamp mismatch")
+                        cached_time = int(block["timestamp"], 16)
+                        store.put("block-time:" + event["block_hash"], cached_time)
+                    timed.append(dict(event, timestamp=cached_time))
+                prep = preparation_check(rpc, pool, timed, frozen.get("evidence_from_block", start), frozen.get("evidence_to_block", head))
+                if prep["status"] != "not_checked":
+                    store.put(prep_key, prep)
+            except (RpcError, ValueError, KeyError, TypeError):
+                prep = {"status": "pending", "reason": "Preparation check incomplete", "source_chain_funding": "not_checked"}
+        row["preparation"] = prep
     store.summarize(pool["pool"], row)
     # Retention evidence is independent of an investment recommendation or contract safety.
     return row

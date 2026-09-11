@@ -95,10 +95,11 @@ def request_output(rows, tx, token, chain_id):
                 continue
             legs = [t for t in data["outTxs"] if t.get("chainId") == chain_id and t.get("txHash", t.get("hash", "")).lower() == tx.lower() and t.get("status") == "success"]
             inputs = [t for t in data["inTxs"] if t.get("status") == "success" and t.get("txHash", t.get("hash"))]
-            if len(legs) != 1 or not inputs or int(out["amount"]) <= 0:
+            if len(legs) != 1 or not inputs or len({t.get("chainId") for t in inputs}) != 1 or int(out["amount"]) <= 0:
                 continue
             matches.append({"recipient": r["recipient"].lower(), "bought_raw": str(int(out["amount"])),
-                "source_address": r["user"], "source_chain_id": inputs[0]["chainId"], "request_id": r["id"], "transaction": tx})
+                "source_address": r["user"], "source_chain_id": inputs[0]["chainId"], "request_id": r["id"], "transaction": tx,
+                "service": "Relay"})
         except (KeyError, ValueError, TypeError, AttributeError):
             continue
     return matches[0] if len(matches) == 1 else None

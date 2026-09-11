@@ -173,6 +173,46 @@ invalidate ordinary ERC20 assumptions; there is no production trade simulation.
 
 `python robinhood.py --db data/robinhood.sqlite --output data/robinhood.json`
 
+## Accumulation evidence (2026-09-11)
+
+Three evidence layers augment an existing cohort; preparation coincidences do
+not independently promote a token or assert insider ownership. Solana is unchanged.
+
+- Cross-chain inflow: receipt-reconciled Relay source/destination chains, distinct
+  recipients, gross bought supply, and frozen at-catch context. Same-chain Relay
+  swaps are excluded from the cross-chain count. Other services remain unverified.
+  Two extra unresolved-route lookups per pool remove the single-solver lookup
+  dependency without making unlimited API requests. Generic single-beneficiary
+  EOA routes can be attributed through receipt reconciliation, but their source
+  network stays unknown. Contract beneficiaries, mixed sources, fee-adjusted
+  unknown routes, and ambiguous swaps fail closed.
+- Preparation: up to 12 selected buyers and 24 buy receipts. Search the available
+  Robinhood quote-token transfer window before their purchases. Three recipients
+  funded by one unclassified EOA within 15 minutes, with buys within 15 minutes
+  and funding less than one hour before buys, are a timing/funding coincidence.
+  Known local infrastructure and contract senders are excluded. This is NOT proof
+  of one owner; unlabelled exchange payouts can still match. Native transfers and
+  historical funding on source chains are NOT covered. Original buy events are
+  frozen so a delayed check does not silently inspect unrelated later purchases.
+- Position movement: durable, hash-anchored checkpoints in the existing SQLite
+  cache. Starts at the first trace checkpoint, not retroactively at launch. Up to
+  12 original buyers, eight additional recipient addresses and two transfer hops.
+  Reconciles incoming/outgoing transfers and all tracked end balances. Tracks only
+  the guaranteed portion of mixed balances; uncertain provenance goes to unknown.
+  Reports original holders / transfer recipients / confirmed sold / unresolved as
+  percentages of total supply. The four buckets conserve original bought tokens.
+  Only reconciled direct sales into the selected pool are confirmed sales; other
+  pools, routers, contracts and untraced destinations remain unresolved. Transfers
+  to another address do not establish unchanged beneficial ownership. A return
+  transfer or repeated event is not a new purchase. Later topups cannot resurrect
+  sold provenance. Supply changes invalidate the trace.
+
+Optional evidence is capped at 64 logical RPC operations per helper and 120 per
+scan, within the existing RPC/time budget (provider retries still count against
+the main budget). It leaves at least 90 main-budget calls and 60 seconds available.
+Partial failures keep the previous atomic trace checkpoint. UI never presents a
+pending or stale trace as a current result. No new database or paid plan is needed.
+
 SQLite stores metadata, frozen cohorts, cursors, current-window logs, cached
 receipts and historical window summaries. Commits occur after head validation.
 Receipt cache expires after seven days. No new D1 quota is used.

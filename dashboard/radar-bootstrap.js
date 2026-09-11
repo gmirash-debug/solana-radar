@@ -16,7 +16,7 @@ if (typeof document !== "undefined") {
     location.href = networkUrl(location.href, event.target.value);
   });
   try {
-    if (network === "robinhood") await import("./robinhood.js?v=20260911-relay-1");
+    if (network === "robinhood") await import("./robinhood.js?v=20260911-evidence-1");
     else await import("./app.js?v=20260910-gmgn-2");
   } catch {
     document.querySelector("#subtitle").textContent = "Interface could not load";
