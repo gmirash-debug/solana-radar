@@ -7,6 +7,7 @@
     "test": "python3 -m unittest discover -s tests -v && node --test cloudflare/scan-dispatcher/test/index.test.mjs dashboard/test/*.test.mjs && node --check dashboard/app.js",
     "replay": "python3 tools/replay_reactivation.py"
   },
-  "dependencies": {},
-  "devDependencies": {}
+  "devDependencies": {
+    "jsdom": "^30.1.1"
+  }
 }

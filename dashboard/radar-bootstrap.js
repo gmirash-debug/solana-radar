@@ -16,8 +16,8 @@ if (typeof document !== "undefined") {
     location.href = networkUrl(location.href, event.target.value);
   });
   try {
-    if (network === "robinhood") await import("./robinhood.js?v=20261001-coordination-1");
-    else await import("./app.js?v=20261001-coordination-1");
+    if (network === "robinhood") await import("./robinhood.js?v=20261001-terms-1");
+    else await import("./app.js?v=20261001-terms-1");
   } catch {
     document.querySelector("#subtitle").textContent = "Interface could not load";
     document.querySelector("#scannerSummary").textContent = "Reload to retry. Published data has not been changed.";
