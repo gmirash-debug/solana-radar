@@ -210,10 +210,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-solana-radar-outbox-v1-
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
       - name: Install dependencies
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         run: |
           python -m pip install -r requirements.txt
+          npm ci
           npm install -g gmgn-cli@1.6.1
 
       - name: Validate scanner and dashboard

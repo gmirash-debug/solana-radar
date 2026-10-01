@@ -1,0 +1,50 @@
+.decision-ui button.term-trigger {
+  appearance: none;
+  display: inline;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: 0;
+  text-transform: inherit;
+  text-align: inherit;
+  line-height: inherit;
+  white-space: normal;
+  padding: 2px 0;
+  margin: 0;
+  min-height: 0;
+  min-width: 0;
+  cursor: help;
+  text-decoration: underline dotted #9ba9b4;
+  text-underline-offset: 4px;
+  overflow-wrap: anywhere;
+}
+.decision-ui button.term-trigger:hover { color: #215f55; text-decoration-color: currentColor; }
+.decision-ui button.term-trigger:focus-visible { outline: 2px solid #26716b; outline-offset: 4px; border-radius: 2px; }
+.term-popover {
+  position: fixed;
+  z-index: 100;
+  box-sizing: border-box;
+  padding: 16px;
+  border: 1px solid #c6cfd9;
+  border-radius: 6px;
+  background: #fff;
+  color: #202831;
+  box-shadow: 0 6px 24px #182a4024;
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.55;
+  letter-spacing: 0;
+  text-align: left;
+}
+.term-popover[hidden] { display: none; }
+.term-popover-title { display: block; font-size: 14px; font-weight: 650; line-height: 1.4; }
+.term-popover p { margin: 8px 0 0; }
+.term-popover .term-popover-note { padding-top: 10px; margin-top: 10px; border-top: 1px solid #e0e5eb; color: #52616e; font-size: 12px; }
+@media (pointer: coarse) {
+  .decision-ui button.term-trigger { padding: 5px 0; cursor: pointer; }
+}

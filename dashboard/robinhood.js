@@ -2,9 +2,11 @@ import {validSnapshot, isFresh, selectTokens, formatSupplyPercent, walletFresh, 
   REVIEW_GROUPS, reviewGroup, positionBounds, marketFresh, comparePositions, ageFilterLabel, relaySignalLabel} from "./robinhood-state.js?v=20260911-evidence-2";
 import {renderAccumulationEvidence, accumulationSummary} from "./accumulation-evidence.js?v=20260911-evidence-2";
 import {renderCoordinatedActivity} from "./coordinated-activity.js?v=20261001-1";
+import {installTerminology} from "./terminology.js?v=20261001-terms-1";
 import {gmgnUrl, renderGmgnMarket, renderGmgnHolders, renderGmgnSecurity} from "./gmgn-context.js?v=20260910-gmgn-2";
 
 const $ = selector => document.querySelector(selector);
+const terminology = installTerminology(document);
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[c]));
 const money = value => value == null || !Number.isFinite(Number(value)) ? "Unknown" : new Intl.NumberFormat("en", {style:"currency", currency:"USD", notation:"compact", maximumFractionDigits:1}).format(value);
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString(undefined, {day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit"}) : "Not checked";
@@ -88,6 +90,7 @@ function detail(t) {
 }
 
 function render({resetList = false} = {}) {
+  terminology.dismiss();
   if (!state.payload) return;
   const listScroll = resetList ? 0 : $(".review-list")?.scrollTop || 0;
   const detailScroll = $(".token-detail")?.scrollTop || 0;
@@ -117,6 +120,7 @@ function render({resetList = false} = {}) {
   bind();
   if ($(".review-list")) $(".review-list").scrollTop = listScroll;
   if (previousKey === state.selected && $(".token-detail")) $(".token-detail").scrollTop = detailScroll;
+  terminology.refresh($("#content"));
 }
 
 function openToken(key) {

@@ -1,5 +1,6 @@
 import { chooseDashboardPayload } from "./data-source.js?v=20260807-wallet-edge-1";
 import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261001-1";
+import { installTerminology } from "./terminology.js?v=20261001-terms-1";
 import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail } from "./decision-view.js?v=20260904-decision-1";
 import {
   DEFAULT_WORKFLOW,
@@ -19,6 +20,7 @@ import {
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const DELETE_SYNC_ENDPOINT = "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/deleted-token";
+const terminology = installTerminology(document);
 
 function loadHiddenTokenKeys() {
   try {
@@ -3601,6 +3603,7 @@ function showNotice(message) {
 }
 
 function render() {
+  terminology.dismiss();
   const listScroll = document.querySelector(".review-list")?.scrollTop || 0;
   const detailScroll = document.querySelector(".review-workspace .token-detail")?.scrollTop || 0;
   const openFolds = [...document.querySelectorAll(".research-fold[open]")].map((fold) => fold.querySelector("summary")?.textContent);
@@ -3624,6 +3627,7 @@ function render() {
   document.querySelectorAll(".research-fold").forEach((fold) => {
     if (openFolds.includes(fold.querySelector("summary")?.textContent)) fold.open = true;
   });
+  terminology.refresh(els.content);
 }
 
 async function runScan() {
