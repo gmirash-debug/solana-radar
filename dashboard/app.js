@@ -1,4 +1,5 @@
 import { chooseDashboardPayload } from "./data-source.js?v=20260807-wallet-edge-1";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261001-1";
 import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail } from "./decision-view.js?v=20260904-decision-1";
 import {
   DEFAULT_WORKFLOW,
@@ -213,7 +214,7 @@ const TIER_META = {
 };
 
 const SUPPLY_INTEGRITY_META = {
-  distributed: { label: "Supply distributed", tone: "good" },
+  distributed: { label: "No concentration flag in checked set", tone: "" },
   watch: { label: "Supply watch", tone: "warn" },
   concentrated: { label: "Supply concentrated", tone: "bad" },
   unverified: { label: "Supply unverified", tone: "warn" },
@@ -2039,6 +2040,7 @@ function renderTokenRow(token) {
         <div class="chips">
           ${primaryStatusChip(token)}
           ${supplyIntegrityChip(token)}
+          ${renderCoordinatedActivity(resolveCoordinatedActivity(token), {now: Date.now(), compact: true})}
           ${operationalFlagChips(token)}
           ${chip(`${token.narrative.primary} - ${token.narrative.tilt}`, narrativeTone(token.narrative))}
           ${token.narrative.secondary.slice(0, 1).map((name) => chip(`${name} flavor`)).join("")}
@@ -2906,15 +2908,17 @@ function renderSupplyHistory(token) {
 
 function renderSupplyTab(token) {
   const integrity = token.supplyIntegrity;
+  const coordinated = resolveCoordinatedActivity(token);
+  const coordinatedEvidence = renderCoordinatedActivity(coordinated, {now: Date.now()});
   if (!integrity) {
-    return `<section class="detail-block"><div class="detail-block-title">Supply integrity</div><div class="empty compact">Supply snapshot pending.</div></section>`;
+    return `<section class="detail-block"><div class="detail-block-title">Supply integrity</div><div class="empty compact">Supply snapshot pending.</div>${coordinatedEvidence}</section>`;
   }
   const raw = integrity.raw_concentration || {};
   const circulating = integrity.estimated_circulating_concentration || {};
   const evidence = Array.isArray(integrity.evidence_families) ? integrity.evidence_families : [];
   const evidenceChips = evidence.length
     ? evidence.map((item) => chip(`${supplyEvidenceLabel(item.family)} / ${item.wallets || 0} wallets${item.supporting_only ? " / support only" : ""}`, item.supporting_only ? "warn" : "good")).join(" ")
-    : chip("No independent wallet links", "good");
+    : chip("No links found in checked subset");
   const dataTone = integrity.data_quality_status === "complete"
     ? "good"
     : integrity.data_quality_status === "invalid"
@@ -2942,7 +2946,7 @@ function renderSupplyTab(token) {
       </div>
       <div class="kv"><span>Status</span><span>${supplyIntegrityChip(token)} <span class="muted-inline">${esc(integrity.reason || "")}</span></span></div>
       <div class="kv"><span>Data quality</span><span>${chip(integrity.data_quality_status || "unavailable", dataTone)} ${esc(supplyPct(integrity.owner_resolution_pct, 0))} owner resolution / ${esc(integrity.largest_accounts_checked || 0)} accounts / checked ${esc(dateLabel(integrity.checked_at))}${refreshState}</span></div>
-      <div class="kv"><span>Coordination</span><span>${integrity.coordination_confirmed ? chip("Confirmed by independent evidence", "bad") : chip("Not confirmed", "good")} ${evidenceChips}</span></div>
+      ${coordinatedEvidence || `<div class="kv"><span>Coordination</span><span>${integrity.coordination_confirmed ? chip("Converging link signals", "warn") : chip("Common control not established")} ${evidenceChips}</span></div>`}
       ${validationIssues.length ? `<div class="kv"><span>Validation</span><span>${validationIssues.map((item) => chip(item, "bad")).join(" ")}</span></div>` : ""}
       ${renderSupplyLinkageGroups(integrity)}
     </section>
@@ -2968,6 +2972,7 @@ function renderWalletsTab(token) {
       <div class="kv"><span>Fresh signal</span><span>${renderSignalTier(token)}</span></div>
       ${renderThesisDetails(token)}
       ${renderWalletEdge(token)}
+      ${renderCoordinatedActivity(resolveCoordinatedActivity(token), {now: Date.now()})}
       <div class="kv"><span>Wallet setup</span><span>${renderWalletCluster(token)}</span></div>
       <div class="kv"><span>Wallet PnL</span><span>${renderWalletSummary(token)}</span></div>
       ${renderTopWalletPreview(token)}
@@ -3305,7 +3310,7 @@ function renderNarratives() {
 function renderReviewRow(token) {
   const view = token.decision;
   return `<button class="review-row${token.key === state.selectedTokenKey ? " is-selected" : ""}${token.hidden ? " is-hidden" : ""}" type="button" data-token-key="${esc(token.key)}" aria-pressed="${token.key === state.selectedTokenKey}">
-    <span class="review-identity">${tokenAvatar(token, true)}<span class="review-copy"><strong>${esc(token.symbol)}</strong><span class="review-reason">${esc(view.reason)}</span><small>Caught ${esc(dateLabel(token.firstSignalAt))}</small></span></span>
+    <span class="review-identity">${tokenAvatar(token, true)}<span class="review-copy"><strong>${esc(token.symbol)}</strong><span class="review-reason">${esc(view.reason)}</span>${renderCoordinatedActivity(resolveCoordinatedActivity(token), {now: Date.now(), compact: true})}<small>Caught ${esc(dateLabel(token.firstSignalAt))}</small></span></span>
     <span class="review-position"><strong>${view.retained === null ? "Unknown" : `${view.retained.toFixed(0)}%`}</strong><small>${view.supply === null ? "supply unknown" : `${view.supply.toFixed(1)}% supply`}</small><small class="${view.fresh ? "" : "warning"}">${view.fresh ? "checked" : "check overdue"}${!view.complete ? " · partial" : ""}</small></span>
     <span class="review-market"><strong>${token.currentMarket?.isFresh ? moneyMaybe(token.currentMcap) : "Unverified"}</strong><small class="${pClass(token.profitPct)}">${pct(token.profitPct)} since catch</small></span>
   </button>`;

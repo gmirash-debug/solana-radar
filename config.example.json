@@ -1,6 +1,21 @@
 {
   "mode": "balanced",
   "lane": "reactivation",
+  "coordinated_activity_enabled": true,
+  "coordinated_activity": {
+    "min_wallets": 3,
+    "min_families": 2,
+    "min_held_supply_pct": 1,
+    "buy_window_seconds": 120,
+    "preparation_window_seconds": 900,
+    "max_funding_lag_seconds": 3600,
+    "min_funding_native": 0.05,
+    "min_funding_buy_fraction": 0.1,
+    "young_max_age_days": 14,
+    "young_max_previous_tx_count": 3,
+    "max_balance_age_seconds": 3600
+  },
+  "coordinated_activity_infrastructure_addresses": [],
   "dashboard_signal_epoch": "2026-08-13T01:01:00Z",
   "modes": {
     "aggressive": {

@@ -19,6 +19,7 @@ from gmgn_context import enrich as enrich_gmgn
 from relay_context import RelayClient, SOLVER, request_output, buy_wave
 from position_evidence import seed_position, replay_position, position_summary, cross_chain_summary, preparation_summary
 from lifi_context import LifiClient
+from coordinated_activity import analyze_coordinated_activity
 
 CHAIN_ID = 4663
 FACTORY = "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
@@ -675,6 +676,37 @@ def recheck_cohort(rpc, pool, cohort, head, supply, now, config):
     return result
 
 
+def attach_coordination_evidence(row, events, store, config, balance_checked_at=None):
+    """Reuse canonical cached timestamps and balances; never perform new RPC reads."""
+    if not config.get("coordinated_activity_enabled", True):
+        return
+    wallets = {wallet["address"]: wallet for wallet in row.get("wallets", [])}
+    normalized = []
+    for event in events:
+        if event.get("recipient") not in wallets:
+            continue
+        at = store.get("block-time:" + event.get("block_hash", ""))
+        if at is None:
+            continue
+        normalized.append({"owner": event["recipient"], "transaction": event["transaction"],
+            "timestamp": at, "bought_tokens": event["bought_raw"]})
+    excluded = {ZERO, SOLVER, POOL_MANAGER, FACTORY, row.get("pool"), row.get("token"), row.get("quote"), *WRAPPED}
+    excluded.update(config.get("coordinated_activity_infrastructure_addresses") or [])
+    row["coordinated_activity"] = analyze_coordinated_activity(
+        normalized, profiles={}, positions=[{
+            "owner": wallet["address"], "current_balance": wallet.get("balance_raw"),
+            "attributed_tokens": wallet.get("bought_raw"), "retained_tokens": wallet.get("retained_lower_bound_raw"),
+            "balance_verified": row.get("balance_block") is not None,
+            "checked_at": balance_checked_at or row.get("checked_at"),
+        } for wallet in wallets.values()], supply=row.get("total_supply_raw"),
+        observed_at=row.get("checked_at"), config=config.get("coordinated_activity") or {},
+        coverage={"status": "complete" if row.get("history_complete") and row.get("attribution_complete") else "partial",
+                  "total_buyers": len(wallets)}, infrastructure_addresses=excluded,
+    )
+    row["coordinated_activity"]["limitations"].append(
+        "EVM preparation groups remain separate: per-wallet funding times and source identity are not available here.")
+
+
 def inspect_incremental(rpc, pool, start, head, config, store, session, now, relay=None, lifi=None):
     identity = store.get("pool:" + pool["pool"])
     if identity:
@@ -864,6 +896,8 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
             except (RpcError, ValueError, KeyError, TypeError):
                 prep = {"status": "pending", "reason": "Preparation check incomplete", "source_chain_funding": "not_checked"}
         row["preparation"] = prep
+    attach_coordination_evidence(row, (frozen or {}).get("evidence_buys", buy_events), store, config,
+                                 balance_checked_at=(frozen or {}).get("checked_at"))
     store.summarize(pool["pool"], row)
     # Retention evidence is independent of an investment recommendation or contract safety.
     return row

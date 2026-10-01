@@ -207,6 +207,26 @@ test("public dashboard payload excludes per-wallet event detail", () => {
   assert.equal(compact.signal_theses[0].source_score, 80);
 });
 
+test("coordination summary strips frozen inputs and addresses without dropping risk metrics", () => {
+  const evidence = {status:"pattern", metrics:{material_union_held_supply_pct:3},
+    signals:[{code:"common_direct_funding", members:["private-wallet"], detail:{source:"private-funder", transfer_verified:true}}]};
+  const input = {alerts:[{pool:{token_address:"token-a"}, created_at:"2026-10-01T12:00:00Z",
+                         coordination_events:[{signature:"private-tx"}], coordinated_activity:evidence}],
+                 signal_theses:[{token_address:"token-a", signal_at:"2026-10-01T12:00:00Z",
+                                 coordination_inputs:{buys:[{owner:"private-wallet"}]}, coordinated_activity:evidence}]};
+  const before = structuredClone(input);
+  const compact = compactDashboardReport(input);
+  assert.equal(compact.alerts[0].coordinated_activity.metrics.material_union_held_supply_pct, 3);
+  assert.equal(compact.signal_theses[0].coordinated_activity.status, "pattern");
+  assert.equal(compact.alerts[0].coordination_events, undefined);
+  assert.equal(compact.signal_theses[0].coordination_inputs, undefined);
+  for (const row of [compact.alerts[0], compact.signal_theses[0]]) {
+    assert.equal(row.coordinated_activity.signals[0].members, undefined);
+    assert.equal(row.coordinated_activity.signals[0].detail.source, undefined);
+  }
+  assert.deepEqual(input, before);
+});
+
 test("dashboard excludes records from the previous scanner filter era", () => {
   const report = {
     alerts: [
