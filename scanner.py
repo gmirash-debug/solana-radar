@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 import requests
 from gmgn_context import token_ath
+from coordinated_activity import analyze_coordinated_activity, compact_coordinated_activity
 
 
 ROOT = Path(__file__).resolve().parent
@@ -42,6 +43,7 @@ STATE_SCHEMA_VERSION = 1
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
 SOLANA_INCINERATOR = "1nc1nerator11111111111111111111111111111111"
+MAX_SUPPORTED_TRANSACTION_VERSION = 1
 SOLANA_ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
@@ -577,6 +579,7 @@ def compact_alert_for_dashboard(alert):
         return {}
     detail_fields = {
         "events",
+        "coordination_events",
         "common_funders",
         "common_recipients",
         "common_executors",
@@ -616,6 +619,8 @@ def compact_alert_for_dashboard(alert):
             for key, value in integrity.items()
             if key not in detail_fields
         }
+    if isinstance(alert.get("coordinated_activity"), dict):
+        compact["coordinated_activity"] = compact_coordinated_activity(alert["coordinated_activity"])
     return compact
 
 
@@ -626,7 +631,7 @@ def compact_signal_thesis_for_dashboard(thesis):
     compact = {
         key: value
         for key, value in thesis.items()
-        if key not in {"cohort", "cohort_wallets", "supply_integrity_history"}
+        if key not in {"cohort", "cohort_wallets", "supply_integrity_history", "coordination_inputs"}
     }
     integrity = thesis.get("supply_integrity")
     if isinstance(integrity, dict):
@@ -643,6 +648,8 @@ def compact_signal_thesis_for_dashboard(thesis):
             for key, value in integrity.items()
             if key not in detail_fields
         }
+    if isinstance(thesis.get("coordinated_activity"), dict):
+        compact["coordinated_activity"] = compact_coordinated_activity(thesis["coordinated_activity"])
     return compact
 
 
@@ -1823,6 +1830,8 @@ class SolanaRpcProvider:
             return "quota"
         if status == 429 or code in (-32429,) or "rate limit" in detail or "too many requests" in detail:
             return "rate_limit"
+        if code in (-32600, -32602, -32015) or ("transaction version" in detail and "not supported" in detail):
+            return "client"
         if code == -32601 or "method is not available" in detail or "method not found" in detail:
             return "unsupported"
         if any(marker in detail for marker in ("timeout", "timed out", "temporarily unavailable")):
@@ -1996,7 +2005,7 @@ class SolanaRpcProvider:
     def transaction(self, signature):
         return self.call(
             "getTransaction",
-            [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+            [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": MAX_SUPPORTED_TRANSACTION_VERSION}],
         )
 
     def transactions_for_address(
@@ -2021,7 +2030,7 @@ class SolanaRpcProvider:
         opts = {
             "transactionDetails": "full",
             "encoding": "jsonParsed",
-            "maxSupportedTransactionVersion": 0,
+            "maxSupportedTransactionVersion": MAX_SUPPORTED_TRANSACTION_VERSION,
             "sortOrder": sort_order,
             "limit": min(max(1, int(limit)), 1000),
             "filters": filters,
@@ -2331,6 +2340,8 @@ class RoutedSolanaRpc:
                 result = provider.call(method, params=params, timeout=provider_timeout)
             except (HeliusRpcError, HeliusCircuitOpen) as exc:
                 self._record_provider_error(name, method, exc)
+                if getattr(exc, "category", None) == "client":
+                    raise
                 errors.append(f"{name}={getattr(exc, 'category', 'circuit')}")
                 if index + 1 < len(names):
                     self.route_failovers[method] += 1
@@ -2387,7 +2398,7 @@ class RoutedSolanaRpc:
     def transaction(self, signature):
         result, _provider = self._route_call(
             "getTransaction",
-            [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+            [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": MAX_SUPPORTED_TRANSACTION_VERSION}],
             order=self.standard_order,
         )
         return result
@@ -2409,7 +2420,7 @@ class RoutedSolanaRpc:
         opts = {
             "transactionDetails": "full",
             "encoding": "jsonParsed",
-            "maxSupportedTransactionVersion": 0,
+            "maxSupportedTransactionVersion": MAX_SUPPORTED_TRANSACTION_VERSION,
             "sortOrder": sort_order,
             "limit": min(max(1, int(limit)), 1000),
             "filters": filters,
@@ -5425,6 +5436,53 @@ def token_amount(balance):
     return int(amount) / (10**decimals)
 
 
+def resolved_pool_token_sale(meta, keys, pool_address, token_mint, outer_instructions=()):
+    """Attribute sales only through a parsed transfer into the pool's token vault."""
+    accounts = {}
+    for balance in (meta.get("preTokenBalances") or []) + (meta.get("postTokenBalances") or []):
+        index = balance.get("accountIndex")
+        if not isinstance(index, int) or not 0 <= index < len(keys):
+            continue
+        key = keys[index]
+        address = key.get("pubkey") if isinstance(key, dict) else key
+        identity = (balance.get("owner"), balance.get("mint"), balance.get("uiTokenAmount", {}).get("decimals", 0))
+        if address in accounts and accounts[address] != identity:
+            accounts[address] = None
+        elif address not in accounts:
+            accounts[address] = identity
+    instructions = list(outer_instructions)
+    for group in meta.get("innerInstructions") or []:
+        instructions.extend(group.get("instructions") or [])
+    amounts = defaultdict(float)
+    for instruction in instructions:
+        if instruction.get("program") not in ("spl-token", "spl-token-2022"):
+            continue
+        parsed = instruction.get("parsed") or {}
+        if parsed.get("type") not in ("transfer", "transferChecked"):
+            continue
+        info = parsed.get("info") or {}
+        source, destination = accounts.get(info.get("source")), accounts.get(info.get("destination"))
+        if not destination or destination[:2] != (pool_address, token_mint):
+            continue
+        if not source:
+            return None, None
+        owner, mint, decimals = source
+        if not owner or owner == pool_address or mint != token_mint or info.get("mint", token_mint) != token_mint:
+            return None, None
+        try:
+            raw = info.get("amount", (info.get("tokenAmount") or {}).get("amount"))
+            amount = int(raw) / (10 ** int(decimals))
+        except (TypeError, ValueError, OverflowError, ZeroDivisionError):
+            return None, None
+        if math.isfinite(amount) and amount > 0:
+            amounts[owner] += amount
+        else:
+            return None, None
+    if len(amounts) != 1:
+        return None, None
+    return next(iter(amounts.items()))
+
+
 def parse_pool_swap(tx, pool):
     if not tx or tx.get("meta", {}).get("err"):
         return None
@@ -5512,6 +5570,15 @@ def parse_pool_swap(tx, pool):
     token_recipient_amount = positive_token_owners[0][1] if positive_token_owners else max(0.0, signer_token_delta)
     token_sender = negative_token_owners[0][0] if negative_token_owners else signer
     token_sender_amount = negative_token_owners[0][1] if negative_token_owners else max(0.0, -signer_token_delta)
+    sale_owner, sale_amount = (None, None)
+    if kind == "sell":
+        sale_owner, sale_amount = resolved_pool_token_sale(meta, keys, pool.pool_address, token_mint,
+            tx.get("transaction", {}).get("message", {}).get("instructions") or [])
+        debit = max(0.0, -token_owner_deltas.get(sale_owner, 0))
+        if not sale_amount or debit + 1e-8 < sale_amount:
+            sale_owner, sale_amount = None, None
+        else:
+            sale_amount = min(sale_amount, token_amount_value)
     routed = kind == "buy" and token_recipient != signer
     recipient_share = token_recipient_amount / token_amount_value if token_amount_value else 0.0
     if kind != "buy":
@@ -5525,6 +5592,7 @@ def parse_pool_swap(tx, pool):
 
     return {
         "signature": signatures[0] if signatures else "",
+        "slot": tx.get("slot"),
         "block_time": tx.get("blockTime"),
         "time": iso(tx.get("blockTime")),
         "pool_address": pool.pool_address,
@@ -5536,6 +5604,8 @@ def parse_pool_swap(tx, pool):
         "token_recipient_amount": token_recipient_amount,
         "token_sender": token_sender,
         "token_sender_amount": token_sender_amount,
+        "coordination_sale_owner": sale_owner,
+        "coordination_sale_amount": sale_amount,
         "recipient_share": recipient_share,
         "routed": routed,
         "owner_resolution": owner_resolution,
@@ -5586,8 +5656,14 @@ def classify_wallet(rpc, wallet, before_signature, buy_time, config, state):
 
     funding_source = None
     funding_sol = 0.0
+    funding_verified = False
     if wallet_class in ("fresh", "freshish") and prev:
-        funding_source, funding_sol = extract_funding_source(rpc, prev.get("signature"), wallet)
+        funding_source, funding_sol, funding_verified = extract_wallet_funding(
+            rpc, prev.get("signature"), wallet,
+        )
+
+    prior_times = [item.get("blockTime") for item in previous if item.get("blockTime")]
+    history_complete = count < 50 and len(prior_times) == count
 
     result = {
         "wallet": wallet,
@@ -5601,20 +5677,60 @@ def classify_wallet(rpc, wallet, before_signature, buy_time, config, state):
         "previous_time": iso(prev.get("blockTime")) if prev else None,
         "funding_source": funding_source,
         "funding_sol": funding_sol,
+        "funding_verified": funding_verified,
+        "funding_at": prev.get("blockTime") if funding_source and prev else None,
+        "history_complete": history_complete,
+        "first_activity_at": min([int(buy_time or 0), *prior_times]) if buy_time and history_complete else None,
     }
     wallet_cache[cache_key] = result
     return result
 
 
 def extract_funding_source(rpc, signature, target_wallet):
+    source, amount, _verified = extract_wallet_funding(rpc, signature, target_wallet)
+    return source, amount
+
+
+def extract_wallet_funding(rpc, signature, target_wallet):
     if not signature:
-        return None, 0.0
+        return None, 0.0, False
     try:
         tx = rpc.transaction(signature)
     except Exception:
-        return None, 0.0
+        return None, 0.0, False
     if not tx or tx.get("meta", {}).get("err"):
-        return None, 0.0
+        return None, 0.0, False
+
+    message = tx.get("transaction", {}).get("message", {})
+    instructions = list(message.get("instructions") or [])
+    for group in tx.get("meta", {}).get("innerInstructions") or []:
+        instructions.extend(group.get("instructions") or [])
+    transfers = defaultdict(float)
+    outgoing = 0.0
+    for instruction in instructions:
+        if instruction.get("program") != "system":
+            continue
+        parsed = instruction.get("parsed") or {}
+        info = parsed.get("info") or {}
+        if parsed.get("type") not in {"transfer", "transferWithSeed"}:
+            continue
+        source = info.get("source")
+        amount = to_float(info.get("lamports")) / 1_000_000_000
+        if not math.isfinite(amount) or amount <= 0:
+            continue
+        if source == target_wallet and info.get("destination") != target_wallet:
+            outgoing += amount
+        if info.get("destination") == target_wallet and isinstance(source, str) and source and source != target_wallet:
+            transfers[source] += amount
+    if len(transfers) == 1:
+        source, amount = next(iter(transfers.items()))
+        amount = max(0.0, amount - outgoing)
+        meta = tx.get("meta", {})
+        for index, key in enumerate(message.get("accountKeys") or []):
+            pubkey = key.get("pubkey") if isinstance(key, dict) else key
+            if pubkey == target_wallet and index < len(meta.get("preBalances", [])) and index < len(meta.get("postBalances", [])):
+                amount = min(amount, max(0.0, (meta["postBalances"][index] - meta["preBalances"][index]) / 1_000_000_000))
+        return source, amount, amount > 0
 
     keys = tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
     meta = tx.get("meta", {})
@@ -5624,17 +5740,17 @@ def extract_funding_source(rpc, signature, target_wallet):
         if index >= len(meta.get("preBalances", [])) or index >= len(meta.get("postBalances", [])):
             continue
         delta = (meta["postBalances"][index] - meta["preBalances"][index]) / 1_000_000_000
-        pubkey = key.get("pubkey")
+        pubkey = key.get("pubkey") if isinstance(key, dict) else key
         if pubkey == target_wallet:
             target_delta += delta
         if abs(delta) >= 0.01:
             deltas.append((pubkey, delta))
     if target_delta <= 0.1:
-        return None, 0.0
+        return None, 0.0, False
     senders = sorted((item for item in deltas if item[1] < -0.01), key=lambda item: item[1])
     if not senders:
-        return None, target_delta
-    return senders[0][0], target_delta
+        return None, target_delta, False
+    return senders[0][0], target_delta, False
 
 
 HARD_WALLET_CLASSES = {"fresh", "freshish", "dormant"}
@@ -6088,6 +6204,7 @@ def build_alerts(pool, events, config):
 
 WAVE_SWAP_FIELDS = (
     "signature",
+    "slot",
     "block_time",
     "kind",
     "signer",
@@ -6095,6 +6212,8 @@ WAVE_SWAP_FIELDS = (
     "token_recipient_amount",
     "token_sender",
     "token_sender_amount",
+    "coordination_sale_owner",
+    "coordination_sale_amount",
     "recipient_share",
     "routed",
     "owner_resolution",
@@ -6292,6 +6411,114 @@ def verified_alert_cluster_members(alert):
     return funders, executors
 
 
+def coordination_inputs_from_alert(alert):
+    wave = alert.get("wave") or {}
+    profiles = {}
+    buys = []
+    fields = ("history_complete", "first_activity_at", "funding_source", "funding_verified", "funding_at", "source_kind", "as_of_signature", "as_of_time")
+    for owner, profile in ((alert.get("wallet_graph") or {}).get("wallets") or {}).items():
+        if isinstance(profile, dict) and not profile.get("error"):
+            profiles[owner] = {key: profile.get(key) for key in fields}
+            profiles[owner]["previous_tx_count"] = profile.get("previous_tx_count_50")
+            profiles[owner]["funding_amount_native"] = profile.get("funding_sol")
+    for event in alert.get("events") or []:
+        if event.get("kind") not in (None, "buy"):
+            continue
+        owner = wave_buy_owner(event)
+        if not owner:
+            continue
+        if event.get("wallet") == owner and "previous_tx_count_50" in event:
+            profiles[owner] = {key: event.get(key) for key in fields}
+            profiles[owner]["previous_tx_count"] = event.get("previous_tx_count_50")
+            profiles[owner]["funding_amount_native"] = event.get("funding_sol")
+    evidence_events = alert.get("coordination_events") or alert.get("events") or []
+    buyer_owners = {wave_buy_owner(event) for event in evidence_events if event.get("kind") != "sell"}
+    for event in evidence_events:
+        if event.get("kind") not in (None, "buy", "sell"):
+            continue
+        is_sale = event.get("kind") == "sell"
+        owner = event.get("coordination_sale_owner") if is_sale else wave_buy_owner(event)
+        sold = min(float(event.get("coordination_sale_amount") or 0), float(event.get("token_amount") or 0)) if is_sale else None
+        if is_sale and (owner not in buyer_owners or not sold or sold <= 0):
+            continue
+        if not owner:
+            continue
+        buys.append({
+            "owner": owner, "transaction": event.get("signature"),
+            "timestamp": parse_timestamp(event.get("block_time") or event.get("time")),
+            "slot": event.get("slot"), "bought_tokens": 0 if event.get("kind") == "sell" else event.get("token_amount"),
+            "amount_native": event.get("sol_amount"), "executor": event.get("signer"),
+            "kind": event.get("kind") or "buy",
+            "sold_tokens": sold,
+        })
+    for owner, profile in profiles.items():
+        first = min((row for row in buys if row["owner"] == owner and row["kind"] == "buy"), key=lambda row: row["timestamp"] or 0, default=None)
+        profile["history_complete"] = bool(profile.get("history_complete") and first
+            and profile.get("as_of_signature") == first["transaction"]
+            and profile.get("as_of_time") == first["timestamp"])
+    positions = []
+    verified_sales = defaultdict(float)
+    for trade in buys:
+        if trade.get("kind") == "sell":
+            verified_sales[trade["owner"]] += trade["sold_tokens"]
+    for row in wave.get("top_buyers") or []:
+        if not row.get("owner"):
+            continue
+        balance_verified = row.get("balance_verified")
+        if balance_verified is None:
+            balance_verified = wave.get("balance_coverage_pct") == 100 and row.get("current_balance") is not None
+        attributed = max(0.0, float(row.get("token_bought") or 0))
+        sold = max(verified_sales[row["owner"]], max(0.0, float(row.get("coordination_sold_tokens") or 0)))
+        retained = min(max(0.0, float(row.get("current_balance") or 0)), max(0.0, attributed - sold)) if balance_verified else None
+        positions.append({
+            "owner": row["owner"], "current_balance": row.get("current_balance"),
+            "attributed_tokens": row.get("token_bought"), "retained_tokens": retained,
+            "balance_verified": bool(balance_verified), "checked_at": alert.get("created_at"),
+        })
+    return {"buys": buys, "profiles": profiles, "positions": positions}
+
+
+def attach_coordinated_activity(alert, config):
+    if not config.get("coordinated_activity_enabled", True):
+        return
+    inputs = coordination_inputs_from_alert(alert)
+    quality = alert.get("data_quality") or {}
+    wave = alert.get("wave") or {}
+    pool = alert.get("pool") or {}
+    excluded = [pool.get("pool_address"), pool.get("token_address"), SOL_MINT, SOLANA_INCINERATOR]
+    excluded.extend(config.get("coordinated_activity_infrastructure_addresses") or [])
+    alert["coordinated_activity"] = analyze_coordinated_activity(
+        **inputs, supply=wave.get("supply"), observed_at=alert.get("created_at"), config=config.get("coordinated_activity") or {},
+        coverage={"status": "complete" if quality.get("status") == "complete" and not alert.get("coordination_events_truncated") else "partial",
+                  "owner_resolution_pct": wave.get("owner_resolution_coverage_pct"),
+                  "balance_coverage_pct": wave.get("balance_coverage_pct"),
+                  "total_buyers": wave.get("unique_buyers") or len({row["owner"] for row in inputs["buys"] if row.get("kind") != "sell"})},
+        infrastructure_addresses=[value for value in excluded if value],
+    )
+
+
+def update_thesis_coordination(thesis, config, checked_at):
+    inputs = thesis.get("coordination_inputs")
+    if not inputs or not config.get("coordinated_activity_enabled", True):
+        return
+    caps = inputs.get("retention_caps") or {}
+    positions = [{
+        "owner": row["owner"], "current_balance": row.get("current_balance"),
+        "attributed_tokens": row.get("attributed_tokens"),
+        "retained_tokens": min(float(row.get("current_balance") or 0), float(caps[row["owner"]])) if row["owner"] in caps else None,
+        "balance_verified": row.get("checked_at") == checked_at,
+        "checked_at": row.get("checked_at"),
+    } for row in thesis.get("cohort") or [] if row.get("owner")]
+    thesis["coordinated_activity"] = analyze_coordinated_activity(
+        buys=inputs.get("buys") or [], profiles=inputs.get("profiles") or {}, positions=positions,
+        supply=thesis.get("supply"), observed_at=checked_at, config=config.get("coordinated_activity") or {},
+        coverage={"status": inputs.get("history_status", "partial"),
+                  "balance_coverage_pct": thesis.get("balance_coverage_pct"),
+                  "total_buyers": len(thesis.get("cohort") or [])},
+        infrastructure_addresses=inputs.get("infrastructure_addresses") or [],
+    )
+
+
 def signal_thesis_from_alert(alert, config, captured_at=None):
     if not isinstance(alert, dict):
         return None
@@ -6402,6 +6629,11 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
     compact_integrity = compact_supply_integrity_snapshot(supply_integrity)
     if compact_integrity:
         integrity_history.append(compact_integrity)
+    coordination = coordination_inputs_from_alert(alert) if alert.get("coordinated_activity") else None
+    if coordination:
+        original_owners = {row["owner"] for row in cohort}
+        coordination["buys"] = [row for row in coordination["buys"] if row["owner"] in original_owners]
+        coordination["profiles"] = {owner: profile for owner, profile in coordination["profiles"].items() if owner in original_owners}
     return {
         "version": 2,
         "cohort_id": "|".join(
@@ -6494,6 +6726,16 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
         "invalidation_streak": 0,
         "supply_integrity": supply_integrity,
         "supply_integrity_history": integrity_history,
+        "coordinated_activity": copy.deepcopy(alert.get("coordinated_activity")),
+        "coordination_inputs": {
+            "buys": coordination["buys"],
+            "profiles": coordination["profiles"],
+            "retention_caps": {row["owner"]: row["retained_tokens"] for row in coordination["positions"]
+                               if row["owner"] in original_owners and row.get("balance_verified") and row.get("retained_tokens") is not None},
+            "history_status": "complete" if (alert.get("data_quality") or {}).get("status") == "complete" and not alert.get("coordination_events_truncated") else "partial",
+            "infrastructure_addresses": [pool.get("pool_address"), pool.get("token_address"), SOL_MINT, SOLANA_INCINERATOR,
+                                         *(config.get("coordinated_activity_infrastructure_addresses") or [])],
+        } if coordination else None,
         "cohort": cohort,
     }
 
@@ -6657,6 +6899,7 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
         )
         if previous_status != thesis["status"]:
             thesis["status_changed_at"] = checked_at
+        update_thesis_coordination(thesis, config, checked_at)
         return thesis
 
     current_retained = sum(item[2] for item in checked)
@@ -6802,6 +7045,7 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
         thesis["status_changed_at"] = checked_at
     if status == "invalidated":
         thesis["invalidated_at"] = checked_at
+    update_thesis_coordination(thesis, config, checked_at)
     return thesis
 
 
@@ -6824,6 +7068,7 @@ def public_signal_thesis(thesis):
         "signal_family",
         "source_tier",
         "signal_confirmation",
+        "coordinated_activity",
         "source_score",
         "source_flow_sol",
         "source_wallets",
@@ -8156,6 +8401,23 @@ def supply_integrity_refresh_due(thesis, config, now=None):
     return int(now or time.time()) - checked_at >= max(5.0, minutes) * 60
 
 
+def resolved_cohort_sales(swaps, owner, first_buy_time, checked_at):
+    """Deduplicate proven sales across all already-fetched post-buy observations."""
+    first_buy_time = parse_timestamp(first_buy_time)
+    checked_at = parse_timestamp(checked_at)
+    by_transaction = {}
+    for swap in swaps:
+        if swap.get("kind") != "sell" or swap.get("coordination_sale_owner") != owner:
+            continue
+        at = parse_timestamp(swap.get("block_time") or swap.get("time"))
+        signature = swap.get("signature")
+        amount = to_float(swap.get("coordination_sale_amount"))
+        if not signature or not first_buy_time or not first_buy_time < at <= checked_at or not math.isfinite(amount) or amount <= 0:
+            continue
+        by_transaction[signature] = max(by_transaction.get(signature, 0), amount)
+    return math.fsum(by_transaction.values())
+
+
 def build_reactivation_wave_alerts(pool, swaps, config, rpc, state=None):
     if not reactivation_wave_enabled(config) or not pool.token_address:
         return []
@@ -8207,8 +8469,10 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc, state=None):
                 continue
             try:
                 balance = rpc.token_balance(owner, pool.token_address)
+                balance_verified = True
             except Exception:
                 balance = 0.0
+                balance_verified = False
                 balance_errors += 1
             bought_tokens = float(row.get("token_bought") or 0)
             activity = owner_activity.get(owner) or {}
@@ -8243,6 +8507,9 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc, state=None):
                     "wave_net_coverage_pct": retention["net_coverage_pct"],
                     "retained_supply_pct": (retained_tokens / supply * 100) if supply else 0.0,
                     "current_balance": balance,
+                    "balance_verified": balance_verified,
+                    "coordination_sold_tokens": resolved_cohort_sales(swaps, owner, row.get("first_buy_time"), parse_timestamp(created_at))
+                        if config.get("coordinated_activity_enabled", True) else None,
                     "current_supply_pct": (balance / supply * 100) if supply else 0.0,
                     "buy_count": row["buy_count"],
                     "sell_count": row["sell_count"],
@@ -8292,6 +8559,12 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc, state=None):
 
         alert = {
             "created_at": created_at,
+            "coordination_events": [
+                {key: item.get(key) for key in WAVE_SWAP_FIELDS}
+                for item in candidate["window"][:200]
+                if float(item.get("sol_amount") or 0) >= float(config.get("reactivation_wave_min_trade_sol", 0.25))
+            ] if config.get("coordinated_activity_enabled", True) else [],
+            "coordination_events_truncated": len(candidate["window"]) > 200,
             "score": 0,
             "lane": "reactivation",
             "reactivation_stage": config.get("reactivation_stage") or "mature",
@@ -9786,6 +10059,7 @@ def apply_alert_data_quality(
                 penalties.append("partial onchain coverage")
             alert["quality_penalties"] = penalties
         apply_signal_confirmation(alert, config)
+        attach_coordinated_activity(alert, config)
     return alerts
 
 

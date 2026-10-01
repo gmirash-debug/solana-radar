@@ -1,6 +1,7 @@
 import {validSnapshot, isFresh, selectTokens, formatSupplyPercent, walletFresh, supplyRange,
   REVIEW_GROUPS, reviewGroup, positionBounds, marketFresh, comparePositions, ageFilterLabel, relaySignalLabel} from "./robinhood-state.js?v=20260911-evidence-2";
 import {renderAccumulationEvidence, accumulationSummary} from "./accumulation-evidence.js?v=20260911-evidence-2";
+import {renderCoordinatedActivity} from "./coordinated-activity.js?v=20261001-1";
 import {gmgnUrl, renderGmgnMarket, renderGmgnHolders, renderGmgnSecurity} from "./gmgn-context.js?v=20260910-gmgn-2";
 
 const $ = selector => document.querySelector(selector);
@@ -35,7 +36,7 @@ function filtered() {
 function row(t) {
   const fresh = isFresh(state.payload) && walletFresh(t);
   return `<button class="review-row${t.key === state.selected ? " is-selected" : ""}" data-token-key="${esc(t.key)}" aria-pressed="${t.key === state.selected}" type="button">
-    <span class="review-identity">${avatar(t, true)}<span class="review-copy"><strong>${esc(t.symbol)}</strong><span class="review-reason">${esc(reason(t))}</span>${accumulationSummary(t) || relaySignalLabel(t) ? `<small>${esc(accumulationSummary(t) || relaySignalLabel(t))}</small>` : ""}<small>Observed ${esc(date(t.first_observed_at))}</small></span></span>
+    <span class="review-identity">${avatar(t, true)}<span class="review-copy"><strong>${esc(t.symbol)}</strong><span class="review-reason">${esc(reason(t))}</span>${renderCoordinatedActivity(t.coordinated_activity, {network:"robinhood", now:Date.now(), compact:true})}${accumulationSummary(t) || relaySignalLabel(t) ? `<small>${esc(accumulationSummary(t) || relaySignalLabel(t))}</small>` : ""}<small>Observed ${esc(date(t.first_observed_at))}</small></span></span>
     <span class="review-position"><strong>${esc(positionText(positionBounds(t)))}</strong><small>${esc(supplyRange(t))} supply</small><small class="${fresh ? "" : "warning"}">${fresh ? "checked" : "check overdue"}${!t.attribution_complete && !t.cohort_created_at ? " / partial" : ""}</small></span>
     <span class="review-market"><strong>${marketFresh(t) ? money(t.fdv_usd) : "Unverified"}</strong><small class="muted">FDV / ${esc(t.protocol || "v3")}</small></span>
   </button>`;
@@ -54,9 +55,10 @@ function overview(t) {
     </section>${relayEvidence(t)}${t.cohort_created_at ? renderAccumulationEvidence(t) : ""}<section class="decision-caveats"><h3>Assessment</h3><p>${esc(reason(t))}. ${t.cohort_created_at ? "Later unrelated buyers do not replace this cohort." : "Observed activity has not established a retained accumulation signal."}</p><p>A reduced original-wallet balance does not mean a sale. Transfer provenance is shown separately and does not establish ownership. Holding is not a new entry signal.</p>${t.error ? `<p class="warning">${esc(t.error)}</p>` : ""}</section>`;
 }
 function wallets(t) {
-  if (!t.wallets.length) return `<div class="review-empty"><img src="icons/scan-search.svg" alt=""><h3>No attributed buyers</h3><p>Available evidence does not establish buyer balances. This does not mean that no purchases occurred.</p></div>`;
+  const coordinatedEvidence = renderCoordinatedActivity(t.coordinated_activity, {network:"robinhood", now:Date.now()});
+  if (!t.wallets.length) return `${coordinatedEvidence}<div class="review-empty"><img src="icons/scan-search.svg" alt=""><h3>No attributed buyers</h3><p>Available evidence does not establish buyer balances. This does not mean that no purchases occurred.</p></div>`;
   return `<div class="section-heading"><h3>${t.cohort_created_at ? "Original buyers" : "Current-window buyers"}</h3><span class="evidence-time">${esc(date(t.checked_at))}</span></div>
-    <div class="table-wrap"><table class="network-wallet-table"><thead><tr><th>Wallet</th><th>Position left</th><th>Supply max.</th></tr></thead><tbody>${t.wallets.map(w => `<tr><td><a href="https://robinhoodchain.blockscout.com/address/${w.address}" target="_blank" rel="noopener noreferrer">${esc(w.address.slice(0, 8))}...${esc(w.address.slice(-6))}</a></td><td>${esc(positionText(positionBounds({wallets:[w]})))}</td><td>${esc(formatSupplyPercent(w.supply_upper_bound_pct))}</td></tr>`).join("")}</tbody></table></div>`;
+    ${coordinatedEvidence}<div class="table-wrap"><table class="network-wallet-table"><thead><tr><th>Wallet</th><th>Position left</th><th>Supply max.</th></tr></thead><tbody>${t.wallets.map(w => `<tr><td><a href="https://robinhoodchain.blockscout.com/address/${w.address}" target="_blank" rel="noopener noreferrer">${esc(w.address.slice(0, 8))}...${esc(w.address.slice(-6))}</a></td><td>${esc(positionText(positionBounds({wallets:[w]})))}</td><td>${esc(formatSupplyPercent(w.supply_upper_bound_pct))}</td></tr>`).join("")}</tbody></table></div>`;
 }
 function supply(t) {
   const security = t.security || {status:"unknown", flags:[], unknown:["not_checked"]};
@@ -64,7 +66,7 @@ function supply(t) {
     ${fact("Retained supply", supplyRange(t))}${fact("Total supply", t.total_supply_raw && t.decimals != null ? new Intl.NumberFormat("en", {maximumFractionDigits:2}).format(Number(t.total_supply_raw) / 10 ** t.decimals) : "Unknown")}
     ${fact("Contract risk", security.status === "risk" ? (security.flags || []).join(", ") : security.status === "no_flags" ? "No flags reported" : "Incomplete checks")}
     ${fact("Unknown checks", (security.unknown || []).join(", ") || "None reported")}${fact("Buy tax", security.buy_tax == null ? "Unknown" : formatSupplyPercent(security.buy_tax * 100))}${fact("Sell tax", security.sell_tax == null ? "Unknown" : formatSupplyPercent(security.sell_tax * 100))}
-    ${fact("Source", security.source || "Not available")}</div><section class="decision-caveats"><h3>Evidence limits</h3><p>The lower bound subtracts outgoing transfers; the upper bound is capped by wallet balance and attributed buys. Unknown taxes are not zero. Contract checks do not guarantee sellability.</p></section>`;
+    ${fact("Source", security.source || "Not available")}</div>${renderCoordinatedActivity(t.coordinated_activity, {network:"robinhood", now:Date.now()})}<section class="decision-caveats"><h3>Evidence limits</h3><p>The lower bound subtracts outgoing transfers; the upper bound is capped by wallet balance and attributed buys. Unknown taxes are not zero. Contract checks do not guarantee sellability.</p></section>`;
 }
 function evidence(t) {
   return `<div class="section-heading"><h3>Observation evidence</h3><span class="evidence-time">${esc(date(t.checked_at))}</span></div><div class="evidence-facts">

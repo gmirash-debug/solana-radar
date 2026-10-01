@@ -17,6 +17,7 @@ on:
     paths:
       - ".github/workflows/scan-and-pages.yml"
       - "scanner.py"
+      - "coordinated_activity.py"
       - "robinhood.py"
       - "robinhood_store.py"
       - "gmgn_context.py"

@@ -370,10 +370,23 @@ function dashboardRecordMatchesToken(record, tokenKey) {
   return dashboardTokenFromRecord(record) === normalizeId(tokenKey);
 }
 
+function compactCoordinationEvidence(evidence) {
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) return evidence;
+  return {...evidence, signals: (Array.isArray(evidence.signals) ? evidence.signals : []).filter(signal => signal && typeof signal === "object").map(signal => {
+    const {members, ...summary} = signal;
+    if (signal.detail && typeof signal.detail === "object") {
+      const {source, ...detail} = signal.detail;
+      summary.detail = detail;
+    }
+    return summary;
+  })};
+}
+
 function compactDashboardAlert(alert = {}) {
   if (!alert || typeof alert !== "object" || Array.isArray(alert)) return {};
   const detailFields = new Set([
     "events",
+    "coordination_events",
     "common_funders",
     "common_recipients",
     "common_executors",
@@ -401,6 +414,7 @@ function compactDashboardAlert(alert = {}) {
     } = alert.supply_integrity;
     compact.supply_integrity = summary;
   }
+  if (alert.coordinated_activity) compact.coordinated_activity = compactCoordinationEvidence(alert.coordinated_activity);
   return compact;
 }
 
@@ -410,6 +424,7 @@ function compactDashboardThesis(thesis = {}) {
     cohort,
     cohort_wallets: cohortWallets,
     supply_integrity_history: supplyIntegrityHistory,
+    coordination_inputs: coordinationInputs,
     ...compact
   } = thesis;
   if (thesis.supply_integrity && typeof thesis.supply_integrity === "object") {
@@ -424,6 +439,7 @@ function compactDashboardThesis(thesis = {}) {
     } = thesis.supply_integrity;
     compact.supply_integrity = summary;
   }
+  if (thesis.coordinated_activity) compact.coordinated_activity = compactCoordinationEvidence(thesis.coordinated_activity);
   return compact;
 }
 
