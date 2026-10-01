@@ -168,6 +168,21 @@ class CoordinationPipelineTests(unittest.TestCase):
         s.update_thesis_coordination(thesis, {}, checked)
         self.assertEqual(thesis["coordinated_activity"]["metrics"]["held_supply_pct"], 15)
 
+    def test_proven_post_window_exits_survive_failed_initial_balances(self):
+        item = alert()
+        for row in item["wave"]["top_buyers"]:
+            row.update(balance_verified=False, current_balance=0, coordination_sold_tokens=50)
+        s.attach_coordinated_activity(item, {})
+        thesis = s.signal_thesis_from_alert(item, {})
+        self.assertEqual(thesis["coordination_inputs"]["retention_caps"], {})
+        self.assertEqual(set(thesis["coordination_inputs"]["proven_sales"].values()), {50})
+        checked = s.iso(NOW + 600)
+        for row in thesis["cohort"]:
+            row.update(current_balance=50, current_retained_tokens=50, checked_at=checked)
+        s.update_thesis_coordination(thesis, {}, checked)
+        self.assertEqual(thesis["coordinated_activity"]["metrics"]["held_supply_pct"], 0)
+        self.assertFalse(thesis["coordinated_activity"]["metrics"]["material_pattern"])
+
     def test_gift_sender_is_not_swap_seller(self):
         accounts = [("buyer-a", "token", "100", "0"), ("gift", "token", "0", "100"),
                     ("outside-owner", "token", "50", "0"), ("pool", "token", "1000", "1050"),
@@ -212,6 +227,12 @@ class CoordinationPipelineTests(unittest.TestCase):
             "source": source, "destination": "vault", "amount": amount}}}
             for source, amount in (("buyer-account", "10"), ("ephemeral", "90"))]
         self.assertEqual(s.resolved_pool_token_sale(meta, keys, "pool", "token", instructions), (None, None))
+
+    def test_proven_sales_include_ambiguous_same_second_conservatively(self):
+        swaps = [{"kind": "sell", "signature": "sale-" + str(at), "block_time": at,
+                  "coordination_sale_owner": "buyer", "coordination_sale_amount": 10}
+                 for at in (NOW - 1, NOW, NOW + 1)]
+        self.assertEqual(s.resolved_cohort_sales(swaps + swaps, "buyer", s.iso(NOW), s.iso(NOW)), 10)
 
     def test_post_window_sales_cap_overlay_through_actual_alert_builder(self):
         item = alert()

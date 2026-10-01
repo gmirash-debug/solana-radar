@@ -125,6 +125,10 @@ subset, never an all-clear for the entire token.
   that sold inventory from replacement deposits; failed or stale reads stay unknown.
   Known sales after the triggering window are counted through the balance check
   from already-fetched swaps, separately from the window-scoped timing evidence.
+  Proven-sale totals persist independently of whether the initial balance read
+  succeeded, so a later successful read cannot erase known exits.
+  Same-second sales are included conservatively because second-level timestamps
+  cannot order transactions; no claim is made about which inventory was sold.
 - Robinhood uses the same analyzer and renderer, cached canonical block times,
   raw-unit balances and conservative retained lower bounds. Missing times are
   not guessed. Existing EVM preparation evidence remains separate because the

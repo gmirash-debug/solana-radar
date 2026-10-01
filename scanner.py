@@ -6473,6 +6473,7 @@ def coordination_inputs_from_alert(alert):
         positions.append({
             "owner": row["owner"], "current_balance": row.get("current_balance"),
             "attributed_tokens": row.get("token_bought"), "retained_tokens": retained,
+            "proven_sold_tokens": sold,
             "balance_verified": bool(balance_verified), "checked_at": alert.get("created_at"),
         })
     return {"buys": buys, "profiles": profiles, "positions": positions}
@@ -6502,10 +6503,13 @@ def update_thesis_coordination(thesis, config, checked_at):
     if not inputs or not config.get("coordinated_activity_enabled", True):
         return
     caps = inputs.get("retention_caps") or {}
+    proven_sales = inputs.get("proven_sales") or {}
     positions = [{
         "owner": row["owner"], "current_balance": row.get("current_balance"),
         "attributed_tokens": row.get("attributed_tokens"),
-        "retained_tokens": min(float(row.get("current_balance") or 0), float(caps[row["owner"]])) if row["owner"] in caps else None,
+        "retained_tokens": min(float(row.get("current_balance") or 0),
+            max(0.0, float(row.get("attributed_tokens") or 0) - float(proven_sales.get(row["owner"], 0))),
+            float(caps.get(row["owner"], row.get("attributed_tokens") or 0))),
         "balance_verified": row.get("checked_at") == checked_at,
         "checked_at": row.get("checked_at"),
     } for row in thesis.get("cohort") or [] if row.get("owner")]
@@ -6730,6 +6734,8 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
         "coordination_inputs": {
             "buys": coordination["buys"],
             "profiles": coordination["profiles"],
+            "proven_sales": {row["owner"]: row["proven_sold_tokens"] for row in coordination["positions"]
+                             if row["owner"] in original_owners},
             "retention_caps": {row["owner"]: row["retained_tokens"] for row in coordination["positions"]
                                if row["owner"] in original_owners and row.get("balance_verified") and row.get("retained_tokens") is not None},
             "history_status": "complete" if (alert.get("data_quality") or {}).get("status") == "complete" and not alert.get("coordination_events_truncated") else "partial",
@@ -8412,7 +8418,7 @@ def resolved_cohort_sales(swaps, owner, first_buy_time, checked_at):
         at = parse_timestamp(swap.get("block_time") or swap.get("time"))
         signature = swap.get("signature")
         amount = to_float(swap.get("coordination_sale_amount"))
-        if not signature or not first_buy_time or not first_buy_time < at <= checked_at or not math.isfinite(amount) or amount <= 0:
+        if not signature or not first_buy_time or not first_buy_time <= at <= checked_at or not math.isfinite(amount) or amount <= 0:
             continue
         by_transaction[signature] = max(by_transaction.get(signature, 0), amount)
     return math.fsum(by_transaction.values())
