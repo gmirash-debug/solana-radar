@@ -16,8 +16,8 @@ if (typeof document !== "undefined") {
     location.href = networkUrl(location.href, event.target.value);
   });
   try {
-    if (network === "robinhood") await import("./robinhood.js?v=20261003-evidence-2");
-    else await import("./app.js?v=20261003-evidence-2");
+    if (network === "robinhood") await import("./robinhood.js?v=20261003-evidence-3");
+    else await import("./app.js?v=20261003-evidence-3");
   } catch {
     document.querySelector("#subtitle").textContent = "Interface could not load";
     document.querySelector("#scannerSummary").textContent = "Reload to retry. Published data has not been changed.";
