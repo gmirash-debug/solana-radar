@@ -10,6 +10,7 @@ import {
   ingestDashboardSnapshot,
   ingestSnapshotDetails,
   discoveryStateForTokens,
+  discoveryDispatchGuard,
   dashboardTokenKeys,
   decodeCursor,
   encodeCursor,
@@ -210,6 +211,24 @@ test("scheduler can be paused without removing its cron triggers", () => {
   assert.equal(schedulerEnabled({ SCHEDULER_ENABLED: "off" }), false);
   assert.equal(schedulerMode({ SCHEDULER_ENABLED: "auto" }), "auto");
   assert.equal(schedulerMode({ SCHEDULER_ENABLED: "false" }), "disabled");
+});
+
+test("discovery never replaces a queued deep scan and ignores independent UI publication", async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const status of ["queued", "pending", "in_progress", "waiting", "requested"]) {
+      globalThis.fetch = async () => new Response(JSON.stringify({workflow_runs:[
+        {id:1,event:"push",status:"in_progress"}, {id:2,event:"workflow_dispatch",status},
+      ]}));
+      assert.deepEqual(await discoveryDispatchGuard({GITHUB_TOKEN:"test"}), {skipped:"deep_scan_has_priority",deep_run_id:2});
+    }
+    globalThis.fetch = async () => new Response(JSON.stringify({workflow_runs:[
+      {id:1,event:"push",status:"in_progress"}, {id:2,event:"workflow_dispatch",status:"completed"},
+    ]}));
+    assert.deepEqual(await discoveryDispatchGuard({GITHUB_TOKEN:"test"}), {});
+    globalThis.fetch = async () => new Response("quota", {status:429});
+    assert.equal((await discoveryDispatchGuard({GITHUB_TOKEN:"test"})).skipped, "scan_queue_status_unavailable");
+  } finally { globalThis.fetch = original; }
 });
 
 test("auto scheduler dispatches only when GitHub Actions is operational", () => {
