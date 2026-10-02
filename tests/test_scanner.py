@@ -1519,6 +1519,7 @@ class ScannerCoreTests(unittest.TestCase):
                     "supply": 10_000,
                     "sticky_tokens": 1_000,
                     "sticky_wallets": 2,
+                    "balance_coverage_pct": 100,
                     "top_buyers": [
                         {
                             "owner": "wallet-a",
@@ -3082,7 +3083,7 @@ class ScannerCoreTests(unittest.TestCase):
                 rpc,
             )
 
-    def test_supply_integrity_requires_two_independent_link_families(self):
+    def test_verified_funding_plus_matching_fee_does_not_confirm_control(self):
         class IntegrityRpc:
             def token_supply(self, _mint):
                 return 1_000
@@ -3104,6 +3105,7 @@ class ScannerCoreTests(unittest.TestCase):
         alert = {
             "common_funders": [{
                 "source": "funder-a",
+                "transfer_verified": True,
                 "members": ["wallet-a", "wallet-b"],
             }],
             "events": [
@@ -3135,10 +3137,10 @@ class ScannerCoreTests(unittest.TestCase):
             checked_at="2026-08-25T12:00:00Z",
         )
 
-        self.assertTrue(snapshot["coordination_confirmed"])
-        self.assertEqual(snapshot["coordination_family_count"], 2)
+        self.assertFalse(snapshot["coordination_confirmed"])
+        self.assertEqual(snapshot["coordination_family_count"], 1)
         self.assertEqual(snapshot["evidence_family_count"], 2)
-        self.assertEqual(snapshot["status"], "concentrated")
+        self.assertEqual(snapshot["status"], "watch")
         self.assertEqual(snapshot["pool_reserve_supply_pct"], 30)
         self.assertAlmostEqual(snapshot["cohort_top_holder_supply_pct"], 25)
         self.assertAlmostEqual(snapshot["max_linked_cluster_current_supply_pct"], 20)
@@ -3225,6 +3227,7 @@ class ScannerCoreTests(unittest.TestCase):
             alert={
                 "common_funders": [{
                     "source": "funder-a",
+                    "transfer_verified": True,
                     "members": ["wallet-1", "wallet-2"],
                 }],
                 "common_executors": [{
@@ -3859,8 +3862,8 @@ class ScannerCoreTests(unittest.TestCase):
             },
         ]
         classifications = {
-            "wallet-a": {"wallet_class": "fresh", "funding_source": "funder"},
-            "wallet-b": {"wallet_class": "freshish", "funding_source": "funder"},
+            "wallet-a": {"wallet_class": "fresh", "funding_source": "funder", "funding_verified": True, "funding_sol": 2},
+            "wallet-b": {"wallet_class": "freshish", "funding_source": "funder", "funding_verified": True, "funding_sol": 2},
             "wallet-c": {"wallet_class": "normal", "funding_source": None},
         }
 
@@ -3878,11 +3881,12 @@ class ScannerCoreTests(unittest.TestCase):
                 {},
             )
 
-        self.assertEqual(graph["effective_wallets"], 1)
-        self.assertEqual(graph["max_cluster_share"], 1)
-        self.assertEqual(graph["clusters"][0]["wallets"], 3)
+        self.assertEqual(graph["effective_wallets"], 2)
+        self.assertAlmostEqual(graph["max_cluster_share"], 7 / 10)
+        self.assertEqual(graph["clusters"][0]["wallets"], 2)
         self.assertEqual(graph["common_funders"][0]["wallets"], 2)
         self.assertEqual(graph["common_executors"][0]["wallets"], 2)
+        self.assertTrue(graph["common_executors"][0]["supporting_only"])
 
     def test_linked_wallet_concentration_cannot_be_actionable(self):
         config = scanner.apply_lane(
@@ -4284,14 +4288,14 @@ class ScannerCoreTests(unittest.TestCase):
                 "checked_wallets": 2,
                 "balance_coverage_pct": 100,
             },
-            "common_funders": [{"source": "funder-a", "members": ["wallet-a", "wallet-b"]}],
+            "common_funders": [{"source": "funder-a", "transfer_verified": True, "members": ["wallet-a", "wallet-b"]}],
             "common_executors": [{"executor": "executor-a", "members": ["wallet-a", "wallet-b"]}],
         }
 
         thesis = scanner.signal_thesis_from_alert(alert, {"signal_thesis_wallet_limit": 10})
 
         self.assertEqual(thesis["cohort"][0]["common_funder"], "funder-a")
-        self.assertEqual(thesis["cohort"][1]["common_executor"], "executor-a")
+        self.assertIsNone(thesis["cohort"][1]["common_executor"])
 
 
 if __name__ == "__main__":

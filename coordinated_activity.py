@@ -4,16 +4,17 @@ import math
 from collections import defaultdict
 from datetime import datetime, timezone
 from itertools import combinations
+from wallet_links import SERVICE_KINDS
 
 
-VERSION = 1
-SERVICE_KINDS = {"service", "cex", "bridge", "router", "exchange", "relay", "lifi"}
+VERSION = 2
 LABELS = {
     "synchronous_buys": "Synchronous purchases",
     "young_low_activity": "Young, low-activity cohort",
     "synchronized_preparation": "Synchronized buyer preparation",
     "common_direct_funding": "Common parsed direct funding",
     "inventory_churn": "High observed inventory churn",
+    "market_rotation": "Possible market-mediated position rotation",
 }
 LIMITATIONS = [
     "Only the supplied original cohort is analyzed; the caller must keep it frozen.",
@@ -27,6 +28,7 @@ LIMITATIONS = [
     "Inventory churn can be ordinary trading or arbitrage; it is not wash trading or provider attribution.",
     "Net-delta parsers may omit same-transaction roundtrips; missing legs are not inferred.",
     "No pattern means no match in the checked subset, not absence outside that subset.",
+    "Matched sell/rebuy waves are a rotation hypothesis, not a direct transfer or proof of common control.",
 ]
 
 
@@ -265,12 +267,7 @@ def analyze_coordinated_activity(buys, profiles=None, positions=None, supply=Non
         members = sorted(set(members))
         if len(members) < (1 if code == "inventory_churn" else 3):
             return
-        full_count = len(members)
-        members = members[:max_members]
         detail = dict(detail)
-        if full_count > len(members):
-            detail.update(members_truncated=True, observed_wallet_count=full_count)
-            reasons.add("group_members_truncated")
         key = (code, detail.get("source", ""), tuple(members))
         signal = {"code": code, "label": LABELS[code], "family": family, "detail": detail,
             "members": members, "wallet_count": len(members),
@@ -342,6 +339,42 @@ def analyze_coordinated_activity(buys, profiles=None, positions=None, supply=Non
                      "buy_span_seconds": max(row["buy_time"] for row in window) - min(row["buy_time"] for row in window),
                      "max_funding_lag_seconds": max(row["buy_time"] - row["funding_time"] for row in window)})
 
+    # Detect market-mediated rotation separately from net new accumulation.
+    rotation_window = _setting(config, "rotation_window_seconds", 900, 60, 3600)
+    rotation_price_gap = _setting(config, "rotation_max_price_gap_pct", 15, 0, 50) / 100
+    rotation_min_pct = _setting(config, "rotation_min_supply_pct", 1, 0.1, 100)
+    for source, funded_rows in sorted(funding.items()):
+        funded_owners = {row["owner"] for row in funded_rows} & material_funding_owners
+        eligible = [row for row in trades if row["owner"] in funded_owners
+            and row["amount_native"] is not None and row["amount_native"] > 0
+            and (row["sold_tokens"] if row["kind"] == "sell" else row["bought_tokens"])]
+        for window in _windows(eligible, "timestamp", rotation_window):
+            sales = [row for row in window if row["kind"] == "sell"]
+            seller_owners = {row["owner"] for row in sales}
+            if len(seller_owners) < 3:
+                continue
+            latest_sale = max(row["timestamp"] for row in sales)
+            purchases = [row for row in window if row["kind"] == "buy"
+                and row["owner"] not in seller_owners and row["timestamp"] >= latest_sale]
+            if len({row["owner"] for row in purchases}) < 3:
+                continue
+            sold = math.fsum(row["sold_tokens"] for row in sales)
+            rebought = math.fsum(row["bought_tokens"] for row in purchases)
+            if not sold or not rebought or not supply or min(sold, rebought) / supply * 100 < rotation_min_pct:
+                continue
+            sale_price = math.fsum(row["amount_native"] for row in sales) / sold
+            buy_price = math.fsum(row["amount_native"] for row in purchases) / rebought
+            if abs(buy_price / sale_price - 1) > rotation_price_gap:
+                continue
+            members = sorted(seller_owners | {row["owner"] for row in purchases})
+            add("market_rotation", "turnover", members, {"source": source,
+                "source_identity": "unknown", "sold_supply_pct": sold / supply * 100,
+                "rebought_supply_pct": rebought / supply * 100,
+                "matched_turnover_supply_pct": min(sold, rebought) / supply * 100,
+                "net_observed_tokens": rebought - sold,
+                "price_gap_pct": abs(buy_price / sale_price - 1) * 100,
+                "interpretation": "Possible replacement of sellers by funding-linked buyers; not new accumulation"})
+
     churn_checked = 0
     churn_wallets = 0
     for owner in owners:
@@ -391,6 +424,8 @@ def analyze_coordinated_activity(buys, profiles=None, positions=None, supply=Non
     watch = False
     for group in combinations(signals, min_families):
         families = {signal["family"] for signal in group}
+        if "turnover" in families:
+            continue
         if len(families) < min_families:
             continue
         members = set.intersection(*(set(signal["members"]) for signal in group))
@@ -451,9 +486,16 @@ def analyze_coordinated_activity(buys, profiles=None, positions=None, supply=Non
         "material_pattern": bool(material), "material_group_count": len(material),
         "material_union_held_supply_pct": _percent(material_union, supply),
         "inventory_churn_checked_wallets": churn_checked, "inventory_churn_wallets": churn_wallets,
+        "market_rotation_observations": sum(signal["code"] == "market_rotation" for signal in signals),
         "max_material_group_wallets": max((len(members) for members in material), default=0),
         "max_material_group_held_supply_pct": max(material.values(), default=None)}
     status = "not_checked" if not rows else "no_pattern_in_checked_subset" if not signals else "coordination_watch" if watch else "pattern"
+    # Display limits must not change intersections, group economics, or coverage.
+    for signal in signals:
+        if len(signal["members"]) > max_members:
+            signal["detail"].update(members_truncated=True,
+                observed_wallet_count=signal["wallet_count"], displayed_wallet_count=max_members)
+            signal["members"] = signal["members"][:max_members]
     return {"version": VERSION, "status": status, "checked_at": _iso(observed),
         "ownership": "not_established", "bundle": "not_established",
         "scope": "Supplied original buyer cohort; bounded descriptive evidence only", "metrics": metrics,

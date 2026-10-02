@@ -18,6 +18,7 @@ on:
       - ".github/workflows/scan-and-pages.yml"
       - "scanner.py"
       - "coordinated_activity.py"
+      - "wallet_links.py"
       - "robinhood.py"
       - "robinhood_store.py"
       - "gmgn_context.py"

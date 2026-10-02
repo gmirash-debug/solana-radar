@@ -101,6 +101,61 @@ class SignalIntegrityTests(unittest.TestCase):
         s.recheck_signal_thesis(rpc, self.pool, state, self.config, s.iso(self.now + 3600))
         self.assertEqual(state["signal_thesis"]["signal_confirmation"]["status"], "candidate")
 
+    def test_rotation_cannot_confirm_accumulation(self):
+        alert = self.alert()
+        alert["coordinated_activity"] = {"metrics": {"market_rotation_observations": 1}}
+        s.apply_signal_confirmation(alert, self.config)
+        self.assertEqual(alert["signal_confirmation"]["status"], "candidate")
+        self.assertIn("rotation", " ".join(alert["signal_confirmation"]["reasons"]))
+
+    def test_explicit_zero_is_not_resurrected_at_capture(self):
+        alert = self.alert()
+        alert["wave"]["top_buyers"][0]["retained_from_wave"] = 0
+        thesis = s.signal_thesis_from_alert(alert, self.config)
+        self.assertEqual(thesis["cohort"][0]["current_retained_tokens"], 0)
+
+    def test_unchecked_initial_zero_does_not_freeze_fake_sale(self):
+        alert = self.alert()
+        alert["wave"]["balance_coverage_pct"] = 0
+        alert["wave"]["top_buyers"][0].update(current_balance=0, retained_from_wave=0, balance_verified=False)
+        thesis = s.signal_thesis_from_alert(alert, self.config)
+        self.assertEqual(thesis["status"], "unknown")
+        self.assertEqual(thesis["balance_coverage_pct"], 0)
+        rpc = Mock()
+        rpc.token_balance.return_value = 100
+        s.recheck_signal_thesis(rpc, self.pool, {"signal_thesis": thesis}, self.config, s.iso(self.now + 3600))
+        self.assertEqual(thesis["current_retained_tokens"], 100)
+
+    def test_rebuy_does_not_restore_original_inventory(self):
+        thesis = s.signal_thesis_from_alert(self.alert(), self.config)
+        state = {"signal_thesis": thesis}
+        rpc = Mock()
+        rpc.token_balance.return_value = 40
+        s.recheck_signal_thesis(rpc, self.pool, state, self.config, s.iso(self.now + 600))
+        rpc.token_balance.return_value = 200
+        s.recheck_signal_thesis(rpc, self.pool, state, self.config, s.iso(self.now + 1200))
+        self.assertEqual(thesis["current_retained_tokens"], 40)
+        self.assertEqual(thesis["cohort"][0]["current_balance"], 200)
+        self.assertEqual(thesis["cohort"][0]["movement_status"], "reduced_unresolved")
+
+    def test_missing_or_invalid_balances_are_not_sold_positions(self):
+        for value in (None, True, float("nan"), float("inf"), -1):
+            state = {"signal_thesis": s.signal_thesis_from_alert(self.alert(), self.config)}
+            rpc = Mock()
+            rpc.token_balance.return_value = value
+            s.recheck_signal_thesis(rpc, self.pool, state, self.config, s.iso(self.now + 600))
+            self.assertEqual(state["signal_thesis"]["status"], "unknown")
+            self.assertEqual(state["signal_thesis"]["balance_errors"], 1)
+
+    def test_repeated_same_snapshot_cannot_count_as_two_complete_checks(self):
+        state = {"signal_thesis": s.signal_thesis_from_alert(self.alert(), self.config)}
+        rpc = Mock()
+        rpc.token_balance.return_value = 0
+        for _ in range(2):
+            s.recheck_signal_thesis(rpc, self.pool, state, self.config, s.iso(self.now + 600))
+        self.assertEqual(state["signal_thesis"]["invalidation_streak"], 1)
+        self.assertNotEqual(state["signal_thesis"]["status"], "invalidated")
+
     def test_new_confirmed_wave_replaces_candidate_not_its_metadata(self):
         old, new = self.alert("old"), self.alert("new", 60)
         old["data_quality"]["status"] = "partial"
@@ -148,7 +203,7 @@ class SignalIntegrityTests(unittest.TestCase):
              patch.object(s, "REMOTE_OUTBOX_DIR", Path(directory)), \
              patch.object(s, "remote_data_url_from_env", return_value="https://example.invalid"), \
              patch.object(s, "remote_ingest_secret", return_value="test"), \
-             patch.object(s, "build_dashboard_snapshot", side_effect=lambda report, *args, **kwargs: report), \
+             patch.object(s, "build_dashboard_snapshot", side_effect=lambda report, *args, **kwargs: {"report": report}), \
              patch.object(s, "remote_api_call") as remote:
             remote.side_effect = RuntimeError("quota exceeded")
             old = {"generated_at": s.iso(self.now)}
@@ -158,8 +213,8 @@ class SignalIntegrityTests(unittest.TestCase):
             new = {"generated_at": s.iso(self.now + 3600)}
             result = s.sync_remote_snapshot(new, {}, {})
             self.assertEqual(result["status"], "synced")
-            self.assertEqual(remote.call_args_list[-2].args[3], old)
-            self.assertEqual(remote.call_args_list[-1].args[3], new)
+            self.assertEqual(remote.call_args_list[-2].args[3]["report"]["generated_at"], new["generated_at"])
+            self.assertEqual(remote.call_args_list[-1].args[3]["report"]["generated_at"], old["generated_at"])
             self.assertFalse(list(Path(directory).glob("*.gz")))
             self.assertTrue((Path(directory) / ".keep").exists())
 
@@ -175,3 +230,81 @@ class SignalIntegrityTests(unittest.TestCase):
         result = s.monitor_due_cohorts(rpc, pools, state, {**self.config, "signal_thesis_extra_balance_budget": 1}, s.iso(self.now))
         self.assertEqual(result, {"due": 2, "checked": 1, "balance_requests": 1, "deferred": 1})
         self.assertEqual(rpc.token_balance.call_args.args[1], "old")
+
+    def test_cloud_batches_resume_only_unacknowledged_evidence(self):
+        body = {"report": {"generated_at": s.iso(self.now)},
+                "detail_signal_theses": [{"token_address": str(i)} for i in range(61)],
+                "market": {str(i): {} for i in range(26)},
+                "history_ledger": {"events": [{"event_id": str(i)} for i in range(26)]}}
+        with patch.object(s, "remote_api_call") as remote:
+            remote.side_effect = [{"ok": True}, {"ok": True}, RuntimeError("temporary quota")]
+            with self.assertRaisesRegex(RuntimeError, "quota"):
+                s.send_remote_snapshot(body, {})
+            self.assertEqual(body["_sync_progress"]["detail_signal_theses"], 25)
+            self.assertEqual(body["_sync_progress"]["summary"], 1)
+            remote.reset_mock()
+            remote.side_effect = None
+            remote.return_value = {"ok": True}
+            s.send_remote_snapshot(body, {})
+            self.assertEqual(remote.call_args_list[0].args[1], "/api/ingest/details")
+            self.assertEqual(remote.call_args_list[0].args[3]["detail_signal_theses"][0]["token_address"], "25")
+            self.assertEqual(len(remote.call_args_list), 6)
+            for call in remote.call_args_list:
+                batch = call.args[3]
+                count = sum(len(batch.get(field) or []) for field in ("detail_signal_theses", "market"))
+                count += len((batch.get("history_ledger") or {}).get("events") or [])
+                self.assertLessEqual(count, 25)
+
+    def test_poison_old_report_does_not_block_current_report(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(s, "REMOTE_OUTBOX_DIR", Path(directory)), \
+             patch.object(s, "remote_data_url_from_env", return_value="https://example.invalid"), \
+             patch.object(s, "remote_ingest_secret", return_value="test"), \
+             patch.object(s, "build_dashboard_snapshot", side_effect=lambda report, *a, **kw: {"report": report}), \
+             patch.object(s, "remote_api_call") as remote:
+            old = {"generated_at": s.iso(self.now)}
+            new = {"generated_at": s.iso(self.now + 3600)}
+            remote.side_effect = RuntimeError("old oversized report")
+            s.sync_remote_snapshot(old, {}, {})
+            def write(_method, _path, _config, body):
+                if body["report"]["generated_at"] == old["generated_at"]:
+                    raise RuntimeError("old oversized report")
+                return {"ok": True}
+            remote.side_effect = write
+            result = s.sync_remote_snapshot(new, {}, {})
+            self.assertTrue(result["current_synced"])
+            self.assertEqual(result["pending"], 1)
+
+    def test_cloud_sync_budget_defers_without_acknowledging(self):
+        body = {"report": {"generated_at": s.iso(self.now)}}
+        with patch.object(s.time, "monotonic", return_value=100), patch.object(s, "remote_api_call") as remote:
+            with self.assertRaisesRegex(RuntimeError, "time budget"):
+                s.send_remote_snapshot(body, {}, deadline=100)
+            remote.assert_not_called()
+            self.assertNotIn("summary", body["_sync_progress"])
+
+    def test_gmgn_rate_limit_opens_circuit_and_removes_signing_key(self):
+        config = {"gmgn_enabled": True}
+        with patch.dict(s.os.environ, {"GMGN_API_KEY": "test-api", "GMGN_PRIVATE_KEY": "never-use", "GMGN_DEBUG": "1"}), \
+             patch.object(s, "gmgn_cli_command", return_value=["gmgn-cli"]), \
+             patch.object(s.subprocess, "run", return_value=Mock(returncode=1, stderr="429 test-api", stdout="")) as run:
+            with self.assertRaisesRegex(RuntimeError, "429 \\*\\*\\*"):
+                s.run_gmgn_cli(config, ["market", "trending"], "test")
+            self.assertTrue(config["_gmgn_circuit_open"])
+            env = run.call_args.kwargs["env"]
+            self.assertNotIn("GMGN_PRIVATE_KEY", env)
+            self.assertNotIn("GMGN_DEBUG", env)
+            self.assertEqual(env["GMGN_RATE_LIMIT_AUTO_RETRY_MAX_WAIT_MS"], "0")
+            with self.assertRaisesRegex(RuntimeError, "circuit"):
+                s.run_gmgn_cli(config, ["token", "info"], "test")
+            self.assertEqual(run.call_count, 1)
+
+    def test_gmgn_requests_are_paced(self):
+        config = {"_gmgn_next_request_at": 100.8}
+        with patch.dict(s.os.environ, {"GMGN_API_KEY": "test-api"}), \
+             patch.object(s, "gmgn_cli_command", return_value=["gmgn-cli"]), \
+             patch.object(s.time, "monotonic", return_value=100), \
+             patch.object(s.time, "sleep") as sleep, \
+             patch.object(s.subprocess, "run", return_value=Mock(returncode=0, stdout='{"ok":true}')):
+            self.assertEqual(s.run_gmgn_cli(config, ["market", "trending"], "test"), {"ok": True})
+            self.assertAlmostEqual(sleep.call_args.args[0], 0.8)

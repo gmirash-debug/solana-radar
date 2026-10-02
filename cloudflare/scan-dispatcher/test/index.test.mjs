@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import worker from "../src/index.js";
 
 import {
   applyDeletedTokenUpdate,
   claimDispatchBucket,
   corsHeaders,
   compactDashboardReport,
+  ingestDashboardSnapshot,
+  ingestSnapshotDetails,
   discoveryStateForTokens,
   dashboardTokenKeys,
   decodeCursor,
@@ -29,6 +32,65 @@ import {
   normalizedOutcome,
   flushHistoryOutbox,
 } from "../src/history.js";
+
+function recordingDb() {
+  const writes = [];
+  return {
+    writes,
+    prepare(sql) {
+      const statement = {
+        values: [],
+        bind(...values) { statement.values = values; return statement; },
+        async run() { writes.push({sql, values: statement.values}); return {success:true, meta:{changes:1}}; },
+        async all() { return {results:[]}; },
+        async first() { return null; },
+      };
+      return statement;
+    },
+    async batch(statements) { return Promise.all(statements.map(statement => statement.run())); },
+  };
+}
+
+test("chunked publication removes wallet detail before D1 row limit and defers expensive writes", async () => {
+  const db = recordingDb();
+  const result = await ingestDashboardSnapshot({RADAR_DB:db}, {
+    chunked:true,
+    report:{generated_at:new Date().toISOString(), signal_theses:[{
+      token_address:"token-a", signal_at:new Date().toISOString(), cohort_wallets:[{noise:"x".repeat(2_000_000)}],
+    }]},
+    deleted_tokens:{tokens:Array.from({length:100}, (_,i)=>`deleted-${i}`)},
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.evidence_pending, true);
+  assert.equal(db.writes.length, 3);
+  const latest = JSON.parse(db.writes.find(row=>row.values[0] === "latest_report").values[1]);
+  assert.equal(latest.signal_theses[0].cohort_wallets, undefined);
+  assert.ok(JSON.stringify(latest).length < 1000);
+});
+
+test("detail batches reject oversize input before writing and preserve source-time conflict guards", async () => {
+  const db = recordingDb();
+  const generated_at = "2026-10-03T00:00:00Z";
+  await assert.rejects(ingestSnapshotDetails({RADAR_DB:db}, {generated_at,
+    detail_signal_theses:Array.from({length:26}, (_,i)=>({token_address:String(i)})),
+  }), /25_rows/);
+  assert.equal(db.writes.length, 0);
+  await assert.rejects(ingestSnapshotDetails({RADAR_DB:db}, {}), /generated_at_required/);
+  await ingestSnapshotDetails({RADAR_DB:db}, {generated_at,
+    detail_current_alerts:[{pool:{token_address:"a"},created_at:generated_at}],
+    detail_signal_theses:[{token_address:"a",signal_at:generated_at}],
+  });
+  assert.ok(db.writes.find(row=>row.sql.includes("INSERT INTO alerts")).sql.includes("WHERE excluded.updated_at >= alerts.updated_at"));
+  assert.ok(db.writes.find(row=>row.sql.includes("INSERT INTO state_docs")).sql.includes("WHERE excluded.source_updated_at >= state_docs.source_updated_at"));
+  assert.equal(db.writes.find(row=>row.sql.includes("INSERT INTO alerts")).values.at(-1), generated_at);
+});
+
+test("new evidence ingestion route requires the server ingest secret", async () => {
+  const response = await worker.fetch(new Request("https://worker.example/api/ingest/details", {
+    method:"POST",body:JSON.stringify({generated_at:"2026-10-03T00:00:00Z"}),
+  }), {RADAR_INGEST_SECRET:"test-secret",RADAR_DB:recordingDb()}, {});
+  assert.equal(response.status, 401);
+});
 
 function githubContent(data, sha) {
   return new Response(JSON.stringify({

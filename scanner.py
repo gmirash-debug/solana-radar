@@ -20,8 +20,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
-from gmgn_context import token_ath
+from gmgn_context import token_ath, VERSION as GMGN_VERSION
 from coordinated_activity import analyze_coordinated_activity, compact_coordinated_activity
+from wallet_links import SERVICE_KINDS, infrastructure_sources, normalize_link as normalize_wallet_link, source_kind
 
 
 ROOT = Path(__file__).resolve().parent
@@ -604,6 +605,9 @@ def compact_alert_for_dashboard(alert):
         if isinstance(top_buyers, list):
             compact_wave["top_buyers_count"] = len(top_buyers)
         compact["wave"] = compact_wave
+    if isinstance(alert.get("wallet_graph"), dict):
+        compact["wallet_graph"] = {key: value for key, value in alert["wallet_graph"].items()
+            if key not in {"wallets", "clusters", "common_funders", "common_executors"}}
     integrity = alert.get("supply_integrity")
     if isinstance(integrity, dict):
         detail_fields = {
@@ -1259,7 +1263,13 @@ def remote_api_call(method, path, config, payload=None, params=None):
         params=params,
         timeout=int(config.get("remote_sync_timeout_seconds", 25)),
     )
-    response.raise_for_status()
+    if response.status_code >= 400:
+        try:
+            detail = str(response.json().get("error") or "remote request failed")[:300]
+        except (ValueError, AttributeError):
+            detail = "remote request failed"
+        detail = detail.replace(secret, "***")
+        raise RuntimeError(f"Remote HTTP {response.status_code}: {detail}")
     result = response.json()
     if not result.get("ok"):
         raise RuntimeError(result.get("error") or f"unexpected remote response: {result}")
@@ -1280,23 +1290,68 @@ def sync_remote_snapshot(report_payload, state, config):
     temp.write_bytes(gzip.compress(json.dumps(body, separators=(",", ":")).encode()))
     temp.replace(current)
     paths = sorted(REMOTE_OUTBOX_DIR.glob("*.json.gz"))
-    selected = list(dict.fromkeys([*paths[:2], current]))
+    # A poison historical item must never block today's operational dashboard.
+    selected = list(dict.fromkeys([current, *paths[:2]]))
     error = None
+    current_synced = False
+    deadline = time.monotonic() + max(30, int(config.get("remote_sync_run_budget_seconds", 240)))
     for path in selected:
+        pending_body = None
         try:
             if not remote_ingest_secret():
                 raise RuntimeError("Remote sync pending: RADAR_INGEST_SECRET is missing")
             pending_body = json.loads(gzip.decompress(path.read_bytes()))
-            remote_api_call("POST", "/api/ingest/snapshot", config, pending_body)
+            send_remote_snapshot(pending_body, config, deadline=deadline)
             path.unlink()
+            current_synced = current_synced or path == current
         except Exception as exc:
+            if isinstance(pending_body, dict):
+                temp = path.with_suffix(".tmp")
+                temp.write_bytes(gzip.compress(json.dumps(pending_body, separators=(",", ":")).encode()))
+                temp.replace(path)
+                current_synced = current_synced or (path == current and bool((pending_body.get("_sync_progress") or {}).get("summary")))
             error = str(exc)[:500]
             print(f"Remote sync pending: {error}", file=sys.stderr)
             if remote_sync_required(config):
                 raise
-            break
+            if time.monotonic() >= deadline:
+                break
+            continue
     pending = len(list(REMOTE_OUTBOX_DIR.glob("*.json.gz")))
-    return {"status": "pending" if pending else "synced", "pending": pending, "error": error, "checked_at": utc_now().isoformat()}
+    return {"status": "pending" if pending else "synced", "current_synced": current_synced,
+            "pending": pending, "error": error, "checked_at": utc_now().isoformat()}
+
+
+def send_remote_snapshot(payload, config, deadline=None):
+    """Publish the list first, then idempotent bounded evidence/history batches."""
+    detail_fields = {"detail_signal_theses", "detail_current_alerts", "detail_history", "history_ledger", "market", "_sync_progress"}
+    summary = {key: value for key, value in payload.items() if key not in detail_fields}
+    summary["report"] = compact_report_for_remote(summary.get("report") or {})
+    summary["chunked"] = True
+    progress = payload.setdefault("_sync_progress", {})
+    def send(part, end, path, body):
+        if int(progress.get(part) or 0) >= end:
+            return
+        if deadline is not None and time.monotonic() >= deadline:
+            raise RuntimeError("remote sync time budget deferred remaining evidence batches")
+        remote_api_call("POST", path, config, body)
+        progress[part] = end
+    send("summary", 1, "/api/ingest/snapshot", summary)
+    generated_at = (payload.get("report") or {}).get("generated_at") or payload.get("generated_at")
+    # Bounded requests resume from the last acknowledged batch after a failure.
+    for field in ("detail_current_alerts", "detail_history", "detail_signal_theses"):
+        rows = payload.get(field) or []
+        for start in range(0, len(rows), 25):
+            send(field, start + len(rows[start:start + 25]), "/api/ingest/details",
+                {"generated_at": generated_at, field: rows[start:start + 25]})
+    market = list((payload.get("market") or {}).items())
+    for start in range(0, len(market), 25):
+        send("market", start + len(market[start:start + 25]), "/api/ingest/details",
+            {"generated_at": generated_at, "market": dict(market[start:start + 25])})
+    events = (payload.get("history_ledger") or {}).get("events") or []
+    for start in range(0, len(events), 25):
+        send("history_ledger", start + len(events[start:start + 25]), "/api/ingest/details",
+            {"generated_at": generated_at, "history_ledger": {"events": events[start:start + 25]}})
 
 
 def sync_remote_discovery_status(status, config):
@@ -2884,31 +2939,43 @@ def gmgn_cli_command():
     if shutil.which("gmgn-cli"):
         return ["gmgn-cli"]
     if shutil.which("npx"):
-        return ["npx", "-y", "gmgn-cli"]
+        return ["npx", "-y", f"gmgn-cli@{GMGN_VERSION}"]
     return None
 
 
 def run_gmgn_cli(config, arguments, label):
     if not config.get("gmgn_enabled", True) or not os.environ.get("GMGN_API_KEY"):
         return None
+    if config.get("_gmgn_circuit_open"):
+        raise RuntimeError("GMGN rate/auth circuit is open for this scan")
     command_prefix = gmgn_cli_command()
     if not command_prefix:
         raise RuntimeError("GMGN_API_KEY is set but gmgn-cli/npx is unavailable")
     command = [*command_prefix, *arguments]
     if "--raw" not in command:
         command.append("--raw")
+    delay = max(0, float(config.get("_gmgn_next_request_at") or 0) - time.monotonic())
+    if delay:
+        time.sleep(delay)
+    config["_gmgn_next_request_at"] = time.monotonic() + max(1.1, float(config.get("gmgn_min_interval_seconds", 1.2)))
+    env = dict(os.environ, GMGN_RATE_LIMIT_AUTO_RETRY_MAX_WAIT_MS="0")
+    env.pop("GMGN_PRIVATE_KEY", None)
+    env.pop("GMGN_DEBUG", None)
     completed = subprocess.run(
         command,
         capture_output=True,
         text=True,
         timeout=int(config.get("gmgn_timeout_seconds", 45)),
         check=False,
+        env=env,
     )
     if completed.returncode != 0:
         api_key = os.environ.get("GMGN_API_KEY", "")
         message = (completed.stderr or completed.stdout or "request failed").strip()
         if api_key:
             message = message.replace(api_key, "***")
+        if any(marker in message for marker in ("429", "RATE_LIMIT", "401", "403", "Unauthorized")):
+            config["_gmgn_circuit_open"] = True
         raise RuntimeError(f"{label}: {message[:500]}")
     try:
         return json.loads(completed.stdout)
@@ -2966,6 +3033,8 @@ def fetch_gmgn_trending_token_addresses(config):
             data = run_gmgn_cli(config, arguments, label)
         except Exception as exc:
             print(f"warn: gmgn trending {interval}/{order_by} failed: {exc}", file=sys.stderr)
+            if config.get("_gmgn_circuit_open"):
+                break
             continue
 
         rank = data.get("data", {}).get("rank") if isinstance(data, dict) else None
@@ -5633,7 +5702,7 @@ def classify_wallet(rpc, wallet, before_signature, buy_time, config, state):
         config.get("wallet_cache_bucket_hours", 6),
     )
     wallet_cache = state.setdefault("wallet_cache", {})
-    if cache_key in wallet_cache:
+    if cache_key in wallet_cache and wallet_cache[cache_key].get("evidence_version") == 2:
         return wallet_cache[cache_key]
 
     previous = rpc.signatures_for_address(wallet, limit=50, before=before_signature)
@@ -5657,15 +5726,25 @@ def classify_wallet(rpc, wallet, before_signature, buy_time, config, state):
     funding_source = None
     funding_sol = 0.0
     funding_verified = False
-    if wallet_class in ("fresh", "freshish") and prev:
-        funding_source, funding_sol, funding_verified = extract_wallet_funding(
-            rpc, prev.get("signature"), wallet,
-        )
+    funding_at = None
+    funding_checked = 0
+    funding_limit = max(0, min(5, int(config.get("wallet_funding_transaction_limit", 3))))
+    funding_lookback = max(0, float(config.get("wallet_funding_lookback_days", 30))) * 86400
+    funding_candidates = [item for item in previous
+        if item.get("blockTime") and buy_time
+        and 0 <= buy_time - item["blockTime"] <= funding_lookback]
+    for item in funding_candidates[:funding_limit]:
+        funding_checked += 1
+        source, amount, verified = extract_wallet_funding(rpc, item.get("signature"), wallet)
+        if verified and amount > funding_sol:
+            funding_source, funding_sol, funding_verified = source, amount, True
+            funding_at = item["blockTime"]
 
     prior_times = [item.get("blockTime") for item in previous if item.get("blockTime")]
     history_complete = count < 50 and len(prior_times) == count
 
     result = {
+        "evidence_version": 2,
         "wallet": wallet,
         "cached_at": int(time.time()),
         "as_of_signature": before_signature,
@@ -5678,7 +5757,10 @@ def classify_wallet(rpc, wallet, before_signature, buy_time, config, state):
         "funding_source": funding_source,
         "funding_sol": funding_sol,
         "funding_verified": funding_verified,
-        "funding_at": prev.get("blockTime") if funding_source and prev else None,
+        "funding_at": funding_at,
+        "source_kind": source_kind(funding_source, config),
+        "funding_transactions_checked": funding_checked,
+        "funding_history_status": "bounded" if len(funding_candidates) > funding_checked or count >= 50 else "checked_subset",
         "history_complete": history_complete,
         "first_activity_at": min([int(buy_time or 0), *prior_times]) if buy_time and history_complete else None,
     }
@@ -5801,16 +5883,30 @@ def score_events(events, config):
     min_wallets = int(config["alert_min_suspicious_wallets"])
     min_sol = float(config["alert_min_suspicious_sol"])
 
-    funding_sources = Counter(event.get("funding_source") for event in suspicious if event.get("funding_source"))
+    funding_sources = defaultdict(set)
+    buyer_costs = defaultdict(float)
+    for event in suspicious:
+        buyer_costs[event.get("token_recipient") or event.get("signer")] += max(0.0, float(event.get("sol_amount") or 0))
+    funding_rules = config.get("coordinated_activity") or {}
+    for event in suspicious:
+        source = event.get("funding_source")
+        owner = event.get("token_recipient") or event.get("signer")
+        amount = float(event.get("funding_sol") or 0)
+        if (source and event.get("funding_verified") is True
+                and source_kind(source, config, event.get("source_kind")) not in SERVICE_KINDS
+                and amount >= float(funding_rules.get("min_funding_native", 0.05))
+                and amount >= buyer_costs[owner] * float(funding_rules.get("min_funding_buy_fraction", 0.1))):
+            funding_sources[source].add(owner)
     token_recipients = Counter(
         event.get("token_recipient")
         for event in suspicious
         if event.get("token_recipient") and not event.get("routed")
     )
     common_funders = [
-        {"source": source, "wallets": count}
-        for source, count in funding_sources.items()
-        if count >= 2
+        {"source": source, "wallets": len(owners), "members": sorted(owner for owner in owners if owner),
+         "transfer_verified": True, "supporting_only": False, "ownership": "not_established"}
+        for source, owners in funding_sources.items()
+        if len(owners - {None}) >= 2
     ]
     common_recipients = [
         {"recipient": recipient, "txs": count}
@@ -6384,12 +6480,15 @@ def classified_alert_cohort(alert, wallet_limit):
     )[:wallet_limit]
 
 
-def verified_alert_cluster_members(alert):
+def verified_alert_cluster_members(alert, config=None):
     """Map only explicit common funder/executor evidence onto cohort wallets."""
     funders = {}
     executors = {}
     for group in alert.get("common_funders") or []:
         if not isinstance(group, dict):
+            continue
+        if normalize_wallet_link(group, "common_funder", config,
+                (alert.get("wallet_graph") or {}).get("wallets"))['supporting_only']:
             continue
         source = str(group.get("source") or "").strip()
         members = group.get("members") or []
@@ -6400,6 +6499,8 @@ def verified_alert_cluster_members(alert):
                 funders[str(owner)] = source
     for group in alert.get("common_executors") or []:
         if not isinstance(group, dict):
+            continue
+        if normalize_wallet_link(group, "common_executor", config)['supporting_only']:
             continue
         executor = str(group.get("executor") or "").strip()
         members = group.get("members") or []
@@ -6487,7 +6588,9 @@ def attach_coordinated_activity(alert, config):
     wave = alert.get("wave") or {}
     pool = alert.get("pool") or {}
     excluded = [pool.get("pool_address"), pool.get("token_address"), SOL_MINT, SOLANA_INCINERATOR]
-    excluded.extend(config.get("coordinated_activity_infrastructure_addresses") or [])
+    excluded.extend(infrastructure_sources(config))
+    for profile in inputs["profiles"].values():
+        profile["source_kind"] = source_kind(profile.get("funding_source"), config, profile.get("source_kind"))
     alert["coordinated_activity"] = analyze_coordinated_activity(
         **inputs, supply=wave.get("supply"), observed_at=alert.get("created_at"), config=config.get("coordinated_activity") or {},
         coverage={"status": "complete" if quality.get("status") == "complete" and not alert.get("coordination_events_truncated") else "partial",
@@ -6513,13 +6616,16 @@ def update_thesis_coordination(thesis, config, checked_at):
         "balance_verified": row.get("checked_at") == checked_at,
         "checked_at": row.get("checked_at"),
     } for row in thesis.get("cohort") or [] if row.get("owner")]
+    for position, row in zip(positions, [row for row in thesis.get("cohort") or [] if row.get("owner")]):
+        position["retained_tokens"] = min(position["retained_tokens"],
+            float(row.get("current_retained_tokens", row.get("attributed_tokens") or 0)))
     thesis["coordinated_activity"] = analyze_coordinated_activity(
         buys=inputs.get("buys") or [], profiles=inputs.get("profiles") or {}, positions=positions,
         supply=thesis.get("supply"), observed_at=checked_at, config=config.get("coordinated_activity") or {},
         coverage={"status": inputs.get("history_status", "partial"),
                   "balance_coverage_pct": thesis.get("balance_coverage_pct"),
                   "total_buyers": len(thesis.get("cohort") or [])},
-        infrastructure_addresses=inputs.get("infrastructure_addresses") or [],
+        infrastructure_addresses=[*(inputs.get("infrastructure_addresses") or []), *infrastructure_sources(config)],
     )
 
 
@@ -6529,7 +6635,7 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
     wave = alert.get("wave") or {}
     wave_rows = wave.get("top_buyers") or []
     cohort = []
-    common_funders, common_executors = verified_alert_cluster_members(alert)
+    common_funders, common_executors = verified_alert_cluster_members(alert, config)
     wallet_limit = max(1, int(config.get("signal_thesis_wallet_limit", 40)))
     holder_min_pct = max(
         0.0,
@@ -6546,6 +6652,7 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
                 0.0,
                 float(
                     row.get("token_bought")
+                    or row.get("bought_tokens")
                     or row.get("retained_from_wave")
                     or row.get("current_balance")
                     or 0
@@ -6558,7 +6665,7 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
                 attributed_tokens,
                 max(
                     0.0,
-                    float(row.get("retained_from_wave") or current_balance),
+                    float(row.get("retained_from_wave") if row.get("retained_from_wave") is not None else current_balance),
                 ),
             )
             retention_pct = (
@@ -6578,6 +6685,9 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
                     "wallet_class": row.get("wallet_class"),
                     "common_funder": common_funders.get(owner),
                     "common_executor": common_executors.get(owner),
+                    "link_evidence_version": 2,
+                    "balance_verified": row.get("balance_verified", wave.get("balance_coverage_pct") == 100),
+                    "retention_cap_tokens": retained_tokens if row.get("balance_verified", wave.get("balance_coverage_pct") == 100) else attributed_tokens,
                     "current_balance": current_balance,
                     "current_retained_tokens": retained_tokens,
                     "retention_pct": retention_pct,
@@ -6590,6 +6700,7 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
             owner = str(row.get("owner") or "")
             row["common_funder"] = common_funders.get(owner)
             row["common_executor"] = common_executors.get(owner)
+            row["link_evidence_version"] = 2
     original_tokens = sum(row["attributed_tokens"] for row in cohort)
     if not cohort or original_tokens <= 0:
         return None
@@ -6619,15 +6730,19 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
     )
     if wave_signal:
         for row in cohort:
-            row["checked_at"] = signal_at
+            if row.get("balance_verified"):
+                row["checked_at"] = signal_at
     initial_totals = cohort_retention_totals(cohort)
     initial_balance_coverage = float(
-        wave.get("balance_coverage_pct") or (100.0 if wave_signal else 0.0)
+        wave.get("balance_coverage_pct") if wave.get("balance_coverage_pct") is not None else 0.0
     )
     initial_holder_retention_pct = (
         initial_totals["holders"] / len(cohort) * 100 if cohort else 0.0
     )
-    initial_status = "intact" if wave_signal and initial_balance_coverage >= 80 else "unknown"
+    initial_status = "unknown"
+    if wave_signal and initial_balance_coverage >= 80:
+        initial_status = "intact" if initial_totals["retention_pct"] >= float(config.get("signal_thesis_intact_min_retention_pct", 60)) \
+            and initial_holder_retention_pct >= float(config.get("signal_thesis_intact_min_holder_pct", 50)) else "weakening"
     supply_integrity = copy.deepcopy(alert.get("supply_integrity"))
     integrity_history = []
     compact_integrity = compact_supply_integrity_snapshot(supply_integrity)
@@ -6728,6 +6843,8 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
         ),
         "balance_coverage_pct": initial_balance_coverage,
         "invalidation_streak": 0,
+        "retention_basis": "Capped original-cohort balance evidence; not a proven inventory ledger",
+        "position_resolution": "outflows_unresolved" if initial_totals["retained_tokens"] < original_tokens else "original_balances_present",
         "supply_integrity": supply_integrity,
         "supply_integrity_history": integrity_history,
         "coordinated_activity": copy.deepcopy(alert.get("coordinated_activity")),
@@ -6849,14 +6966,27 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
     for row in cohort:
         attributed = max(0.0, float(row.get("attributed_tokens") or 0))
         try:
-            balance = max(
-                0.0,
-                float(rpc.token_balance(row["owner"], pool.token_address) or 0),
-            )
+            value = rpc.token_balance(row["owner"], pool.token_address)
+            if value is None or isinstance(value, bool):
+                raise ValueError("token balance is unavailable")
+            balance = float(value)
+            if not math.isfinite(balance) or balance < 0:
+                raise ValueError("invalid token balance")
         except Exception:
             errors += 1
             continue
-        retained = min(balance, attributed)
+        inputs = thesis.get("coordination_inputs") or {}
+        proven_sold = float((inputs.get("proven_sales") or {}).get(row["owner"], 0))
+        frozen_cap = (inputs.get("retention_caps") or {}).get(row["owner"], attributed)
+        previous_cap = row.get("retention_cap_tokens")
+        if previous_cap is None:
+            previous_cap = row.get("current_retained_tokens", attributed) if row.get("checked_at") else attributed
+        retained = min(balance, max(0.0, attributed - proven_sold),
+            max(0.0, float(frozen_cap)), max(0.0, float(previous_cap)))
+        # A rebuy cannot restore evidence for the original signal inventory.
+        row["retention_cap_tokens"] = retained
+        row["balance_reduced_tokens"] = max(0.0, attributed - retained)
+        row["movement_status"] = "reduced_unresolved" if retained < attributed else "balance_present"
         is_holder = bool(
             attributed > 0 and retained / attributed * 100 >= holder_min_pct
         )
@@ -6966,17 +7096,20 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
     can_invalidate = (
         cohort_coverage >= min_cohort_coverage
         and cohort_wallet_coverage >= min_cohort_wallet_coverage
+        and balance_coverage_pct >= 99.99
+        and token_balance_coverage_pct >= 99.99
     )
     invalidation_candidate = bool(
         can_invalidate
         and retention_pct <= invalidated_max_retention
         and holder_retention_pct <= invalidated_max_holders
     )
-    invalidation_streak = (
-        int(thesis.get("invalidation_streak") or 0) + 1
-        if invalidation_candidate
-        else 0
-    )
+    previous_complete = parse_timestamp(thesis.get("last_complete_check_at"))
+    new_check = not previous_complete or parse_timestamp(checked_at) > previous_complete
+    invalidation_streak = (int(thesis.get("invalidation_streak") or 0) + int(new_check)
+        if invalidation_candidate else 0)
+    if balance_coverage_pct >= 99.99 and token_balance_coverage_pct >= 99.99 and new_check:
+        thesis["last_complete_check_at"] = checked_at
     if (
         invalidation_candidate
         and invalidation_streak >= confirmations_required
@@ -7028,6 +7161,8 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
             "token_retention_pct": retention_pct,
             "invalidation_candidate": invalidation_candidate,
             "invalidation_streak": invalidation_streak,
+            "retention_basis": "Capped original-cohort balance evidence; not a proven inventory ledger",
+            "position_resolution": "outflows_unresolved" if current_retained < original_tokens else "original_balances_present",
             "current_retained_supply_pct": (
                 current_retained / supply * 100 if supply else None
             ),
@@ -7109,6 +7244,8 @@ def public_signal_thesis(thesis):
         "balance_errors",
         "invalidation_candidate",
         "invalidation_streak",
+        "retention_basis",
+        "position_resolution",
         "supply_integrity",
         "supply_integrity_history",
     }
@@ -7128,6 +7265,8 @@ def public_signal_thesis(thesis):
         "retention_pct",
         "is_holder",
         "checked_at",
+        "movement_status",
+        "balance_reduced_tokens",
     }
     holder_min_pct = max(
         0.0,
@@ -7649,7 +7788,7 @@ def analyze_wave_wallet_graph(rpc, buyers, config, state):
             errors += 1
             classifications[owner] = {"error": str(exc)[:200]}
             continue
-        classifications[owner] = result
+        classifications[owner] = {**result, "buy_sol": buyer_sol.get(owner, 0)}
         funder = result.get("funding_source")
         if funder:
             funding_groups[funder].append(owner)
@@ -7657,20 +7796,20 @@ def analyze_wave_wallet_graph(rpc, buyers, config, state):
             executor_groups[top_buy["signer"]].append(owner)
 
     common_funders = [
-        {
+        normalize_wallet_link({
             "source": funder,
             "wallets": len(set(wallets)),
             "members": sorted(set(wallets)),
-        }
+        }, "common_funder", config, classifications)
         for funder, wallets in funding_groups.items()
         if len(set(wallets)) >= 2
     ]
     common_executors = [
-        {
+        normalize_wallet_link({
             "executor": executor,
             "wallets": len(set(wallets)),
             "members": sorted(set(wallets)),
-        }
+        }, "common_executor", config)
         for executor, wallets in executor_groups.items()
         if len(set(wallets)) >= 2
     ]
@@ -7689,6 +7828,8 @@ def analyze_wave_wallet_graph(rpc, buyers, config, state):
             parents[right_root] = left_root
 
     for group in [*common_funders, *common_executors]:
+        if group.get("supporting_only"):
+            continue
         members = [owner for owner in group["members"] if owner in parents]
         for owner in members[1:]:
             union(members[0], owner)
@@ -7796,30 +7937,27 @@ def parsed_token_account_owner(account):
 def supply_integrity_linkage_groups(alert, thesis, config):
     groups = []
     if isinstance(alert, dict):
+        profiles = (alert.get("wallet_graph") or {}).get("wallets") or {}
         for item in alert.get("common_funders") or []:
             members = sorted({str(value) for value in item.get("members") or [] if value})
             if len(members) >= 2 and item.get("source"):
-                groups.append(
-                    {
+                groups.append(normalize_wallet_link(
+                    {**item,
                         "family": "common_funder",
                         "key": str(item["source"]),
                         "members": members,
                         "wallets": len(members),
-                        "supporting_only": False,
-                    }
-                )
+                    }, "common_funder", config, profiles))
         for item in alert.get("common_executors") or []:
             members = sorted({str(value) for value in item.get("members") or [] if value})
             if len(members) >= 2 and item.get("executor"):
-                groups.append(
-                    {
+                groups.append(normalize_wallet_link(
+                    {**item,
                         "family": "common_executor",
                         "key": str(item["executor"]),
                         "members": members,
                         "wallets": len(members),
-                        "supporting_only": False,
-                    }
-                )
+                    }, "common_executor", config))
 
         fee_groups = defaultdict(set)
         all_buyers = set()
@@ -7880,7 +8018,12 @@ def supply_integrity_linkage_groups(alert, thesis, config):
                             "key": key,
                             "members": members,
                             "wallets": len(members),
-                            "supporting_only": False,
+                            "transfer_verified": family == "common_funder" and all(
+                                row.get("link_evidence_version") == 2
+                                for row in cohort if row.get("owner") in members_set),
+                            "link_verified": family == "common_executor" and all(
+                                row.get("link_evidence_version") == 2
+                                for row in cohort if row.get("owner") in members_set),
                         }
                     )
         previous = thesis.get("supply_integrity") or {}
@@ -7896,7 +8039,7 @@ def supply_integrity_linkage_groups(alert, thesis, config):
         if len(members) < 2:
             continue
         key = (str(group.get("family") or ""), str(group.get("key") or ""), tuple(members))
-        normalized = dict(group)
+        normalized = normalize_wallet_link(group, group.get("family"), config)
         normalized["members"] = members
         normalized["wallets"] = len(members)
         unique[key] = normalized
@@ -7937,7 +8080,7 @@ def supply_integrity_linked_clusters(cohort, groups, supply):
         if retained_value is None:
             retained_value = row.get("retained_from_wave")
         if retained_value is None:
-            retained_value = row.get("attributed_tokens")
+            retained_value = 0
         signal_retained = max(0.0, float(retained_value or 0))
         balances[owner] = {
             "current_balance": current_balance,
@@ -7977,6 +8120,8 @@ def supply_integrity_linked_clusters(cohort, groups, supply):
         families = set()
         member_set = set(members)
         for group in groups or []:
+            if group.get("supporting_only"):
+                continue
             if len(member_set.intersection(group.get("members") or [])) >= 2:
                 families.add(str(group.get("family") or "unknown"))
         current_tokens = sum(balances[owner]["current_balance"] for owner in members)
@@ -8144,7 +8289,7 @@ def analyze_supply_integrity(pool, rpc, config, alert=None, thesis=None, checked
                         for member in group.get("members") or []
                     }
                 ),
-                "supporting_only": family == "priority_fee",
+                "supporting_only": all(group.get("supporting_only") for group in family_groups),
             }
         )
     family_count = len(evidence_families)
@@ -8233,7 +8378,7 @@ def analyze_supply_integrity(pool, rpc, config, alert=None, thesis=None, checked
         )
     )
     watch = bool(
-        family_count
+        any(not item.get("supporting_only") for item in evidence_families)
         or cohort_top_supply_pct
         >= float(config.get("supply_integrity_watch_cohort_supply_pct", 3))
         or (
@@ -8261,8 +8406,8 @@ def analyze_supply_integrity(pool, rpc, config, alert=None, thesis=None, checked
     reasons = []
     if coordination_confirmed:
         reasons.append(
-            f"{coordination_family_count} independent wallet-link families agree "
-            "inside one connected cohort cluster"
+            f"{coordination_family_count} verified link families overlap in the checked cohort; "
+            "common ownership is not established"
         )
     elif family_count:
         reasons.append(
@@ -8296,6 +8441,9 @@ def analyze_supply_integrity(pool, rpc, config, alert=None, thesis=None, checked
 
     return {
         "version": 1,
+        "evidence_version": 2,
+        "ownership": "not_established",
+        "holder_scope": "up to 20 largest token accounts, resolved to owners; not a full holder census",
         "checked_at": checked_at,
         "status": status,
         "data_quality_status": data_quality_status,
@@ -8329,6 +8477,8 @@ def analyze_supply_integrity(pool, rpc, config, alert=None, thesis=None, checked
             "free float is approximate only when a pool-controlled reserve is resolved",
             "CEX and terminal labels require a maintained address-label source",
             "priority-fee matches are supporting evidence only",
+            "shared services and unclassified executors are not wallet ownership links",
+            "concentration is a risk signal, not proof of insider control or a buy recommendation",
         ],
     }
 
@@ -10064,8 +10214,8 @@ def apply_alert_data_quality(
             if "partial onchain coverage" not in penalties:
                 penalties.append("partial onchain coverage")
             alert["quality_penalties"] = penalties
-        apply_signal_confirmation(alert, config)
         attach_coordinated_activity(alert, config)
+        apply_signal_confirmation(alert, config)
     return alerts
 
 
@@ -10076,6 +10226,8 @@ def apply_signal_confirmation(alert, config):
     baseline = alert.get("reactivation_baseline") or {}
     graph = alert.get("wallet_graph") or {}
     reasons = list((alert.get("data_quality") or {}).get("reasons") or [])
+    if ((alert.get("coordinated_activity") or {}).get("metrics") or {}).get("market_rotation_observations"):
+        reasons.append("market-mediated rotation needs review; turnover is not new accumulation")
     if (alert.get("data_quality") or {}).get("status") != "complete":
         reasons.append("onchain verification incomplete")
     if alert.get("signal_family") != "reactivation_wave":

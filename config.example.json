@@ -2,6 +2,9 @@
   "mode": "balanced",
   "lane": "reactivation",
   "coordinated_activity_enabled": true,
+  "wallet_source_labels": {},
+  "wallet_funding_transaction_limit": 3,
+  "wallet_funding_lookback_days": 30,
   "coordinated_activity": {
     "min_wallets": 3,
     "min_families": 2,
@@ -11,6 +14,9 @@
     "max_funding_lag_seconds": 3600,
     "min_funding_native": 0.05,
     "min_funding_buy_fraction": 0.1,
+    "rotation_window_seconds": 900,
+    "rotation_max_price_gap_pct": 15,
+    "rotation_min_supply_pct": 1,
     "young_max_age_days": 14,
     "young_max_previous_tx_count": 3,
     "max_balance_age_seconds": 3600

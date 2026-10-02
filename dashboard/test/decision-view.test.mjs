@@ -8,7 +8,7 @@ function token(overrides = {}) {
   return {
     key: "mint", dataStatus: "current", lifecycleStatus: "holding", currentSignalTier: "watch",
     signalLifecycle: { currentConfirmed: true }, currentSignalAlerts: [{ signal_confirmation: { status: "confirmed" } }],
-    currentMarket: { isFresh: true }, supplyIntegrity: { status: "distributed", data_quality_status: "complete" },
+    currentMarket: { isFresh: true }, supplyIntegrity: { status: "distributed", data_quality_status: "complete", checked_at: checked, evidence_version: 2 },
     signalThesis: { status: "intact", token_retention_pct: 80, current_retained_supply_pct: 4,
       last_checked_at: checked, next_check_at: "2026-09-04T22:15:00Z", balance_coverage_pct: 100,
       token_balance_coverage_pct: 100, cohort_wallet_coverage_pct: 100, cohort_token_coverage_pct: 100 },
@@ -23,6 +23,24 @@ test("ready-to-review requires current confirmation and fresh evidence", () => {
   assert.equal(view(token({ currentMarket: { isFresh: false } })).queue, "holding");
   assert.equal(view(token({ dataStatus: "scanner_stale" })).queue, "holding");
   assert.equal(view(token({ supplyIntegrity: { status: "watch", data_quality_status: "complete" } })).queue, "holding");
+});
+test("old holder snapshots and legacy link proof cannot make a ready signal", () => {
+  for (const patch of [{checked_at:"2026-09-04T18:00:00Z"}, {evidence_version:1}, {checked_at:null}]) {
+    const t = token(); Object.assign(t.supplyIntegrity, patch);
+    assert.equal(view(t).queue, "holding");
+    assert.ok(view(t).blockers.length);
+  }
+});
+test("holder freshness uses its own configured refresh interval", () => {
+  const t = token(); t.supplyIntegrity.checked_at = "2026-09-04T19:30:00Z";
+  assert.equal(view(t).queue, "review");
+  assert.equal(decisionView(t, {supply_integrity_refresh_minutes:60}, now).queue, "holding");
+});
+test("market rotation stays a risk warning rather than accumulation readiness", () => {
+  const t = token(); t.signalThesis.coordinated_activity = {metrics:{market_rotation_observations:1}};
+  assert.equal(view(t).queue, "holding");
+  assert.equal(view(t).rotation, true);
+  assert.ok(view(t).blockers.some(reason => reason.includes("rotation")));
 });
 test("weakening is never concealed behind missing confirmation or overdue checks", () => {
   const t = token({ dataStatus: "check_needed", signalLifecycle: { currentConfirmed: false }, lifecycleStatus: "weakening" });
