@@ -1,7 +1,7 @@
 import { chooseDashboardPayload } from "./data-source.js?v=20260807-wallet-edge-1";
 import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261001-1";
-import { installTerminology } from "./terminology.js?v=20261003-evidence-2";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail } from "./decision-view.js?v=20261003-evidence-2";
+import { installTerminology } from "./terminology.js?v=20261003-evidence-3";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail } from "./decision-view.js?v=20261003-evidence-3";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -2101,15 +2101,17 @@ function walletHeldLabel(wallet) {
     return wallet.retention_unavailable ? "not available" : "pending";
   }
   const retainedPct = Math.max(0, Number(wallet.retained_pct));
+  if (!Number.isFinite(retainedPct)) return "not available";
   if (!retainedPct) return "0% retained";
   const formatted = retainedPct < 0.1
     ? "<0.1"
     : retainedPct < 1
       ? retainedPct.toFixed(1)
       : retainedPct.toFixed(0);
+  const bound = retainedPct < 0.1 ? formatted : `\u2264${formatted}`;
   return wallet.is_signal_holder === false
-    ? `${formatted}% dust`
-    : `${formatted}% held`;
+    ? `${bound}% dust`
+    : `${bound}% left`;
 }
 
 function walletHeldClass(wallet) {
@@ -2135,7 +2137,7 @@ function renderWalletRows(token) {
             <th>Class</th>
             <th>Buys</th>
             <th>Entry</th>
-            <th>Held</th>
+            <th>Position left</th>
             <th>Open return</th>
             <th>Open PnL</th>
           </tr>
