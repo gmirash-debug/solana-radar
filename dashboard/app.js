@@ -1,7 +1,8 @@
 import { chooseDashboardPayload } from "./data-source.js?v=20260807-wallet-edge-1";
 import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261001-1";
-import { installTerminology } from "./terminology.js?v=20261003-evidence-3";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail } from "./decision-view.js?v=20261003-evidence-3";
+import { installTerminology } from "./terminology.js?v=20261003-evidence-4";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail } from "./decision-view.js?v=20261003-evidence-4";
+import { loadTokenDetail } from "./static-detail.js?v=20261003-evidence-4";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -120,6 +121,7 @@ const state = {
   tokenDetailRetryAt: new Map(),
   tokenDetailErrors: new Map(),
   tokenDetailCache: new Map(),
+  tokenDetailManifest: null,
 };
 
 const els = {
@@ -1668,6 +1670,9 @@ function applyDashboardPayload(payload, source, fallbackReason = null) {
   state.scanStatus = payload?.scan_status || {};
   state.discoveryStatus = payload?.discovery_status || {};
   state.historyStatus = payload?.history_status || {};
+  state.tokenDetailManifest = payload?.token_details?.generation === nextGeneratedAt
+    ? payload.token_details
+    : state.tokenDetailManifest?.generation === nextGeneratedAt ? state.tokenDetailManifest : null;
   state.dataSource = source;
   state.fallbackReason = fallbackReason;
   if (snapshotChanged) {
@@ -1805,7 +1810,7 @@ async function ensureTokenDetail(tokenKey) {
   const baseUrl = remoteDataUrl();
   if (
     !state.publishedDashboard
-    || !baseUrl
+    || (!baseUrl && !state.tokenDetailManifest)
     || !key
     || state.tokenDetailLoadedKeys.has(key)
     || state.tokenDetailLoadingKeys.has(key)
@@ -1816,16 +1821,12 @@ async function ensureTokenDetail(tokenKey) {
   const generation = state.report?.generated_at;
   renderDetailLoadState(key);
   try {
-    const response = await fetchWithTimeout(`${baseUrl}/api/dashboard/token?token_key=${encodeURIComponent(key)}`, {
-      cache: "no-store",
-      headers: { accept: "application/json" },
+    const detail = await loadTokenDetail({
+      manifest: state.tokenDetailManifest, key, generation, baseUrl,
+      fetcher: fetchWithTimeout,
+      accepts: (incoming) => canApplyDetail(incoming, key, generation, state.report?.generated_at,
+        state.report?.signal_theses?.find((item) => detailRecordMatchesToken(item, key))),
     });
-    const detail = await response.json().catch(() => null);
-    if (!response.ok || !detail?.ok) throw new Error(detail?.error || `token detail ${response.status}`);
-    const thesis = state.report?.signal_theses?.find((item) => detailRecordMatchesToken(item, key));
-    if (!canApplyDetail(detail, key, generation, state.report?.generated_at, thesis)) {
-      throw new Error("Details belong to an older snapshot. The newer scan summary is retained.");
-    }
     applyTokenDetail(detail);
     state.tokenDetailCache.set(key, detail);
     state.tokenDetailLoadedKeys.add(key);
@@ -1845,6 +1846,7 @@ async function ensureTokenDetail(tokenKey) {
 function detailLoadMessage(key) {
   if (state.tokenDetailLoadingKeys.has(key)) return `<span class="loading-dot"></span> Loading wallet details...`;
   if (state.tokenDetailErrors.has(key)) return `Wallet details unavailable. Showing the scan summary. <button type="button" data-retry-detail="${esc(key)}">Retry</button>`;
+  if (state.tokenDetailCache.get(key)?.source === "published_scan") return "Wallet details from the published scan. Check times are shown below.";
   return "";
 }
 

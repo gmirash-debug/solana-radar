@@ -1226,10 +1226,10 @@ async function discoveryDispatchGuard(env) {
 export default {
   async scheduled(_event, env, ctx) {
     const mode = schedulerMode(env);
-    const historyTask = hasHistoryDb(env)
+    const historyTask = shouldFlushScheduledHistory(_event, env) && hasHistoryDb(env)
       ? flushHistoryOutbox(env).catch(() => null)
       : Promise.resolve(null);
-    if (mode === "disabled") {
+    if (mode === "disabled" || shouldFlushScheduledHistory(_event, env)) {
       ctx.waitUntil(historyTask);
       return;
     }
@@ -1441,6 +1441,11 @@ export default {
     }
   },
 };
+
+export function shouldFlushScheduledHistory(event, env) {
+  // Discovery is frequent; archival aggregation must not consume its read budget.
+  return event?.cron === (env?.HISTORY_FLUSH_CRON || "37 * * * *");
+}
 
 export {
   applyDeletedTokenUpdate,

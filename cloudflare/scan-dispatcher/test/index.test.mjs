@@ -2,6 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import worker from "../src/index.js";
 
+test("archive cron is isolated from frequent discovery and deep scans", async () => {
+  assert.equal(shouldFlushScheduledHistory({cron:"*/5 * * * *"}, {}), false);
+  assert.equal(shouldFlushScheduledHistory({cron:"7 * * * *"}, {}), false);
+  assert.equal(shouldFlushScheduledHistory({cron:"37 * * * *"}, {}), true);
+  assert.equal(shouldFlushScheduledHistory({cron:"37 * * * *"}, {HISTORY_FLUSH_CRON:"37 */6 * * *"}), false);
+  const tasks=[];
+  // No GitHub credentials: an accidental scan dispatch would reject.
+  await worker.scheduled({cron:"37 * * * *"}, {SCHEDULER_ENABLED:"auto"}, {waitUntil:task=>tasks.push(task)});
+  await Promise.all(tasks);
+});
+
 import {
   applyDeletedTokenUpdate,
   claimDispatchBucket,
@@ -11,6 +22,7 @@ import {
   ingestSnapshotDetails,
   discoveryStateForTokens,
   discoveryDispatchGuard,
+  shouldFlushScheduledHistory,
   dashboardTokenKeys,
   decodeCursor,
   encodeCursor,
