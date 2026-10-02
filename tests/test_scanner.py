@@ -2248,7 +2248,6 @@ class ScannerCoreTests(unittest.TestCase):
                             "transaction": {"signatures": ["newest"]},
                         }
                     ],
-                    "paginationToken": "more",
                 }
             ]
         )

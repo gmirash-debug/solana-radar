@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {networkFromUrl, networkUrl} from "../radar-bootstrap.js";
-import {reviewGroup, positionBounds, marketFresh, comparePositions, selectTokens} from "../robinhood-state.js";
+import {reviewGroup, positionBounds, marketFresh, comparePositions, selectTokens, supplyRange, formatSupplyPercent} from "../robinhood-state.js";
 
 const now = Date.parse("2026-09-07T12:00:00Z");
 const payload = {status:"ok", generated_at:"2026-09-07T11:45:00Z"};
@@ -26,11 +26,29 @@ test("one shell and stylesheet serve both networks; old URL is just a redirect",
 test("freshness and original cohort evidence gate the holding group", () => {
   assert.equal(reviewGroup(token,payload,now),"observed");
   assert.equal(reviewGroup({...token,status:"retained"},payload,now),"needs_data");
-  const held = {...token,status:"retained",cohort_checks:2,cohort_created_at:payload.generated_at};
+  const held = {...token,status:"retained",cohort_checks:2,cohort_created_at:payload.generated_at, wallets:[wallet]};
   assert.equal(reviewGroup(held,payload,now),"retained");
   assert.equal(reviewGroup(held,{...payload,status:"unavailable"},now),"needs_data");
   assert.equal(reviewGroup({...held,checked_at:"2026-09-07T09:00:00Z"},payload,now),"needs_data");
   assert.equal(reviewGroup({...token,status:"queued",security:{status:"risk"}},payload,now),"risk");
+});
+test("holding labels require positive known retention, not only a status and check counter", () => {
+  const held = {...token,status:"retained",cohort_checks:2,cohort_created_at:payload.generated_at};
+  for (const wallets of [[], [{...wallet,retained_lower_bound_raw:null}],
+    [{...wallet,retained_lower_bound_raw:"0",retained_upper_bound_raw:"0"}]]) {
+    assert.equal(reviewGroup({...held, wallets}, payload, now), "needs_data");
+  }
+});
+test("false numeric zero and invalid supply bounds remain unknown, while measured zero survives", () => {
+  for (const missing of [null, undefined, "", "  ", false, true, [], {}, NaN, Infinity, -1]) {
+    assert.equal(formatSupplyPercent(missing), "Unknown");
+    assert.equal(supplyRange({retained_supply_upper_bound_pct:missing}), "Not checked");
+  }
+  assert.equal(formatSupplyPercent(0), "0.00%");
+  assert.equal(supplyRange({retained_supply_lower_bound_pct:0,retained_supply_upper_bound_pct:0}), "0.00%");
+  assert.equal(supplyRange({retained_supply_lower_bound_pct:false,retained_supply_upper_bound_pct:2}), "Up to 2.00%");
+  assert.equal(supplyRange({retained_supply_lower_bound_pct:3,retained_supply_upper_bound_pct:2}), "Not checked");
+  assert.equal(supplyRange({retained_supply_upper_bound_pct:101}), "Not checked");
 });
 test("position percentages are weighted purchase bounds, not supply or wallet count", () => {
   assert.deepEqual(positionBounds({wallets:[wallet,{bought_raw:"300",retained_lower_bound_raw:"300",retained_upper_bound_raw:"300"}]}),{lower:80,upper:90});

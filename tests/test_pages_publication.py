@@ -1,10 +1,11 @@
 import unittest
 import json
 import tempfile
+from unittest import mock
 from pathlib import Path
 from datetime import datetime, timezone
 
-from tools.build_pages import choose_snapshot, publish_token_details
+from tools.build_pages import choose_snapshot, publish_token_details, preserve_published_details
 
 
 class PagesPublicationTests(unittest.TestCase):
@@ -52,3 +53,66 @@ class PagesPublicationTests(unittest.TestCase):
             state["pools"]["pool"]["signal_thesis"][field] = "different"
             with tempfile.TemporaryDirectory() as directory:
                 self.assertEqual(publish_token_details(snapshot, state, Path(directory))["files"], {})
+
+    def test_future_snapshot_cannot_hide_a_valid_current_scan(self):
+        current = {"report": {"generated_at": "2026-10-03T01:00:00Z"}}
+        future = {"report": {"generated_at": "2099-01-01T00:00:00Z"}}
+        now = datetime(2026, 10, 3, 1, tzinfo=timezone.utc)
+        self.assertIs(choose_snapshot(current, future, now), current)
+        self.assertIs(choose_snapshot(future, current, now), current)
+        with self.assertRaises(ValueError):
+            choose_snapshot(future, None, now)
+
+    def published_fixture(self):
+        snapshot, _ = self.fixture()
+        generation = snapshot["report"]["generated_at"]
+        path = "data/token-details/" + "a" * 64 + ".json"
+        snapshot["token_details"] = {"generation": generation, "files": {"mint/unsafe": path}}
+        detail = {"ok": True, "token_key": "mint/unsafe", "report_source_updated_at": generation,
+                  "thesis": {**snapshot["report"]["signal_theses"][0],
+                             "cohort_wallets": [{"owner": "wallet", "current_balance": 0}]}}
+        return snapshot, detail, path
+
+    def test_older_runtime_cache_preserves_matching_published_wallets(self):
+        snapshot, detail, path = self.published_fixture()
+        fetcher = mock.Mock(return_value=mock.Mock(json=mock.Mock(return_value=detail)))
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = publish_token_details(snapshot, {}, Path(directory))
+            preserved = preserve_published_details(snapshot, manifest, Path(directory), fetcher=fetcher)
+            self.assertEqual(preserved["files"]["mint/unsafe"], path)
+            saved = json.loads((Path(directory) / Path(path).name).read_text())
+            self.assertEqual(saved["thesis"]["cohort_wallets"][0]["current_balance"], 0)
+
+    def test_existing_runtime_wallet_details_do_not_need_public_downloads(self):
+        snapshot, detail, path = self.published_fixture()
+        fetcher = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = {"generation": snapshot["report"]["generated_at"], "files": {"mint/unsafe": path}}
+            preserve_published_details(snapshot, manifest, Path(directory), fetcher=fetcher)
+        fetcher.assert_not_called()
+
+    def test_unsafe_or_mismatched_published_wallets_block_publication(self):
+        for mutation in ("unsafe", "generation", "cohort"):
+            snapshot, detail, path = self.published_fixture()
+            if mutation == "unsafe":
+                snapshot["token_details"]["files"]["mint/unsafe"] = "../../private.json"
+            elif mutation == "generation":
+                detail["report_source_updated_at"] = "old"
+            else:
+                detail["thesis"]["cohort_id"] = "replacement"
+            fetcher = mock.Mock(return_value=mock.Mock(json=mock.Mock(return_value=detail)))
+            with tempfile.TemporaryDirectory() as directory:
+                manifest = {"generation": snapshot["report"]["generated_at"], "files": {}}
+                with self.assertRaises(ValueError):
+                    preserve_published_details(snapshot, manifest, Path(directory), fetcher=fetcher)
+                self.assertEqual(list(Path(directory).glob("*.json")), [])
+
+    def test_detail_reuse_never_exceeds_the_run_budget(self):
+        snapshot, _, _ = self.published_fixture()
+        fetcher = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "budget"):
+                preserve_published_details(snapshot,
+                    {"generation": snapshot["report"]["generated_at"], "files": {}},
+                    Path(directory), fetcher=fetcher, max_seconds=0)
+        fetcher.assert_not_called()

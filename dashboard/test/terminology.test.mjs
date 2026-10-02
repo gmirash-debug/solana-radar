@@ -32,6 +32,9 @@ test("terms separate position retention, supply, attribution and provider labels
   assert.equal(termForLabel("Wallets still holding"), "holders");
   assert.equal(termForLabel("Retention checks"), "retention_checks");
   assert.equal(termForLabel("GMGN wallet labels"), "gmgn_labels");
+  assert.equal(termForLabel("Observed position movements"), "position_activity");
+  assert.match(TERMS.position_activity.text, /Полная история кошельков не проверена/);
+  assert.match(TERMS.position_activity.note, /не являются доказательством продажи/);
   assert.match(TERMS.position.text, /не 75% всего суплая/);
   assert.match(TERMS.top_cohort.note, /не означает, что группа всё продала/);
   assert.match(TERMS.coordination.note, /не доказательство/);
@@ -90,6 +93,17 @@ test("keyboard focus opens, Escape dismisses without losing focus or prior descr
   assert.equal(popup.hidden, true);
   assert.equal(doc.activeElement, button);
   assert.equal(button.getAttribute("aria-describedby"), "other-description");
+});
+test("leaving the hovered trigger cannot dismiss a keyboard-focused explanation", t => {
+  const {dom, doc, button, popup, pointer} = fixture(t);
+  let scheduled = 0;
+  dom.window.setTimeout = () => { scheduled += 1; return scheduled; };
+  button.focus();
+  pointer(button, "pointerout", "mouse", doc.body);
+  assert.equal(scheduled, 0);
+  assert.equal(popup.hidden, false);
+  doc.querySelector("#outside").focus();
+  assert.equal(popup.hidden, true);
 });
 test("mobile ignores hover, tap pins, second tap and outside click dismiss", t => {
   const {doc, button, popup, pointer} = fixture(t);

@@ -23,6 +23,7 @@ import requests
 from gmgn_context import token_ath, VERSION as GMGN_VERSION
 from coordinated_activity import analyze_coordinated_activity, compact_coordinated_activity
 from wallet_links import SERVICE_KINDS, infrastructure_sources, normalize_link as normalize_wallet_link, source_kind
+from solana_position_lineage import annotate_pool_activity
 
 
 ROOT = Path(__file__).resolve().parent
@@ -654,6 +655,12 @@ def compact_signal_thesis_for_dashboard(thesis):
         }
     if isinstance(thesis.get("coordinated_activity"), dict):
         compact["coordinated_activity"] = compact_coordinated_activity(thesis["coordinated_activity"])
+    if isinstance(thesis.get("observed_position_activity"), dict):
+        activity = thesis["observed_position_activity"]
+        compact["observed_position_activity"] = {
+            key: value for key, value in activity.items() if key not in {"owners", "observations"}
+        }
+        compact["observed_position_activity"]["observation_count"] = len(activity.get("observations") or [])
     return compact
 
 
@@ -6679,6 +6686,8 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
                     "attributed_tokens": attributed_tokens,
                     "initial_balance": current_balance,
                     "buy_sol": max(0.0, float(row.get("buy_sol") or 0)),
+                    "buy_count": row.get("buy_count")
+                        if type(row.get("buy_count")) is int and row["buy_count"] >= 0 else None,
                     "first_buy_time": parse_timestamp(
                         row.get("first_buy_time")
                     ),
@@ -7246,6 +7255,7 @@ def public_signal_thesis(thesis):
         "invalidation_streak",
         "retention_basis",
         "position_resolution",
+        "observed_position_activity",
         "supply_integrity",
         "supply_integrity_history",
     }
@@ -7259,6 +7269,7 @@ def public_signal_thesis(thesis):
         "wallet_class",
         "attributed_tokens",
         "buy_sol",
+        "buy_count",
         "first_buy_time",
         "current_balance",
         "current_retained_tokens",
@@ -7314,6 +7325,8 @@ def refresh_signal_thesis(
     alerts,
     config,
     checked_at=None,
+    observed_transactions=None,
+    observed_swaps=None,
 ):
     if not config.get("signal_thesis_tracking_enabled", True):
         return None
@@ -7374,6 +7387,22 @@ def refresh_signal_thesis(
         schedule_signal_recheck(pool_state, alerts, config)
     elif not isinstance(thesis, dict):
         schedule_signal_recheck(pool_state, alerts, config)
+    if isinstance(thesis, dict) and observed_transactions is not None:
+        try:
+            thesis["observed_position_activity"] = annotate_pool_activity(
+                pool.token_address, observed_transactions, observed_swaps or [],
+                [row["owner"] for row in thesis.get("cohort") or [] if row.get("owner")],
+                signal_timestamp=thesis.get("signal_at"), checked_timestamp=checked_at,
+                service_owners=[pool.pool_address, SOL_MINT, SOLANA_INCINERATOR,
+                                *infrastructure_sources(config)],
+            )
+        except (TypeError, ValueError) as exc:
+            thesis["observed_position_activity"] = {
+                "status": "unavailable", "scope": "supplied_pool_transactions_strictly_after_signal",
+                "wallet_history_complete": False, "affects_original_cohort_retention": False,
+                "confirmation_eligible": False, "ownership": "not_established",
+                "issues": [str(exc)[:160]],
+            }
     return public_signal_thesis(thesis)
 
 
@@ -9495,10 +9524,13 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
                             else max(current_newest, newest)
                         )
                     cursor = result.get("paginationToken")
-                    if len(batch) < limit:
-                        cursor = None
-                    if not cursor or not batch:
+                    if not cursor:
                         stage_cursor(save_cursor_key, None)
+                        break
+                    if not batch or cursor == kwargs["pagination_token"]:
+                        pass_stats["truncated"] = True
+                        stats["truncated"] = True
+                        stage_cursor(save_cursor_key, cursor, provider_name)
                         break
                 else:
                     pass_stats["truncated"] = True
@@ -9643,8 +9675,13 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
 
     max_segments = max(1, int(config.get("helius_rolling_backlog_max_segments", 12)))
     if len(rolling_backlogs) > max_segments:
-        rolling_backlogs = rolling_backlogs[-max_segments:]
-        stats["rolling_backlog_segments_dropped"] = True
+        # Keep the oldest repair cursor and replay overlapping newer ranges as one.
+        # Dropping the oldest segment would erase the only path across that gap.
+        replay = dict(rolling_backlogs[-1])
+        merged = rolling_backlogs[max_segments - 1:]
+        replay["from"] = min(int(item.get("from") or live_from) for item in merged)
+        rolling_backlogs = [*rolling_backlogs[:max_segments - 1], replay]
+        stats["rolling_backlog_segments_compacted"] = len(merged) - 1
     if rolling_backlogs:
         staged_updates["helius_rolling_backlogs"] = rolling_backlogs
     else:
@@ -10065,9 +10102,11 @@ def combine_fetch_stats(probe_stats, deep_stats):
     combined["phase"] = "probe_plus_deep"
     combined["pages"] = int(probe_stats.get("pages", 0)) + int(deep_stats.get("pages", 0))
     combined["transactions"] = int(probe_stats.get("transactions", 0)) + int(deep_stats.get("transactions", 0))
+    for key in ("transaction_errors", "parse_errors"):
+        combined[key] = int(probe_stats.get(key) or 0) + int(deep_stats.get(key) or 0)
     combined["passes"] = [*(probe_stats.get("passes") or []), *(deep_stats.get("passes") or [])]
     combined["truncated"] = bool(probe_stats.get("truncated") or deep_stats.get("truncated"))
-    if deep_stats.get("live_resumed"):
+    if "rolling_backlog_segments_after" in deep_stats or deep_stats.get("live_resumed"):
         combined["live_truncated"] = bool(deep_stats.get("live_truncated"))
     else:
         combined["live_truncated"] = bool(
@@ -10076,14 +10115,19 @@ def combine_fetch_stats(probe_stats, deep_stats):
     combined["backfill_pending"] = bool(
         probe_stats.get("backfill_pending") or deep_stats.get("backfill_pending")
     )
-    combined["rolling_gap_pending"] = bool(
-        probe_stats.get("rolling_gap_pending")
-        or deep_stats.get("rolling_gap_pending")
-    )
-    combined["rolling_backlog_segments_after"] = max(
-        int(probe_stats.get("rolling_backlog_segments_after") or 0),
-        int(deep_stats.get("rolling_backlog_segments_after") or 0),
-    )
+    # A deep pass observes the queue after the probe; closed gaps must not remain
+    # stuck in the final report just because they were pending during the probe.
+    if "rolling_backlog_segments_after" in deep_stats:
+        combined["rolling_gap_pending"] = bool(deep_stats.get("rolling_gap_pending"))
+        combined["rolling_backlog_segments_after"] = int(deep_stats["rolling_backlog_segments_after"])
+    else:
+        combined["rolling_gap_pending"] = bool(
+            probe_stats.get("rolling_gap_pending") or deep_stats.get("rolling_gap_pending")
+        )
+        combined["rolling_backlog_segments_after"] = max(
+            int(probe_stats.get("rolling_backlog_segments_after") or 0),
+            int(deep_stats.get("rolling_backlog_segments_after") or 0),
+        )
     combined["live_cursor_reset"] = bool(
         probe_stats.get("live_cursor_reset") or deep_stats.get("live_cursor_reset")
     )
@@ -10103,9 +10147,13 @@ def combine_fetch_stats(probe_stats, deep_stats):
         int(deep_stats.get("live_cursor_head_age_seconds") or 0),
     )
     combined["had_previous_state"] = bool(probe_stats.get("had_previous_state"))
-    combined["history_gap_seconds"] = max(
-        int(probe_stats.get("history_gap_seconds") or 0),
-        int(deep_stats.get("history_gap_seconds") or 0),
+    combined["history_gap_seconds"] = (
+        int(deep_stats.get("history_gap_seconds") or 0)
+        if "rolling_backlog_segments_after" in deep_stats
+        else max(
+            int(probe_stats.get("history_gap_seconds") or 0),
+            int(deep_stats.get("history_gap_seconds") or 0),
+        )
     )
     live_newest = [
         int(value)
@@ -10308,6 +10356,8 @@ def pool_backfill_pending(pool, pool_state, config):
 
 
 def pool_has_new_activity(rpc, pool, pool_state, config):
+    if pool_state.get("helius_rolling_backlogs") or pool_state.get("helius_live_cursor"):
+        return True, {"reason": "history_gap_repair"}
     recheck_due = parse_timestamp(pool_state.get("signal_recheck_due_at"))
     thesis_recheck_due = bool(
         recheck_due and int(time.time()) >= recheck_due
@@ -10548,6 +10598,8 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
         pool_state,
         alerts,
         config,
+        observed_transactions=txs,
+        observed_swaps=swaps,
     )
     return alerts, {
         "pool": pool.as_dict(),
@@ -10659,6 +10711,7 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
         new_signatures.append(item["signature"])
     live_truncated = bool(previous_latest and not previous_found and len(signatures) >= limit)
     swaps = []
+    fetched_transactions = []
     transaction_errors = 0
     parse_errors = 0
     for signature in reversed(new_signatures):
@@ -10671,6 +10724,8 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
                 file=sys.stderr,
             )
             continue
+        if isinstance(tx, dict):
+            fetched_transactions.append(tx)
         try:
             swap = parse_pool_swap(tx, pool)
         except Exception:
@@ -10765,6 +10820,8 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
         pool_state,
         alerts,
         config,
+        observed_transactions=fetched_transactions,
+        observed_swaps=swaps,
     )
 
     summary = {

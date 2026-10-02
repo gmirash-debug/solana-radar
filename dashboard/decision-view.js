@@ -9,7 +9,7 @@ export const REVIEW_QUEUES = [
 ];
 
 export function numeric(value) {
-  if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
+  if (!["number", "string"].includes(typeof value) || (typeof value === "string" && !value.trim())) return null;
   const result = Number(value);
   return Number.isFinite(result) ? result : null;
 }
@@ -25,7 +25,9 @@ export function retentionBound(value, digits = 0) {
   if (amount === 0) return "0%";
   const cutoff = 10 ** -digits;
   if (amount < cutoff) return `<${cutoff}%`;
-  return `\u2264${amount.toFixed(digits)}%`;
+  const factor = 10 ** digits;
+  const rounded = Number(amount.toFixed(digits));
+  return `\u2264${(rounded < amount ? rounded + 1 / factor : rounded).toFixed(digits)}%`;
 }
 
 function time(value) {
@@ -90,7 +92,7 @@ export function decisionView(token, config = {}, now = Date.now()) {
     queue = "inactive"; label = "Closed";
   } else if (thesis.status === "weakening" || token.lifecycleStatus === "weakening") {
     queue = "reducing"; label = "Position reduced";
-  } else if (thesis.status === "intact" && retained !== null && complete) {
+  } else if (thesis.status === "intact" && retained > 0 && complete) {
     queue = "holding"; label = fresh ? "Holding" : "Held at last check";
     if (currentConfirmed && fresh && token.dataStatus === "current" && token.currentMarket?.isFresh
       && integrity.data_quality_status === "complete" && integrity.status === "distributed"
@@ -100,13 +102,13 @@ export function decisionView(token, config = {}, now = Date.now()) {
     }
   } else if (!currentConfirmed && (token.currentSignalAlerts || []).length && token.dataStatus !== "scanner_stale"
     && token.currentSignalTier !== "noise" && token.currentSignalTier !== "late_chase"
-    && (!token.signalThesis || thesis.status !== "unknown")) {
+    && (!token.signalThesis || !["unknown", "intact"].includes(thesis.status))) {
     queue = "early"; label = "Unconfirmed activity";
   }
   const meta = REVIEW_QUEUES.find((item) => item.id === queue);
   const reason = queue === "review" ? "Confirmed buying + retained balances"
-    : queue === "holding" ? `Up to ${Math.round(retained)}% of original position remains${fresh ? "" : "; check overdue"}`
-      : queue === "reducing" ? (retained === null ? "Original cohort balances declined" : `Up to ${Math.round(retained)}% of original position remains`)
+    : queue === "holding" ? `${retentionBound(retained).replace("\u2264", "Up to ")} of original position remains${fresh ? "" : "; check overdue"}`
+      : queue === "reducing" ? (retained === null ? "Original cohort balances declined" : `${retentionBound(retained).replace("\u2264", "Up to ")} of original position remains`)
         : queue === "early" ? "Buying observed; confirmation missing"
           : queue === "inactive" ? "Original accumulation invalidated"
             : !cohortComplete && cohortCoverage !== null ? `Only ${Math.round(cohortCoverage)}% of original wallets covered`
@@ -133,12 +135,28 @@ export function compareReviewTokens(a, b, sort = "caught") {
 }
 
 // Never let slow detail requests replace a newer summary or another snapshot.
+export function sameDetailCohort(detail, tokenKey, thesis, generation) {
+  const source = time(detail?.report_source_updated_at), current = time(generation);
+  return detail?.token_key === tokenKey && Boolean(thesis?.cohort_id)
+    && Number.isFinite(source) && Number.isFinite(current) && source <= current
+    && detail.thesis?.cohort_id === thesis.cohort_id
+    && ["signal_at", "signal_window_start", "signal_window_end"].every(field =>
+      thesis[field] == null || detail.thesis?.[field] === thesis[field]);
+}
+
 export function canApplyDetail(detail, tokenKey, requestedGeneration, currentGeneration, thesis) {
   if (detail?.token_key !== tokenKey || requestedGeneration !== currentGeneration) return false;
   const source = time(detail.report_source_updated_at);
   const generation = time(currentGeneration);
-  if (!Number.isFinite(source) || (Number.isFinite(generation) && source < generation)) return false;
+  if (!Number.isFinite(generation) || source !== generation) return false;
+  if (detail.thesis?.token_address && detail.thesis.token_address !== tokenKey
+    && detail.thesis.pool_address !== tokenKey) return false;
+  for (const field of ["cohort_id", "signal_at", "signal_window_start", "signal_window_end"]) {
+    if (thesis?.[field] != null && detail.thesis?.[field] !== thesis[field]) return false;
+  }
   const incoming = time(detail.thesis?.last_checked_at);
   const existing = time(thesis?.last_checked_at);
-  return !Number.isFinite(existing) || (Number.isFinite(incoming) && incoming >= existing);
+  const updated = time(thesis?.updated_at);
+  return (!Number.isFinite(existing) || incoming === existing)
+    && (!Number.isFinite(updated) || time(detail.thesis?.updated_at) === updated);
 }

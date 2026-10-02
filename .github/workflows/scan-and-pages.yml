@@ -372,12 +372,14 @@ jobs:
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         run: |
           git fetch origin main
-          git archive FETCH_HEAD dashboard | tar -x
+          publisher=$(mktemp -d "${RUNNER_TEMP:-/tmp}/radar-publisher.XXXXXX")
+          trap 'rm -rf "$publisher"' EXIT
+          git archive FETCH_HEAD | tar -x -C "$publisher"
           rm -rf .pages
           mkdir -p .pages/data
-          cp dashboard/*.html dashboard/*.js dashboard/*.css .pages/
-          cp -R dashboard/icons .pages/
-          python tools/build_pages.py
+          cp "$publisher"/dashboard/*.html "$publisher"/dashboard/*.js "$publisher"/dashboard/*.css .pages/
+          cp -R "$publisher/dashboard/icons" .pages/
+          python "$publisher/tools/build_pages.py"
 
       - name: Configure Pages
         if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'

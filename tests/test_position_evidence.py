@@ -3,7 +3,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 import robinhood as rh
-from position_evidence import seed_position, replay_position, position_summary, cross_chain_summary, preparation_summary
+from position_evidence import (seed_position, replay_position, position_summary, cross_chain_summary,
+                               preparation_summary, annotate_solana_pool_position_activity)
 from robinhood_store import Store
 from tests.test_robinhood import TOKEN, QUOTE, POOL, WALLET, ROUTER, fixture, topic
 
@@ -20,6 +21,13 @@ def event(sender=WALLET, recipient=B, amount=40, index=0):
 
 
 class PositionTests(unittest.TestCase):
+    def test_solana_annotation_is_a_partial_non_invalidating_integration_boundary(self):
+        out = annotate_solana_pool_position_activity("mint", [], [], ["owner"], signal_timestamp=100)
+        self.assertEqual(out["status"], "partial")
+        self.assertFalse(out["affects_original_cohort_retention"])
+        self.assertIsNone(out["retention_bounds_raw"])
+        self.assertTrue(out["unresolved_outflows_possible"])
+
     def test_transfer_not_sale_and_no_double_count(self):
         s = seed()
         nodes = dict(s["nodes"], **{B: {"balance":"0", "known":"0", "depth":1}})
