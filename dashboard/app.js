@@ -1,8 +1,8 @@
 import { chooseDashboardPayload } from "./data-source.js?v=20260807-wallet-edge-1";
 import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261001-1";
-import { installTerminology } from "./terminology.js?v=20261003-evidence-4";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail } from "./decision-view.js?v=20261003-evidence-4";
-import { loadTokenDetail } from "./static-detail.js?v=20261003-evidence-4";
+import { installTerminology } from "./terminology.js?v=20261003-evidence-5";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, retentionBound } from "./decision-view.js?v=20261003-evidence-5";
+import { loadTokenDetail } from "./static-detail.js?v=20261003-evidence-5";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -2145,7 +2145,7 @@ function renderWalletRows(token) {
           </tr>
         </thead>
         <tbody>
-          ${token.wallets.slice(0, 16).map((wallet) => `
+          ${token.wallets.map((wallet) => `
             <tr>
               <td><code>${esc(short(wallet.owner))}</code></td>
               <td>${esc(wallet.class_label || "-")}${wallet.routed ? ` ${chip(`routed ${wallet.routed}`, "warn")}` : ""}</td>
@@ -2159,6 +2159,7 @@ function renderWalletRows(token) {
         </tbody>
       </table>
     </div>
+    <div class="muted-inline">${token.wallets.length} observed wallets</div>
   `;
 }
 
@@ -2471,10 +2472,7 @@ function renderThesisSummary(token) {
   if (!thesis) {
     return `${tierChip("recheck_due")} <span class="muted-inline">original buyer cohort has not been persisted yet</span>`;
   }
-  const retention = thesis.token_retention_pct === null
-    || thesis.token_retention_pct === undefined
-    ? null
-    : Number(thesis.token_retention_pct);
+  const retention = token.decision?.retained;
   const holders = Number(thesis.holders_remaining || 0);
   const originalWallets = Number(thesis.original_wallets || 0);
   const checked = thesis.last_checked_at
@@ -2482,7 +2480,7 @@ function renderThesisSummary(token) {
     : "not checked";
   return [
     tierChip(thesisTier(thesis)),
-    Number.isFinite(retention) ? `${retention.toFixed(0)}% of signal tokens retained` : "",
+    `${retentionBound(retention)} original-position balance cap`,
     originalWallets ? `${holders}/${originalWallets} tracked wallets still holding` : "",
     checked,
   ].filter(Boolean).join(" / ");
@@ -2493,10 +2491,6 @@ function renderThesisDetails(token) {
   if (!thesis) {
     return `<div class="kv"><span>Original cohort</span><span>${renderThesisSummary(token)}</span></div>`;
   }
-  const retainedSupply = thesis.current_retained_supply_pct === null
-    || thesis.current_retained_supply_pct === undefined
-    ? null
-    : Number(thesis.current_retained_supply_pct);
   const walletCoverage = thesis.balance_coverage_pct === null
     || thesis.balance_coverage_pct === undefined
     ? null
@@ -2523,7 +2517,7 @@ function renderThesisDetails(token) {
   ].filter(Boolean).join(" / ");
   return `
     <div class="kv"><span>Original cohort</span><span>${renderThesisSummary(token)}</span></div>
-    <div class="kv"><span>Retained supply</span><span>${Number.isFinite(retainedSupply) ? `${retainedSupply.toFixed(2)}%` : "-"}${thesis.reason ? ` <span class="muted-inline">${esc(thesis.reason)}</span>` : ""}</span></div>
+    <div class="kv"><span>Retained supply</span><span>${esc(retentionBound(thesis.current_retained_supply_pct, 2))} of total token supply <span class="muted-inline">/ original cohort at last check</span></span></div>
     <div class="kv"><span>Verification</span><span>${esc(coverage || "balance coverage unavailable")}${cohortCoverage ? ` / cohort ${esc(cohortCoverage)}` : ""}${thesis.next_check_at ? ` / next ${esc(dateLabel(thesis.next_check_at))}` : ""}</span></div>
   `;
 }
@@ -2561,7 +2555,7 @@ function renderWalletEdge(token) {
   if (!edge) {
     return state.tokenDetailLoadingKeys.has(token.key)
       ? `<div class="kv"><span>Historical wallet edge</span><span class="muted-inline">loading prior signal record</span></div>`
-      : `<div class="kv"><span>Historical wallet edge</span><span class="muted-inline">no prior scored cohort yet</span></div>`;
+      : `<div class="kv"><span>Historical wallet edge</span><span class="muted-inline">Historical scores are unavailable in this snapshot.</span></div>`;
   }
   const latest = edge.latest || {};
   const validated = Number(latest.validated_wallets || 0);
@@ -2769,7 +2763,7 @@ function latestTokenSocial(token) {
 function renderOverviewTab(token) {
   const view = token.decision;
   const thesis = token.signalThesis || {};
-  const holdings = view.retained === null ? "Unknown" : `${view.retained.toFixed(0)}%`;
+  const holdings = retentionBound(view.retained);
   const known = [
     ["Signal confirmation", view.confirmation],
     ["Wallets still holding", thesis.holders_remaining != null && thesis.original_wallets != null ? `${thesis.holders_remaining} of ${thesis.original_wallets} stored wallets` : "Not verified"],
