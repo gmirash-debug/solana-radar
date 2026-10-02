@@ -279,13 +279,49 @@ class CoordinatedActivityTests(unittest.TestCase):
         result = analyze(buys(owners, span=1), profiles=profiles(owners), positions=positions(owners),
             supply=5000, config={"max_members": 999, "max_signals": 999}, coverage={"status": "complete", "total_buyers": 30})
         self.assertTrue(result["signals"])
-        self.assertTrue(all(len(signal["members"]) <= 20 and signal["wallet_count"] <= 20 for signal in result["signals"]))
+        self.assertTrue(all(len(signal["members"]) <= 20 and signal["wallet_count"] == 30 for signal in result["signals"]))
+        self.assertEqual(result["metrics"]["material_union_held_supply_pct"], 30)
         self.assertEqual(result["coverage"]["status"], "partial")
         owners = [f"wallet-{index:03}" for index in range(60)]
         rows = [dict(row, timestamp=NOW - 10000 + index // 3 * 300) for index, row in enumerate(buys(owners, span=0))]
         result = analyze(rows, profiles={}, positions=positions(owners), supply=5000)
         self.assertEqual(len(result["signals"]), 12)
         self.assertIn("signals_truncated", result["coverage"]["reasons"])
+
+    def test_large_group_economics_and_intersection_use_every_member(self):
+        owners = [f"wallet-{index:03}" for index in range(40)]
+        result = analyze(buys(owners, span=1), profiles=profiles(owners), positions=positions(owners),
+            supply=5000, coverage={"history_status": "complete", "expected_buyers": 40,
+                "owner_resolution_pct": 100, "balance_coverage_pct": 100})
+        self.assertEqual(result["coverage"]["status"], "complete")
+        self.assertEqual(result["metrics"]["material_union_held_supply_pct"], 40)
+        self.assertEqual(result["metrics"]["max_material_group_wallets"], 40)
+        self.assertEqual(result["signals"][0]["wallet_count"], 40)
+        self.assertEqual(len(result["signals"][0]["members"]), 20)
+
+    def test_funding_linked_sell_and_rebuy_wave_is_rotation_not_new_family(self):
+        sellers = ["old-a", "old-b", "old-c"]
+        buyers = ["new-a", "new-b", "new-c"]
+        owners = sellers + buyers
+        rows = [dict(row, timestamp=NOW - 200 + index) for index, row in enumerate(buys(sellers))]
+        rows += [{"owner": owner, "transaction": "sale-" + owner, "kind": "sell",
+            "timestamp": NOW - 100 + index, "sold_tokens": 50, "amount_native": 1}
+            for index, owner in enumerate(sellers)]
+        rows += [dict(row, timestamp=NOW - 40 + index) for index, row in enumerate(buys(buyers))]
+        info = profiles(owners, source="unclassified-funder")
+        for profile in info.values():
+            profile["funding_at"] = NOW - 300
+        held = positions(buyers) + positions(sellers, balance=0)
+        result = analyze(rows, profiles=info, positions=held)
+        rotation = next(signal for signal in result["signals"] if signal["code"] == "market_rotation")
+        self.assertTrue(rotation["supporting_only"])
+        self.assertEqual(rotation["detail"]["net_observed_tokens"], 0)
+        self.assertEqual(rotation["detail"]["matched_turnover_supply_pct"], 15)
+        self.assertEqual(result["metrics"]["market_rotation_observations"], 1)
+        excluded = analyze(rows, profiles=profiles(owners, source="unclassified-funder", kind="cex"), positions=held)
+        self.assertNotIn("market_rotation", codes(excluded))
+        no_sales = analyze([row for row in rows if row.get("kind") != "sell"], profiles=info, positions=held)
+        self.assertNotIn("market_rotation", codes(no_sales))
 
     def test_compact_strips_members_and_does_not_mutate_full_evidence(self):
         result = analyze(profiles=profiles(source="funder"))

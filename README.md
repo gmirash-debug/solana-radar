@@ -94,6 +94,39 @@ Holder concentration and wallet-link verification follow
 keeps supply concentration, cohort retention, coordination evidence, and data
 quality separate instead of compressing them into one unexplained score.
 
+## Reading the radar
+
+Start with **Ready to review**, not the raw score or number of candidates.
+Confirmed activity is a reason to inspect a token, not a recommendation to buy.
+**Holding** describes the original cohort, not a fresh entry. **Early observations**
+and **Needs data** still lack confirmation; the card lists the missing evidence.
+
+Check wallet and market timestamps independently. **Position left** uses the
+original purchased position as its denominator; **Retained supply** uses total
+token supply. A Solana balance cap is an upper bound, not a complete inventory
+ledger. New purchases do not restore a previously reduced original position.
+Without parsed swaps, reduced balances can mean either sales or transfers.
+
+Review holder concentration, coverage, liquidity, and price extension in GMGN.
+Shared CEX/Relay/router usage or fees do not establish common ownership.
+Funding-linked sell/rebuy rotation is a risk hypothesis, not new accumulation.
+Hover, focus, or tap terminology in cards to read its explanation.
+
+### Publication reliability
+
+The cloud publisher sends the operational list before bounded evidence batches.
+Acknowledged batches are not resent after a failure. The latest snapshot takes
+priority over the historical outbox, and old snapshots cannot overwrite newer
+records. A pending historical replay does not by itself mean the current list
+is stale: compare report time and `persistence.current_synced` separately.
+The historical outbox is preserved until all its batches are acknowledged.
+Historical analytics are processed independently in bounded background batches.
+
+Known limits: incomplete RPC windows remain unconfirmed; the largest-account
+snapshot is a sample of up to 20 token accounts, not a full holder census.
+Full Solana position lineage across transfers is not implemented. Funding checks
+are bounded to three pre-buy transactions by default, not a complete source audit.
+
 ## Keep watching
 
 ```bash

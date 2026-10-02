@@ -402,6 +402,10 @@ function compactDashboardAlert(alert = {}) {
     if (Array.isArray(topBuyers)) wave.top_buyers_count = topBuyers.length;
     compact.wave = wave;
   }
+  if (alert.wallet_graph && typeof alert.wallet_graph === "object") {
+    const {wallets, clusters, common_funders, common_executors, ...graph} = alert.wallet_graph;
+    compact.wallet_graph = graph;
+  }
   if (alert.supply_integrity && typeof alert.supply_integrity === "object") {
     const {
       top_owners: topOwners,
@@ -569,6 +573,7 @@ async function upsertAlerts(db, history, fallbackGeneratedAt, now) {
         tier = excluded.tier,
         payload_json = excluded.payload_json,
         updated_at = excluded.updated_at
+      WHERE excluded.updated_at >= alerts.updated_at
     `).bind(
       identity.alertKey,
       identity.generatedAt,
@@ -639,7 +644,7 @@ async function pruneRadarData(db, now = isoNow()) {
 
 async function ingestDashboardSnapshot(env, payload) {
   if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
-  const report = payload?.report && typeof payload.report === "object" ? payload.report : {};
+  const report = compactDashboardReport(payload?.report && typeof payload.report === "object" ? payload.report : {});
   const history = Array.isArray(payload?.history) ? payload.history : [];
   const detailSignalTheses = Array.isArray(payload?.detail_signal_theses) ? payload.detail_signal_theses : [];
   const detailCurrentAlerts = Array.isArray(payload?.detail_current_alerts) ? payload.detail_current_alerts : [];
@@ -653,6 +658,13 @@ async function ingestDashboardSnapshot(env, payload) {
     throw new Error("compact_report_exceeds_1_5mb");
   }
   const accepted = await upsertStateDoc(env.RADAR_DB, "latest_report", report, generatedAt, now);
+  if (payload?.chunked === true) {
+    await upsertScanRun(env.RADAR_DB, report, now);
+    if (accepted) {
+      await upsertStateDoc(env.RADAR_DB, "deleted_tokens", deletedTokens, normalizeId(deletedTokens.updated_at) || generatedAt, now);
+    }
+    return {ok: true, generated_at: generatedAt, ignored: accepted ? null : "stale_snapshot", evidence_pending: true};
+  }
   if (!accepted) {
     // A newer dashboard must not discard historical events from an offline run.
     const historyQueued = await enqueueHistoryEvents(env, payload, now);
@@ -687,9 +699,7 @@ async function ingestDashboardSnapshot(env, payload) {
   const historyQueued = await enqueueHistoryEvents(env, payload, now);
   // The operational dashboard stays available if the analytics store is
   // temporarily unavailable. Events remain in the outbox and retry on cron.
-  const historySync = hasHistoryDb(env)
-    ? await flushHistoryOutbox(env).catch((error) => ({ enabled: true, error: error.message, pending: historyQueued.queued }))
-    : { enabled: false, pending: historyQueued.queued, error: "history_db_not_configured" };
+  const historySync = { enabled: hasHistoryDb(env), pending: historyQueued.queued, status: "queued_for_background_flush" };
   await pruneRadarData(env.RADAR_DB, now);
   return {
     ok: true,
@@ -700,6 +710,29 @@ async function ingestDashboardSnapshot(env, payload) {
     history_queued: historyQueued.queued,
     history_sync: historySync,
   };
+}
+
+async function ingestSnapshotDetails(env, payload) {
+  if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
+  const now = isoNow();
+  const generatedAt = normalizeId(payload?.generated_at);
+  if (!generatedAt || !Number.isFinite(Date.parse(generatedAt))) throw new Error("generated_at_required");
+  const alerts = [...(payload?.detail_current_alerts || []), ...(payload?.detail_history || [])];
+  const theses = payload?.detail_signal_theses || [];
+  const market = Object.entries(payload?.market || {});
+  const events = payload?.history_ledger?.events || [];
+  if ([alerts.length, theses.length, market.length, events.length].reduce((sum, count) => sum + count, 0) > 25) {
+    throw new Error("evidence_batch_exceeds_25_rows");
+  }
+  const alertsSynced = await upsertAlerts(env.RADAR_DB, alerts, generatedAt, generatedAt);
+  const thesesSynced = await upsertSignalThesisDetails(env.RADAR_DB, theses, generatedAt, now);
+  const marketSynced = market.length ? await upsertDiscoveryStateRows(env.RADAR_DB, market.map(([tokenKey, item]) => ({
+    tokenKey, poolAddress: normalizeId(item?.pool_address), market: item,
+    updatedAt: normalizeId(item?.current_market_verified_at) || normalizeId(item?.latest_seen_at) || generatedAt,
+  }))) : 0;
+  const history = events.length ? await enqueueHistoryEvents(env, payload, now) : {queued: 0};
+  return {ok: true, generated_at: generatedAt, alerts_synced: alertsSynced,
+    thesis_details_synced: thesesSynced, market_synced: marketSynced, history_queued: history.queued};
 }
 
 function decodeCursor(value) {
@@ -1298,6 +1331,10 @@ export default {
           if (request.method !== "POST") return json({ ok: false, error: "POST required" }, 405, corsHeaders(request, env));
           return json(await ingestDashboardSnapshot(env, await request.json()), 200, corsHeaders(request, env));
         }
+        if (url.pathname === "/api/ingest/details") {
+          if (request.method !== "POST") return json({ok: false, error: "POST required"}, 405, corsHeaders(request, env));
+          return json(await ingestSnapshotDetails(env, await request.json()), 200, corsHeaders(request, env));
+        }
         if (url.pathname === "/api/discovery/state") {
           if (request.method === "GET") {
             return json(
@@ -1397,13 +1434,14 @@ export {
   dashboardTokenDetail,
   compactDashboardAlert,
   compactDashboardReport,
+  ingestDashboardSnapshot,
+  ingestSnapshotDetails,
   isCurrentDashboardSignal,
   dashboardTokenKeys,
   discoveryStateForTokens,
   decodeCursor,
   discoveryStatePage,
   encodeCursor,
-  ingestDashboardSnapshot,
   ingestDiscoveryState,
   ingestAccess,
   syncDeletedTokensToD1,

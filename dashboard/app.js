@@ -1,7 +1,7 @@
 import { chooseDashboardPayload } from "./data-source.js?v=20260807-wallet-edge-1";
 import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261001-1";
-import { installTerminology } from "./terminology.js?v=20261001-terms-1";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail } from "./decision-view.js?v=20260904-decision-1";
+import { installTerminology } from "./terminology.js?v=20261003-evidence-2";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail } from "./decision-view.js?v=20261003-evidence-2";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -2771,11 +2771,13 @@ function renderOverviewTab(token) {
     ["Wallets still holding", thesis.holders_remaining != null && thesis.original_wallets != null ? `${thesis.holders_remaining} of ${thesis.original_wallets} stored wallets` : "Not verified"],
     ["Original wallets covered", view.cohortCoverage === null ? "Unknown" : `${view.cohortCoverage.toFixed(0)}%`],
     ["Stored balances checked", view.walletCoverage === null ? "Unknown" : `${view.walletCoverage.toFixed(0)}% wallets / ${view.tokenCoverage?.toFixed(0) ?? "?"}% tokens`],
+    ["Control risk", token.supplyIntegrity?.status === "concentrated" ? "High concentration"
+      : view.rotation ? "Sell/rebuy rotation pattern" : "Common ownership not established"],
   ];
   return `
     <section class="position-evidence">
       <div class="section-heading"><h3>Original position</h3><span class="evidence-time ${view.fresh ? "" : "warning"}">${view.checkedAt ? `Checked ${esc(dateLabel(view.checkedAt))}${view.fresh ? "" : " · overdue"}` : "Not checked"}</span></div>
-      <div class="retention-summary"><strong>${holdings}</strong><span>of acquired tokens retained${view.complete ? "" : " in the checked subset"}<small>${view.supply === null ? "Total supply share unverified" : `${view.supply.toFixed(2)}% of total token supply at last check`}</small></span></div>
+      <div class="retention-summary"><strong>${holdings}</strong><span>original-position balance cap${view.complete ? "" : " in the checked subset"}<small>${view.supply === null ? "Total supply share unverified" : `Up to ${view.supply.toFixed(2)}% of total token supply at last check`}</small></span></div>
       ${view.retained === null ? "" : `<meter class="retention-meter ${esc(view.tone)}" min="0" max="100" value="${view.retained}" aria-label="Original position retained">${holdings}</meter>`}
       <div class="evidence-facts">${known.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join("")}</div>
     </section>
@@ -2881,7 +2883,7 @@ function renderSupplyLinkageGroups(integrity) {
           const members = (group.members || []).slice(0, 4).map((owner) => `<a href="https://solscan.io/account/${encodeURIComponent(owner)}" target="_blank" rel="noreferrer"><code>${esc(short(owner))}</code></a>`).join(" ");
           return `
             <div class="mini-item">
-              <strong>${esc(supplyEvidenceLabel(family))} ${group.supporting_only ? chip("support only", "warn") : chip("direct link", "good")}</strong>
+              <strong>${esc(supplyEvidenceLabel(family))} ${group.supporting_only || integrity.evidence_version !== 2 ? chip("support only", "warn") : chip("verified transfer link", "warn")}</strong>
               <span>${keyLabel} / ${esc(group.wallets || 0)} wallets</span>
               ${members ? `<span class="supply-evidence-members">${members}</span>` : ""}
             </div>
@@ -2947,7 +2949,8 @@ function renderSupplyTab(token) {
         ${detailMetric("Linked cluster", supplyPct(integrity.max_linked_cluster_current_supply_pct, 2), `${supplyPct(integrity.max_linked_cluster_signal_supply_pct, 2)} signal-attributed`)}
       </div>
       <div class="kv"><span>Status</span><span>${supplyIntegrityChip(token)} <span class="muted-inline">${esc(integrity.reason || "")}</span></span></div>
-      <div class="kv"><span>Data quality</span><span>${chip(integrity.data_quality_status || "unavailable", dataTone)} ${esc(supplyPct(integrity.owner_resolution_pct, 0))} owner resolution / ${esc(integrity.largest_accounts_checked || 0)} accounts / checked ${esc(dateLabel(integrity.checked_at))}${refreshState}</span></div>
+      <div class="kv"><span>Data quality</span><span>${chip(integrity.data_quality_status || "unavailable", dataTone)} within checked sample / ${esc(supplyPct(integrity.owner_resolution_pct, 0))} owner resolution / ${esc(integrity.largest_accounts_checked || 0)} accounts / checked ${esc(dateLabel(integrity.checked_at))}${refreshState}</span></div>
+      <div class="kv"><span>Holder scope</span><span>Up to 20 largest token accounts, resolved to owners. Not all holders; common ownership is not established.</span></div>
       ${coordinatedEvidence || `<div class="kv"><span>Coordination</span><span>${integrity.coordination_confirmed ? chip("Converging link signals", "warn") : chip("Common control not established")} ${evidenceChips}</span></div>`}
       ${validationIssues.length ? `<div class="kv"><span>Validation</span><span>${validationIssues.map((item) => chip(item, "bad")).join(" ")}</span></div>` : ""}
       ${renderSupplyLinkageGroups(integrity)}

@@ -36,6 +36,12 @@ export function decisionView(token, config = {}, now = Date.now()) {
   const age = now - checked;
   const grace = (numeric(config.signal_thesis_recheck_grace_minutes) ?? 15) * 60_000;
   const maxAge = ((numeric(config.signal_thesis_recheck_minutes) ?? 60) * 60_000) + grace;
+  const integrityAge = now - time(integrity.checked_at);
+  const holderMaxAge = ((numeric(config.supply_integrity_refresh_minutes) ?? 180) * 60_000) + grace;
+  const integrityFresh = Number.isFinite(integrityAge) && integrityAge >= 0 && integrityAge <= holderMaxAge;
+  const linkPolicyCurrent = numeric(integrity.evidence_version) >= 2;
+  const coordination = thesis.coordinated_activity || (token.currentSignalAlerts || []).map(a => a.coordinated_activity).find(Boolean);
+  const rotation = numeric(coordination?.metrics?.market_rotation_observations) > 0;
   const next = time(thesis.next_check_at);
   const fresh = Number.isFinite(age) && age >= 0 && age <= maxAge
     && (!Number.isFinite(next) || now < next + grace);
@@ -58,12 +64,15 @@ export function decisionView(token, config = {}, now = Date.now()) {
   if (!token.currentMarket?.isFresh) blockers.push("Current market data is missing or stale.");
   if (token.dataStatus === "scanner_stale") blockers.push("The latest scan is stale or failed.");
   if (!integrity.status || integrity.status === "unverified" || integrity.data_quality_status !== "complete") {
-    blockers.push("Supply ownership is not fully verified.");
+    blockers.push("The checked holder sample is incomplete; full ownership is not established.");
   } else if (integrity.status === "concentrated") {
     blockers.push("High holder concentration; inspect the supply breakdown.");
   } else if (integrity.status === "watch") {
     blockers.push("Holder concentration or wallet links need review; this is not a buying signal.");
   }
+  if (!integrityFresh) blockers.push("Holder snapshot is missing or stale; concentration may have changed.");
+  if (!linkPolicyCurrent) blockers.push("Legacy wallet links require rechecking under the current evidence rules.");
+  if (rotation) blockers.push("Funding-linked sell/rebuy rotation was observed; turnover is not new accumulation.");
   if (token.currentSignalTier === "late_chase") blockers.push("The scanner flagged an extended or crowded move.");
 
   let queue = "verification";
@@ -76,6 +85,7 @@ export function decisionView(token, config = {}, now = Date.now()) {
     queue = "holding"; label = fresh ? "Holding" : "Held at last check";
     if (currentConfirmed && fresh && token.dataStatus === "current" && token.currentMarket?.isFresh
       && integrity.data_quality_status === "complete" && integrity.status === "distributed"
+      && integrityFresh && linkPolicyCurrent && !rotation
       && ["watch", "actionable", "hot_reactivation"].includes(token.currentSignalTier)) {
       queue = "review"; label = token.currentSignalTier === "watch" ? "Confirmed activity" : "Confirmed burst";
     }
@@ -95,6 +105,7 @@ export function decisionView(token, config = {}, now = Date.now()) {
   return { queue, label, tone: meta.tone, reason, retained, supply, fresh, complete, balanceComplete,
     cohortComplete, walletCoverage, tokenCoverage, cohortCoverage, cohortTokenCoverage,
     checkedAt: Number.isFinite(checked) ? thesis.last_checked_at : null, blockers,
+    integrityFresh, linkPolicyCurrent, rotation,
     confirmation: currentConfirmed ? "Confirmed this scan" : thesisConfirmed ? "Previously confirmed" : "Not confirmed" };
 }
 
