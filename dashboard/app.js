@@ -3316,7 +3316,7 @@ function renderReviewRow(token) {
   const view = token.decision;
   return `<button class="review-row${token.key === state.selectedTokenKey ? " is-selected" : ""}${token.hidden ? " is-hidden" : ""}" type="button" data-token-key="${esc(token.key)}" aria-pressed="${token.key === state.selectedTokenKey}">
     <span class="review-identity">${tokenAvatar(token, true)}<span class="review-copy"><strong>${esc(token.symbol)}</strong><span class="review-reason">${esc(view.reason)}</span>${renderCoordinatedActivity(resolveCoordinatedActivity(token), {now: Date.now(), compact: true})}<small>Caught ${esc(dateLabel(token.firstSignalAt))}</small></span></span>
-    <span class="review-position"><strong>${view.retained === null ? "Unknown" : `${view.retained.toFixed(0)}%`}</strong><small>${view.supply === null ? "supply unknown" : `${view.supply.toFixed(1)}% supply`}</small><small class="${view.fresh ? "" : "warning"}">${view.fresh ? "checked" : "check overdue"}${!view.complete ? " · partial" : ""}</small></span>
+    <span class="review-position"><strong>${view.retained === null ? "Unknown" : `&le;${view.retained.toFixed(0)}%`}</strong><small>${view.supply === null ? "supply unknown" : `&le;${view.supply.toFixed(1)}% supply`}</small><small class="${view.fresh ? "" : "warning"}">${view.fresh ? "checked" : "check overdue"}${!view.complete ? " · partial" : ""}</small></span>
     <span class="review-market"><strong>${token.currentMarket?.isFresh ? moneyMaybe(token.currentMcap) : "Unverified"}</strong><small class="${pClass(token.profitPct)}">${pct(token.profitPct)} since catch</small></span>
   </button>`;
 }
@@ -3349,7 +3349,7 @@ function renderFilters() {
     </div>
     <div class="review-workspace${state.mobileDetailOpen && token ? " is-detail-open" : ""}">
       <section class="review-list-panel" aria-label="Tokens by position state">
-        <div class="review-table-head"><span>Token / last observation</span><span title="Share of originally acquired tokens remaining at last check">Position left</span><span>Current mcap</span></div>
+        <div class="review-table-head"><span>Token / last observation</span><span title="Upper balance bound for the original purchased position; sales versus transfers unresolved">Position left</span><span>Current mcap</span></div>
         <div class="review-list">
           ${state.reviewQueue === "overview" && !queues[0].count ? `<div class="no-confirmation"><span class="quiet-indicator"></span><span><strong>No ready-to-review signals</strong><small>Current confirmation and fresh checks are not available together.</small></span></div>` : ""}
           ${list || `<div class="review-empty"><img src="icons/scan-search.svg" alt=""><h3>${state.reviewQueue === "review" ? "No confirmed signals ready" : "No matching tokens"}</h3><p>${state.reviewQueue === "review" ? "Unverified candidates remain in Early observations or Needs data." : "Try another view or clear the additional filters."}</p><button type="button" id="resetReview">All open positions</button></div>`}

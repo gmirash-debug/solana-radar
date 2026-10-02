@@ -121,6 +121,9 @@ records. A pending historical replay does not by itself mean the current list
 is stale: compare report time and `persistence.current_synced` separately.
 The historical outbox is preserved until all its batches are acknowledged.
 Historical analytics are processed independently in bounded background batches.
+Five-minute discovery pauses while a deep/manual scan is queued or running, so
+it cannot replace that scan in GitHub's single pending slot. The state-writer
+lock remains shared to prevent concurrent cache overwrites.
 
 Known limits: incomplete RPC windows remain unconfirmed; the largest-account
 snapshot is a sample of up to 20 token accounts, not a full holder census.

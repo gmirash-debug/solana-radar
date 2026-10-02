@@ -96,8 +96,8 @@ export function decisionView(token, config = {}, now = Date.now()) {
   }
   const meta = REVIEW_QUEUES.find((item) => item.id === queue);
   const reason = queue === "review" ? "Confirmed buying + retained balances"
-    : queue === "holding" ? `${Math.round(retained)}% of original position retained${fresh ? "" : "; check overdue"}`
-      : queue === "reducing" ? (retained === null ? "Original cohort balances declined" : `${Math.round(retained)}% of original position remains`)
+    : queue === "holding" ? `Up to ${Math.round(retained)}% of original position remains${fresh ? "" : "; check overdue"}`
+      : queue === "reducing" ? (retained === null ? "Original cohort balances declined" : `Up to ${Math.round(retained)}% of original position remains`)
         : queue === "early" ? "Buying observed; confirmation missing"
           : queue === "inactive" ? "Original accumulation invalidated"
             : !cohortComplete && cohortCoverage !== null ? `Only ${Math.round(cohortCoverage)}% of original wallets covered`

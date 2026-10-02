@@ -48,6 +48,7 @@ test("weakening is never concealed behind missing confirmation or overdue checks
   assert.equal(view(t).queue, "reducing");
   assert.equal(view(t).fresh, false);
   assert.match(view(t).reason, /20%/);
+  assert.match(view(t).reason, /^Up to /);
 });
 test("legacy holding is not promoted into a confirmed entry", () => {
   const result = view(token({ signalLifecycle: { currentConfirmed: false } }));

@@ -1188,6 +1188,10 @@ async function dispatchScan(env, source, options = {}) {
 async function dispatchScheduledScan(event, env) {
   const kind = schedulerKindForCron(event?.cron);
   const bucket = schedulerBucket(kind, event?.scheduledTime || new Date());
+  if (kind === "discovery") {
+    const guard = await discoveryDispatchGuard(env);
+    if (guard.skipped) return {ok: true, ...guard, kind, bucket};
+  }
   const claim = await claimDispatchBucket(env, kind, bucket);
   if (!claim.claimed) {
     return { ok: true, skipped: "duplicate_bucket", kind, bucket, persistent_dedupe: claim.persistent };
@@ -1196,6 +1200,27 @@ async function dispatchScheduledScan(event, env) {
     ...(await dispatchScan(env, `cloudflare-${kind}`, { kind, bucket })),
     persistent_dedupe: claim.persistent,
   };
+}
+
+async function discoveryDispatchGuard(env) {
+  const owner = env.GITHUB_OWNER || DEFAULT_OWNER;
+  const repo = env.GITHUB_REPO || DEFAULT_REPO;
+  const workflow = env.GITHUB_WORKFLOW || DEFAULT_WORKFLOW;
+  try {
+    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflow}/runs?per_page=20`, {
+      headers: {accept:"application/vnd.github+json", authorization:`Bearer ${requireEnv(env, "GITHUB_TOKEN")}`,
+        "user-agent":"solana-radar-scan-dispatcher", "x-github-api-version":"2022-11-28"},
+    });
+    if (!response.ok) return {skipped:"scan_queue_status_unavailable", status_code:response.status};
+    const runs = (await response.json()).workflow_runs;
+    if (!Array.isArray(runs)) return {skipped:"scan_queue_status_unavailable"};
+    // GitHub preserves only one pending run per concurrency group. A discovery
+    // dispatch must not replace an already queued hourly/manual deep scan.
+    const active = runs.find(run => run.event === "workflow_dispatch" && run.status !== "completed");
+    return active ? {skipped:"deep_scan_has_priority", deep_run_id:active.id} : {};
+  } catch {
+    return {skipped:"scan_queue_status_unavailable"};
+  }
 }
 
 export default {
@@ -1423,6 +1448,7 @@ export {
   corsHeaders,
   dispatchScheduledScan,
   dispatchAutoScheduledScan,
+  discoveryDispatchGuard,
   githubActionsStatus,
   requireCloudflareAccess,
   schedulerBucket,
