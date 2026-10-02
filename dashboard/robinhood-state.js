@@ -1,3 +1,5 @@
+import {numeric} from "./decision-view.js?v=20261003-evidence-6";
+
 export const CHAIN_ID = 4663;
 export function ageFilterLabel(config) {
   const low = config?.min_pool_age_hours, high = config?.max_pool_age_hours;
@@ -12,8 +14,8 @@ export function relaySignalLabel(token) {
   return "";
 }
 export function formatSupplyPercent(value) {
-  if (value == null || !Number.isFinite(Number(value))) return "Unknown";
-  const number = Number(value);
+  const number = numeric(value);
+  if (number === null || number < 0) return "Unknown";
   return number > 0 && number < 0.01 ? "<0.01%" : `${number.toFixed(2)}%`;
 }
 export const addressOk = value => /^0x[0-9a-f]{40}$/.test(value || "");
@@ -42,8 +44,8 @@ export function walletFresh(token, now = Date.now()) {
     && now - checked >= -300000 && now - checked < 90 * 60000;
 }
 export function supplyRange(token) {
-  const low = token?.retained_supply_lower_bound_pct, high = token?.retained_supply_upper_bound_pct;
-  if (high == null) return "Not checked";
+  const low = numeric(token?.retained_supply_lower_bound_pct), high = numeric(token?.retained_supply_upper_bound_pct);
+  if (high === null || high < 0 || high > 100 || (low !== null && (low < 0 || low > high))) return "Not checked";
   if (low == null) return `Up to ${formatSupplyPercent(high)}`;
   return Math.abs(low - high) < 0.00001 ? formatSupplyPercent(high) : `${formatSupplyPercent(low)} - ${formatSupplyPercent(high)}`;
 }
@@ -66,6 +68,7 @@ export function reviewGroup(token, payload, now = Date.now()) {
   if (token.status === "risk" || token.security?.status === "risk") return "risk";
   if (!isFresh(payload, now) || !walletFresh(token, now)) return "needs_data";
   if (["retained", "buy_wave"].includes(token.status) && !(token.cohort_checks >= (token.status === "retained" ? 2 : 1) && token.cohort_created_at)) return "needs_data";
+  if (token.status === "retained" && !(positionBounds(token)?.lower > 0)) return "needs_data";
   return REVIEW_GROUPS.some(g => g.id === token.status) ? token.status : "needs_data";
 }
 

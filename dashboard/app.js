@@ -1,8 +1,8 @@
-import { chooseDashboardPayload } from "./data-source.js?v=20260807-wallet-edge-1";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261001-1";
-import { installTerminology } from "./terminology.js?v=20261003-evidence-5";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, retentionBound } from "./decision-view.js?v=20261003-evidence-5";
-import { loadTokenDetail } from "./static-detail.js?v=20261003-evidence-5";
+import { chooseDashboardPayload } from "./data-source.js?v=20261003-evidence-6";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-evidence-6";
+import { installTerminology } from "./terminology.js?v=20261003-evidence-6";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric } from "./decision-view.js?v=20261003-evidence-6";
+import { loadTokenDetail } from "./static-detail.js?v=20261003-evidence-6";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -12,12 +12,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20260910-gmgn-2";
+} from "./token-state.js?v=20261003-evidence-6";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20260813-current-filter-scope-3";
+} from "./filter-scope.js?v=20261003-evidence-6";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const DELETE_SYNC_ENDPOINT = "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/deleted-token";
@@ -937,6 +937,21 @@ function callerPostKeys(caller = {}) {
   return [`${caller.author || ""}:${caller.top_post?.date_posted || ""}:${caller.top_post?.text || ""}`];
 }
 
+function observedAmount(value) {
+  const amount = numeric(value);
+  return amount !== null && amount >= 0 ? amount : null;
+}
+
+function observedCount(value) {
+  const count = observedAmount(value);
+  return Number.isSafeInteger(count) ? count : null;
+}
+
+function validWalletCheck(value) {
+  const checked = typeof value === "string" && value.trim() ? Date.parse(value) : NaN;
+  return Number.isFinite(checked) && checked <= Date.now();
+}
+
 function buildTokenSignals() {
   const currentPools = currentPoolsByToken();
   const observationsByToken = poolObservationsByToken();
@@ -1085,9 +1100,17 @@ function buildTokenSignals() {
       if (poolPrice && native) nativeRatios.push(poolPrice / native);
     });
     const solUsd = median(nativeRatios);
-    const currentNative = solUsd && currentPriceUsd ? currentPriceUsd / solUsd : null;
+    const currentNative = currentMarket.isFresh && solUsd && currentPriceUsd ? currentPriceUsd / solUsd : null;
     const walletMap = new Map();
-    token.alerts.forEach((alert) => {
+    const thesis = token.signalThesis;
+    // Historical and later buy windows cannot supply counts or costs for this cohort.
+    const walletAlerts = thesis ? token.alerts.filter((alert) => {
+      if (thesis.signal_window_start && thesis.signal_window_end) {
+        return alert.window_start === thesis.signal_window_start && alert.window_end === thesis.signal_window_end;
+      }
+      return Boolean(thesis.signal_at && alert.created_at === thesis.signal_at);
+    }) : token.alerts;
+    walletAlerts.forEach((alert) => {
       const observedAt = alert.created_at || alert.window_end || alert.window_start || "";
       (alert.wave?.top_buyers || []).forEach((buyer) => {
         const owner = buyer.owner;
@@ -1100,22 +1123,35 @@ function buildTokenSignals() {
           classes: {
             [buyer.wallet_class || "wave_buyer"]: 1,
           },
-          buys: Number(buyer.buy_count || 0),
-          sells: Number(buyer.sell_count || 0),
-          sol_in: Number(buyer.buy_sol || 0),
-          sol_out: Number(buyer.sell_sol || 0),
-          tokens_bought: Number(buyer.token_bought || 0),
-          tokens_sold: Number(buyer.token_sold || 0),
-          retained_tokens: Number(buyer.retained_from_wave || 0),
-          current_balance: Number(buyer.current_balance || 0),
+          buys: observedCount(buyer.buy_count),
+          sells: observedCount(buyer.sell_count),
+          sol_in: observedAmount(buyer.buy_sol),
+          sol_out: observedAmount(buyer.sell_sol),
+          tokens_bought: observedAmount(buyer.token_bought),
+          tokens_sold: observedAmount(buyer.token_sold),
+          retained_tokens: null,
+          current_balance: null,
+          retention_unavailable: true,
           routed: 0,
           first_time: buyer.first_buy_time || alert.window_start,
           aggregate_at: observedAt,
           pnl_basis: "wave aggregate",
         });
+        const row = walletMap.get(owner);
+        const retained = observedAmount(buyer.retained_from_wave);
+        const balance = observedAmount(buyer.current_balance);
+        if (buyer.balance_verified !== false
+          && (buyer.balance_verified === true || alert.wave?.balance_coverage_pct === 100)
+          && retained !== null && balance !== null && row.tokens_bought > 0
+          && validWalletCheck(observedAt)) {
+          row.retained_tokens = Math.min(retained, balance, row.tokens_bought);
+          row.current_balance = balance;
+          row.retention_checked_at = observedAt;
+          row.retention_unavailable = false;
+        }
       });
     });
-    uniqueEvents.forEach((event) => {
+    uniqueAlertEvents(walletAlerts).forEach((event) => {
       const alert = event._alert || {};
       const owner = eventOwner(event);
       if (!owner) return;
@@ -1125,12 +1161,13 @@ function buildTokenSignals() {
           signer_examples: new Set(),
           classes: {},
           buys: 0,
-          sells: 0,
+          sells: null,
           sol_in: 0,
-          sol_out: 0,
+          sol_out: null,
           tokens_bought: 0,
-          tokens_sold: 0,
-          retained_tokens: 0,
+          tokens_sold: null,
+          retained_tokens: null,
+          retention_unavailable: true,
           routed: 0,
           first_time: event.time || alert.window_start,
           pnl_basis: "buy events only",
@@ -1140,19 +1177,29 @@ function buildTokenSignals() {
       if (event.signer) row.signer_examples.add(event.signer);
       row.classes[event.wallet_class || "unknown"] = (row.classes[event.wallet_class || "unknown"] || 0) + 1;
       if (row.aggregate_at) {
+        row.observed_buys = (row.observed_buys || 0) + 1;
         row.routed += event.routed ? 1 : 0;
         return;
       }
       row.buys += 1;
-      row.sol_in += Number(event.sol_amount || 0);
-      row.tokens_bought += Number(event.token_amount || event.token_recipient_amount || 0);
-      row.retained_tokens = row.tokens_bought;
+      const amount = observedAmount(event.sol_amount);
+      const tokens = observedAmount(event.token_amount ?? event.token_recipient_amount);
+      row.sol_in = row.sol_in !== null && amount !== null ? row.sol_in + amount : null;
+      row.tokens_bought = row.tokens_bought !== null && tokens !== null ? row.tokens_bought + tokens : null;
       row.routed += event.routed ? 1 : 0;
       if (new Date(event.time || alert.window_start) < new Date(row.first_time)) row.first_time = event.time || alert.window_start;
     });
-    const thesisCohortWallets = Array.isArray(token.signalThesis?.cohort_wallets)
-      ? token.signalThesis.cohort_wallets
+    const cachedDetail = state.tokenDetailCache.get(token.key);
+    const walletThesis = token.signalThesis?.cohort_wallets?.length ? token.signalThesis
+      : sameDetailCohort(cachedDetail, token.key, token.signalThesis, state.report?.generated_at) ? cachedDetail.thesis : token.signalThesis;
+    const olderWalletSnapshot = walletThesis !== token.signalThesis;
+    const thesisCohortWallets = Array.isArray(walletThesis?.cohort_wallets)
+      ? walletThesis.cohort_wallets
       : [];
+    if (thesisCohortWallets.length) {
+      const owners = new Set(thesisCohortWallets.map(row => String(row?.owner || "").trim()));
+      walletMap.forEach((row, owner) => { if (!owners.has(owner)) walletMap.delete(owner); });
+    }
     thesisCohortWallets.forEach((cohortWallet) => {
       const owner = String(cohortWallet?.owner || "").trim();
       if (!owner) return;
@@ -1161,12 +1208,12 @@ function buildTokenSignals() {
           owner,
           signer_examples: new Set(),
           classes: {},
-          buys: 0,
-          sells: 0,
-          sol_in: 0,
-          sol_out: 0,
-          tokens_bought: 0,
-          tokens_sold: 0,
+          buys: null,
+          sells: null,
+          sol_in: null,
+          sol_out: null,
+          tokens_bought: null,
+          tokens_sold: null,
           retained_tokens: null,
           routed: 0,
           first_time: cohortWallet.first_buy_time || token.signalThesis?.signal_at,
@@ -1180,35 +1227,30 @@ function buildTokenSignals() {
         Number(token.signalThesis?.holder_min_pct ?? 10),
       );
       if (!Object.keys(row.classes).length) row.classes[walletClass] = 1;
-      const attributedTokens = Math.max(0, Number(cohortWallet.attributed_tokens || 0));
-      const buySol = Math.max(0, Number(cohortWallet.buy_sol || 0));
-      if (!row.tokens_bought && attributedTokens) row.tokens_bought = attributedTokens;
-      if (!row.sol_in && buySol) row.sol_in = buySol;
-      if (!row.buys && attributedTokens) row.buys = 1;
-      row.thesis_attributed_tokens = attributedTokens || row.tokens_bought;
-      row.retention_checked_at = cohortWallet.checked_at || null;
+      const attributedTokens = observedAmount(cohortWallet.attributed_tokens);
+      row.tokens_bought = attributedTokens;
+      row.sol_in = observedAmount(cohortWallet.buy_sol);
+      if (row.buys === null) row.buys = observedCount(cohortWallet.buy_count);
+      row.thesis_attributed_tokens = attributedTokens;
+      row.retention_checked_at = validWalletCheck(cohortWallet.checked_at) ? cohortWallet.checked_at : null;
+      row.current_balance = observedAmount(cohortWallet.current_balance);
+      const currentRetained = observedAmount(cohortWallet.current_retained_tokens);
       const hasCheckedRetention = Boolean(
         row.retention_checked_at
-        && cohortWallet.current_retained_tokens !== null
-        && cohortWallet.current_retained_tokens !== undefined
-        && Number.isFinite(Number(cohortWallet.current_retained_tokens)),
+        && currentRetained !== null && attributedTokens > 0,
       );
       if (hasCheckedRetention) {
-        const currentRetained = Math.max(0, Number(cohortWallet.current_retained_tokens));
         row.retained_tokens = Math.min(
           currentRetained,
-          row.thesis_attributed_tokens || currentRetained,
+          attributedTokens,
+          row.current_balance ?? currentRetained,
         );
-        row.current_balance = cohortWallet.current_balance === null
-          || cohortWallet.current_balance === undefined
-          ? null
-          : Math.max(0, Number(cohortWallet.current_balance));
         const calculatedRetentionPct = row.thesis_attributed_tokens
           ? row.retained_tokens / row.thesis_attributed_tokens * 100
           : 0;
-        row.is_signal_holder = typeof cohortWallet.is_holder === "boolean"
+        row.is_signal_holder = row.retained_tokens > 0 && (typeof cohortWallet.is_holder === "boolean"
           ? cohortWallet.is_holder
-          : calculatedRetentionPct >= holderMinPct;
+          : calculatedRetentionPct >= holderMinPct);
         row.retention_unavailable = false;
         row.pnl_basis = "current balance check";
       } else {
@@ -1218,7 +1260,7 @@ function buildTokenSignals() {
         row.pnl_basis = "balance check pending";
       }
     });
-    if (token.signalThesis?.last_checked_at && !thesisCohortWallets.length) {
+    if (token.signalThesis && !thesisCohortWallets.length) {
       walletMap.forEach((row) => {
         row.retained_tokens = null;
         row.retention_unavailable = true;
@@ -1226,6 +1268,7 @@ function buildTokenSignals() {
       });
     }
     const wallets = [...walletMap.values()].map((row) => {
+      if (row.buys === null && row.observed_buys) row.buys = row.observed_buys;
       row.avg_entry_native = row.tokens_bought ? row.sol_in / row.tokens_bought : null;
       const retentionBasis = Number(row.thesis_attributed_tokens || row.tokens_bought || 0);
       const hasBalanceCheck = Boolean(
@@ -1233,6 +1276,10 @@ function buildTokenSignals() {
         && row.retained_tokens !== null
         && row.retained_tokens !== undefined,
       );
+      const walletMaxAge = (Number(state.report?.config?.signal_thesis_recheck_minutes ?? 60)
+        + Number(state.report?.config?.signal_thesis_recheck_grace_minutes ?? 15)) * 60000;
+      row.retention_fresh = !olderWalletSnapshot && hasBalanceCheck
+        && Date.now() - Date.parse(row.retention_checked_at) <= walletMaxAge;
       if (row.retention_unavailable) {
         row.realized_pnl_sol = null;
         row.current_value_sol = null;
@@ -1246,7 +1293,7 @@ function buildTokenSignals() {
           : null;
         const isOpenHolder = row.is_signal_holder !== false
           && row.retained_tokens > 0;
-        row.current_value_sol = currentNative !== null && currentNative !== undefined
+        row.current_value_sol = row.retention_fresh && currentNative !== null && currentNative !== undefined
           ? currentNative * row.retained_tokens
           : null;
         row.unrealized_pnl_sol = row.current_value_sol !== null && row.avg_entry_native
@@ -1254,7 +1301,7 @@ function buildTokenSignals() {
           : null;
         row.realized_pnl_sol = null;
         row.pnl_sol = isOpenHolder ? row.unrealized_pnl_sol : null;
-        row.pnl_pct = isOpenHolder && row.avg_entry_native && currentNative
+        row.pnl_pct = row.pnl_sol !== null && isOpenHolder && row.avg_entry_native && currentNative
           ? ((currentNative / row.avg_entry_native) - 1) * 100
           : null;
         row.pnl_basis = isOpenHolder
@@ -1679,12 +1726,15 @@ function applyDashboardPayload(payload, source, fallbackReason = null) {
     state.tokenDetailLoadedKeys.clear();
     state.tokenDetailRetryAt.clear();
     state.tokenDetailErrors.clear();
-    state.tokenDetailCache.clear();
   }
-  if (!snapshotChanged) state.tokenDetailCache.forEach((detail, key) => {
+  state.tokenDetailCache.forEach((detail, key) => {
     const thesis = state.report?.signal_theses?.find((item) => detailRecordMatchesToken(item, key));
     if (canApplyDetail(detail, key, nextGeneratedAt, nextGeneratedAt, thesis)) applyTokenDetail(detail);
-    else { state.tokenDetailCache.delete(key); state.tokenDetailLoadedKeys.delete(key); }
+    else {
+      state.tokenDetailLoadedKeys.delete(key);
+      // Keep dated wallets, not aggregate summaries, when the original cohort is unchanged.
+      if (!sameDetailCohort(detail, key, thesis, nextGeneratedAt)) state.tokenDetailCache.delete(key);
+    }
   });
   const tokens = buildTokenSignals();
   const visibleTokens = state.tab === "filters" ? tokens.filter(tokenMatchesBaseFilters) : filteredTokens(tokens);
@@ -1762,14 +1812,14 @@ function detailRecordMatchesToken(record, tokenKey) {
 }
 
 function mergeTokenAlertDetails(existing, tokenKey, details) {
-  const incoming = Array.isArray(details) ? details.filter((item) => item && typeof item === "object") : [];
+  const incoming = Array.isArray(details) ? details.filter((item) => detailRecordMatchesToken(item, tokenKey)) : [];
   if (!incoming.length) return existing || [];
   const byId = new Map(incoming.map((item) => [alertId(item), item]));
   const knownIds = new Set();
   const merged = (existing || []).map((item) => {
     const id = alertId(item);
     knownIds.add(id);
-    return byId.get(id) || item;
+    return detailRecordMatchesToken(item, tokenKey) ? byId.get(id) || item : item;
   });
   incoming.forEach((item) => {
     if (!knownIds.has(alertId(item))) merged.push(item);
@@ -1809,7 +1859,7 @@ async function ensureTokenDetail(tokenKey) {
   const key = String(tokenKey || "").trim();
   const baseUrl = remoteDataUrl();
   if (
-    !state.publishedDashboard
+    (!state.publishedDashboard && !(state.dataSource === "static" && state.tokenDetailManifest))
     || (!baseUrl && !state.tokenDetailManifest)
     || !key
     || state.tokenDetailLoadedKeys.has(key)
@@ -1827,6 +1877,9 @@ async function ensureTokenDetail(tokenKey) {
       accepts: (incoming) => canApplyDetail(incoming, key, generation, state.report?.generated_at,
         state.report?.signal_theses?.find((item) => detailRecordMatchesToken(item, key))),
     });
+    // Recheck after awaiting: a scan or cohort can change between acceptance and application.
+    if (!canApplyDetail(detail, key, generation, state.report?.generated_at,
+      state.report?.signal_theses?.find((item) => detailRecordMatchesToken(item, key)))) return;
     applyTokenDetail(detail);
     state.tokenDetailCache.set(key, detail);
     state.tokenDetailLoadedKeys.add(key);
@@ -1846,7 +1899,13 @@ async function ensureTokenDetail(tokenKey) {
 function detailLoadMessage(key) {
   if (state.tokenDetailLoadingKeys.has(key)) return `<span class="loading-dot"></span> Loading wallet details...`;
   if (state.tokenDetailErrors.has(key)) return `Wallet details unavailable. Showing the scan summary. <button type="button" data-retry-detail="${esc(key)}">Retry</button>`;
-  if (state.tokenDetailCache.get(key)?.source === "published_scan") return "Wallet details from the published scan. Check times are shown below.";
+  const detail = state.tokenDetailCache.get(key);
+  if (detail?.source === "published_scan") {
+    const thesis = state.report?.signal_theses?.find((item) => detailRecordMatchesToken(item, key));
+    return canApplyDetail(detail, key, state.report?.generated_at, state.report?.generated_at, thesis)
+      ? "Wallet details from the published scan. Check times are shown below."
+      : "Wallet observations from an earlier published check; the current scan summary is unchanged.";
+  }
   return "";
 }
 
@@ -2102,28 +2161,22 @@ function walletHeldLabel(wallet) {
   if (wallet.retained_pct === null || wallet.retained_pct === undefined) {
     return wallet.retention_unavailable ? "not available" : "pending";
   }
-  const retainedPct = Math.max(0, Number(wallet.retained_pct));
-  if (!Number.isFinite(retainedPct)) return "not available";
-  if (!retainedPct) return "0% retained";
-  const formatted = retainedPct < 0.1
-    ? "<0.1"
-    : retainedPct < 1
-      ? retainedPct.toFixed(1)
-      : retainedPct.toFixed(0);
-  const bound = retainedPct < 0.1 ? formatted : `\u2264${formatted}`;
-  return wallet.is_signal_holder === false
-    ? `${bound}% dust`
-    : `${bound}% left`;
+  const retainedPct = numeric(wallet.retained_pct);
+  const bound = retentionBound(retainedPct, retainedPct < 1 ? 1 : 0);
+  if (bound === "Unknown") return "not available";
+  const label = retainedPct === 0 ? "0% retained"
+    : `${bound} ${wallet.is_signal_holder === false ? "dust" : "left"}`;
+  return wallet.retention_fresh ? label : `${label} at last check`;
 }
 
 function walletHeldClass(wallet) {
-  if (wallet.retained_pct === null || wallet.retained_pct === undefined) return "";
-  return wallet.is_signal_holder === true ? "good" : "bad";
+  if (wallet.retained_pct === null || wallet.retained_pct === undefined || !wallet.retention_fresh) return "";
+  return wallet.is_signal_holder === true ? "good" : wallet.is_signal_holder === false ? "bad" : "";
 }
 
 function renderWalletRows(token) {
   if (!token.wallets.length) {
-    if (state.publishedDashboard && !state.tokenDetailLoadedKeys.has(token.key)) {
+    if ((state.publishedDashboard || state.tokenDetailManifest) && !state.tokenDetailLoadedKeys.has(token.key)) {
       return `<div class="empty compact">Individual wallet details are not available in this scan summary.</div>`;
     }
     return state.tokenDetailLoadingKeys.has(token.key)
@@ -2149,8 +2202,8 @@ function renderWalletRows(token) {
             <tr>
               <td><code>${esc(short(wallet.owner))}</code></td>
               <td>${esc(wallet.class_label || "-")}${wallet.routed ? ` ${chip(`routed ${wallet.routed}`, "warn")}` : ""}</td>
-              <td>${esc(wallet.buys)}</td>
-              <td>${sol(wallet.sol_in)}</td>
+              <td>${wallet.buys === null ? "Unknown" : esc(wallet.buys)}</td>
+              <td>${wallet.sol_in === null ? "Unknown" : sol(wallet.sol_in)}</td>
               <td class="${walletHeldClass(wallet)}" title="${esc(wallet.retention_checked_at ? `balance checked ${dateLabel(wallet.retention_checked_at)}` : wallet.pnl_basis)}">${esc(walletHeldLabel(wallet))}</td>
               <td class="${pClass(wallet.pnl_pct)}">${pct(wallet.pnl_pct)}</td>
               <td class="${pClass(wallet.pnl_sol)}">${wallet.pnl_sol === null ? "-" : sol(wallet.pnl_sol)}</td>
@@ -2473,15 +2526,16 @@ function renderThesisSummary(token) {
     return `${tierChip("recheck_due")} <span class="muted-inline">original buyer cohort has not been persisted yet</span>`;
   }
   const retention = token.decision?.retained;
-  const holders = Number(thesis.holders_remaining || 0);
-  const originalWallets = Number(thesis.original_wallets || 0);
+  const holders = observedCount(thesis.holders_remaining);
+  const originalWallets = observedCount(thesis.original_wallets);
   const checked = thesis.last_checked_at
     ? `checked ${dateLabel(thesis.last_checked_at)}`
     : "not checked";
   return [
     tierChip(thesisTier(thesis)),
     `${retentionBound(retention)} original-position balance cap`,
-    originalWallets ? `${holders}/${originalWallets} tracked wallets still holding` : "",
+    holders !== null && originalWallets !== null && holders <= originalWallets
+      ? `${holders}/${originalWallets} tracked wallets holding at last check` : "holder count unverified",
     checked,
   ].filter(Boolean).join(" / ");
 }
@@ -2592,7 +2646,7 @@ function renderTopWalletPreview(token) {
         <div class="wallet-preview-row">
           <code>${esc(short(wallet.owner))}</code>
           <span>${esc(wallet.class_label || "-")}</span>
-          <strong>${sol(wallet.sol_in)}</strong>
+          <strong>${wallet.sol_in === null ? "Unknown" : sol(wallet.sol_in)}</strong>
           <strong class="${walletHeldClass(wallet)}">${esc(walletHeldLabel(wallet))}</strong>
         </div>
       `).join("")}
@@ -2766,7 +2820,9 @@ function renderOverviewTab(token) {
   const holdings = retentionBound(view.retained);
   const known = [
     ["Signal confirmation", view.confirmation],
-    ["Wallets still holding", thesis.holders_remaining != null && thesis.original_wallets != null ? `${thesis.holders_remaining} of ${thesis.original_wallets} stored wallets` : "Not verified"],
+    ["Wallets still holding", observedCount(thesis.holders_remaining) !== null
+      && observedCount(thesis.original_wallets) !== null && thesis.holders_remaining <= thesis.original_wallets
+      ? `${thesis.holders_remaining} of ${thesis.original_wallets} stored wallets at last check` : "Not verified"],
     ["Original wallets covered", view.cohortCoverage === null ? "Unknown" : `${view.cohortCoverage.toFixed(0)}%`],
     ["Stored balances checked", view.walletCoverage === null ? "Unknown" : `${view.walletCoverage.toFixed(0)}% wallets / ${view.tokenCoverage?.toFixed(0) ?? "?"}% tokens`],
     ["Control risk", token.supplyIntegrity?.status === "concentrated" ? "High concentration"
@@ -2775,7 +2831,7 @@ function renderOverviewTab(token) {
   return `
     <section class="position-evidence">
       <div class="section-heading"><h3>Original position</h3><span class="evidence-time ${view.fresh ? "" : "warning"}">${view.checkedAt ? `Checked ${esc(dateLabel(view.checkedAt))}${view.fresh ? "" : " · overdue"}` : "Not checked"}</span></div>
-      <div class="retention-summary"><strong>${holdings}</strong><span>original-position balance cap${view.complete ? "" : " in the checked subset"}<small>${view.supply === null ? "Total supply share unverified" : `Up to ${view.supply.toFixed(2)}% of total token supply at last check`}</small></span></div>
+      <div class="retention-summary"><strong>${holdings}</strong><span>original-position balance cap${view.complete ? "" : " in the checked subset"}<small>${view.supply === null ? "Total supply share unverified" : `${retentionBound(view.supply, 2)} of total token supply at last check`}</small></span></div>
       ${view.retained === null ? "" : `<meter class="retention-meter ${esc(view.tone)}" min="0" max="100" value="${view.retained}" aria-label="Original position retained">${holdings}</meter>`}
       <div class="evidence-facts">${known.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join("")}</div>
     </section>
@@ -2806,8 +2862,10 @@ function renderOverviewTab(token) {
 }
 
 function supplyPct(value, digits = 1) {
-  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "-";
-  return `${Math.max(0, Number(value)).toFixed(digits)}%`;
+  const amount = observedAmount(value);
+  if (amount === null || amount > 100) return "-";
+  if (amount > 0 && amount < 10 ** -digits) return `<${10 ** -digits}%`;
+  return `${amount.toFixed(digits)}%`;
 }
 
 function supplyEvidenceLabel(family) {
@@ -2881,7 +2939,7 @@ function renderSupplyLinkageGroups(integrity) {
           const members = (group.members || []).slice(0, 4).map((owner) => `<a href="https://solscan.io/account/${encodeURIComponent(owner)}" target="_blank" rel="noreferrer"><code>${esc(short(owner))}</code></a>`).join(" ");
           return `
             <div class="mini-item">
-              <strong>${esc(supplyEvidenceLabel(family))} ${group.supporting_only || integrity.evidence_version !== 2 ? chip("support only", "warn") : chip("verified transfer link", "warn")}</strong>
+              <strong>${esc(supplyEvidenceLabel(family))} ${group.supporting_only === false && group.transfer_verified === true && Number(integrity.evidence_version) >= 2 ? chip("verified transfer link", "warn") : chip("support only", "warn")}</strong>
               <span>${keyLabel} / ${esc(group.wallets || 0)} wallets</span>
               ${members ? `<span class="supply-evidence-members">${members}</span>` : ""}
             </div>
@@ -2968,12 +3026,21 @@ function renderSupplyTab(token) {
   `;
 }
 
+function renderObservedPositionActivity(token) {
+  const activity = token.signalThesis?.observed_position_activity;
+  if (activity?.status !== "partial" || activity.scope !== "supplied_pool_transactions_strictly_after_signal"
+    || !Array.isArray(activity.observations) || !activity.observations.length) return "";
+  const count = activity.observations.length;
+  return `<div class="kv"><span>Observed position movements</span><span>${count} ${count === 1 ? "observation" : "observations"} / partial wallet history / not confirmed sales</span></div>`;
+}
+
 function renderWalletsTab(token) {
   return `
     <section class="detail-block">
       <div class="detail-block-title">Wallet signal</div>
       <div class="kv"><span>Fresh signal</span><span>${renderSignalTier(token)}</span></div>
       ${renderThesisDetails(token)}
+      ${renderObservedPositionActivity(token)}
       ${renderWalletEdge(token)}
       ${renderCoordinatedActivity(resolveCoordinatedActivity(token), {now: Date.now()})}
       <div class="kv"><span>Wallet setup</span><span>${renderWalletCluster(token)}</span></div>
@@ -3314,7 +3381,7 @@ function renderReviewRow(token) {
   const view = token.decision;
   return `<button class="review-row${token.key === state.selectedTokenKey ? " is-selected" : ""}${token.hidden ? " is-hidden" : ""}" type="button" data-token-key="${esc(token.key)}" aria-pressed="${token.key === state.selectedTokenKey}">
     <span class="review-identity">${tokenAvatar(token, true)}<span class="review-copy"><strong>${esc(token.symbol)}</strong><span class="review-reason">${esc(view.reason)}</span>${renderCoordinatedActivity(resolveCoordinatedActivity(token), {now: Date.now(), compact: true})}<small>Caught ${esc(dateLabel(token.firstSignalAt))}</small></span></span>
-    <span class="review-position"><strong>${view.retained === null ? "Unknown" : `&le;${view.retained.toFixed(0)}%`}</strong><small>${view.supply === null ? "supply unknown" : `&le;${view.supply.toFixed(1)}% supply`}</small><small class="${view.fresh ? "" : "warning"}">${view.fresh ? "checked" : "check overdue"}${!view.complete ? " · partial" : ""}</small></span>
+    <span class="review-position"><strong>${esc(retentionBound(view.retained))}</strong><small>${view.supply === null ? "supply unknown" : `${esc(retentionBound(view.supply, 1))} supply`}</small><small class="${view.fresh ? "" : "warning"}">${view.fresh ? "checked" : "check overdue"}${!view.complete ? " · partial" : ""}</small></span>
     <span class="review-market"><strong>${token.currentMarket?.isFresh ? moneyMaybe(token.currentMcap) : "Unverified"}</strong><small class="${pClass(token.profitPct)}">${pct(token.profitPct)} since catch</small></span>
   </button>`;
 }

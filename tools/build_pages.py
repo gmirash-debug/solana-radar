@@ -1,7 +1,9 @@
 """Keep UI-only publications from replacing a fresh scan with old Git data."""
 import json
 import hashlib
+import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,6 +12,7 @@ import requests
 
 PUBLISHED_SNAPSHOT = "https://gmirash-debug.github.io/solana-radar/data/dashboard_fallback.json"
 ROBINHOOD_SNAPSHOT = "https://gmirash-debug.github.io/solana-radar/data/robinhood.json"
+TOKEN_DETAIL_PATH = re.compile(r"data/token-details/[a-f0-9]{64}\.json\Z")
 
 
 def choose_robinhood(local, published):
@@ -56,11 +59,15 @@ def snapshot_time(payload):
 
 
 def choose_snapshot(local, published, now=None):
+    now = now or datetime.now(timezone.utc)
     local_at, published_at = snapshot_time(local), snapshot_time(published)
+    if local_at and local_at > now + timedelta(minutes=5):
+        local_at = None
+    if published_at and published_at > now + timedelta(minutes=5):
+        published_at = None
     if published_at and (not local_at or published_at > local_at):
         return published
     if local_at:
-        now = now or datetime.now(timezone.utc)
         if not published_at and not -timedelta(minutes=5) <= now - local_at <= timedelta(hours=3):
             raise ValueError("Published snapshot unavailable; refusing to publish stale Git data")
         return local
@@ -104,6 +111,40 @@ def publish_token_details(snapshot, runtime_state, destination):
     return {"generation": generation, "files": files}
 
 
+def preserve_published_details(snapshot, manifest, destination, fetcher=requests.get, max_seconds=90):
+    """Reuse exact-generation public details if the runtime cache is older."""
+    previous = snapshot.get("token_details") or {}
+    if previous.get("generation") != manifest["generation"]:
+        return manifest
+    summaries = {row.get("token_address"): row for row in snapshot["report"].get("signal_theses", [])}
+    deadline = time.monotonic() + max_seconds
+    for key, path in (previous.get("files") or {}).items():
+        if key in manifest["files"] or key not in summaries:
+            continue
+        if not isinstance(path, str) or not TOKEN_DETAIL_PATH.fullmatch(path):
+            raise ValueError("Unsafe published wallet detail path")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError("Wallet detail preservation exceeded its publication budget")
+        response = fetcher(PUBLISHED_SNAPSHOT.rsplit("/data/", 1)[0] + "/" + path,
+                           timeout=min(15, remaining))
+        response.raise_for_status()
+        detail = response.json()
+        summary, thesis = summaries[key], detail.get("thesis") or {}
+        if (detail.get("ok") is not True or detail.get("token_key") != key
+            or detail.get("report_source_updated_at") != manifest["generation"]
+            or not thesis.get("cohort_wallets") or not summary.get("cohort_id")
+            or any(thesis.get(field) != summary.get(field)
+                   for field in ("cohort_id", "signal_at", "last_checked_at", "updated_at"))):
+            raise ValueError("Published wallet detail does not match the selected cohort")
+        encoded = json.dumps(detail, separators=(",", ":"))
+        if len(encoded.encode()) > 2 * 1024 * 1024:
+            raise ValueError("Published wallet detail exceeds the size limit")
+        (destination / Path(path).name).write_text(encoded)
+        manifest["files"][key] = path
+    return manifest
+
+
 def main():
     try:
         local = json.loads(Path("data/dashboard_fallback.json").read_text())
@@ -121,8 +162,10 @@ def main():
         runtime_state = json.loads(Path("data/state.json").read_text())
     except (OSError, ValueError):
         runtime_state = {}
-    selected = {**selected, "token_details": publish_token_details(
-        selected, runtime_state, Path(".pages/data/token-details"))}
+    detail_dir = Path(".pages/data/token-details")
+    manifest = publish_token_details(selected, runtime_state, detail_dir)
+    manifest = preserve_published_details(selected, manifest, detail_dir)
+    selected = {**selected, "token_details": manifest}
     destination = Path(".pages/data/dashboard_fallback.json")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(selected, separators=(",", ":")))

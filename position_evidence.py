@@ -2,6 +2,12 @@
 import copy
 from collections import defaultdict
 
+from solana_position_lineage import (
+    analyze_position as solana_position_summary,
+    annotate_pool_activity as annotate_solana_pool_position_activity,
+    parse_position_transaction as parse_solana_position_transaction,
+)
+
 
 def seed_position(wallets, block, block_hash, supply):
     return {"version": 1, "from_block": block, "block": block, "block_hash": block_hash,

@@ -3,6 +3,7 @@ export const TERMS = Object.freeze({
   control_risk: {title:"Control risk", text:"Отдельная оценка концентрации и признаков координации. Даже подтверждённый перевод от общего источника не доказывает одного владельца.", note:"CEX, Relay, роутер, терминал или одинаковая комиссия сами по себе не связывают владельцев. Высокая концентрация — риск, а не причина покупать."},
   rotation: {title:"Market-mediated rotation", text:"Одна группа адресов продаёт, а другие с общим подтверждённым источником финансирования откупают близкий объём примерно по той же цене вскоре после продаж.", note:"Это гипотеза переезда позиции через рынок, не прямой перевод. Повторный оборот не считается новым накоплением; общий владелец не установлен."},
   balance_cap: {title:"Original-position balance cap", text:"Верхняя оценка того, сколько первоначально купленной позиции могло остаться в отслеживаемых кошельках. Новая покупка после снижения не восстанавливает старую позицию в расчёте.", note:"Не является полной историей движения токенов. Снижение может быть продажей или переводом; получатели перевода могут продолжать держать токены."},
+  position_activity: {title:"Наблюдаемые движения позиции", text:"В переданных транзакциях пула после сигнала замечены движения токенов. Полная история кошельков не проверена; принадлежность этих токенов исходной позиции не установлена.", note:"Перевод, вывод через сервис или кандидат на продажу не являются доказательством продажи. Эти наблюдения не меняют удержание исходной когорты и не доказывают общего владельца."},
   position: {title:"Position left", text:"Какая доля отслеживаемых покупок группы остаётся на последней проверке. Например, 75% означает три четверти той позиции, а не 75% всего суплая.", note:"Original cohort — фиксированная исходная группа; Observed buyers — пока только замеченная выборка. Снижение баланса может быть переводом, а не продажей; диапазон означает неточную долю."},
   retained_supply: {title:"Retained supply", text:"Доля общего выпуска, отнесённая к оставшейся позиции отслеживаемой группы. Смотри тип оценки: Up to — верхняя граница, At least — подтверждённый минимум, диапазон — неопределённость.", note:"Это другой знаменатель, чем у Position left. Балансы без полной истории не доказывают точное удержание первоначальных покупок. Unknown не означает ноль."},
   cohort: {title:"Original cohort", text:"Зафиксированная группа покупателей исходного сигнала. По ней отслеживается, сохранилась ли первоначальная аккумуляция.", note:"Новые покупатели не заменяют тех, кто вышел. При неполном покрытии вывод относится только к сохранённой части группы."},
@@ -67,6 +68,7 @@ export const TERMS = Object.freeze({
 const aliases = {
   control_risk:["Control risk", "Holder scope"], rotation:["Possible market-mediated position rotation", "Sell/rebuy rotation pattern"],
   balance_cap:["Original-position balance cap"],
+  position_activity:["Observed position movements"],
   position:["Position left", "Original position", "Original buyer position", "Observed buyer position"],
   retained_supply:["Retained supply", "Cohort supply", "Observed supply", "Holding now"],
   cohort:["Original cohort", "Original buyers"], holding:["Holding", "Holding confirmed", "Thesis intact", "Held at last check"],
@@ -168,7 +170,10 @@ export function installTerminology(doc) {
     popup.style.left = `${position.left}px`; popup.style.top = `${position.top}px`;
     button.setAttribute("aria-describedby", [...new Set((button.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean).concat(popup.id))].join(" "));
   };
-  const deferHide = () => { cancel(); if (!pinned) timer = win.setTimeout(hide, 180); };
+  const deferHide = () => {
+    cancel();
+    if (!pinned && active !== doc.activeElement) timer = win.setTimeout(hide, 180);
+  };
   listen(doc, "pointerover", event => {
     if (event.pointerType === "touch") return;
     if (popup.contains(event.target)) { cancel(); return; }

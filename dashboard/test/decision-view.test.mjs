@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, retentionBound } from "../decision-view.js";
+import { decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric } from "../decision-view.js";
 
 test("all position and supply labels preserve bounds, tiny holdings and unknown values", () => {
   assert.equal(retentionBound(85), "\u226485%");
@@ -8,7 +8,16 @@ test("all position and supply labels preserve bounds, tiny holdings and unknown 
   assert.equal(retentionBound(0.02), "<1%");
   assert.equal(retentionBound(0.0002,2), "<0.01%");
   assert.equal(retentionBound(0), "0%");
+  assert.equal(retentionBound(85.2), "\u226486%");
+  assert.equal(retentionBound(3.911,2), "\u22643.92%");
   for (const value of [null, undefined, false, "", NaN, Infinity, -1, 101]) assert.equal(retentionBound(value), "Unknown");
+});
+test("blank, boolean and structured values are not numeric evidence", () => {
+  for (const value of ["  ", "\t", false, true, [], {}, [0]]) {
+    assert.equal(numeric(value), null);
+    assert.equal(retentionBound(value), "Unknown");
+  }
+  assert.equal(numeric("0"), 0);
 });
 
 const now = Date.parse("2026-09-04T21:30:00Z");
@@ -93,6 +102,12 @@ test("zero retention is a real value, not missing data", () => {
   t.signalThesis = { ...t.signalThesis, status: "weakening", token_retention_pct: 0, current_retained_supply_pct: 0 };
   assert.equal(view(t).retained, 0); assert.equal(view(t).supply, 0);
 });
+test("an intact status with measured zero cannot show holding or readiness", () => {
+  const t = token(); t.signalThesis.token_retention_pct = 0;
+  assert.equal(view(t).queue, "verification");
+  t.signalLifecycle.currentConfirmed = false;
+  assert.equal(view(t).queue, "verification");
+});
 test("new observations stay unconfirmed and closed positions stay out of overview", () => {
   const early = view(token({ signalThesis: null, lifecycleStatus: "pending", signalLifecycle: { currentConfirmed: false } }));
   assert.equal(early.queue, "early");
@@ -123,4 +138,23 @@ test("old, mismatched and in-flight stale details cannot overwrite a snapshot", 
   assert.equal(canApplyDetail(detail, "mint", checked, "2026-09-04T22:00:00Z", {}), false);
   assert.equal(canApplyDetail({...detail, report_source_updated_at:null}, "mint", checked, checked, {}), false);
   assert.equal(canApplyDetail({...detail, thesis:{last_checked_at:"2026-09-04T20:00:00Z"}}, "mint", checked, checked, {last_checked_at: checked}), false);
+});
+test("newer source reports and replacement cohorts cannot mix with the selected summary", () => {
+  const thesis = {cohort_id:"original", signal_at:checked, last_checked_at:checked, updated_at:checked};
+  const detail = {token_key:"mint", report_source_updated_at:checked, thesis};
+  assert.equal(canApplyDetail(detail,"mint",checked,checked,thesis), true);
+  for (const patch of [{cohort_id:"replacement"}, {cohort_id:null}, {signal_at:null},
+    {last_checked_at:"2026-09-04T21:20:00Z"}, {updated_at:null}]) {
+    assert.equal(canApplyDetail({...detail,thesis:{...thesis,...patch}},"mint",checked,checked,thesis), false);
+  }
+  assert.equal(canApplyDetail({...detail,report_source_updated_at:"2026-09-04T22:00:00Z"},"mint",checked,checked,thesis), false);
+  assert.equal(canApplyDetail({...detail,report_source_updated_at:checked},"mint","invalid","invalid",{}), false);
+});
+test("only older matching-cohort details can survive as dated wallet observations", () => {
+  const thesis = {cohort_id:"original",signal_at:checked};
+  const detail = {token_key:"mint",report_source_updated_at:checked,thesis};
+  assert.equal(sameDetailCohort(detail,"mint",thesis,"2026-09-04T22:00:00Z"),true);
+  assert.equal(sameDetailCohort(detail,"mint",thesis,"2026-09-04T20:00:00Z"),false);
+  assert.equal(sameDetailCohort({...detail,report_source_updated_at:null},"mint",thesis,checked),false);
+  assert.equal(sameDetailCohort(detail,"mint",{...thesis,cohort_id:"replacement"},checked),false);
 });
