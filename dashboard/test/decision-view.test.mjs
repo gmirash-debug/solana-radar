@@ -1,6 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail } from "../decision-view.js";
+import { decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, retentionBound } from "../decision-view.js";
+
+test("all position and supply labels preserve bounds, tiny holdings and unknown values", () => {
+  assert.equal(retentionBound(85), "\u226485%");
+  assert.equal(retentionBound(3.91,2), "\u22643.91%");
+  assert.equal(retentionBound(0.02), "<1%");
+  assert.equal(retentionBound(0.0002,2), "<0.01%");
+  assert.equal(retentionBound(0), "0%");
+  for (const value of [null, undefined, false, "", NaN, Infinity, -1, 101]) assert.equal(retentionBound(value), "Unknown");
+});
 
 const now = Date.parse("2026-09-04T21:30:00Z");
 const checked = "2026-09-04T21:15:00Z";

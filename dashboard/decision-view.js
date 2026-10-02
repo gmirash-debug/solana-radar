@@ -19,6 +19,15 @@ function percent(value) {
   return n !== null && n >= 0 && n <= 100 ? n : null;
 }
 
+export function retentionBound(value, digits = 0) {
+  const amount = percent(value);
+  if (amount === null) return "Unknown";
+  if (amount === 0) return "0%";
+  const cutoff = 10 ** -digits;
+  if (amount < cutoff) return `<${cutoff}%`;
+  return `\u2264${amount.toFixed(digits)}%`;
+}
+
 function time(value) {
   return typeof value === "string" && value.trim() ? Date.parse(value) : NaN;
 }
