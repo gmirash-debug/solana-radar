@@ -844,13 +844,14 @@ export async function flushHistoryOutbox(env, { limit = OUTBOX_BATCH_SIZE } = {}
     WHERE event_id = ?1
   `).bind(row.event_id, now)));
   delivered = ingested.length;
-  const pending = await env.RADAR_DB.prepare("SELECT COUNT(*) AS count FROM history_outbox WHERE status = 'pending'").first();
+  const pending = await env.RADAR_DB.prepare("SELECT COUNT(*) AS count FROM (SELECT 1 FROM history_outbox WHERE status = 'pending' LIMIT 1001)").first();
   const status = {
     updated_at: now,
     last_flush_at: now,
     delivered,
     failed,
     pending: Number(pending?.count) || 0,
+    pending_capped: Number(pending?.count) >= 1001,
     history_db_configured: true,
     archive_configured: Boolean(env?.RADAR_ARCHIVE),
   };
