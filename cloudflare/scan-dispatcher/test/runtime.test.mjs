@@ -69,6 +69,9 @@ test("dashboard and token details survive D1 outage without database reads", asy
   assert.equal(payload.report.signal_theses[0].cohort,undefined);
   const detail = await (await worker.fetch(new Request("https://worker/api/dashboard/token?token_key=token"),env,{})).json();
   assert.equal(detail.thesis.cohort[0].owner,"owner");
+  const missingKey = await worker.fetch(new Request("https://worker/api/dashboard/token"),env,{});
+  assert.equal(missingKey.status,400);
+  assert.equal((await missingKey.json()).error,"token_key_required");
   assert.equal(dbReads,0);
 });
 

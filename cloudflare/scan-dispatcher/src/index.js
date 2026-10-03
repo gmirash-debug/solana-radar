@@ -1135,6 +1135,9 @@ export default {
       if (request.method !== "GET") {
         return json({ ok: false, error: "GET required" }, 405, corsHeaders(request, env));
       }
+      if (!normalizeId(url.searchParams.get("token_key"))) {
+        return json({ok:false, error:"token_key_required"}, 400, corsHeaders(request, env));
+      }
       try {
         const durable = await runtimeDashboardResponse(env, request).catch(() => null);
         if (durable?.ok) return new Response(durable.body, {headers:{"content-type":"application/json", "cache-control":"no-store", ...corsHeaders(request, env)}});
