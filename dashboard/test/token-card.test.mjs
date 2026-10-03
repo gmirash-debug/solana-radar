@@ -48,12 +48,30 @@ function fixture(t, {signalThesis = thesis(), alerts = [], overrides = {}} = {})
   const api = vm.runInContext(`({state, buildTokenSignals, renderWalletRows, walletHeldLabel,
     renderReviewRow, renderThesisSummary, renderSupplyLinkageGroups, supplyPct,
     mergeTokenAlertDetails, ensureTokenDetail, applyDashboardPayload, detailLoadMessage,
-    renderObservedPositionActivity})`, context);
+    renderObservedPositionActivity, renderStatus})`, context);
   api.state.report = {generated_at:checked, alerts, signal_theses:signalThesis ? [signalThesis] : [], config:{}};
   api.state.history = [];
   t.after(() => dom.window.close());
   return {...api, dom, context};
 }
+
+test("targeted checks retain a separate deep-scan date and storage-source label", t => {
+  const api = fixture(t);
+  api.state.report.scan_profile = "targeted";
+  api.state.report.stats = {scanned_pools:6};
+  api.state.dataSource = "remote";
+  api.state.storageSource = "durable_snapshot";
+  api.renderStatus();
+  const doc = api.dom.window.document;
+  assert.match(doc.querySelector("#subtitle").textContent, /^Last check /);
+  assert.match(doc.querySelector("#statusRow").textContent, /targeted check: 6 pools/);
+  assert.match(doc.querySelector("#statusRow").textContent, /deep scan not recorded yet/);
+  assert.match(doc.querySelector("#statusRow").textContent, /durable snapshot/);
+  assert.doesNotMatch(doc.querySelector("#statusRow").textContent, /live D1/);
+  api.state.report.last_deep_scan_at = checked;
+  api.renderStatus();
+  assert.doesNotMatch(doc.querySelector("#statusRow").textContent, /deep scan not recorded yet/);
+});
 
 test("local static previews hydrate matching published wallet details without enabling remote mode", async t => {
   const detail = {ok:true, token_key:"mint", report_source_updated_at:checked,

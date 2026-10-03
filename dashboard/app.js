@@ -114,6 +114,7 @@ const state = {
   serverDeletedPoolKeys: new Set(),
   publishedDashboard: false,
   dataSource: "none",
+  storageSource: null,
   fallbackReason: null,
   remoteRetryAt: 0,
   remoteFailureCount: 0,
@@ -1722,6 +1723,7 @@ function applyDashboardPayload(payload, source, fallbackReason = null) {
     ? payload.token_details
     : state.tokenDetailManifest?.generation === nextGeneratedAt ? state.tokenDetailManifest : null;
   state.dataSource = source;
+  state.storageSource = payload?.storage_source || null;
   state.fallbackReason = fallbackReason;
   if (snapshotChanged) {
     state.tokenDetailLoadedKeys.clear();
@@ -1959,8 +1961,11 @@ function renderStatus() {
     : null;
   const discoveryFailed = discoveryStatus.status === "failed";
   const persistence = status.persistence || report.stats?.persistence || {};
+  const targeted = report.scan_profile === "targeted";
+  const deepAt = report.last_deep_scan_at || (targeted ? null : report.generated_at);
+  const deepFreshness = deepAt ? reportFreshness(deepAt) : null;
   els.subtitle.textContent = report.generated_at
-    ? `Last scan ${dateLabel(report.generated_at)}`
+    ? `${targeted ? "Last check" : "Last scan"} ${dateLabel(report.generated_at)}`
     : "No scan report yet";
   const summary = document.querySelector("#scannerSummary");
   if (summary) {
@@ -1977,6 +1982,8 @@ function renderStatus() {
     `<span class="status-pill"><span class="dot ${running ? "warn" : ""}"></span>${running ? "scan running" : "idle"}</span>`,
     failed ? `<span class="status-pill freshness-bad" title="${esc(status.error || "Scanner failed")}"><span class="dot bad"></span>last attempt failed ${esc(dateLabel(status.last_attempt_at))}</span>` : "",
     `<span class="status-pill freshness-${freshness.tone}"><span class="dot ${freshness.tone === "good" ? "" : freshness.tone}"></span>${esc(freshness.label)}</span>`,
+    targeted ? `<span class="status-pill">targeted check: ${esc(report.stats?.scanned_pools ?? "-")} pools</span>` : "",
+    targeted ? `<span class="status-pill freshness-${deepFreshness?.tone || "warn"}">deep scan ${deepAt ? esc(dateLabel(deepAt)) : "not recorded yet"}</span>` : "",
     `<span class="status-pill freshness-${healthTone}" title="${esc(healthReason)}"><span class="dot ${healthTone === "good" ? "" : healthTone}"></span>scan ${esc(healthStatus)}</span>`,
     persistence.status === "pending" ? `<span class="status-pill freshness-warn" title="${esc(persistence.error || "Cloud storage unavailable; retry queued")}">Cloud save pending: ${esc(persistence.pending)}</span>` : "",
     discoveryFailed
@@ -1988,7 +1995,7 @@ function renderStatus() {
     blockedRpcProviders.length ? `<span class="status-pill freshness-warn" title="${esc(rpcTitle)}">${esc(blockedRpcProviders.join(" + "))} blocked</span>` : "",
     athProvider.status && athProvider.status !== "ok" ? `<span class="status-pill freshness-bad" title="${esc(athProvider.error || "GMGN unavailable")}">ATH source ${esc(athProvider.status)}</span>` : "",
     `<span class="status-pill">lane ${esc(laneText)}</span>`,
-    state.dataSource === "remote" ? `<span class="status-pill">live D1</span>` : "",
+    state.dataSource === "remote" ? `<span class="status-pill">${state.storageSource === "durable_snapshot" ? "durable snapshot" : "live D1"}</span>` : "",
     state.dataSource === "static" ? `<span class="status-pill freshness-warn" title="${esc(state.fallbackReason || "remote unavailable")}">fallback snapshot</span>` : "",
     state.publishedDashboard && state.hiddenTokenKeys.size ? `<button class="status-action" id="syncDeleted" type="button">Sync deleted</button>` : "",
     status.next_scan_at ? `<span class="status-pill">next auto ${esc(dateLabel(status.next_scan_at))}</span>` : "",
