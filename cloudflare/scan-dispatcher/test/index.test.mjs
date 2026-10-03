@@ -406,6 +406,26 @@ test("dashboard excludes out-of-window pools from all operational payloads", () 
   assert.equal(isCurrentDashboardSignal(report.alerts[0], report), false);
 });
 
+test("dashboard shaping honors the thirty-minute minimum for alerts and summaries", () => {
+  const ages = [0.5 - 1 / 3600, 0.5, 23, 24, 360, 360 + 1 / 3600];
+  const report = {
+    config: { age_min_hours: 0.5, age_max_hours: 360 },
+    alerts: ages.map((age_hours, index) => ({
+      created_at: "2026-10-03T02:00:00Z",
+      pool: { token_address: `token-${index}`, age_hours },
+    })),
+    summaries: ages.map((age_hours, index) => ({
+      pool: { token_address: `token-${index}`, age_hours },
+    })),
+  };
+  const compact = compactDashboardReport(report);
+  const expected = ["token-1", "token-2", "token-3", "token-4"];
+  assert.deepEqual(compact.alerts.map(item => item.pool.token_address), expected);
+  assert.deepEqual(compact.summaries.map(item => item.pool.token_address), expected);
+  assert.equal(compact.config.age_min_hours, 0.5);
+  assert.equal(isCurrentDashboardSignal({ created_at: "2026-10-03T02:00:00Z", pool: {} }, report), false);
+});
+
 test("D1 dashboard chunks market lookups below the SQLite parameter limit", async () => {
   const bindings = [];
   const db = {

@@ -1,9 +1,9 @@
-import { chooseDashboardPayload } from "./data-source.js?v=20261003-runtime-8";
-import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261003-runtime-8";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-runtime-8";
-import { installTerminology } from "./terminology.js?v=20261003-runtime-8";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric } from "./decision-view.js?v=20261003-runtime-8";
-import { loadTokenDetail } from "./static-detail.js?v=20261003-runtime-8";
+import { chooseDashboardPayload } from "./data-source.js?v=20261003-age-30m-9";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261003-age-30m-9";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-age-30m-9";
+import { installTerminology } from "./terminology.js?v=20261003-age-30m-9";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric } from "./decision-view.js?v=20261003-age-30m-9";
+import { loadTokenDetail } from "./static-detail.js?v=20261003-age-30m-9";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -13,12 +13,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261003-runtime-8";
+} from "./token-state.js?v=20261003-age-30m-9";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261003-runtime-8";
+} from "./filter-scope.js?v=20261003-age-30m-9";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const DELETE_SYNC_ENDPOINT = "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/deleted-token";
@@ -146,8 +146,8 @@ const els = {
 const FILTER_META = {
   reactivation: {
     label: "Reactivation",
-    criteria: "1d-15d / $0-$5m mcap / liq >= $3k / 5m burst + retained buy-wave",
-    thesis: "migrated tokens aged 1d-15d ranked by renewed 5m and 1h activity, then confirmed by distributed net buying and balances that still retain the acquired supply. ATH is risk context, not a discovery gate.",
+    criteria: "30m-15d / $0-$5m mcap / liq >= $3k / 5m burst + retained buy-wave",
+    thesis: "migrated tokens aged 30m-15d ranked by renewed 5m and 1h activity, then confirmed by distributed net buying and balances that still retain the acquired supply. ATH is risk context, not a discovery gate.",
   },
 };
 
