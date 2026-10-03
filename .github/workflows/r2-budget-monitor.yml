@@ -1,0 +1,35 @@
+name: R2 free-tier budget notifications
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      test_notification:
+        description: Send a one-time notification test without changing usage
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: solana-radar-r2-notifications
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Notify the owner and acknowledge only confirmed delivery
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RADAR_INGEST_SECRET: ${{ secrets.RADAR_INGEST_SECRET }}
+          TEST_NOTIFICATION: ${{ inputs.test_notification && 'true' || 'false' }}
+        run: python tools/r2_budget_monitor.py

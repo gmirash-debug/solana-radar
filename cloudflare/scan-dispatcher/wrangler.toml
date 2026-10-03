@@ -29,6 +29,14 @@ class_name = "HistoryQueue"
 tag = "v3"
 new_sqlite_classes = ["HistoryQueue"]
 
+[[durable_objects.bindings]]
+name = "R2_BUDGET"
+class_name = "R2Budget"
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["R2Budget"]
+
 [vars]
 GITHUB_OWNER = "gmirash-debug"
 GITHUB_REPO = "solana-radar"
@@ -44,6 +52,7 @@ STORAGE_SQL_BACKEND = "turso"
 TURSO_DATABASE_URL = "libsql://solana-radar-gmirash-debug.aws-eu-west-1.turso.io"
 HISTORY_ARCHIVE_MODE = "r2"
 RUNTIME_ARCHIVE_MODE = "r2"
+R2_BUDGET_GUARD = "enabled"
 HISTORY_DERIVED_MODE = "daily"
 # Estimated queue work only; leave room for daily Learning and operational SQL.
 HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS = "180000"

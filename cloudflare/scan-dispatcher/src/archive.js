@@ -1,4 +1,5 @@
 import { historyEventId } from "./history.js";
+import {R2BudgetError} from "./r2-budget.js";
 
 export const HISTORY_ARCHIVE_LIMITS = Object.freeze({
   eventBytes: 128 * 1024, compressedBytes: 129 * 1024, timeoutMs: 10000, depth: 100,
@@ -107,7 +108,7 @@ async function bounded(action, options) {
       timer = setTimeout(() => reject(new HistoryArchiveError("history_archive_timeout")), timeout);
     })]);
   } catch (error) {
-    if (error instanceof HistoryArchiveError) throw error;
+    if (error instanceof HistoryArchiveError || error instanceof R2BudgetError) throw error;
     throw new HistoryArchiveError("history_archive_unavailable");
   } finally { clearTimeout(timer); }
 }

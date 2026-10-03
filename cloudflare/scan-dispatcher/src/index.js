@@ -20,8 +20,10 @@ import {resolveStorageEnv} from "./storage-sql.js";
 import {archiveHistoryEvent, readHistoryArchive} from "./archive.js";
 import {validateHistoryEvents} from "./runtime-history.js";
 import {runHistoryMaintenance, historyMaintenanceStatus, pruneArchivedHistoryOutbox} from "./history-maintenance.js";
+import {r2BudgetStatus, r2BudgetCall, dispatchR2BudgetNotice} from "./r2-budget.js";
 export {RuntimeSnapshots} from "./runtime.js";
 export {HistoryQueue} from "./runtime-history.js";
+export {R2Budget} from "./r2-budget.js";
 
 const DEFAULT_OWNER = "gmirash-debug";
 const DEFAULT_REPO = "solana-radar";
@@ -703,8 +705,8 @@ async function ingestDiscoveryState(env, rows) {
   return { ok: true, rows_synced: rowsSynced };
 }
 
-async function dashboardData(env, historyLimit = 40) {
-  const durable = await runtimeDocument(env, "dashboard").catch(() => null);
+async function dashboardData(env, historyLimit = 40, skipDurable = false) {
+  const durable = skipDurable ? null : await runtimeDocument(env, "dashboard").catch(() => null);
   if (durable?.document?.value?.report?.generated_at) {
     const {detail_signal_theses, detail_current_alerts, detail_history, ...snapshot} = durable.document.value;
     const scanStatus = await runtimeDocument(env, "scan_status").catch(() => null);
@@ -763,10 +765,10 @@ async function dashboardData(env, historyLimit = 40) {
   };
 }
 
-async function dashboardTokenDetail(env, requestedTokenKey) {
+async function dashboardTokenDetail(env, requestedTokenKey, skipDurable = false) {
   const tokenKey = normalizeId(requestedTokenKey);
   if (!tokenKey) throw new Error("token_key_required");
-  const durable = await runtimeDocument(env, "dashboard").catch(() => null);
+  const durable = skipDurable ? null : await runtimeDocument(env, "dashboard").catch(() => null);
   if (durable?.document?.value) {
     const snapshot = durable.document.value;
     const matches = item => dashboardRecordMatchesToken(item, tokenKey);
@@ -1156,10 +1158,16 @@ async function runArchiveRetention(env) {
   return result;
 }
 
+async function budgetView(env) {
+  try { return await r2BudgetStatus(env); }
+  catch { return {enabled:true,paused:true,status:"unavailable",pause_reason:"r2_budget_unavailable"}; }
+}
+
 export default {
   async scheduled(_event, env, ctx) {
     env = resolveStorageEnv(env);
     if (env.STORAGE_WRITES_FROZEN === "true") return;
+    if (_event?.cron === DISCOVERY_CRON) ctx.waitUntil(dispatchR2BudgetNotice(env).catch(() => null));
     const mode = schedulerMode(env);
     const turso = env.STORAGE_SQL_BACKEND === "turso";
     const historyTask = env.HISTORY_QUEUE && hasHistoryDb(env) && _event?.cron === DISCOVERY_CRON
@@ -1181,9 +1189,15 @@ export default {
   },
 
   async fetch(request, env) {
+    const rawArchive = env.RADAR_ARCHIVE;
     try { env = resolveStorageEnv(env); }
     catch (error) { return json({ok:false, error:error.message}, 503); }
     const url = new URL(request.url);
+
+    if (url.pathname === "/api/storage/r2-budget" && request.method === "GET") {
+      const budget = await budgetView(env);
+      return json({ok:budget.status !== "unavailable",...budget},budget.status === "unavailable" ? 503 : 200,corsHeaders(request,env));
+    }
 
     if (request.method === "OPTIONS") {
       const headers = corsHeaders(request, env);
@@ -1236,6 +1250,7 @@ export default {
         archive_configured: Boolean(env.RADAR_ARCHIVE),
         history_archive_mode: env.HISTORY_ARCHIVE_MODE || "durable",
         runtime_archive_mode: env.RUNTIME_ARCHIVE_MODE || "durable",
+        r2_budget: await budgetView(env),
         history: historical,
       }, 200, corsHeaders(request, env));
     }
@@ -1245,10 +1260,11 @@ export default {
         return json({ ok: false, error: "GET required" }, 405, corsHeaders(request, env));
       }
       try {
-        const durable = await runtimeDashboardResponse(env, request).catch(() => null);
-        if (durable?.ok) return new Response(durable.body, {headers:{"content-type":"application/json", "cache-control":"no-store", ...corsHeaders(request, env)}});
+        const budget = await budgetView(env);
+        const durable = budget.paused ? null : await runtimeDashboardResponse(env, request).catch(() => null);
+        if (durable?.ok) return json({...await durable.json(),r2_budget:budget},200,corsHeaders(request,env));
         return json(
-          await dashboardData(env, url.searchParams.get("history_limit")),
+          {...await dashboardData(env, url.searchParams.get("history_limit"),budget.paused),r2_budget:budget},
           200,
           corsHeaders(request, env),
         );
@@ -1265,10 +1281,11 @@ export default {
         return json({ok:false, error:"token_key_required"}, 400, corsHeaders(request, env));
       }
       try {
-        const durable = await runtimeDashboardResponse(env, request).catch(() => null);
+        const budget = await budgetView(env);
+        const durable = budget.paused ? null : await runtimeDashboardResponse(env, request).catch(() => null);
         if (durable?.ok) return new Response(durable.body, {headers:{"content-type":"application/json", "cache-control":"no-store", ...corsHeaders(request, env)}});
         return json(
-          await dashboardTokenDetail(env, url.searchParams.get("token_key")),
+          await dashboardTokenDetail(env, url.searchParams.get("token_key"),budget.paused),
           200,
           corsHeaders(request, env),
         );
@@ -1324,6 +1341,25 @@ export default {
       const access = ingestAccess(request, env);
       if (!access.ok) return json({ ok: false, error: access.error }, access.status, corsHeaders(request, env));
       try {
+        if (url.pathname === "/api/storage/r2-budget/bootstrap") {
+          if (request.method !== "POST") return json({ok:false,error:"POST required"},405);
+          const previous = await r2BudgetStatus(env);
+          if (previous.initialized) return json({ok:true,unchanged:true,...previous});
+          const baseline = await storageRequestJson(request,4096);
+          if (baseline.month !== new Date().toISOString().slice(0,7)
+              || [baseline.class_a,baseline.class_b,baseline.account_storage_bytes].some(value => !Number.isSafeInteger(value) || value < 0)) {
+            return json({ok:false,error:"r2_budget_baseline_invalid"},400);
+          }
+          if (!rawArchive?.list) return json({ok:false,error:"archive_not_configured"},503);
+          const inventory = await rawArchive.list({limit:1000});
+          if (inventory.truncated) return json({ok:false,error:"r2_budget_baseline_inventory_too_large"},503);
+          return json(await r2BudgetCall(env,"bootstrap",{...baseline,
+            class_a:Number(baseline.class_a)+1,objects:inventory.objects.map(row=>({key:row.key,size:row.size}))}));
+        }
+        if (url.pathname === "/api/storage/r2-budget/ack") {
+          if (request.method !== "POST") return json({ok:false,error:"POST required"},405);
+          return json(await r2BudgetCall(env,"ack",await storageRequestJson(request,4096)));
+        }
         if (url.pathname === "/api/storage/archive") {
           if (request.method !== "POST") return json({ok:false,error:"POST required"},405);
           if (env.HISTORY_ARCHIVE_MODE !== "r2") return json({ok:false,error:"history_archive_disabled"},503);

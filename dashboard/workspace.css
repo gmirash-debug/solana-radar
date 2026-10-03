@@ -241,3 +241,14 @@
   .evidence-facts > div { font-size: 10px; }
 }
 @media (prefers-reduced-motion: reduce) { .decision-ui * { scroll-behavior: auto !important; } }
+.r2-budget-alert { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; padding: 12px 16px; border: 1px solid currentColor; border-radius: 6px; }
+.r2-budget-alert span { font-size: 13px; line-height: 1.5; }
+.r2-budget-monitor { padding: 16px 0 0; border-top: 1px solid var(--line, #d8e2df); }
+.r2-budget-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.r2-budget-heading h2 { margin: 0; font-size: 15px; }
+.r2-budget-quotas { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 16px 0; }
+.r2-budget-quota > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px; font-size: 13px; }
+.r2-budget-quota meter { display: block; width: 100%; height: 14px; margin: 6px 0; }
+.r2-budget-quota small, .r2-budget-monitor p { font-size: 12px; line-height: 1.5; color: var(--muted, #697b76); }
+.r2-budget-monitor p { margin: 6px 0; }
+@media (max-width: 760px) { .r2-budget-quotas { grid-template-columns: 1fr; gap: 12px; } }

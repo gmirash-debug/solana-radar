@@ -13,6 +13,28 @@ from runtime_dashboard import dashboard_documents
 
 
 class RuntimePartitioningTests(unittest.TestCase):
+    def test_r2_budget_pause_keeps_history_unacknowledged_but_publishes_current_sql(self):
+        event = {"event_id": "valid", "episode": {"episode_id": "episode", "token_address": "mint", "caught_at": "2026-10-03T00:00:00Z"},
+                 "event": {"event_type": "signal", "observed_at": "2026-10-03T00:00:00Z"}}
+        body = {"report": {"generated_at": "2026-10-03T00:00:00Z"}, "history_ledger": {"events": [event]},
+                "detail_signal_theses": [{"token_address": "mint"}]}
+        original = copy.deepcopy(event)
+        def paused(method, path, config, payload):
+            if path == "/api/runtime/history":
+                raise RuntimeError("Remote HTTP 503: r2_monthly_budget_paused")
+            return {"ok": True}
+        with patch.object(s, "remote_api_call", side_effect=paused) as remote:
+            self.assertFalse(s.send_remote_snapshot(body, {}))
+        self.assertEqual(body["history_ledger"]["events"], [original])
+        self.assertNotIn("durable_history_ledger", body["_sync_progress"])
+        self.assertEqual(body["_sync_progress"]["summary"], 1)
+        self.assertIn("R2 paused", body["_sync_deferred_reason"])
+        self.assertIn("/api/ingest/details", [call.args[1] for call in remote.call_args_list])
+        with patch.object(s, "remote_api_call", return_value={"ok": True}):
+            self.assertTrue(s.send_remote_snapshot(body, {}))
+        self.assertEqual(body["_sync_progress"]["durable_history_ledger"], 1)
+        self.assertNotIn("_sync_deferred_reason", body)
+
     def test_cold_backlog_yields_to_current_history_without_false_ack(self):
         body = {"report": {"generated_at": "2026-10-03T00:00:00Z"}, "history_ledger": {"events": [
             {"event_id": "valid", "episode": {"episode_id": "episode", "token_address": "mint", "caught_at": "2026-09-01T00:00:00Z"},

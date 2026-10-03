@@ -1,4 +1,4 @@
-import {formatSupplyPercent} from "./robinhood-state.js?v=20261003-storage-v1";
+import {formatSupplyPercent} from "./robinhood-state.js?v=20261003-r2-budget-v1";
 
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[c]));
 const fact = (label, value) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;

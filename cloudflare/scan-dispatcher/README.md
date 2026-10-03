@@ -87,6 +87,60 @@ while the state-writer workflow is queued or in progress.
 - Rolling SQL backups are private and independent of Cloudflare. R2 object archives
   must also be preserved when restoring SQL containing archive references.
 
+## R2 Free-Tier Guard
+
+`R2_BUDGET_GUARD=enabled` wraps every scanner R2 GET, HEAD, PUT and LIST.
+One serialized SQLite Durable Object reserves charges **before** the native call.
+Concurrent requests cannot overspend the counters. Failed/uncertain requests remain
+charged conservatively. Unbounded streams and Infrequent Access are refused.
+Missing budget state fails closed, including before initial bootstrap.
+
+| Free Standard allowance | Warning | Stop before reaching |
+| --- | --- | --- |
+| 10 GB-month storage | 8 GB upper bound | 9 GB upper bound |
+| 1 million Class A operations/month | 800,000 | 900,000 |
+| 10 million Class B operations/month | 8,000,000 | 9,000,000 |
+
+The **first** exhausted allowance stops **all billable** R2 access for the rest
+of the UTC calendar month. Verified free DELETE garbage collection may continue;
+it never deletes undelivered evidence or releases the monthly pause. On the first
+at 00:00 UTC, operation counters reset, but storage does not. A database still at
+9 GB remains paused. A second **rolling 33-day cap** reserves the same operation
+allowances across calendar resets. This protects the actual account billing cycle
+(verified in this account as October 3 - November 3), whose exact renewal time is
+not exposed by the UI. A calendar reset therefore cannot spend a second allowance
+before Cloudflare renews it; the safety cap may extend a pause into the next month.
+This instantaneous storage ceiling conservatively bounds the
+provider's daily-peak GB-month measure. Metadata reserves 4 KB per object.
+
+The bootstrap is authenticated, one-time, and starts from account-wide analytics
+operation totals plus a lag cushion and an actual bucket inventory. Repeating
+bootstrap cannot reset or lower counters. Counters are reservations, **not an
+invoice**. The guard covers this scanner's binding; another bucket, manual upload,
+or external API client can consume the account free tier outside this guard.
+Cloudflare does not provide an account-wide R2 hard spending cap.
+
+Budget-paused scans still publish current operational data and token details to
+Turso. R2 evidence stays in the unacknowledged outbox, with the previous complete
+checkpoint retained. The public dashboard and token routes use SQL while paused.
+These are degraded archive guarantees, not a claim that archives remain current.
+
+Monitoring: public `GET /api/storage/r2-budget` never accesses R2. The dashboard
+shows all three counters in Diagnostics, with warning/pause banners always visible.
+Cloudflare checks pending alerts every five minutes and dispatches
+`r2-budget-monitor.yml`; its independent GitHub schedule is a 15-minute backstop.
+GitHub Actions creates a deduplicated issue, assigns and mentions the operator;
+delivery is acknowledged only after GitHub confirms the issue. Email delivery
+depends on the owner's GitHub notification settings. This works with a laptop off.
+The optional `test_notification` input sends an explicit test without faking usage.
+
+Bootstrap and notification acknowledgement use the existing ingestion secret:
+`POST /api/storage/r2-budget/bootstrap` accepts month and conservative account
+`class_a`, `class_b`, `account_storage_bytes`; the server obtains object sizes.
+`POST /api/storage/r2-budget/ack` requires event ID and a repository issue URL.
+
+Quota source: https://developers.cloudflare.com/r2/pricing/
+
 ## Deleted token sync
 
 The deployed dashboard can POST deleted false catches to:

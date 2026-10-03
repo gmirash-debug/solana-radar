@@ -14,6 +14,7 @@ import * as evaluation from "../evaluation-summary.js";
 import * as robinhood from "../robinhood-state.js";
 import * as accumulation from "../accumulation-evidence.js";
 import * as gmgn from "../gmgn-context.js";
+import * as r2Budget from "../r2-budget-view.js";
 
 const now = Date.parse("2026-10-03T12:00:00Z"), checked = "2026-10-03T11:50:00Z";
 const start = "2026-10-03T11:00:00Z", end = "2026-10-03T11:05:00Z";
@@ -49,7 +50,7 @@ function harness(t, {fetch = async () => { throw new Error("Unmocked network req
   dom.window.scrollTo = () => {};
   setup(dom.window);
   const context = vm.createContext({...dataSource, ...coordination, ...terminology, ...decision,
-    ...staticDetail, ...tokenState, ...scope, ...evaluation, ...robinhood, ...accumulation, ...gmgn,
+    ...staticDetail, ...tokenState, ...scope, ...evaluation, ...robinhood, ...accumulation, ...gmgn, ...r2Budget,
     decisionView:(token, config) => decision.decisionView(token, config, clock.now),
     resolveCurrentMarket:args => tokenState.resolveCurrentMarket({...args, now:clock.now}),
     isFresh:p => robinhood.isFresh(p, clock.now), walletFresh:row => robinhood.walletFresh(row, clock.now),
@@ -111,6 +112,7 @@ test("U01: missing registry clocks, expired own quotes and future quotes remain 
 test("U02: failed remote refresh/cooldown retains the newer accepted snapshot and details", async t => {
   let requests = 0;
   const api = harness(t, {url:"https://audit.github.io/", fetch:async url => {
+    if (url.endsWith("/api/storage/r2-budget")) return response({ok:true,enabled:false});
     if (url.startsWith("https://mock.invalid/")) { requests++; throw new Error("mock Worker failure"); }
     return response(payload("2026-10-03T10:00:00Z"));
   }});
@@ -138,6 +140,19 @@ test("U02: late concurrent responses cannot override the latest request, even wi
   first.resolve(payload("2026-10-03T11:59:00Z"));
   await olderRequest;
   assert.equal(api.state.report.generated_at, "2026-10-03T11:55:00Z");
+});
+
+test("R2 budget refresh is independent of an unchanged or older scan report", async t => {
+  const api = harness(t, {url:"https://audit.github.io/", fetch:async url => {
+    if(url.endsWith("/api/storage/r2-budget")) return response({ok:true,enabled:true,initialized:true,paused:true,status:"paused",resets_at:"2026-11-01T00:00:00.000Z",usage:{class_a:899999,class_b:1,storage_bytes:500}});
+    return response(payload("2026-10-03T10:00:00Z"));
+  }});
+  api.dom.window.SOLANA_RADAR_DATA_API_URL = "https://mock.invalid";
+  await api.loadData(); await tick();
+  assert.equal(api.state.report.generated_at,checked);
+  assert.match(api.doc.querySelector("#r2BudgetAlert").textContent,/R2 paused/);
+  assert.equal(api.doc.querySelector("#scannerDiagnostics").open,false);
+  assert.equal(api.doc.querySelectorAll("#r2BudgetMonitor meter").length,3);
 });
 
 test("U02: initial fallback still displays before remote completes and equal static cannot strip remote data", async t => {
@@ -611,7 +626,7 @@ test("cache integration: every versioned entry asset uses the unified remediatio
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const tags = [...html.matchAll(/(?:href|src)="(?:[^"]+)\?v=([^"]+)"/g)].map(match => match[1]);
   assert.equal(tags.length, 5);
-  assert.ok(tags.every(tag => tag === "20261003-storage-v1"));
+  assert.ok(tags.every(tag => tag === "20261003-r2-budget-v1"));
 });
 
 test("legacy migration integration: a fresh confirmed alert cannot upgrade the original unknown-sale thesis", t => {
