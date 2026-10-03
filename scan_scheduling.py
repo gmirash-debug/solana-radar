@@ -2,6 +2,14 @@
 from datetime import datetime
 
 
+def scan_freshness_reference(report, targeted=False):
+    if targeted:
+        return report.get("generated_at")
+    if report.get("scan_profile") == "targeted":
+        return report.get("last_deep_scan_at")
+    return report.get("last_deep_scan_at") or report.get("generated_at")
+
+
 def _timestamp(value):
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))

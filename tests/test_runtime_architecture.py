@@ -7,13 +7,21 @@ from unittest.mock import Mock, patch
 import scanner as s
 from runtime_checkpoint import build_checkpoint, decode_checkpoint, restore_checkpoint
 from rpc_budget import MonthlyRpcBudget, configure_monthly_budgets
-from scan_scheduling import targeted_profile, fast_candidate_pools
+from scan_scheduling import targeted_profile, fast_candidate_pools, scan_freshness_reference
 from launch_history import advance_launch_history
 from prospective_evidence import capture_evaluation_rows
 from signal_evaluation import evaluate_signals, EvaluationOptions
 
 
 class RuntimeArchitectureTests(unittest.TestCase):
+    def test_targeted_report_without_deep_time_cannot_postpone_hourly_scan(self):
+        report = {"generated_at": "2026-10-03T01:30:00Z", "scan_profile": "targeted"}
+        self.assertIsNone(scan_freshness_reference(report))
+        self.assertEqual(scan_freshness_reference(report, targeted=True), report["generated_at"])
+        report["last_deep_scan_at"] = "2026-10-03T00:30:00Z"
+        self.assertEqual(scan_freshness_reference(report), report["last_deep_scan_at"])
+        self.assertEqual(scan_freshness_reference({"generated_at": report["generated_at"]}), report["generated_at"])
+
     def test_termination_preserves_active_state_and_monthly_usage(self):
         active = {"rpc_monthly_usage": {"2026-10": {"alchemy": {"estimated_units": 100}}},
                   "pools": {"pool": {"cursor": "preserved"}}}
