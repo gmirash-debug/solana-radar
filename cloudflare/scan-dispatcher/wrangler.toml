@@ -40,8 +40,17 @@ SCHEDULER_ENABLED = "auto"
 HISTORY_FLUSH_CRON = "37 * * * *"
 # Release-specific deferred migration. Other versions are deliberately rejected.
 HISTORY_SCHEMA_AUTO_UPGRADE = "0003_resumable_history.sql"
+STORAGE_SQL_BACKEND = "turso"
+TURSO_DATABASE_URL = "libsql://solana-radar-gmirash-debug.aws-eu-west-1.turso.io"
+HISTORY_ARCHIVE_MODE = "r2"
+RUNTIME_ARCHIVE_MODE = "r2"
+HISTORY_DERIVED_MODE = "daily"
+# Estimated queue work only; leave room for daily Learning and operational SQL.
+HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS = "180000"
+# Turso calls are external requests; share the free invocation cap with Learning.
+HISTORY_QUEUE_FLUSH_QUERIES = "24"
 
-# Create the database before the first production deploy, then replace this id.
+# Retained for an explicit rollback; the Turso adapter does not write to D1.
 [[d1_databases]]
 binding = "RADAR_DB"
 database_name = "solana-radar"
@@ -53,9 +62,6 @@ database_name = "solana-radar-history"
 database_id = "41d38b04-c3ae-41c0-aa80-1bcb2f0dead4"
 migrations_dir = "migrations-history"
 
-# Raw transaction and provider payloads are optional. The account has not
-# enabled R2 yet, so do not add an active binding until the bucket exists.
-# Once enabled, create `solana-radar-archive` and add:
-# [[r2_buckets]]
-# binding = "RADAR_ARCHIVE"
-# bucket_name = "solana-radar-archive"
+[[r2_buckets]]
+binding = "RADAR_ARCHIVE"
+bucket_name = "solana-radar-archive"

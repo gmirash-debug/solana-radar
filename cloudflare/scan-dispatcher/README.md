@@ -1,25 +1,28 @@
 # Solana Radar Scan Dispatcher
 
 Cloudflare Worker that triggers the five-minute discovery pulse, the hourly deep
-scan, serves the live dashboard from D1, and syncs dashboard token deletions.
+scan, serves the live dashboard from Durable Objects, and syncs dashboard token deletions.
+Canonical operational and Learning SQL lives in Turso. Verified compressed evidence
+and runtime blobs live in a private R2 bucket. D1 bindings remain for rollback only.
 
 ## Deploy
 
 ```bash
 cd cloudflare/scan-dispatcher
 npx wrangler login
-npx wrangler d1 create solana-radar
-# Copy the returned database id into wrangler.toml.
-npx wrangler d1 migrations apply solana-radar --remote
 npx wrangler secret put GITHUB_TOKEN
 npx wrangler secret put RADAR_INGEST_SECRET
+npx wrangler secret put TURSO_AUTH_TOKEN
+# Set TURSO_DATABASE_URL only after the lossless import has been verified.
+# See STORAGE_MIGRATION.md in the repository root for cutover and rollback.
 npx wrangler deploy
 ```
 
 `GITHUB_TOKEN` must be able to run Actions for `gmirash-debug/solana-radar`.
 For a fine-grained GitHub token, grant this repository read/write access to Actions.
 `RADAR_INGEST_SECRET` must have the same value as the GitHub Actions repository
-secret of the same name. It protects the scanner-to-D1 ingestion endpoints.
+secret of the same name. It protects scanner ingestion and private archive endpoints.
+The Turso credential is database-specific, server-side, and never sent to the dashboard.
 
 The public dashboard reads `GET /api/dashboard`; it is CORS-restricted to the
 configured Pages origin. That endpoint intentionally returns list-level facts
@@ -27,8 +30,8 @@ only. `GET /api/dashboard/token?token_key=<mint>` loads the selected token's
 wallet cohort and event evidence on demand, so the dashboard remains responsive
 on mobile. The scanner writes compact reports, alert history, token-scoped
 market/baseline state, and every terminal scan status through protected `/api/*`
-ingestion routes. Raw scanner state and runtime caches do not leave the runtime
-cache.
+ingestion routes. Raw scanner state and runtime caches remain in authenticated
+private checkpoints, not public dashboard assets.
 
 ## Access-protected writes
 
@@ -63,8 +66,23 @@ curl -X POST "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.
 ```
 
 The Worker runs discovery every five minutes and the deep scan at minute 7 of each
-hour. GitHub's native schedules remain a backup and skip when the Worker snapshot
-is already fresh.
+hour. `scan-watchdog.yml` is an independent hourly safety net: it checks verified
+scan freshness and existing runs before dispatching. It never runs another scanner
+while the state-writer workflow is queued or in progress.
+
+## Storage Safety
+
+- R2 writes are acknowledged only after confirming native checksums and metadata.
+- Queue envelopes keep immutable archive references; SQL delivery reads and verifies
+  the complete original event before advancing the resumable cursor.
+- Failed uploads, interrupted SQL and legacy pending events remain retryable.
+- Learning recomputes derived scores once per UTC day using a fixed cutoff. Source
+  wallet observations, cohort retention and original priors are still immediate.
+- The queue's estimated write budget is not an account-wide billing guarantee.
+- Legacy raw SQL is preserved during cutover. Only verified, identical archived
+  delivered outbox copies qualify for cleanup; pending evidence is never TTL-deleted.
+- Rolling SQL backups are private and independent of Cloudflare. R2 object archives
+  must also be preserved when restoring SQL containing archive references.
 
 ## Deleted token sync
 

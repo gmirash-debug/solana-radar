@@ -1,18 +1,27 @@
 import { historyEventId, checkedHistoryDb } from "./history.js";
 import { resumeHistoryEvent, HistoryYield, minimumHistoryWork, minimumProgressWork, estimatedHistoryQueries, historyInfrastructure } from "./history-progress.js";
+import { archiveHistoryEvent, readHistoryArchive, validateHistoryArchiveReference, historyArchiveEnabled } from "./archive.js";
+import { resolveStorageEnv } from "./storage-sql.js";
 
 // Parent integration (no public DO route): export {HistoryQueue} from index.js;
 // bind HISTORY_QUEUE to HistoryQueue and append a new_sqlite_classes migration.
 // Await enqueueDurableHistory before acknowledging an authenticated ingest.
 // Invoke flushDurableHistory from the existing bounded background scheduler.
 export const HISTORY_QUEUE_LIMITS = Object.freeze({
-  enqueueEvents: 25, flushEvents: 25, flushQueries: 40, eventBytes: 128 * 1024, requestBytes: 1024 * 1024,
+  enqueueEvents: 25, flushEvents: 25, flushQueries: 40, flushRequests: 45,
+  eventBytes: 128 * 1024, requestBytes: 1024 * 1024,
   // Metadata only: retain 30 days even at 5,000 minimum-cost events/day,
   // including UTC-boundary bursts and pending work. Payload caps stay unchanged.
   pendingRows: 2048, pendingBytes: 16 * 1024 * 1024, receiptRows: 160000,
   receiptRetentionMs: 30 * 86400_000, leaseMs: 10 * 60_000,
   dailyDoWriteUnits: 50000, dailyHistoryWriteUnits: 80000, flushHistoryWriteUnits: 40000,
+  // Internal SQL/index estimates, not billed rows; reserve headroom for other workloads.
+  dailyTursoHistoryWriteUnits: 180000, maximumTursoHistoryWriteUnits: 1000000,
   scheduledFlushes: 2,
+  // R2 binding requests are internal (Free: 1,000); keep the 25-event ingress wire unchanged.
+  archiveEnqueueRequests: 75, archiveSpillRows: 5, archiveBatchTimeoutMs: 30000,
+  // Local queue budgets, not account-wide billing telemetry. No archive deletion is automatic.
+  dailyArchiveWrites: 2000, dailyArchiveReads: 10000, dailyArchiveWriteBytes: 8 * 1024 * 1024,
 });
 const ENCODER = new TextEncoder();
 const QUEUE_NAME = "history-events-v1";
@@ -22,8 +31,19 @@ class QueueError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
 }
 
-function lowered(env, name, maximum) {
-  if (env?.[name] === undefined) return maximum;
+function requestBudget(maximum, reason = "history_flush_request_budget") {
+  return { used: 0, archive: 0, history: 0,
+    get remaining() { return maximum - this.used; },
+    reserve(kind) {
+      if (this.used >= maximum) throw new HistoryYield(reason);
+      this.used++;
+      this[kind]++;
+    },
+  };
+}
+
+function lowered(env, name, maximum, fallback = maximum) {
+  if (env?.[name] === undefined) return fallback;
   const value = Number(env[name]);
   if (!Number.isInteger(value) || value < 1 || value > maximum) throw new QueueError(`invalid_${name}`);
   return value;
@@ -42,6 +62,36 @@ function assertJson(value, seen = new Set()) {
   seen.add(value);
   for (const child of Object.values(value)) assertJson(child, seen);
   seen.delete(value);
+}
+
+function archivedEnvelope(value) {
+  if (!value || value.archive_queue_version === undefined || (value.episode && value.event)) return null;
+  if (value.archive_queue_version !== 1) throw new QueueError("history_archive_queue_version_invalid", 503);
+  const ref = validateHistoryArchiveReference(value.archive_ref);
+  const work = value.work;
+  if (!work || ![8, 16, 24].includes(work.minimum) || ![8, 24].includes(work.edges)
+      || !Number.isInteger(work.initial_queries) || work.initial_queries < 2 || work.initial_queries > HISTORY_QUEUE_LIMITS.flushQueries) {
+    throw new QueueError("history_archive_work_metadata_invalid", 503);
+  }
+  return {ref, work};
+}
+
+function progressWork(payload, state, infra) {
+  const archived = archivedEnvelope(payload);
+  if (!archived) return minimumProgressWork(payload, state, infra);
+  if (state.phase === "done") return 0;
+  if (state.phase === "wallets" || state.phase === "clusters") return 16;
+  return state.phase === "edges" ? archived.work.edges : 8;
+}
+
+function progressQueries(payload, state, derivedMode) {
+  const archived = archivedEnvelope(payload);
+  if (!archived) return estimatedHistoryQueries(payload, state, derivedMode);
+  if (state.phase === "done") return 0;
+  if (derivedMode === "daily" && ["derived_dirty", "baselines", "scores", "cluster_scores", "unlock"].includes(state.phase)) {
+    return estimatedHistoryQueries({event:{event_type:archived.ref.event_type}}, state, derivedMode);
+  }
+  return state.phase && state.phase !== "episode" ? HISTORY_QUEUE_LIMITS.flushQueries : archived.work.initial_queries;
 }
 
 export function validateHistoryEvents(events, now = Date.now(), eventBytes = HISTORY_QUEUE_LIMITS.eventBytes) {
@@ -94,16 +144,25 @@ async function readRequest(request) {
 export class HistoryQueue {
   constructor(ctx, env = {}) {
     this.ctx = ctx;
-    this.env = env;
+    this.env = resolveStorageEnv(env);
+    env = this.env;
     this.sql = ctx.storage.sql;
     this.inFlight = null;
+    this.enqueueTail = Promise.resolve();
     this.maxRows = lowered(env, "HISTORY_QUEUE_MAX_PENDING_ROWS", HISTORY_QUEUE_LIMITS.pendingRows);
     this.maxBytes = lowered(env, "HISTORY_QUEUE_MAX_PENDING_BYTES", HISTORY_QUEUE_LIMITS.pendingBytes);
     this.maxReceipts = lowered(env, "HISTORY_QUEUE_MAX_RECEIPT_ROWS", HISTORY_QUEUE_LIMITS.receiptRows);
     this.eventBytes = lowered(env, "HISTORY_QUEUE_MAX_EVENT_BYTES", HISTORY_QUEUE_LIMITS.eventBytes);
     this.doBudget = lowered(env, "HISTORY_QUEUE_DAILY_WRITE_UNITS", HISTORY_QUEUE_LIMITS.dailyDoWriteUnits);
-    this.historyBudget = lowered(env, "HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS", HISTORY_QUEUE_LIMITS.dailyHistoryWriteUnits);
+    this.queryLimit = lowered(env, "HISTORY_QUEUE_FLUSH_QUERIES", HISTORY_QUEUE_LIMITS.flushQueries);
+    this.isTurso = env.STORAGE_SQL_BACKEND === "turso";
+    this.historyBudget = lowered(env, "HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS",
+      this.isTurso ? HISTORY_QUEUE_LIMITS.maximumTursoHistoryWriteUnits : HISTORY_QUEUE_LIMITS.dailyHistoryWriteUnits,
+      this.isTurso ? HISTORY_QUEUE_LIMITS.dailyTursoHistoryWriteUnits : HISTORY_QUEUE_LIMITS.dailyHistoryWriteUnits);
     this.infra = historyInfrastructure(env);
+    this.archiveWrites = lowered(env, "HISTORY_ARCHIVE_DAILY_WRITES", HISTORY_QUEUE_LIMITS.dailyArchiveWrites);
+    this.archiveReads = lowered(env, "HISTORY_ARCHIVE_DAILY_READS", HISTORY_QUEUE_LIMITS.dailyArchiveReads);
+    this.archiveBytes = lowered(env, "HISTORY_ARCHIVE_DAILY_WRITE_BYTES", HISTORY_QUEUE_LIMITS.dailyArchiveWriteBytes);
     ctx.storage.transactionSync(() => {
       this.sql.exec(`CREATE TABLE IF NOT EXISTS history_queue_events (
         event_id TEXT PRIMARY KEY, episode_id TEXT NOT NULL, source_at INTEGER NOT NULL,
@@ -125,9 +184,12 @@ export class HistoryQueue {
       this.sql.exec("INSERT OR IGNORE INTO history_queue_meta(id) VALUES (1)");
       const eventColumns = new Set(this.rows("PRAGMA table_info(history_queue_events)").map(row => row.name));
       if (!eventColumns.has("progress_json")) this.sql.exec("ALTER TABLE history_queue_events ADD COLUMN progress_json TEXT");
+      if (!eventColumns.has("archive_version")) this.sql.exec("ALTER TABLE history_queue_events ADD COLUMN archive_version INTEGER NOT NULL DEFAULT 0");
       const metaColumns = new Set(this.rows("PRAGMA table_info(history_queue_meta)").map(row => row.name));
       for (const [name, type] of [["last_flush_at", "TEXT"], ["last_flush_error", "TEXT"],
-        ["last_flush_delivered", "INTEGER NOT NULL DEFAULT 0"]]) {
+        ["last_flush_delivered", "INTEGER NOT NULL DEFAULT 0"], ["archive_day", "TEXT NOT NULL DEFAULT ''"],
+        ["archive_writes", "INTEGER NOT NULL DEFAULT 0"], ["archive_reads", "INTEGER NOT NULL DEFAULT 0"],
+        ["archive_write_bytes", "INTEGER NOT NULL DEFAULT 0"]]) {
         if (!metaColumns.has(name)) this.sql.exec(`ALTER TABLE history_queue_meta ADD COLUMN ${name} ${type}`);
       }
     });
@@ -135,20 +197,25 @@ export class HistoryQueue {
 
   rows(sql, ...values) { return this.sql.exec(sql, ...values).toArray(); }
 
+  historyDay(now) { return `${this.isTurso ? "turso:" : ""}${new Date(now).toISOString().slice(0, 10)}`; }
+
   meta(now) {
     const meta = this.rows("SELECT * FROM history_queue_meta WHERE id=1")[0];
     const day = new Date(now).toISOString().slice(0, 10);
     if (meta.do_day !== day) { meta.do_day = day; meta.do_writes = 0; }
-    if (meta.hist_day !== day) { meta.hist_day = day; meta.hist_writes = 0; }
+    if (meta.hist_day !== this.historyDay(now)) { meta.hist_day = this.historyDay(now); meta.hist_writes = 0; }
+    if (meta.archive_day !== day) { meta.archive_day = day; meta.archive_writes = 0; meta.archive_reads = 0; meta.archive_write_bytes = 0; }
     return meta;
   }
 
   saveMeta(meta) {
     this.sql.exec(`UPDATE history_queue_meta SET pending_rows=?, pending_bytes=?, delivered_rows=?,
-      do_day=?, do_writes=?, hist_day=?, hist_writes=?,last_flush_at=?,last_flush_error=?,last_flush_delivered=? WHERE id=1`,
+      do_day=?, do_writes=?, hist_day=?, hist_writes=?,last_flush_at=?,last_flush_error=?,last_flush_delivered=?,
+      archive_day=?,archive_writes=?,archive_reads=?,archive_write_bytes=? WHERE id=1`,
     meta.pending_rows, meta.pending_bytes, meta.delivered_rows,
     meta.do_day, meta.do_writes, meta.hist_day, meta.hist_writes,
-    meta.last_flush_at, meta.last_flush_error, meta.last_flush_delivered);
+    meta.last_flush_at, meta.last_flush_error, meta.last_flush_delivered,
+    meta.archive_day,meta.archive_writes,meta.archive_reads,meta.archive_write_bytes);
   }
 
   reserveDo(meta, units) {
@@ -167,6 +234,99 @@ export class HistoryQueue {
     if (events.some(event => minimumHistoryWork(event,this.infra) > this.historyBudget)) {
       throw new QueueError("history_event_exceeds_atomic_daily_allowance");
     }
+    if (!historyArchiveEnabled(this.env)) return this.persistEnqueue(validated, now);
+    // DO requests may interleave while awaiting R2; serialize to keep the first accepted payload authoritative.
+    const pending = this.enqueueTail.then(async () => {
+      const unique = new Map();
+      let duplicates = 0;
+      for (const row of validated) {
+        if (unique.has(row.id) || this.rows("SELECT status FROM history_queue_events WHERE event_id=?", row.id).length) duplicates++;
+        else unique.set(row.id, row);
+      }
+      const meta = this.meta(Date.now());
+      if (meta.pending_rows + unique.size > this.maxRows || (unique.size && meta.pending_bytes >= this.maxBytes)) {
+        throw new QueueError("history_queue_pending_capacity", 507);
+      }
+      if (unique.size && meta.do_writes + unique.size * 8 + 2 > this.doBudget) {
+        throw new QueueError("history_queue_daily_write_budget", 429);
+      }
+      const archived = [];
+      const options = this.archiveOptions(requestBudget(HISTORY_QUEUE_LIMITS.archiveEnqueueRequests, "history_archive_enqueue_request_budget"));
+      for (const row of unique.values()) {
+        const raw = JSON.parse(row.json);
+        const ref = await archiveHistoryEvent(this.env, raw, options);
+        const envelope = this.referenceEnvelope(raw, ref);
+        const json = JSON.stringify(envelope);
+        archived.push({...row, json, bytes: ENCODER.encode(json).byteLength, archiveVersion: 1});
+      }
+      const result = this.persistEnqueue(archived, Date.now());
+      result.duplicates += duplicates;
+      return result;
+    });
+    this.enqueueTail = pending.catch(() => {});
+    return pending;
+  }
+
+  referenceEnvelope(raw, ref) {
+    return {archive_queue_version: 1, archive_ref: ref, work: {minimum: minimumHistoryWork(raw, this.infra),
+      edges: minimumProgressWork(raw, {phase: "edges"}, this.infra),
+      initial_queries: Math.min(HISTORY_QUEUE_LIMITS.flushQueries, estimatedHistoryQueries(raw, {}, this.env.HISTORY_DERIVED_MODE))}};
+  }
+
+  archiveOptions(requests) {
+    return {deadline: Date.now() + HISTORY_QUEUE_LIMITS.archiveBatchTimeoutMs,
+      onOperation: (kind, bytes) => {
+        requests?.reserve("archive");
+        this.ctx.storage.transactionSync(() => {
+          const meta = this.meta(Date.now());
+          if ((kind === "write" && (meta.archive_writes + 1 > this.archiveWrites
+              || meta.archive_write_bytes + bytes > this.archiveBytes))
+              || (kind === "read" && meta.archive_reads + 1 > this.archiveReads)) {
+            throw new QueueError("history_archive_daily_budget", 429);
+          }
+          this.reserveDo(meta, 2);
+          if (kind === "write") { meta.archive_writes++; meta.archive_write_bytes += bytes; }
+          else meta.archive_reads++;
+          this.saveMeta(meta);
+        });
+      }};
+  }
+
+  async spillLegacyRows(requests = requestBudget(HISTORY_QUEUE_LIMITS.flushRequests)) {
+    if (!historyArchiveEnabled(this.env)) return 0;
+    const rows = this.rows(`SELECT event_id,episode_id,source_at,payload_json,payload_bytes FROM history_queue_events
+      WHERE status='pending' AND archive_version=0 AND lease_token IS NULL
+      ORDER BY source_at,event_id LIMIT ?`, HISTORY_QUEUE_LIMITS.archiveSpillRows);
+    const options = this.archiveOptions(requests);
+    let spilled = 0;
+    for (const row of rows) {
+      // A new immutable object needs HEAD + PUT + confirmation HEAD; never strand a PUT at the cap.
+      if (requests.remaining < 3) break;
+      const raw = JSON.parse(row.payload_json);
+      const [validated] = validateHistoryEvents([raw], Date.now(), this.eventBytes);
+      if (validated.id !== row.event_id || validated.episodeId !== row.episode_id || validated.sourceAt !== row.source_at) {
+        throw new QueueError("history_archive_legacy_identity_mismatch", 503);
+      }
+      const ref = await archiveHistoryEvent(this.env, raw, options);
+      const json = JSON.stringify(this.referenceEnvelope(raw, ref));
+      const bytes = ENCODER.encode(json).byteLength;
+      this.ctx.storage.transactionSync(() => {
+        const current = this.rows("SELECT status,lease_token,payload_json FROM history_queue_events WHERE event_id=?", row.event_id)[0];
+        if (current?.status !== "pending" || current.lease_token || current.payload_json !== row.payload_json) return;
+        const meta = this.meta(Date.now());
+        this.reserveDo(meta, 4);
+        const actual = this.written(this.sql.exec(`UPDATE history_queue_events
+          SET payload_json=?,payload_bytes=?,archive_version=1 WHERE event_id=?`, json, bytes, row.event_id), 2);
+        meta.do_writes -= Math.max(0, 2 - actual);
+        meta.pending_bytes += bytes - row.payload_bytes;
+        this.saveMeta(meta);
+        spilled++;
+      });
+    }
+    return spilled;
+  }
+
+  persistEnqueue(validated, now) {
     return this.ctx.storage.transactionSync(() => {
       const meta = this.meta(now);
       const unique = new Map();
@@ -193,8 +353,8 @@ export class HistoryQueue {
         meta.delivered_rows -= expired.length;
         for (const event of unique.values()) {
           actual+=this.written(this.sql.exec(`INSERT INTO history_queue_events
-            (event_id,episode_id,source_at,payload_json,payload_bytes,status,next_attempt_at)
-            VALUES (?,?,?,?,?,'pending',?)`, event.id, event.episodeId, event.sourceAt, event.json, event.bytes, now),8);
+            (event_id,episode_id,source_at,payload_json,payload_bytes,status,next_attempt_at,archive_version)
+            VALUES (?,?,?,?,?,'pending',?,?)`, event.id, event.episodeId, event.sourceAt, event.json, event.bytes, now,event.archiveVersion || 0),8);
         }
         meta.pending_rows += unique.size;
         meta.pending_bytes += addedBytes;
@@ -206,7 +366,7 @@ export class HistoryQueue {
     });
   }
 
-  claim(now) {
+  claim(now, remainingRequests = HISTORY_QUEUE_LIMITS.flushRequests) {
     return this.ctx.storage.transactionSync(() => {
       const meta = this.meta(now);
       // A poisoned episode waits, but unrelated newer episodes remain eligible.
@@ -217,16 +377,20 @@ export class HistoryQueue {
               AND (older.source_at < q.source_at OR (older.source_at=q.source_at AND older.event_id < q.event_id)))
         ORDER BY q.source_at,q.event_id LIMIT ?`, now, now, HISTORY_QUEUE_LIMITS.flushEvents);
       if (!candidates.length) return { rows:[], budget: 0, day: meta.hist_day };
-      const eligible=candidates.filter(row=>minimumProgressWork(JSON.parse(row.payload_json),JSON.parse(row.progress_json || "{}"),this.infra)
+      const eligible=candidates.filter(row=>progressWork(JSON.parse(row.payload_json),JSON.parse(row.progress_json || "{}"),this.infra)
         <= this.historyBudget-meta.hist_writes);
       if (!eligible.length) throw new QueueError("history_daily_write_budget", 429);
       const rows=[];
       let queries=0;
+      let requests=0;
       for (const row of eligible) {
-        const cost=estimatedHistoryQueries(JSON.parse(row.payload_json),JSON.parse(row.progress_json || "{}"));
-        if (rows.length && queries+cost>HISTORY_QUEUE_LIMITS.flushQueries) break;
+        const payload=JSON.parse(row.payload_json);
+        const cost=progressQueries(payload,JSON.parse(row.progress_json || "{}"),this.env.HISTORY_DERIVED_MODE);
+        const archiveCost=archivedEnvelope(payload) ? 1 : historyArchiveEnabled(this.env) ? 4 : 0;
+        if (rows.length && queries+cost>this.queryLimit) break;
+        if (rows.length && requests+cost+archiveCost>remainingRequests) break;
         if ((rows.length+1)*16+4>this.doBudget-meta.do_writes) break;
-        queries+=cost; rows.push(row);
+        queries+=cost; requests+=cost+archiveCost; rows.push(row);
       }
       if (!rows.length) throw new QueueError("history_queue_daily_write_budget",429);
       const budget = Math.min(HISTORY_QUEUE_LIMITS.flushHistoryWriteUnits, this.historyBudget - meta.hist_writes);
@@ -242,14 +406,14 @@ export class HistoryQueue {
       }
       meta.do_writes-=Math.max(0,rows.length*8-actual); // Keep the entire finish reservation.
       this.saveMeta(meta);
-      return { rows, budget, day: meta.hist_day };
+      return { rows, budget, day: meta.hist_day, doDay: meta.do_day };
     });
   }
 
   finish(claim, result, used, error, now = Date.now()) {
     return this.ctx.storage.transactionSync(() => {
       const meta = this.meta(now);
-      if (meta.do_day!==claim.day) this.reserveDo(meta,claim.rows.length*8+2);
+      if (meta.do_day!==claim.doDay) this.reserveDo(meta,claim.rows.length*8+2);
       const successful = new Set(result.ingested.map(event => event.event_id));
       const failures = new Map((result?.failed || []).map(event => [event.event_id, event.error]));
       const deferred = new Set(result.deferred || []);
@@ -293,32 +457,61 @@ export class HistoryQueue {
   }
 
   async runFlush() {
+    // One invocation budget covers R2 spill, verified hydration and every SQL round trip.
+    const requests = requestBudget(HISTORY_QUEUE_LIMITS.flushRequests);
+    let spilled = 0;
+    try { spilled = await this.spillLegacyRows(requests); }
+    catch (error) {
+      // Exhausted archive PUT allowance must not stall already archived events that only need GET.
+      if (error?.message !== "history_archive_daily_budget") throw error;
+    }
     if (!this.env.RADAR_HISTORY_DB || typeof this.env.RADAR_HISTORY_DB.prepare !== "function") {
       throw new QueueError("history_db_not_configured", 503);
     }
     const now = Date.now();
-    const claim = this.claim(now);
-    if (!claim.rows.length) return { enabled: true, delivered: 0, failed: 0, pending: this.meta(now).pending_rows };
+    const claim = this.claim(now, requests.remaining);
+    if (!claim.rows.length) return { enabled: true, delivered: 0, failed: 0, spilled, pending: this.meta(now).pending_rows,
+      history_requests: requests.used, archive_requests: requests.archive, external_history_requests: 0 };
     let used = 0;
     let queries = 0;
     const result = {ingested:[],failed:[],deferred:[],progress:new Map()};
     let error = null;
     try {
       const db = checkedHistoryDb(this.env.RADAR_HISTORY_DB, statements => {
-            if (new Date(Date.now()).toISOString().slice(0, 10) !== claim.day) throw new Error("history_write_day_changed");
+            if (this.historyDay(Date.now()) !== claim.day) throw new Error("history_write_day_changed");
             const units = statements * WRITE_UNITS_PER_STATEMENT;
             if (used + units > claim.budget) throw new HistoryYield("history_flush_write_budget");
             used += units;
           }, () => {
-            if (queries >= HISTORY_QUEUE_LIMITS.flushQueries) throw new HistoryYield("history_flush_query_budget");
+            if (queries >= this.queryLimit) throw new HistoryYield("history_flush_query_budget");
+            requests.reserve("history");
             queries++;
           });
+      const archiveOptions = this.archiveOptions(requests);
       for (const row of claim.rows) {
         const state = JSON.parse(row.progress_json || "{}");
         result.progress.set(row.event_id,state);
         try {
-          result.ingested.push(await resumeHistoryEvent(db,JSON.parse(row.payload_json),state,{
+          let raw = JSON.parse(row.payload_json);
+          let envelope = archivedEnvelope(raw);
+          if (!envelope && historyArchiveEnabled(this.env)) {
+            // An expired pre-cutover lease can still contain raw evidence. Do not change its payload_bytes
+            // while a former lease could finish; verified delivery will remove it using the original size.
+            const ref = await archiveHistoryEvent(this.env, raw, archiveOptions);
+            envelope = {ref};
+          }
+          if (envelope) {
+            raw = await readHistoryArchive(this.env, envelope.ref, archiveOptions);
+            const [verified] = validateHistoryEvents([raw], now, this.eventBytes);
+            if (verified.id !== row.event_id || verified.episodeId !== row.episode_id || verified.sourceAt !== row.source_at) {
+              throw new QueueError("history_archive_queue_identity_mismatch", 503);
+            }
+            raw.archive_ref = envelope.ref;
+            raw.event.raw_object_key = envelope.ref.key;
+          }
+          result.ingested.push(await resumeHistoryEvent(db,raw,state,{
             now:new Date(now).toISOString(),remaining:()=>Math.floor((claim.budget-used)/WRITE_UNITS_PER_STATEMENT),infra:this.infra,
+            derivedMode: this.env.HISTORY_DERIVED_MODE,
           }));
         } catch (caught) {
           if (caught.deferred) result.deferred.push(row.event_id);
@@ -341,7 +534,9 @@ export class HistoryQueue {
         }
       }
     } catch (caught) { error = caught; }
-    return {...this.finish(claim, result, used, error),history_queries:queries};
+    return {...this.finish(claim, result, used, error),history_queries:queries,spilled,
+      history_requests: requests.used, archive_requests: requests.archive,
+      external_history_requests: this.isTurso ? requests.history : 0};
   }
 
   flush() {
@@ -381,9 +576,13 @@ export class HistoryQueue {
       oldest_pending_at: oldest ? new Date(oldest.source_at).toISOString() : null,
       next_attempt_at: due ? new Date(due.next_attempt_at).toISOString() : null,
       write_budget_day: meta.hist_day, do_write_units: meta.do_writes, history_write_units: meta.hist_writes,
-      limits: { ...HISTORY_QUEUE_LIMITS, pendingRows: this.maxRows, pendingBytes: this.maxBytes,
+      archive_mode: historyArchiveEnabled(this.env) ? "r2" : "inline", archive_budget_day: meta.archive_day,
+      archive_write_requests: meta.archive_writes, archive_read_requests: meta.archive_reads,
+      archive_write_bytes: meta.archive_write_bytes,
+      limits: { ...HISTORY_QUEUE_LIMITS, flushQueries: this.queryLimit, pendingRows: this.maxRows, pendingBytes: this.maxBytes,
         receiptRows: this.maxReceipts, eventBytes: this.eventBytes,
-        dailyDoWriteUnits: this.doBudget, dailyHistoryWriteUnits: this.historyBudget } };
+        dailyDoWriteUnits: this.doBudget, dailyHistoryWriteUnits: this.historyBudget,
+        dailyArchiveWrites: this.archiveWrites, dailyArchiveReads: this.archiveReads, dailyArchiveWriteBytes: this.archiveBytes } };
   }
 
   async fetch(request) {
@@ -391,7 +590,7 @@ export class HistoryQueue {
       const path = new URL(request.url).pathname;
       if (request.method === "GET" && path === "/status") return Response.json({ ok: true, ...this.status() });
       if (request.method !== "POST") throw new QueueError("history_queue_post_required", 405);
-      if (path === "/enqueue") return Response.json({ ok: true, ...this.enqueue((await readRequest(request)).events) });
+      if (path === "/enqueue") return Response.json({ ok: true, ...await this.enqueue((await readRequest(request)).events) });
       if (path === "/receipts") {
         const ids=(await readRequest(request)).ids;
         if (!Array.isArray(ids) || ids.length>25 || ids.some(id=>typeof id!=="string" || id.length>240)) {
@@ -400,7 +599,7 @@ export class HistoryQueue {
         return Response.json({ok:true,receipts:ids.map(event_id=>({event_id,
           status:this.rows("SELECT status FROM history_queue_events WHERE event_id=?",event_id)[0]?.status || "unknown"}))});
       }
-      if (path === "/ingest") return Response.json({ ok: true, ...this.enqueue(historyLedgerEvents(await readRequest(request))) });
+      if (path === "/ingest") return Response.json({ ok: true, ...await this.enqueue(historyLedgerEvents(await readRequest(request))) });
       if (path === "/flush") return Response.json({ ok: true, ...await this.flush() });
       throw new QueueError("history_queue_route_not_found", 404);
     } catch (error) {

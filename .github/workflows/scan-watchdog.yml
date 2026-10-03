@@ -1,0 +1,28 @@
+name: Scan scheduler safety net
+
+on:
+  schedule:
+    - cron: "43 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: solana-radar-watchdog
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Dispatch only when the primary scheduler left scans stale
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/scan_watchdog.py

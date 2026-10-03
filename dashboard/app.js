@@ -1,9 +1,9 @@
-import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261003-audit-remediation-10";
-import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261003-audit-remediation-10";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-audit-remediation-10";
-import { installTerminology } from "./terminology.js?v=20261003-audit-remediation-10";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261003-audit-remediation-10";
-import { loadTokenDetail } from "./static-detail.js?v=20261003-audit-remediation-10";
+import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261003-storage-v1";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261003-storage-v1";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-storage-v1";
+import { installTerminology } from "./terminology.js?v=20261003-storage-v1";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261003-storage-v1";
+import { loadTokenDetail } from "./static-detail.js?v=20261003-storage-v1";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -14,12 +14,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261003-audit-remediation-10";
+} from "./token-state.js?v=20261003-storage-v1";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261003-audit-remediation-10";
+} from "./filter-scope.js?v=20261003-storage-v1";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const PENDING_TOKEN_ACTIONS_KEY = "solana-radar:pending-token-actions:v1";
@@ -2107,7 +2107,7 @@ function renderStatus() {
     blockedRpcProviders.length ? `<span class="status-pill freshness-warn" title="${esc(rpcTitle)}">${esc(blockedRpcProviders.join(" + "))} blocked</span>` : "",
     athProvider.status && athProvider.status !== "ok" ? `<span class="status-pill freshness-bad" title="${esc(athProvider.error || "GMGN unavailable")}">ATH source ${esc(athProvider.status)}</span>` : "",
     `<span class="status-pill">lane ${esc(laneText)}</span>`,
-    state.dataSource === "remote" ? `<span class="status-pill">${state.storageSource === "durable_snapshot" ? "durable snapshot" : "live D1"}</span>` : "",
+    state.dataSource === "remote" ? `<span class="status-pill">${state.storageSource === "durable_snapshot" ? "durable snapshot" : "live SQL"}</span>` : "",
     state.dataSource === "static" ? `<span class="status-pill freshness-warn" title="${esc(state.fallbackReason || "remote unavailable")}">fallback snapshot</span>` : "",
     state.dataSource !== "static" && state.fallbackReason ? `<span class="status-pill freshness-warn" title="${esc(state.fallbackReason)}">Refresh unavailable / previous snapshot retained</span>` : "",
     state.pendingTokenActions.size || (state.publishedDashboard && state.hiddenTokenKeys.size)

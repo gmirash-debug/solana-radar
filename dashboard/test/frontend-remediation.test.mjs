@@ -611,7 +611,7 @@ test("cache integration: every versioned entry asset uses the unified remediatio
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const tags = [...html.matchAll(/(?:href|src)="(?:[^"]+)\?v=([^"]+)"/g)].map(match => match[1]);
   assert.equal(tags.length, 5);
-  assert.ok(tags.every(tag => tag === "20261003-audit-remediation-10"));
+  assert.ok(tags.every(tag => tag === "20261003-storage-v1"));
 });
 
 test("legacy migration integration: a fresh confirmed alert cannot upgrade the original unknown-sale thesis", t => {

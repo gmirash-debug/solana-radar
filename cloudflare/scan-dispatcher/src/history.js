@@ -1,6 +1,7 @@
 // History processing is independent of dashboard publication; keep expensive
 // derived wallet writes bounded within each background invocation.
 import {stepClusterJob} from "./history-clusters.js";
+import {archiveHistoryEvent} from "./archive.js";
 const OUTBOX_BATCH_SIZE = 2;
 const D1_IN_PARAMETER_LIMIT = 100;
 const HISTORY_SCHEMA_VERSION = 1;
@@ -359,6 +360,10 @@ async function upsertEpisode(db, episode, now) {
 }
 
 async function upsertEpisodeEvent(db, eventId, episode, event, raw, now) {
+  // Only compact indexed fields stay in SQL once verified immutable evidence
+  // exists in R2. Legacy events keep their raw payload until archived safely.
+  const payload = raw.archive_ref ? {schema_version:2, archive_ref:raw.archive_ref,
+    episode:{episode_id:episode.episode_id, token_address:episode.token_address}, event} : raw;
   await db.prepare(`
     INSERT OR IGNORE INTO signal_episode_events (
       event_id, episode_id, observed_at, event_type, tier, score, price_usd,
@@ -369,7 +374,8 @@ async function upsertEpisodeEvent(db, eventId, episode, event, raw, now) {
     eventId, episode.episode_id, iso(event.observed_at, now), text(event.event_type) || "snapshot",
     text(event.tier), number(event.score), positive(event.price_usd), positive(event.mcap_usd),
     positive(event.liquidity_usd), number(event.retained_supply_pct), number(event.cohort_retained_pct),
-    text(event.thesis_status), text(event.data_quality_status), serialize(raw), text(event.raw_object_key), now,
+    text(event.thesis_status), text(event.data_quality_status), serialize(payload),
+    text(raw.archive_ref?.key) || text(event.raw_object_key), now,
   ).run();
 }
 
@@ -673,6 +679,16 @@ async function refreshClusters(db, walletAddresses, now) {
 
 async function ingestHistoryEvent(env, rawEvent, now = nowIso(), derived = null) {
   if (!hasHistoryDb(env)) throw new Error("history_db_not_configured");
+  if (env.HISTORY_ARCHIVE_MODE === "r2") {
+    // Only a server-verified reference may replace the full SQL payload.
+    rawEvent = structuredClone(rawEvent);
+    delete rawEvent.archive_ref;
+    if (rawEvent.event) delete rawEvent.event.raw_object_key;
+    if (rawEvent.episode) delete rawEvent.episode.raw_object_key;
+    rawEvent.archive_ref = await archiveHistoryEvent(env, rawEvent);
+  } else if (rawEvent?.archive_ref) {
+    throw new Error("history_archive_reference_requires_verification");
+  }
   const episode = normalizedEpisode(rawEvent?.episode, now);
   if (!episode) throw new Error("history_episode_token_required");
   const event = rawEvent?.event && typeof rawEvent.event === "object" ? rawEvent.event : {};
@@ -682,7 +698,7 @@ async function ingestHistoryEvent(env, rawEvent, now = nowIso(), derived = null)
     .map((row) => normalizedWallet(row, episode))
     .filter(Boolean);
   const eventId = historyEventId({ ...rawEvent, episode, event: { ...event, observed_at: observedAt } });
-  const archiveKey = await archiveEvent(env, rawEvent, now).catch(() => null);
+  const archiveKey = rawEvent.archive_ref?.key || await archiveEvent(env, rawEvent, now).catch(() => null);
   if (archiveKey) {
     episode.raw_object_key = archiveKey;
     event.raw_object_key = archiveKey;

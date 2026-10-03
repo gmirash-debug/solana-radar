@@ -106,6 +106,38 @@ test("new evidence ingestion route requires the server ingest secret", async () 
   assert.equal(response.status, 401);
 });
 
+test("storage endpoints require authorization and reject unbounded or malformed JSON", async () => {
+  const env = {RADAR_INGEST_SECRET:"secret", HISTORY_ARCHIVE_MODE:"r2"};
+  const call = (path, body, authorized=true) => worker.fetch(new Request(`https://worker.example${path}`, {
+    method:"POST", headers:authorized ? {"x-radar-ingest-secret":"secret"} : {}, body,
+  }),env,{});
+  assert.equal((await call("/api/storage/archive", "{}", false)).status,401);
+  assert.equal((await call("/api/storage/archive", "x".repeat(151*1024))).status,413);
+  assert.equal((await call("/api/storage/archive/read", "x".repeat(4097))).status,413);
+  assert.equal((await call("/api/storage/archive/read", "{" )).status,400);
+});
+
+test("overlapping ingest rotation accepts old and next keys, never arbitrary or empty keys", async () => {
+  const env={RADAR_INGEST_SECRET:"old",RADAR_INGEST_SECRET_NEXT:"next"};
+  const call=key=>worker.fetch(new Request("https://worker.example/api/runtime/checkpoint?kind=invalid", {
+    headers:{"x-radar-ingest-secret":key},
+  }),env,{});
+  assert.equal((await call("old")).status,400);
+  assert.equal((await call("next")).status,400);
+  assert.equal((await call("bad")).status,401);
+  assert.equal((await call("")).status,401);
+});
+
+test("identical state and thesis replays avoid unnecessary SQL row writes", async () => {
+  const db = recordingDb(), generated_at="2026-10-03T00:00:00Z";
+  await ingestSnapshotDetails({RADAR_DB:db}, {generated_at,
+    detail_signal_theses:[{token_address:"a",signal_at:generated_at}],
+  });
+  const query = db.writes.find(row=>row.sql.includes("INSERT INTO state_docs")).sql;
+  assert.ok(query.includes("state_docs.payload_json IS NOT excluded.payload_json"));
+  assert.ok(query.includes("state_docs.source_updated_at IS NOT excluded.source_updated_at"));
+});
+
 function githubContent(data, sha) {
   return new Response(JSON.stringify({
     content: btoa(JSON.stringify(data)),
