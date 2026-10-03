@@ -1,0 +1,37 @@
+name: Read-only RPC routing check
+
+on:
+  workflow_dispatch:
+    inputs:
+      mint:
+        description: "Solana mint for bounded read-only checks"
+        default: "7bK4jRMa3aY85wJMQEQqWsmY9mmrRT32AFWZ23cBpump"
+      owner:
+        description: "Optional wallet for balance access check"
+        default: "11111111111111111111111111111111"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -r requirements.txt
+      - name: Check configured providers without changing scanner state
+        env:
+          HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
+          ALCHEMY_SOLANA_RPC_URL: ${{ secrets.ALCHEMY_SOLANA_RPC_URL }}
+          ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+          CHAINSTACK_SOLANA_RPC_URL: ${{ secrets.CHAINSTACK_SOLANA_RPC_URL }}
+          DRPC_SOLANA_RPC_URL: ${{ secrets.DRPC_SOLANA_RPC_URL }}
+          DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
+          PUBLICNODE_SOLANA_RPC_URL: https://solana-rpc.publicnode.com
+          PROBE_MINT: ${{ inputs.mint }}
+          PROBE_OWNER: ${{ inputs.owner }}
+        run: python tools/probe_rpc_routes.py --mint "$PROBE_MINT" --owner "$PROBE_OWNER"

@@ -660,6 +660,7 @@ class ScannerCoreTests(unittest.TestCase):
         chainstack = scanner.ChainstackRpc(
             "https://chainstack.invalid",
             max_retries=0,
+            unsupported_methods=[],
         )
         chainstack.session.post = mock.Mock(
             side_effect=[
@@ -4050,7 +4051,7 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(result, 123)
         self.assertEqual(alchemy.session.post.call_count, 0)
         self.assertEqual(chainstack.session.post.call_count, 1)
-        self.assertIn("alchemy", rpc.blocked_providers)
+        self.assertNotIn("alchemy", rpc.blocked_providers)
         self.assertEqual(rpc.route_failovers["getBalance"], 1)
 
     def test_discovery_pulse_uses_small_fast_market_query_set(self):

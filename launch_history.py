@@ -20,7 +20,7 @@ def advance_launch_history(rpc, pool, task, parser, *, now, window_seconds=21600
         return task
     result = rpc.transactions_for_address(pool.pool_address, limit=min(100, max_transactions - task["transactions"]),
         sort_order="asc", block_time={"gte": start, "lte": end}, pagination_token=task.get("cursor"),
-        provider_name=task.get("provider"))
+        provider_name=task.get("provider"), history_task="archive")
     provider = result.get("_provider")
     if task.get("cursor") and provider != task.get("provider"):
         task.update(status="partial", reason="provider_cursor_mismatch")

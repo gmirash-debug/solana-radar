@@ -21,8 +21,11 @@ class PositionHistoryRpc:
             "slot": {"gte": from_slot, "lte": to_slot}}}
         if cursor:
             options["paginationToken"] = cursor
+        archive_order = getattr(self.rpc, "archive_order", None)
+        if not isinstance(archive_order, list):
+            archive_order = self.rpc.enhanced_order
         result, used = self.rpc._route_call("getTransactionsForAddress", [account, options],
-            preferred=provider, order=[provider] if provider else self.rpc.enhanced_order)
+            preferred=provider, order=[provider] if provider else archive_order)
         if provider and used != provider:
             raise RuntimeError("position_history_provider_changed")
         self.providers[account] = used
