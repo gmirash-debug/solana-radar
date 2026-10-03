@@ -8,7 +8,9 @@ The live queue payloads and their exact failure causes have not been inspected.
 
 1. Preserve backups of both D1 databases and existing queue/runtime documents.
 2. Apply `migrations-history/0003_resumable_history.sql` to the history database
-   **before deploying this Worker code**. From `cloudflare/scan-dispatcher`, the
+   **before deploying this Worker code in normal mode**. The explicit guarded
+   exception below permits deployment while migration 0003 is quota-blocked.
+   From `cloudflare/scan-dispatcher`, the
    operator can use `wrangler d1 migrations list RADAR_HISTORY_DB --remote`, then
    `wrangler d1 migrations apply RADAR_HISTORY_DB --remote`. Use migration tracking;
    do not replay the ALTER statements manually against an already migrated DB.
@@ -21,6 +23,58 @@ The live queue payloads and their exact failure causes have not been inspected.
    metadata-only override: it does not support the demonstrated 30-day workload.
 5. Verify report/detail pending behavior and UI-only Robinhood publication after
    deployment. The parent owns frontend acceptance and production verification.
+
+### Release-specific guarded exception
+
+`wrangler.toml` explicitly sets
+`HISTORY_SCHEMA_AUTO_UPGRADE="0003_resumable_history.sql"` for this release.
+With that exact flag, an absent marker never permits history flush or public
+intelligence reads against the new schema. Without the flag, the normal
+migration-first contract applies with **zero additional D1 queries**.
+Unknown/empty flag values fail clearly; the guard never guesses future versions.
+
+Only the existing five-minute cron and authenticated manual flush may attempt
+the upgrade. Public fetches are read-only gates, not migration triggers. An
+attempt reads the exact marker once, then sends at most one atomic `db.batch()`:
+17 fixed statements byte-for-byte matching migration 0003, followed by
+`INSERT INTO d1_migrations(name) VALUES('0003_resumable_history.sql')`.
+The existing tracker must have its verified unique name/default timestamp schema;
+the guard does not create or repair it. After batch failure it performs one
+bounded marker recheck: another writer's committed marker means ready, otherwise
+the original failure is retained. It never blindly retries ALTER within a call.
+[D1 documents transactional batch rollback](https://developers.cloudflare.com/d1/worker-api/d1-database/#batch).
+
+While daily quota blocks this batch, runtime DO health reports
+`history_schema_upgrade_pending`, `history_schema.ready=false`, the underlying
+quota cause, fresh queue counts/age/as-of and `flush_skipped=true`. No queue lease,
+progress or payload is changed by a skipped flush. Authenticated history intake
+remains durable subject to its existing pending capacities. Public intelligence
+returns 503 with clear schema state; token detail may retain a null optional
+history edge. Scanner dispatch and dashboard publication remain independent.
+Both runtime projections and the dashboard document fallback overlay fresh
+`history_status`, so schema/quota pending is not hidden behind an old snapshot.
+
+Cron retries are bounded to one attempt per invocation and stop writing once
+the marker is present. It can succeed after the account's UTC reset when the
+actual platform allows the batch; it does not reset quotas, raise write budgets
+or upgrade/pay for the plan. Avoid concurrent manual retry loops. Non-quota SQL,
+missing schema/tracker and configuration errors report explicit failed state and
+cause rather than being silently labelled quota. A batch may still be blocked
+after reset by genuine account limits or schema prerequisites.
+
+**Prerequisite:** tables from migrations 0001 and 0002 must already exist. If a
+complete `sqlite_master` inventory literally contains only `d1_migrations`,
+migration 0003 cannot ALTER the missing baseline tables. The guard intentionally
+fails closed; the operator must apply the earlier tracked migrations after quota
+availability, not manufacture a marker or partially alter the schema.
+
+After a committed marker, verify new schema tables, healthy flush/backlog
+progress and public intelligence. Then remove the release-specific opt-in in a
+follow-up deployment if desired; migration 0003 remains tracked for Wrangler.
+Backups reported by the parent are preserved privately at
+`/Users/mirash/.codex/backups/solana-radar/20261003/`; this owner did not read or
+modify them. Local tests prove rollback/reset/concurrency routing, **not live
+automatic upgrade after reset**. Parent owns pending-mode production verification.
 
 ## Resolved IDs and files
 
@@ -162,8 +216,9 @@ node --test cloudflare/scan-dispatcher/test/*.test.mjs
 /tmp/radar-audit-venv-20261001/bin/python -B -m unittest tests.test_pages_publication tests.test_audit_publication_regressions tests.test_runtime_architecture tests.test_runtime_partitioning tests.test_history_coverage tests.test_robinhood
 ```
 
-Verification: final combined Worker run passed all 87 tests, including the
-retirement-specific regression. Python: 78 tests passed. No network/API calls
+Verification after the release guard: combined Worker run passed all 97 tests,
+including 10 schema/gating tests and the two-day mature receipt-store workload.
+Python: 78 tests passed before this Cloudflare-only change. No network/API calls
 are used by these regression fixtures. Original pre-fix scratch repros remain at
 `/tmp/radar-audit-evidence-20261001`; they assert the old broken behavior and are
 not expected to pass against remediated code.

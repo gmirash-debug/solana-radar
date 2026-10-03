@@ -5,8 +5,10 @@ implementation and release record, not a claim of profitable signals or
 complete on-chain coverage. The original read-only audit is preserved at
 `/Users/mirash/Documents/New project/reports/scanner-full-audit-20261003/report.md`.
 
-Release status: local integration verification passed; production rollout is
-pending. Production deployment must follow the migration order below.
+Release status: local integration and GitHub PR validation passed. The live
+account's free-tier D1 daily write limit blocked schema migration with error
+7500. Deferred rollout protection passed integration tests; the guarded
+production release is pending final CI and deployment verification.
 
 ## Before / After
 
@@ -67,7 +69,7 @@ pending. Production deployment must follow the migration order below.
 ## Verification
 
 - Full Python suite: 636 tests passed. Combined Worker and dashboard suite:
-  257 tests passed. Three synthetic replay cases passed. JavaScript syntax,
+  267 tests passed. Three synthetic replay cases passed. JavaScript syntax,
   workflow YAML and whitespace checks passed.
 - A two-day queue simulation processed 4,952 events, including an initial
   backlog, 100 forty-wallet cohort checks per hour, outcomes, new signals,
@@ -89,15 +91,26 @@ pending. Production deployment must follow the migration order below.
   deleting tokens: desktop 1440x900, mobile 390x844, both networks, token
   navigation, terminology and explicit provider-unavailable states.
 - GitHub PR validation runs without production secrets or live provider calls.
+- Ten release-guard tests cover atomic migration rollback, UTC quota recovery,
+  idempotence, concurrent operators, incorrect schema and authentication, fresh
+  pending health, and independent dashboard/scanner operation. Live automatic
+  migration after quota reset remains unverified until the marker is present.
 
 ## Safe Rollout
 
 1. Export both D1 databases before schema changes. Backups for this release are
    `/tmp/solana-radar-pre-remediation-20261003.sql` and
    `/tmp/solana-radar-history-pre-remediation-20261003.sql`.
+   Private durable copies are in
+   `/Users/mirash/.codex/backups/solana-radar/20261003/`.
 2. Apply the additive history migration `0003_resumable_history.sql` to
    `solana-radar-history`. Do not edit migrations already applied in production.
-3. Deploy the Worker only after the migration and full tests succeed.
+3. Normally deploy the Worker only after the migration and full tests succeed.
+   If the account-wide daily limit blocks the migration, the explicit release
+   guard must leave history ingestion pending, preserve all accepted queue work
+   and retry the same atomic, migration-tracked schema batch from the existing
+   cron after the UTC reset. Other scanner/dashboard paths remain independent.
+   Do not deploy the unguarded new history writer against the old schema.
 4. Merge the validated scanner/dashboard release and verify the actual Pages
    assets, Worker endpoints and a fresh scan using the new code.
 5. Inspect history backlog, oldest pending age, daily allowance and latest flush
@@ -120,3 +133,6 @@ of an entire database needs an explicit write-safe restoration plan.
   evidence is not a negative finding and is never a buy recommendation.
 - Old published snapshots and archived observations are not retroactively
   rewritten merely because a new calculation is correct.
+- The 2026-10-03 account-wide D1 quota is exhausted. An automatic retry is not
+  evidence that migration or backlog drainage has already succeeded. A live
+  schema marker and delivery counters must confirm completion after reset.
