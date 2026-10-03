@@ -1351,10 +1351,18 @@ export default {
             return json({ok:false,error:"r2_budget_baseline_invalid"},400);
           }
           if (!rawArchive?.list) return json({ok:false,error:"archive_not_configured"},503);
-          const inventory = await rawArchive.list({limit:1000});
-          if (inventory.truncated) return json({ok:false,error:"r2_budget_baseline_inventory_too_large"},503);
+          const objects = [];
+          let cursor, pages = 0, truncated = true;
+          while (truncated && pages < 10) {
+            const inventory = await rawArchive.list({limit:1000,...(cursor ? {cursor} : {})});
+            pages++;objects.push(...inventory.objects.map(row=>({key:row.key,size:row.size})));
+            truncated = inventory.truncated;
+            if (truncated && (!inventory.cursor || inventory.cursor === cursor)) return json({ok:false,error:"r2_budget_baseline_cursor_invalid"},503);
+            cursor = inventory.cursor;
+          }
+          if (truncated) return json({ok:false,error:"r2_budget_baseline_inventory_too_large"},503);
           return json(await r2BudgetCall(env,"bootstrap",{...baseline,
-            class_a:Number(baseline.class_a)+1,objects:inventory.objects.map(row=>({key:row.key,size:row.size}))}));
+            class_a:baseline.class_a+pages,objects}));
         }
         if (url.pathname === "/api/storage/r2-budget/ack") {
           if (request.method !== "POST") return json({ok:false,error:"POST required"},405);

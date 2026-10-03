@@ -104,15 +104,18 @@ export class R2Budget {
         let extra = {};
         if (url.pathname === "/bootstrap") {
           if (current.initialized) return {ok:true,unchanged:true,...status(current)};
-          if (body.month !== current.month || !Array.isArray(body.objects) || body.objects.length > 1000) throw new R2BudgetError("r2_budget_baseline_invalid");
+          if (body.month !== current.month || !Array.isArray(body.objects) || body.objects.length > 10000) throw new R2BudgetError("r2_budget_baseline_invalid");
           const seen = new Set();
           let stored = 0;
+          let catalogue = {};
           for (const row of body.objects) {
             const key = objectKey(row.key), bytes = amount(row.size) + METADATA_ALLOWANCE;
             if (seen.has(key)) throw new R2BudgetError("r2_budget_duplicate_baseline_key");
             seen.add(key); stored += bytes;
-            await tx.put({[`object:${key}`]:bytes});
+            catalogue[`object:${key}`] = bytes;
+            if (Object.keys(catalogue).length === 128) { await tx.put(catalogue); catalogue = {}; }
           }
+          if (Object.keys(catalogue).length) await tx.put(catalogue);
           Object.assign(current,{initialized:true,class_a:amount(body.class_a),class_b:amount(body.class_b),
             storage_bytes:Math.max(stored,amount(body.account_storage_bytes)),baseline_at:new Date(now).toISOString()});
           chargeDay(current,now,"class_a",current.class_a);chargeDay(current,now,"class_b",current.class_b);

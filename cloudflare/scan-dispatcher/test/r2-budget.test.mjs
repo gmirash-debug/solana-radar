@@ -175,3 +175,17 @@ test("malformed bootstrap baseline cannot consume an unguarded inventory call",a
   }),{...f.env,RADAR_INGEST_SECRET:"secret"});
   assert.equal(response.status,400);assert.equal(f.calls.length,0);
 });
+
+test("bootstrap inventories every page and cannot skip older archive objects",async t=>{
+  const f=fixture(t);let lists=0;
+  f.raw.list=async(options)=>{
+    lists++;if(lists===1)return {truncated:true,cursor:"next",objects:Array.from({length:1000},(_,i)=>({key:`k${i}`,size:10}))};
+    assert.equal(options.cursor,"next");return {truncated:false,objects:[{key:"last",size:20}]};
+  };
+  const request=()=>new Request("https://radar/api/storage/r2-budget/bootstrap",{method:"POST",headers:{"x-radar-ingest-secret":"secret"},
+    body:JSON.stringify({month:new Date().toISOString().slice(0,7),class_a:10,class_b:20,account_storage_bytes:0})});
+  const env={...f.env,RADAR_INGEST_SECRET:"secret"};
+  const response=await worker.fetch(request(),env);assert.equal(response.status,200);
+  const state=await response.json();assert.equal(state.usage.class_a,12);assert.equal(state.usage.storage_bytes,1000*4106+4116);
+  const again=await worker.fetch(request(),env);assert.equal((await again.json()).unchanged,true);assert.equal(lists,2);
+});
