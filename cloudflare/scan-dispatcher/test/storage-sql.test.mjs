@@ -25,8 +25,9 @@ const rejectsCode = (work, code) => assert.rejects(work, error => error instance
 test("native fetch retains the global receiver in Worker runtimes", async t => {
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });
-  globalThis.fetch = async function () {
+  globalThis.fetch = async function (_, options) {
     assert.equal(this, globalThis, "native fetch must not receive the database instance");
+    assert.equal(options.redirect, "manual", "Workers does not implement the error redirect mode");
     return Response.json(successfulSingle(rowResult()));
   };
   const db = createTursoDatabase(credentials);
@@ -124,7 +125,7 @@ test("URL conversion and credentials stay in headers, private fields, and the co
     assert.equal(JSON.stringify(db), "{}");
     await db.prepare("SELECT 1 n").all();
     assert.equal(call.endpoint, "https://radar-test.turso.io/v2/pipeline");
-    assert.equal(call.options.redirect, "error");
+    assert.equal(call.options.redirect, "manual");
     assert.equal(call.options.headers.Authorization, "Bearer test.secret.token");
     assert.equal(call.options.body.includes(credentials.TURSO_AUTH_TOKEN), false);
   }

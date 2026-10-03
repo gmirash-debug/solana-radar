@@ -336,7 +336,9 @@ class TursoDatabase {
     });
     try {
       const payload = await Promise.race([(async () => {
-        const response = await this.#fetch(this.#endpoint, {method:"POST", redirect:"error", signal:controller.signal,
+        // Workers supports manual/follow only; reject all 3xx below without
+        // forwarding credentials or automatically replaying a SQL request.
+        const response = await this.#fetch(this.#endpoint, {method:"POST", redirect:"manual", signal:controller.signal,
           headers:{Authorization:`Bearer ${this.#token}`, "Content-Type":"application/json", Accept:"application/json"}, body});
         if (!response || typeof response.status !== "number") protocolInvalid();
         if (response.status < 200 || response.status >= 300) {
