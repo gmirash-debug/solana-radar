@@ -72,6 +72,26 @@ test("dashboard and token details survive D1 outage without database reads", asy
   assert.equal(dbReads,0);
 });
 
+test("large checkpoint bodies and responses are streamed through the edge worker", async () => {
+  const env = {RUNTIME_SNAPSHOTS:namespace(), RADAR_INGEST_SECRET:"secret"};
+  const path = "https://worker/api/runtime/checkpoint?kind=deep";
+  const checkpoint = {encoded:"x".repeat(3_000_000)};
+  const request = new Request(path, {method:"POST", headers:{"x-radar-ingest-secret":"secret"},
+    body:JSON.stringify({checkpoint, updated_at:AT, revision:2})});
+  request.json = () => { throw new Error("edge must not parse checkpoint bodies"); };
+  assert.equal((await worker.fetch(request, env, {})).status,200);
+  const object = env.RUNTIME_SNAPSHOTS.get("checkpoint:deep");
+  const originalFetch = object.fetch.bind(object);
+  object.fetch = async incoming => {
+    const response = await originalFetch(incoming);
+    response.json = () => { throw new Error("edge must not parse checkpoint responses"); };
+    return response;
+  };
+  const response = await worker.fetch(new Request(path, {headers:{"x-radar-ingest-secret":"secret"}}),env,{});
+  assert.equal(response.status,200);
+  assert.deepEqual(JSON.parse(await response.text()).document.value,checkpoint);
+});
+
 test("targeted cron uses distinct fifteen-minute buckets without replacing the hourly bucket", () => {
   assert.equal(schedulerKindForCron("22,37,52 * * * *"),"targeted");
   assert.notEqual(schedulerBucket("targeted","2026-10-03T00:22:00Z"),schedulerBucket("targeted","2026-10-03T00:37:00Z"));

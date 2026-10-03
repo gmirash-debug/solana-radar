@@ -13,8 +13,8 @@ import {
   historyWalletDetail,
   historyWallets,
 } from "./history.js";
-import {runtimeDocument, runtimeDashboardResponse, runtimeMetadata} from "./runtime.js";
-import {enqueueDurableHistory, flushDurableHistory, durableHistoryStatus} from "./runtime-history.js";
+import {runtimeDocument, runtimeDashboardResponse, runtimeCheckpointResponse, runtimeMetadata} from "./runtime.js";
+import {durableHistoryIngestResponse, flushDurableHistory, durableHistoryStatus} from "./runtime-history.js";
 export {RuntimeSnapshots} from "./runtime.js";
 export {HistoryQueue} from "./runtime-history.js";
 
@@ -1197,10 +1197,8 @@ export default {
           const kind = url.searchParams.get("kind") || "deep";
           if (!["deep", "discovery"].includes(kind)) return json({ok:false, error:"invalid_checkpoint_kind"}, 400);
           if (!env.RUNTIME_SNAPSHOTS) return json({ok:false, error:"runtime_storage_not_configured"}, 503);
-          if (request.method === "GET") return json(await runtimeDocument(env, `checkpoint:${kind}`));
-          if (request.method !== "POST") return json({ok:false, error:"GET or POST required"}, 405);
-          const payload = await request.json();
-          return json(await runtimeDocument(env, `checkpoint:${kind}`, payload.checkpoint, payload.updated_at, payload.revision));
+          if (!["GET", "POST"].includes(request.method)) return json({ok:false, error:"GET or POST required"}, 405);
+          return await runtimeCheckpointResponse(env, request, kind);
         }
         if (url.pathname === "/api/runtime/dashboard") {
           if (request.method !== "POST") return json({ok:false, error:"POST required"}, 405);
@@ -1209,7 +1207,7 @@ export default {
         }
         if (url.pathname === "/api/runtime/history") {
           if (request.method !== "POST") return json({ok:false, error:"POST required"}, 405);
-          return json(await enqueueDurableHistory(env, await request.json()));
+          return await durableHistoryIngestResponse(env, request);
         }
         if (url.pathname === "/api/ingest/snapshot") {
           if (request.method !== "POST") return json({ ok: false, error: "POST required" }, 405, corsHeaders(request, env));

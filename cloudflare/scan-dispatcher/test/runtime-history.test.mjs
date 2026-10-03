@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { historyEventId, ingestHistoryBatch } from "../src/history.js";
+import worker from "../src/index.js";
 import {
   HistoryQueue, HISTORY_QUEUE_LIMITS, durableHistoryStatus,
   enqueueDurableHistory, flushDurableHistory, validateHistoryEvents,
@@ -133,6 +134,23 @@ test("enqueue retains the entire event and never accesses RADAR_DB", async t => 
   assert.deepEqual(JSON.parse(f.rows()[0].payload_json), original);
   assert.equal(result.pending_bytes, Buffer.byteLength(JSON.stringify(original)));
   assert.equal(f.db.calls.length, 0);
+});
+
+test("authenticated history envelopes are streamed and validated inside the durable queue", async t => {
+  const f = fixture(t, {RADAR_INGEST_SECRET:"secret"});
+  const original = event("streamed");
+  original.large_observation = "x".repeat(60000);
+  const request = new Request("https://worker/api/runtime/history", {method:"POST",
+    headers:{"x-radar-ingest-secret":"secret"}, body:JSON.stringify(ledger([original]))});
+  request.json = () => {throw new Error("edge must not parse history envelopes");};
+  const response = await worker.fetch(request, f.env, {});
+  assert.equal(response.status,200);
+  assert.equal((await response.json()).queued,1);
+  assert.deepEqual(JSON.parse(f.rows()[0].payload_json),original);
+  const invalid = await worker.fetch(new Request("https://worker/api/runtime/history", {method:"POST",
+    headers:{"x-radar-ingest-secret":"secret"}, body:JSON.stringify({history_ledger:[]})}), f.env, {});
+  assert.equal(invalid.status,400);
+  assert.equal((await invalid.json()).error,"history_ledger_invalid");
 });
 
 test("stable fallback historyEventId and duplicate first-payload semantics", async t => {

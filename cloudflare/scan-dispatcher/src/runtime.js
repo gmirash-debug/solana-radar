@@ -51,6 +51,12 @@ export class RuntimeSnapshots {
       }
       if (request.method !== "POST") return Response.json({ok:false, error:"GET or POST required"}, {status:405});
       let payload = await request.json();
+      if (url.searchParams.has("ingest_checkpoint")) {
+        if (!payload.checkpoint || typeof payload.checkpoint !== "object" || Array.isArray(payload.checkpoint)) {
+          throw new Error("invalid_runtime_checkpoint");
+        }
+        payload = {value:payload.checkpoint, updated_at:payload.updated_at, revision:payload.revision};
+      }
       if (url.searchParams.has("ingest_dashboard")) {
         const snapshot = {...payload, report:compactDashboardReport(payload.report),
           history:(payload.history || []).map(compactDashboardAlert)};
@@ -87,6 +93,17 @@ export class RuntimeSnapshots {
       return Response.json({ok:false, error:error.message}, {status:400});
     }
   }
+}
+
+export function runtimeCheckpointResponse(env, request, kind) {
+  const name = `checkpoint:${kind}`;
+  const stub = env.RUNTIME_SNAPSHOTS.get(env.RUNTIME_SNAPSHOTS.idFromName(name));
+  const target = new URL(`https://runtime/${name}`);
+  const upload = request.method === "POST";
+  if (upload) target.searchParams.set("ingest_checkpoint", "1");
+  return stub.fetch(new Request(target, upload ? {
+    method:"POST", body:request.body, duplex:"half", headers:{"content-type":"application/json"},
+  } : {}));
 }
 
 export async function runtimeDashboardResponse(env, request, upload = false) {

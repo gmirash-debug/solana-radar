@@ -293,6 +293,7 @@ export class HistoryQueue {
       if (request.method === "GET" && path === "/status") return Response.json({ ok: true, ...this.status() });
       if (request.method !== "POST") throw new QueueError("history_queue_post_required", 405);
       if (path === "/enqueue") return Response.json({ ok: true, ...this.enqueue((await readRequest(request)).events) });
+      if (path === "/ingest") return Response.json({ ok: true, ...this.enqueue(historyLedgerEvents(await readRequest(request))) });
       if (path === "/flush") return Response.json({ ok: true, ...await this.flush() });
       throw new QueueError("history_queue_route_not_found", 404);
     } catch (error) {
@@ -314,14 +315,26 @@ async function queueRequest(env, path, value, method = "POST") {
   return result;
 }
 
-export async function enqueueDurableHistory(env, payload) {
+function historyLedgerEvents(payload) {
   const ledger = payload?.history_ledger;
   if (ledger !== undefined && (!ledger || typeof ledger !== "object" || Array.isArray(ledger))) {
     throw new QueueError("history_ledger_invalid");
   }
-  const events = ledger?.events === undefined ? [] : ledger.events;
+  return ledger?.events === undefined ? [] : ledger.events;
+}
+
+export async function enqueueDurableHistory(env, payload) {
+  const events = historyLedgerEvents(payload);
   validateHistoryEvents(events);
   return queueRequest(env, "enqueue", { events });
+}
+
+export function durableHistoryIngestResponse(env, request) {
+  if (!env?.HISTORY_QUEUE) throw new QueueError("history_queue_not_configured", 503);
+  const stub = env.HISTORY_QUEUE.get(env.HISTORY_QUEUE.idFromName(QUEUE_NAME));
+  return stub.fetch(new Request("https://history-queue/ingest", {
+    method:"POST", body:request.body, duplex:"half", headers:{"content-type":"application/json"},
+  }));
 }
 
 export async function flushDurableHistory(env) {
