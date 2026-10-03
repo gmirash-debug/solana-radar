@@ -1455,9 +1455,9 @@ def send_remote_snapshot(payload, config, deadline=None):
     for start in range(0, len(market), 25):
         send("market", start + len(market[start:start + 25]), "/api/ingest/details",
             {"generated_at": generated_at, "market": dict(market[start:start + 25])})
-    for start in range(0, len(events), 25):
-        send("history_ledger", start + len(events[start:start + 25]), "/api/ingest/details",
-            {"generated_at": generated_at, "history_ledger": {"events": history_batch(start, start + 25)}})
+    # The durable queue owns historical delivery; do not write the same new events
+    # into the legacy D1 outbox as well. Its pre-existing backlog still drains separately.
+    progress["history_ledger"] = int(progress.get("durable_history_ledger") or 0)
 
 
 def sync_remote_discovery_status(status, config):

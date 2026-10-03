@@ -251,7 +251,7 @@ class SignalIntegrityTests(unittest.TestCase):
             s.send_remote_snapshot(body, {})
             self.assertEqual(remote.call_args_list[0].args[1], "/api/ingest/details")
             self.assertEqual(remote.call_args_list[0].args[3]["detail_signal_theses"][0]["token_address"], "25")
-            self.assertEqual(len(remote.call_args_list), 6)
+            self.assertEqual(len(remote.call_args_list), 4)
             for call in remote.call_args_list:
                 batch = call.args[3]
                 count = sum(len(batch.get(field) or []) for field in ("detail_signal_theses", "market"))

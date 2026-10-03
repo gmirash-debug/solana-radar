@@ -56,6 +56,8 @@ The scanner first queues complete, idempotently identified historical events in
 therefore does not erase newly acknowledged event payloads. Every five minutes
 a bounded flush writes to `RADAR_HISTORY_DB` and refreshes derived rows before
 acknowledging the events. Failed/poison items back off; newer work can proceed.
+New events use only this durable queue, not a second duplicate operational D1
+outbox write. The pre-existing legacy D1 backlog continues draining separately.
 
 The queue has explicit byte/row/write limits. Full or oversize batches are
 rejected, not silently dropped. The existing local compressed outbox preserves

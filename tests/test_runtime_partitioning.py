@@ -62,6 +62,8 @@ class RuntimePartitioningTests(unittest.TestCase):
             if "history_ledger" in call.args[3]:
                 self.assertEqual(call.args[3]["history_ledger"]["events"], [valid])
         self.assertEqual(body["_sync_progress"]["durable_history_ledger"], 2)
+        self.assertEqual(body["_sync_progress"]["history_ledger"], 2)
+        self.assertEqual([call.args[1] for call in remote.call_args_list if "history_ledger" in call.args[3]], ["/api/runtime/history"])
 
     def test_successful_replay_moves_bad_original_payload_to_quarantine(self):
         invalid = {"event_id": "wrong", "episode": {"episode_id": "episode", "token_address": "mint", "caught_at": "2026-09-02T00:00:00Z"},
