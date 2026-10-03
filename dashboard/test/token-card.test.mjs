@@ -73,6 +73,40 @@ test("targeted checks retain a separate deep-scan date and storage-source label"
   assert.doesNotMatch(doc.querySelector("#statusRow").textContent, /deep scan not recorded yet/);
 });
 
+test("saved current snapshots do not label a historical backlog as a cloud failure", t => {
+  const api = fixture(t);
+  api.state.scanStatus = {persistence:{status:"pending", pending:612,
+    current_synced:true, durable_dashboard_synced:true, checkpoint:{ok:true}}};
+  api.renderStatus();
+  const row = api.dom.window.document.querySelector("#statusRow");
+  assert.match(row.textContent, /Archive pending: 612/);
+  assert.doesNotMatch(row.textContent, /Cloud save pending/);
+  assert.match(row.innerHTML, /Current dashboard is saved/);
+  assert.doesNotMatch(row.innerHTML, /Cloud storage unavailable/);
+});
+
+test("unconfirmed current publication keeps its cloud warning", t => {
+  const api = fixture(t);
+  api.state.scanStatus = {persistence:{status:"pending", pending:1,
+    current_synced:true, durable_dashboard_synced:false, durable_dashboard_error:"upload deferred"}};
+  api.renderStatus();
+  const row = api.dom.window.document.querySelector("#statusRow");
+  assert.match(row.textContent, /Cloud save pending: 1/);
+  assert.match(row.innerHTML, /upload deferred/);
+  assert.doesNotMatch(row.textContent, /Archive pending/);
+});
+
+test("a rejected private checkpoint remains a state warning even with a saved dashboard", t => {
+  const api = fixture(t);
+  api.state.scanStatus = {persistence:{status:"pending", pending:612,
+    current_synced:true, durable_dashboard_synced:true, checkpoint:{ok:false,error:"checkpoint deferred"}}};
+  api.renderStatus();
+  const row = api.dom.window.document.querySelector("#statusRow");
+  assert.match(row.textContent, /State save pending/);
+  assert.match(row.innerHTML, /checkpoint deferred/);
+  assert.doesNotMatch(row.textContent, /Archive pending/);
+});
+
 test("local static previews hydrate matching published wallet details without enabling remote mode", async t => {
   const detail = {ok:true, token_key:"mint", report_source_updated_at:checked,
     thesis:thesis(), current_alerts:[], history:[], source:"published_scan"};
@@ -264,11 +298,11 @@ test("partial movement note needs actual observations and never renders raw amou
 
 test("HTML entrypoint and every dashboard JS import use the same evidence cache tag", () => {
   const html = readFileSync(new URL("../index.html",import.meta.url),"utf8");
-  assert.match(html, /src="radar-bootstrap\.js\?v=20261003-runtime-7"/);
+  assert.match(html, /src="radar-bootstrap\.js\?v=20261003-runtime-8"/);
   for (const file of readdirSync(new URL("../",import.meta.url)).filter(file => file.endsWith(".js"))) {
     const source = readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
     for (const match of source.matchAll(/(?:from\s+|import\()"(\.\/[^"?]+\.js\?v=([^"]+))"/g)) {
-      assert.equal(match[2],"20261003-runtime-7",`${file}: ${match[1]}`);
+      assert.equal(match[2],"20261003-runtime-8",`${file}: ${match[1]}`);
     }
   }
 });
