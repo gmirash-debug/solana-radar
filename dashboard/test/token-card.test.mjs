@@ -48,12 +48,20 @@ function fixture(t, {signalThesis = thesis(), alerts = [], overrides = {}} = {})
   const api = vm.runInContext(`({state, buildTokenSignals, renderWalletRows, walletHeldLabel,
     renderReviewRow, renderThesisSummary, renderSupplyLinkageGroups, supplyPct,
     mergeTokenAlertDetails, ensureTokenDetail, applyDashboardPayload, detailLoadMessage,
-    renderObservedPositionActivity, renderStatus})`, context);
+    renderObservedPositionActivity, renderStatus, renderFilters, filterMeta})`, context);
   api.state.report = {generated_at:checked, alerts, signal_theses:signalThesis ? [signalThesis] : [], config:{}};
   api.state.history = [];
   t.after(() => dom.window.close());
   return {...api, dom, context};
 }
+
+test("the radar and token criteria display the thirty-minute age minimum", t => {
+  const api = fixture(t, {signalThesis:null});
+  api.state.report.config = {age_min_hours:0.5, age_max_hours:360};
+  api.renderFilters();
+  assert.match(api.dom.window.document.querySelector(".radar-heading").textContent, /30m–15d/);
+  assert.match(api.filterMeta("reactivation").criteria, /^30m-15d/);
+});
 
 test("targeted checks retain a separate deep-scan date and storage-source label", t => {
   const api = fixture(t);
@@ -298,11 +306,11 @@ test("partial movement note needs actual observations and never renders raw amou
 
 test("HTML entrypoint and every dashboard JS import use the same evidence cache tag", () => {
   const html = readFileSync(new URL("../index.html",import.meta.url),"utf8");
-  assert.match(html, /src="radar-bootstrap\.js\?v=20261003-runtime-8"/);
+  assert.match(html, /src="radar-bootstrap\.js\?v=20261003-age-30m-9"/);
   for (const file of readdirSync(new URL("../",import.meta.url)).filter(file => file.endsWith(".js"))) {
     const source = readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
     for (const match of source.matchAll(/(?:from\s+|import\()"(\.\/[^"?]+\.js\?v=([^"]+))"/g)) {
-      assert.equal(match[2],"20261003-runtime-8",`${file}: ${match[1]}`);
+      assert.equal(match[2],"20261003-age-30m-9",`${file}: ${match[1]}`);
     }
   }
 });

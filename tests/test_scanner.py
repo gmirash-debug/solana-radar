@@ -1069,7 +1069,7 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(payload["config"]["mcap_min_usd"], effective["mcap_min_usd"])
         self.assertEqual(payload["config"]["mcap_max_usd"], effective["mcap_max_usd"])
         self.assertEqual(payload["config"]["liquidity_min_usd"], effective["liquidity_min_usd"])
-        self.assertEqual(payload["config"]["age_min_hours"], 24)
+        self.assertEqual(payload["config"]["age_min_hours"], 0.5)
         self.assertEqual(payload["config"]["age_max_hours"], 360)
         self.assertEqual(
             payload["config"]["dashboard_signal_epoch"],
@@ -3419,7 +3419,7 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(early["reactivation_wave_min_buy_sol"], 35)
         self.assertEqual(early["volume_1h_to_mcap_max_watch"], 1.2)
 
-    def test_reactivation_universe_accepts_low_cap_token_only_within_one_to_fifteen_days(self):
+    def test_reactivation_universe_accepts_low_cap_token_from_thirty_minutes_to_fifteen_days(self):
         config = scanner.apply_lane(
             scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {}),
             "reactivation",
@@ -3432,7 +3432,7 @@ class ScannerCoreTests(unittest.TestCase):
             mcap_usd=20_000,
             liquidity_usd=4_000,
             volume_1h_usd=500,
-            pair_created_at=now - 24 * 3600,
+            pair_created_at=now - 30 * 60,
         )
         at_maximum_age_pool = scanner.Pool(
             pool_address="at-maximum-age",
@@ -3450,7 +3450,7 @@ class ScannerCoreTests(unittest.TestCase):
             mcap_usd=20_000,
             liquidity_usd=4_000,
             volume_1h_usd=500,
-            pair_created_at=now - 23 * 3600,
+            pair_created_at=now - 30 * 60 + 1,
         )
         too_old_pool = scanner.Pool(
             pool_address="too-old",
@@ -3471,6 +3471,17 @@ class ScannerCoreTests(unittest.TestCase):
             self.assertTrue(scanner.pool_matches_config(at_maximum_age_pool, config))
             self.assertFalse(scanner.pool_matches_config(too_new_pool, config))
             self.assertFalse(scanner.pool_matches_config(too_old_pool, config))
+            for hours in (1, 23, 24):
+                with self.subTest(age_hours=hours):
+                    pool = scanner.Pool(**{
+                        **at_minimum_age_pool.__dict__,
+                        "pair_created_at": now - hours * 3600,
+                    })
+                    self.assertTrue(scanner.pool_matches_config(pool, config))
+            unknown_age_pool = scanner.Pool(**{
+                **at_minimum_age_pool.__dict__, "pair_created_at": None,
+            })
+            self.assertFalse(scanner.pool_matches_config(unknown_age_pool, config))
             self.assertEqual(
                 scanner.reactivation_stage_config(at_minimum_age_pool, config)["reactivation_stage"],
                 "ignition",

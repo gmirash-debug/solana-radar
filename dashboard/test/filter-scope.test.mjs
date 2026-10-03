@@ -84,6 +84,26 @@ test("the current filter scope excludes pools outside its age window", () => {
   );
 });
 
+test("the thirty-minute filter includes young pools without resetting prior catches", () => {
+  const report = { config: { age_min_hours: 0.5, age_max_hours: 360 } };
+  for (const [age, included] of [[0.5 - 1 / 3600, false], [0.5, true], [23, true],
+    [24, true], [360, true], [360 + 1 / 3600, false]]) {
+    const signal = { created_at: "2026-10-03T02:00:00Z", pool: { age_hours: age } };
+    assert.equal(isCurrentFilterPool(signal, report), included, `age ${age}`);
+    assert.equal(isCurrentFilterSignal(signal, report), included, `signal age ${age}`);
+  }
+  assert.equal(isCurrentFilterPool({}, report), false);
+  const existing = { first_signal_at: "2026-09-30T02:00:00Z", first_obs_mcap_usd: 20_000 };
+  assert.deepEqual(marketWithCurrentFilterCatch(existing, report), existing);
+});
+
+test("the thirty-minute filter uses the actual pair timestamp over a stale reported age", () => {
+  const report = { config: { age_min_hours: 0.5, age_max_hours: 360 } };
+  const created = Date.now() - 31 * 60_000;
+  assert.equal(isCurrentFilterPool({ pair_created_at: created, age_hours: 0.2 }, report), true);
+  assert.equal(isCurrentFilterPool({ pool: { pair_created_at: created / 1000 } }, report), true);
+});
+
 test("a legacy catch cannot overwrite a new filter-era catch", () => {
   const market = {
     first_signal_at: "2026-07-31T10:00:00Z",

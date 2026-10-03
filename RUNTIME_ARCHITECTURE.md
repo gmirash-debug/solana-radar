@@ -1,9 +1,12 @@
 # Runtime reliability and shadow evaluation
 
-## Unchanged strategy
+## Active strategy
 
-Only Reactivation is enabled. The token-age window remains 24-360 hours;
+Only Reactivation is enabled. The pool-age window is 0.5-360 hours (30 minutes
+to 15 days), measured from the existing pair creation timestamp;
 existing market, retention, migration and data-quality gates are unchanged.
+The age gate admits earlier candidates; it does not shorten confirmation,
+holding, baseline or purchase-analysis windows.
 No supporting movement or statistical evidence confirms an alert by itself.
 
 ## Scheduling and fair bounded work

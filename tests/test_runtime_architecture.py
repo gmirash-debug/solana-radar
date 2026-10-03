@@ -74,12 +74,13 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertEqual(MonthlyRpcBudget(ledger, "alchemy", 120, datetime(2026, 11, 1, tzinfo=timezone.utc)).remaining, 120)
 
     def test_targeted_profile_changes_budgets_not_token_filter(self):
-        config = {"age_min_hours": 24, "age_max_hours": 360, "mcap_min_usd": 0,
-                  "lanes": {"reactivation": {"age_min_hours": 24, "age_max_hours": 360, "enabled": True}}}
+        config = {"age_min_hours": 0.5, "age_max_hours": 360, "mcap_min_usd": 0,
+                  "lanes": {"reactivation": {"age_min_hours": 0.5, "age_max_hours": 360, "enabled": True}}}
         fast = targeted_profile(config)
         self.assertEqual(fast["active_pool_limit"], 6)
         self.assertEqual(fast["age_max_hours"], 360)
-        self.assertEqual(fast["lanes"]["reactivation"]["age_min_hours"], 24)
+        self.assertEqual(fast["age_min_hours"], 0.5)
+        self.assertEqual(fast["lanes"]["reactivation"]["age_min_hours"], 0.5)
         self.assertNotIn("active_pool_limit", config)
         self.assertFalse(fast["helius_initial_backfill_enabled"])
         self.assertEqual(fast["scan_health_min_scanned_pools"], 1)
