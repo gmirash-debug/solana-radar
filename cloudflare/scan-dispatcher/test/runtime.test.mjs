@@ -10,6 +10,7 @@ function storage() {
     const staging = new Map(structuredClone([...map]));
     const tx = {async get(key) {return Array.isArray(key) ? new Map(key.filter(k=>staging.has(k)).map(k=>[k, staging.get(k)])) : staging.get(key);},
       async put(values) {assert.ok(Object.keys(values).length <= 128); if (fail) throw new Error("disk failure"); for (const [key,value] of Object.entries(values)) staging.set(key,value);},
+      async list({prefix, limit=512, startAfter}) {return new Map([...staging].filter(([k]) => k.startsWith(prefix) && (!startAfter || k > startAfter)).sort(([a],[b])=>a.localeCompare(b)).slice(0,limit));},
       async delete(keys) {for (const key of keys) staging.delete(key);}};
     const result = await callback(tx);
     map.clear(); for (const [key,value] of staging) map.set(key,value);
@@ -41,6 +42,72 @@ test("durable documents chunk safely, overwrite atomically and reject stale revi
   assert.deepEqual((await (await object.fetch(new Request("https://runtime/doc"))).json()).document.value,value);
   assert.equal((await put(object,{small:true}, AT, 2)).status,200);
   assert.equal(state.map.size,2);
+});
+
+async function blob(data, encoding="gzip+base64-part") {
+  const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(data))), b=>b.toString(16).padStart(2,"0")).join("");
+  return {schema_version:1, encoding, sha256, encoded_bytes:data.length, data};
+}
+
+test("large checkpoints commit only after every immutable part is present", async () => {
+  const env = {RUNTIME_SNAPSHOTS:namespace(), RADAR_INGEST_SECRET:"secret"};
+  const headers = {"x-radar-ingest-secret":"secret"};
+  const path = "https://worker/api/runtime/checkpoint?kind=deep";
+  const parts = await Promise.all(Array.from({length:9}, (_,i)=>blob(String.fromCharCode(65+i).repeat(1024*1024))));
+  const manifest = {schema_version:2,encoding:"gzip+base64+parts", sha256:"f".repeat(64), decoded_bytes:12*1024*1024,
+    encoded_bytes:9*1024*1024,parts:parts.map(p=>({id:p.sha256,bytes:p.encoded_bytes}))};
+  const post = (checkpoint, suffix="") => worker.fetch(new Request(path+suffix,{method:"POST",headers,
+    body:JSON.stringify({checkpoint, updated_at:AT, revision:3})}),env,{});
+  await post({old:true});
+  assert.equal((await post(manifest)).status,400);
+  assert.equal((await (await worker.fetch(new Request(path,{headers}),env,{})).json()).document.value.old,true);
+  for (const part of parts) assert.equal((await post(part,`&part=${part.sha256}`)).status,200);
+  assert.equal((await post(manifest)).status,200);
+  assert.deepEqual((await (await worker.fetch(new Request(path,{headers}),env,{})).json()).document.value,manifest);
+  const corrupt = {...parts[0],data:"B".repeat(1024*1024)};
+  assert.equal((await post(corrupt,`&part=${parts[0].sha256}`)).status,400);
+  const restored = await (await worker.fetch(new Request(`${path}&part=${parts[0].sha256}`,{headers}),env,{})).json();
+  assert.equal(restored.document.value.data,parts[0].data);
+  assert.equal((await worker.fetch(new Request(`${path}&part=${parts[0].sha256}`),env,{})).status,401);
+});
+
+test("per-token evidence larger than one dashboard document stays generation-bound", async () => {
+  const env = {RUNTIME_SNAPSHOTS:namespace(), RADAR_INGEST_SECRET:"secret"};
+  const headers = {"x-radar-ingest-secret":"secret"};
+  const path = "https://worker/api/runtime/dashboard";
+  const post = (value,suffix="")=>worker.fetch(new Request(path+suffix,{method:"POST",headers,body:JSON.stringify(value)}),env,{});
+  const refs = {};
+  for (let i=0;i<10;i++) {
+    const token_key = `token-${i}`;
+    const detail = await blob(JSON.stringify({token_key,thesis:{cohort:[{owner:`owner-${i}`,proof:"x".repeat(900_000)}]},current_alerts:[],history:[]}),"json-ascii");
+    assert.equal((await post({detail,updated_at:AT},`?part=${detail.sha256}`)).status,200);
+    refs[token_key] = {id:detail.sha256,bytes:detail.encoded_bytes};
+  }
+  const root = {report:{generated_at:AT},token_detail_refs:refs};
+  assert.equal((await post(root)).status,200);
+  const publicRoot = await (await worker.fetch(new Request("https://worker/api/dashboard"),env,{})).json();
+  assert.equal(publicRoot.token_detail_refs,undefined);
+  const detail = await (await worker.fetch(new Request("https://worker/api/dashboard/token?token_key=solana:token-3"),env,{})).json();
+  assert.equal(detail.thesis.cohort[0].owner,"owner-3");
+  assert.equal(detail.report_source_updated_at,AT);
+  refs["token-3"] = refs["token-4"];
+  assert.equal((await post({...root,token_detail_refs:refs})).status,400);
+  assert.equal((await (await worker.fetch(new Request("https://worker/api/dashboard/token?token_key=token-3"),env,{})).json()).thesis.cohort[0].owner,"owner-3");
+});
+
+test("blob cleanup retains published and recently staged evidence", async () => {
+  const {collectOldBlobs} = await import("../src/runtime-documents.js");
+  const state = storage(), object = new RuntimeSnapshots({storage:state});
+  const parts = await Promise.all([blob("AAAA"),blob("BBBB"),blob("CCCC")]);
+  for (const part of parts) {
+    await object.fetch(new Request(`https://runtime/checkpoint:deep:blob:${part.sha256}`,{method:"POST",body:JSON.stringify({value:part,updated_at:AT})}));
+    state.map.get(`checkpoint:deep:blob-index:${part.sha256}`).staged_at = 1;
+  }
+  state.map.get(`checkpoint:deep:blob-index:${parts[2].sha256}`).staged_at = Date.now();
+  await state.transaction(tx=>collectOldBlobs(tx,"checkpoint:deep",new Set([parts[0].sha256])));
+  assert.ok(state.map.has(`checkpoint:deep:blob:${parts[0].sha256}:meta`));
+  assert.ok(!state.map.has(`checkpoint:deep:blob:${parts[1].sha256}:meta`));
+  assert.ok(state.map.has(`checkpoint:deep:blob:${parts[2].sha256}:meta`));
 });
 
 test("checkpoints require authentication and do not leak through public routes", async () => {

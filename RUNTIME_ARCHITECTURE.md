@@ -29,8 +29,17 @@ It stores a ready dashboard and private deep/discovery checkpoints. Checkpoints
 retain buffers, provider-bound cursors, original cohorts, evaluation observations
 and the shared monthly RPC ledger. Rebuildable top-level caches are omitted.
 Atomic writes reject stale source times/revisions and never truncate a document.
-Documents are bounded to 8 MiB; encoded checkpoints to 7 MiB. Oversize or corrupt
-state is rejected explicitly, leaving the previous checkpoint and local cache.
+Individual documents are bounded to 8 MiB. Checkpoints above 6 MiB encoded are
+split into immutable 1 MiB pieces with content digests, then an atomic manifest
+is committed only after all pieces are present. Decoding remains bounded to
+128 MiB (192 MiB encoded). A failed upload never replaces the previous complete
+checkpoint, and a corrupt or missing part never partially restores state.
+Dashboard lists and full per-token details are separate documents; the ready
+list references exact immutable detail versions, so source generations and
+cohorts cannot mix. Per-token details are bounded to 6 MiB and 1,024 references.
+Old unreferenced parts are collected in bounded batches after a one-hour staging
+grace period; content-addressed unchanged parts are not rewritten. The limits
+are explicit safety bounds, not an unlimited free storage promise.
 
 Public dashboard projections and token details are produced inside the object
 and streamed through the Worker. Health reads metadata, not the whole snapshot.
@@ -51,6 +60,10 @@ acknowledging the events. Failed/poison items back off; newer work can proceed.
 The queue has explicit byte/row/write limits. Full or oversize batches are
 rejected, not silently dropped. The existing local compressed outbox preserves
 unacknowledged backlog and its batch cursors. Legacy backlog is replayed slowly;
+invalid legacy event identities/times are kept in the cached outbox's quarantine
+with their original payload, not submitted to analytics or silently erased.
+Valid events in the same old snapshot can proceed. Price horizons are attributed
+only to their original catch; a renewed thesis cannot inherit old outcomes.
 it is not claimed to have been fully migrated. D1's free daily quotas are
 account-wide: another D1 database does not create a new independent quota.
 The Durable Object queue itself also uses bounded, estimated free-tier writes.

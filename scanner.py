@@ -26,7 +26,9 @@ from coordinated_activity import analyze_coordinated_activity, compact_coordinat
 from wallet_links import SERVICE_KINDS, infrastructure_sources, normalize_link as normalize_wallet_link, source_kind
 from solana_position_lineage import annotate_pool_activity, freeze_receipt_seeds
 from position_history_rpc import check_receipt_positions
-from runtime_checkpoint import build_checkpoint, restore_checkpoint
+from runtime_checkpoint import build_checkpoint, restore_checkpoint, checkpoint_documents, hydrate_checkpoint
+from runtime_dashboard import dashboard_documents
+from history_contract import history_event_error
 from rpc_budget import configure_monthly_budgets, request_reservation
 from scan_scheduling import targeted_profile, fast_candidate_pools
 from launch_history import advance_launch_history
@@ -1042,6 +1044,7 @@ def build_history_ledger(report_payload, state, config, generated_at):
         candidates = candidates[:limit]
 
     events = []
+    foreign_outcome_episodes = 0
     for thesis in candidates:
         token = str(thesis.get("token_address") or thesis.get("pool_address"))
         pool_address = thesis.get("pool_address")
@@ -1140,11 +1143,15 @@ def build_history_ledger(report_payload, state, config, generated_at):
                 }
             )
 
+        # Outcomes belong to their original catch, not a renewed thesis for the same mint.
         horizons = outcome.get("horizons") if isinstance(outcome, dict) else {}
+        if horizons and parse_timestamp(outcome.get("caught_at")) != parse_timestamp(caught_at):
+            horizons = {}
+            foreign_outcome_episodes += 1
         for horizon in HISTORY_LEDGER_HORIZONS:
             checkpoint = horizons.get(horizon) if isinstance(horizons, dict) else None
             checkpoint_at = checkpoint.get("at") if isinstance(checkpoint, dict) else None
-            if not checkpoint_at:
+            if not checkpoint_at or parse_timestamp(checkpoint_at) < parse_timestamp(caught_at):
                 continue
             events.append(
                 {
@@ -1180,6 +1187,7 @@ def build_history_ledger(report_payload, state, config, generated_at):
         "schema_version": HISTORY_LEDGER_SCHEMA_VERSION,
         "generated_at": generated_at,
         "events": events,
+        "foreign_outcome_episodes_deferred": foreign_outcome_episodes,
     }
 
 
@@ -1300,6 +1308,8 @@ def load_runtime_checkpoint(state, config, kind):
         result = remote_api_call("GET", "/api/runtime/checkpoint", config, params={"kind": kind})
         payload = (result.get("document") or {}).get("value")
         if payload:
+            payload = hydrate_checkpoint(payload, lambda part: (remote_api_call(
+                "GET", "/api/runtime/checkpoint", config, params={"kind": kind, "part": part}).get("document") or {}).get("value") or {})
             state, recovered = restore_checkpoint(state, payload)
             config[f"_runtime_{kind}_recovered"] = recovered
             config[f"_runtime_{kind}_available"] = True
@@ -1314,8 +1324,13 @@ def sync_runtime_checkpoint(state, config, kind):
         return {"status": "local_only"}
     try:
         runtime = state.get("_runtime", {})
+        checkpoint, parts = checkpoint_documents(build_checkpoint(state))
+        for part in parts:
+            remote_api_call("POST", "/api/runtime/checkpoint", config, {
+                "checkpoint": part, "updated_at": runtime.get("updated_at"), "revision": runtime.get("revision", 0)},
+                params={"kind": kind, "part": part["sha256"]})
         result = remote_api_call("POST", "/api/runtime/checkpoint", config, {
-            "checkpoint": build_checkpoint(state), "updated_at": runtime.get("updated_at"),
+            "checkpoint": checkpoint, "updated_at": runtime.get("updated_at"),
             "revision": runtime.get("revision", 0)}, params={"kind": kind})
         config[f"_runtime_{kind}_saved"] = result
         return result
@@ -1334,7 +1349,11 @@ def sync_remote_snapshot(report_payload, state, config):
     durable_synced = False
     durable_error = None
     try:
-        ready = {key: value for key, value in body.items() if key != "history_ledger"}
+        ready, documents = dashboard_documents(body)
+        for document in documents:
+            remote_api_call("POST", "/api/runtime/dashboard", config,
+                            {"detail": document, "updated_at": ready["report"]["generated_at"]},
+                            params={"part": document["sha256"]})
         published = remote_api_call("POST", "/api/runtime/dashboard", config, ready)
         durable_synced = bool(published.get("accepted"))
     except Exception as exc:
@@ -1360,7 +1379,15 @@ def sync_remote_snapshot(report_payload, state, config):
                 raise RuntimeError("Remote sync pending: RADAR_INGEST_SECRET is missing")
             pending_body = json.loads(gzip.decompress(path.read_bytes()))
             send_remote_snapshot(pending_body, config, deadline=deadline)
-            path.unlink()
+            if pending_body.get("_sync_rejected_history"):
+                quarantine = REMOTE_OUTBOX_DIR / "quarantine"
+                quarantine.mkdir(exist_ok=True)
+                temp = path.with_suffix(".tmp")
+                temp.write_bytes(gzip.compress(json.dumps(pending_body, separators=(",", ":")).encode()))
+                temp.replace(quarantine / path.name)
+                path.unlink()
+            else:
+                path.unlink()
             current_synced = current_synced or path == current
         except Exception as exc:
             if isinstance(pending_body, dict):
@@ -1379,12 +1406,13 @@ def sync_remote_snapshot(report_payload, state, config):
     return {"status": "pending" if pending else "synced", "current_synced": current_synced,
             "durable_dashboard_synced": durable_synced, "durable_dashboard_error": durable_error,
             "checkpoint": config.get("_runtime_deep_saved", {}),
-            "pending": pending, "error": error, "checked_at": utc_now().isoformat()}
+            "pending": pending, "quarantined": len(list((REMOTE_OUTBOX_DIR / "quarantine").glob("*.json.gz"))),
+            "error": error, "checked_at": utc_now().isoformat()}
 
 
 def send_remote_snapshot(payload, config, deadline=None):
     """Publish the list first, then idempotent bounded evidence/history batches."""
-    detail_fields = {"detail_signal_theses", "detail_current_alerts", "detail_history", "history_ledger", "market", "_sync_progress"}
+    detail_fields = {"detail_signal_theses", "detail_current_alerts", "detail_history", "history_ledger", "market", "_sync_progress", "_sync_rejected_history"}
     summary = {key: value for key, value in payload.items() if key not in detail_fields}
     summary["report"] = compact_report_for_remote(summary.get("report") or {})
     summary["chunked"] = True
@@ -1398,6 +1426,14 @@ def send_remote_snapshot(payload, config, deadline=None):
         progress[part] = end
     generated_at = (payload.get("report") or {}).get("generated_at") or payload.get("generated_at")
     events = (payload.get("history_ledger") or {}).get("events") or []
+    rejected = payload.setdefault("_sync_rejected_history", {})
+    for index, row in enumerate(events):
+        reason = history_event_error(row)
+        if reason:
+            # Keep the entire original event in the outbox/quarantine; only exclude it from analytics.
+            rejected[str(index)] = {"event_id": row.get("event_id") if isinstance(row, dict) else None, "reason": reason}
+    def history_batch(start, end):
+        return [row for index, row in enumerate(events[start:end], start) if str(index) not in rejected]
     # Archive events before any operational D1 write: its daily quota can be exhausted.
     start = int(progress.get("durable_history_ledger") or 0)
     while start < len(events):
@@ -1406,7 +1442,7 @@ def send_remote_snapshot(payload, config, deadline=None):
             batch = batch[:max(1, len(batch) // 2)]
         end = start + len(batch)
         send("durable_history_ledger", end, "/api/runtime/history",
-             {"generated_at": generated_at, "history_ledger": {"events": batch}})
+             {"generated_at": generated_at, "history_ledger": {"events": history_batch(start, end)}})
         start = end
     send("summary", 1, "/api/ingest/snapshot", summary)
     # Bounded requests resume from the last acknowledged batch after a failure.
@@ -1421,7 +1457,7 @@ def send_remote_snapshot(payload, config, deadline=None):
             {"generated_at": generated_at, "market": dict(market[start:start + 25])})
     for start in range(0, len(events), 25):
         send("history_ledger", start + len(events[start:start + 25]), "/api/ingest/details",
-            {"generated_at": generated_at, "history_ledger": {"events": events[start:start + 25]}})
+            {"generated_at": generated_at, "history_ledger": {"events": history_batch(start, start + 25)}})
 
 
 def sync_remote_discovery_status(status, config):

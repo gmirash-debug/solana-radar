@@ -26,6 +26,8 @@ on:
       - "position_evidence.py"
       - "solana_position_lineage.py"
       - "runtime_checkpoint.py"
+      - "runtime_dashboard.py"
+      - "history_contract.py"
       - "rpc_budget.py"
       - "scan_scheduling.py"
       - "launch_history.py"

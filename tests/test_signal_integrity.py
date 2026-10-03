@@ -235,7 +235,9 @@ class SignalIntegrityTests(unittest.TestCase):
         body = {"report": {"generated_at": s.iso(self.now)},
                 "detail_signal_theses": [{"token_address": str(i)} for i in range(61)],
                 "market": {str(i): {} for i in range(26)},
-                "history_ledger": {"events": [{"event_id": str(i)} for i in range(26)]}}
+                "history_ledger": {"events": [{"event_id": str(i),
+                    "episode": {"episode_id": "episode", "token_address": "mint", "caught_at": s.iso(self.now)},
+                    "event": {"event_type": "signal", "observed_at": s.iso(self.now)}} for i in range(26)]}}
         with patch.object(s, "remote_api_call") as remote:
             remote.side_effect = [{"ok": True}, {"ok": True}, {"ok": True}, {"ok": True}, RuntimeError("temporary quota")]
             with self.assertRaisesRegex(RuntimeError, "quota"):
