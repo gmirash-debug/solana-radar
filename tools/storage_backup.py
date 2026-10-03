@@ -850,16 +850,18 @@ class GitHub:
             self.assert_private()
             self.request(self.prefix + "/releases/" + str(release_id), "PATCH", {"body":RELEASE_MARKER
                 + "\narchive_sha256=" + manifest["archive_sha256"] + "\nmanifest_sha256=" + manifest_sha})
-            # New assets are durable and checksum-verified before any old backup
-            # is removed. The verified draft counts as one of the seven copies.
-            self.prune(keep, protected=release_id)
             self.assert_private()
-            published = self.request(self.prefix + "/releases/" + str(release_id), "PATCH", {"draft":False})
-            if not isinstance(published, dict) or published.get("draft") is not False:
+            # GitHub can expose an untagged-* name until a draft is published.
+            # Publish the verified replacement before relying on its tag for retention.
+            published = self.request(self.prefix + "/releases/" + str(release_id), "PATCH",
+                {"draft":False, "tag_name":tag, "make_latest":"false"})
+            if (not isinstance(published, dict) or published.get("draft") is not False
+                    or published.get("tag_name") != tag):
                 raise BackupError("verified backup release publication failed")
+            self.prune(keep, protected=release_id)
         except Exception:
-            # Do not delete a verified draft after pruning: it may now be one
-            # of the newest surviving recovery points. No prior backup is ever
+            # Do not delete a verified recovery point after a publication or
+            # retention failure. No prior backup is ever
             # removed before both replacement assets have passed SHA checks.
             if not verified:
                 try:

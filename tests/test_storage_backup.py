@@ -557,6 +557,7 @@ class FakeGitHub:
         self.fail_upload = False
         self.bad_digest = False
         self.fail_publish = False
+        self.temporary_draft_tag = False
 
     def open(self, request, timeout):
         path = urllib.parse.urlsplit(request.full_url).path
@@ -572,6 +573,8 @@ class FakeGitHub:
             return Response(self.releases[(page-1)*100:page*100])
         if path == prefix + "/releases" and method == "POST":
             row = {**payload, "id":self.next_id}
+            if self.temporary_draft_tag:
+                row["tag_name"] = "untagged-test-draft"
             self.next_id += 1
             self.releases.append(row)
             return Response(row)
@@ -680,16 +683,30 @@ class GitHubTests(unittest.TestCase):
             self.client.publish(self.archive, self.manifest_path, self.manifest)
         self.assertEqual([row["id"] for row in self.server.releases], [1])
 
-    def test_publication_failure_preserves_verified_draft_after_rotation(self):
+    def test_publication_failure_preserves_verified_draft_and_all_old_copies(self):
         for index in range(1,8):
             self.server.add_old(index)
         self.server.fail_publish = True
         with self.assertRaises(backup.BackupError):
             self.client.publish(self.archive, self.manifest_path, self.manifest)
-        self.assertEqual(len(self.server.releases), 7)
+        self.assertEqual(len(self.server.releases), 8)
+        self.assertTrue(set(range(1, 8)).issubset(row["id"] for row in self.server.releases))
         latest = next(row for row in self.server.releases if row["id"] == 100)
         self.assertTrue(latest["draft"])
         self.assertTrue(latest["body"].startswith(backup.RELEASE_MARKER))
+
+    def test_temporary_draft_tag_is_published_before_retention(self):
+        for index in range(1, 8):
+            self.server.add_old(index)
+        self.server.temporary_draft_tag = True
+        result = self.client.publish(self.archive, self.manifest_path, self.manifest)
+        published = next(row for row in self.server.releases if row["id"] == result)
+        self.assertFalse(published["draft"])
+        self.assertTrue(published["tag_name"].startswith("storage-backup-"))
+        publication = next(index for index, (method, _, payload) in enumerate(self.server.calls)
+            if method == "PATCH" and payload.get("draft") is False)
+        deletion = next(index for index, (method, _, _) in enumerate(self.server.calls) if method == "DELETE")
+        self.assertLess(publication, deletion)
 
     def test_unverified_drafts_foreign_releases_and_tags_not_pruned(self):
         for index in range(1,9):
