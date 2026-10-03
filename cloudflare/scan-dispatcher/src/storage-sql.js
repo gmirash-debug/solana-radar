@@ -1,5 +1,6 @@
 // Fetch-only Hrana v2 adapter. Each call owns and closes its SQL stream; writes
 // are never retried here because an interrupted response may hide a commit.
+import {guardR2Env} from "./r2-budget.js";
 const MAX_BATCH_STATEMENTS = 100;
 const MAX_REQUEST_BYTES = 16 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -444,10 +445,10 @@ export function createTursoDatabase(env, options = {}) { return new TursoDatabas
 
 export function backendEnv(env, options = {}) {
   const backend = env?.STORAGE_SQL_BACKEND;
-  if (backend === undefined || backend === null || backend === "" || backend === "d1") return env;
+  if (backend === undefined || backend === null || backend === "" || backend === "d1") return guardR2Env(env);
   if (backend !== "turso") invalid("storage_sql_backend_invalid");
   const db = createTursoDatabase(env, options);
-  return {...env, RADAR_DB:db, RADAR_HISTORY_DB:db};
+  return guardR2Env({...env, RADAR_DB:db, RADAR_HISTORY_DB:db});
 }
 
 export const resolveStorageEnv = backendEnv;

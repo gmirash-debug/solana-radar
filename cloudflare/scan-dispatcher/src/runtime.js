@@ -2,6 +2,7 @@
 import {compactDashboardReport, compactDashboardAlert, dashboardRecordMatchesToken} from "./dashboard-shaping.js";
 import {isContentId, validateBlob, documentReferences, validateReferences, collectOldBlobs, protectSupersededBlobs} from "./runtime-documents.js";
 import {shouldArchiveRuntime, archiveRuntimeDocument, readRuntimeArchive, deleteRuntimeArchive} from "./runtime-archive.js";
+import {guardR2Env} from "./r2-budget.js";
 const MAX_BYTES = 8 * 1024 * 1024;
 const CHUNK_CHARS = 32000;
 
@@ -23,7 +24,7 @@ async function readDocument(tx, name, metadataOnly = false, env = {}) {
 }
 
 export class RuntimeSnapshots {
-  constructor(state, env = {}) { this.storage = state.storage; this.env = env; }
+  constructor(state, env = {}) { this.storage = state.storage; this.env = guardR2Env(env); }
 
   fetch(request) {
     // Serialize restaging with archive GC so a re-published immutable object

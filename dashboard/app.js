@@ -1,9 +1,10 @@
-import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261003-storage-v1";
-import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261003-storage-v1";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-storage-v1";
-import { installTerminology } from "./terminology.js?v=20261003-storage-v1";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261003-storage-v1";
-import { loadTokenDetail } from "./static-detail.js?v=20261003-storage-v1";
+import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261003-r2-budget-v1";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261003-r2-budget-v1";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-r2-budget-v1";
+import { installTerminology } from "./terminology.js?v=20261003-r2-budget-v1";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261003-r2-budget-v1";
+import { loadTokenDetail } from "./static-detail.js?v=20261003-r2-budget-v1";
+import { r2BudgetView } from "./r2-budget-view.js?v=20261003-r2-budget-v1";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -14,12 +15,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261003-storage-v1";
+} from "./token-state.js?v=20261003-r2-budget-v1";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261003-storage-v1";
+} from "./filter-scope.js?v=20261003-r2-budget-v1";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const PENDING_TOKEN_ACTIONS_KEY = "solana-radar:pending-token-actions:v1";
@@ -133,6 +134,7 @@ const state = {
   publishedDashboard: false,
   dataSource: "none",
   storageSource: null,
+  r2Budget: null,
   fallbackReason: null,
   remoteRetryAt: 0,
   remoteFailureCount: 0,
@@ -1812,6 +1814,7 @@ function applyDashboardPayload(payload, source, fallbackReason = null, requestId
   state.scanStatus = payload?.scan_status || {};
   state.discoveryStatus = payload?.discovery_status || {};
   state.historyStatus = payload?.history_status || {};
+  if (payload?.r2_budget) state.r2Budget = payload.r2_budget;
   state.tokenDetailManifest = payload?.token_details?.generation === nextGeneratedAt
     ? payload.token_details
     : state.tokenDetailManifest?.generation === nextGeneratedAt ? state.tokenDetailManifest : null;
@@ -1846,6 +1849,14 @@ async function loadData() {
   const requestId = ++state.dashboardRequestId;
   const currentRequest = () => requestId === state.dashboardRequestId;
   state.publishedDashboard = isPublishedDashboard();
+  const budgetUrl = remoteDataUrl();
+  if (budgetUrl) {
+    fetchJson(`${budgetUrl}/api/storage/r2-budget`).then(budget => {
+      if (currentRequest()) { state.r2Budget = budget; renderStatus(); }
+    }).catch(() => {
+      if (currentRequest()) { state.r2Budget = {enabled:true,paused:true,status:"unavailable"}; renderStatus(); }
+    });
+  }
   if (state.publishedDashboard) {
     const remoteTask = remoteDataUrl() && Date.now() >= state.remoteRetryAt
       ? fetchRemoteDashboard()
@@ -2022,6 +2033,11 @@ function renderDetailLoadState(key) {
 }
 
 function renderStatus() {
+  const budget = r2BudgetView(state.r2Budget);
+  const budgetAlert = document.querySelector("#r2BudgetAlert");
+  const budgetMonitor = document.querySelector("#r2BudgetMonitor");
+  if (budgetAlert) budgetAlert.innerHTML = budget.alert;
+  if (budgetMonitor) budgetMonitor.innerHTML = budget.panel;
   const report = state.report || {};
   const status = state.scanStatus || {};
   const discoveryStatus = state.discoveryStatus || {};

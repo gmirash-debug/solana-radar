@@ -1372,7 +1372,7 @@ def sync_remote_snapshot(report_payload, state, config):
                 temp = path.with_suffix(".tmp")
                 temp.write_bytes(gzip.compress(json.dumps(pending_body, separators=(",", ":")).encode()))
                 temp.replace(path)
-                deferred_reason = "legacy archive waits for durable queue headroom"
+                deferred_reason = pending_body.get("_sync_deferred_reason") or "legacy archive waits for durable queue headroom"
                 continue
             if pending_body.get("_sync_rejected_history"):
                 quarantine = REMOTE_OUTBOX_DIR / "quarantine"
@@ -1407,7 +1407,7 @@ def sync_remote_snapshot(report_payload, state, config):
 
 def send_remote_snapshot(payload, config, deadline=None, legacy=False):
     """Publish the list first, then idempotent bounded evidence/history batches."""
-    detail_fields = {"detail_signal_theses", "detail_current_alerts", "detail_history", "history_ledger", "market", "_sync_progress", "_sync_rejected_history"}
+    detail_fields = {"detail_signal_theses", "detail_current_alerts", "detail_history", "history_ledger", "market", "_sync_progress", "_sync_rejected_history", "_sync_deferred_reason"}
     summary = {key: value for key, value in payload.items() if key not in detail_fields}
     summary["report"] = compact_report_for_remote(summary.get("report") or {})
     summary["chunked"] = True
@@ -1433,6 +1433,7 @@ def send_remote_snapshot(payload, config, deadline=None, legacy=False):
         return [row for index, row in enumerate(events[start:end], start) if str(index) not in rejected]
     # Archive events before any operational D1 write: its daily quota can be exhausted.
     start = int(progress.get("durable_history_ledger") or 0)
+    archive_paused = False
     while start < len(events):
         if legacy and int(config.get("_history_queue_pending") or 0) >= int(config.get("legacy_history_queue_soft_limit", 128)):
             return False
@@ -1440,8 +1441,17 @@ def send_remote_snapshot(payload, config, deadline=None, legacy=False):
         while len(batch) > 1 and len(json.dumps(batch, separators=(",", ":")).encode()) > 900_000:
             batch = batch[:max(1, len(batch) // 2)]
         end = start + len(batch)
-        send("durable_history_ledger", end, "/api/runtime/history",
-             {"generated_at": generated_at, "history_ledger": {"events": history_batch(start, end)}})
+        try:
+            send("durable_history_ledger", end, "/api/runtime/history",
+                 {"generated_at": generated_at, "history_ledger": {"events": history_batch(start, end)}})
+        except RuntimeError as exc:
+            if "r2_monthly_budget_paused" not in str(exc) and "r2_budget_" not in str(exc):
+                raise
+            # Keep unacknowledged evidence in the local outbox, but publish
+            # current operational data to SQL while the archive is paused.
+            archive_paused = True
+            payload["_sync_deferred_reason"] = "R2 paused by the monthly budget guard; original evidence stays queued"
+            break
         start = end
     send("summary", 1, "/api/ingest/snapshot", summary)
     # Bounded requests resume from the last acknowledged batch after a failure.
@@ -1457,7 +1467,9 @@ def send_remote_snapshot(payload, config, deadline=None, legacy=False):
     # The durable queue owns historical delivery; do not write the same new events
     # into the legacy D1 outbox as well. Its pre-existing backlog still drains separately.
     progress["history_ledger"] = int(progress.get("durable_history_ledger") or 0)
-    return True
+    if not archive_paused:
+        payload.pop("_sync_deferred_reason", None)
+    return not archive_paused
 
 
 def sync_remote_discovery_status(status, config):

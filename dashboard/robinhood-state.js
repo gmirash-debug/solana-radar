@@ -1,4 +1,4 @@
-import {numeric} from "./decision-view.js?v=20261003-storage-v1";
+import {numeric} from "./decision-view.js?v=20261003-r2-budget-v1";
 
 export const CHAIN_ID = 4663;
 export function ageFilterLabel(config) {

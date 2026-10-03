@@ -10,6 +10,7 @@ import * as decision from "../decision-view.js";
 import * as staticDetail from "../static-detail.js";
 import * as tokenState from "../token-state.js";
 import * as filterScope from "../filter-scope.js";
+import * as r2Budget from "../r2-budget-view.js";
 
 const now = Date.parse("2026-10-03T12:00:00Z");
 const checked = "2026-10-03T11:50:00Z";
@@ -35,7 +36,7 @@ function fixture(t, {signalThesis = thesis(), alerts = [], overrides = {}} = {})
     static now() { return now; }
   }
   const context = vm.createContext({...dataSource, ...coordination, ...terminology, ...decision,
-    ...staticDetail, ...tokenState, ...filterScope,
+    ...staticDetail, ...tokenState, ...filterScope, ...r2Budget,
     decisionView:(token, config) => decision.decisionView(token, config, now),
     resolveCurrentMarket:args => tokenState.resolveCurrentMarket({...args, now}),
     document:dom.window.document, window:dom.window, localStorage:dom.window.localStorage,
@@ -306,11 +307,11 @@ test("partial movement note needs actual observations and never renders raw amou
 
 test("HTML entrypoint and every dashboard JS import use the same evidence cache tag", () => {
   const html = readFileSync(new URL("../index.html",import.meta.url),"utf8");
-  assert.match(html, /src="radar-bootstrap\.js\?v=20261003-storage-v1"/);
+  assert.match(html, /src="radar-bootstrap\.js\?v=20261003-r2-budget-v1"/);
   for (const file of readdirSync(new URL("../",import.meta.url)).filter(file => file.endsWith(".js"))) {
     const source = readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
     for (const match of source.matchAll(/(?:from\s+|import\()"(\.\/[^"?]+\.js\?v=([^"]+))"/g)) {
-      assert.equal(match[2],"20261003-storage-v1",`${file}: ${match[1]}`);
+      assert.equal(match[2],"20261003-r2-budget-v1",`${file}: ${match[1]}`);
     }
   }
 });
