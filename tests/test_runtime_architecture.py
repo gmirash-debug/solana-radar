@@ -121,7 +121,7 @@ class RuntimeArchitectureTests(unittest.TestCase):
         pools = [s.Pool(pool_address=x, token_address=x, mcap_usd=100000, volume_1h_usd=1000, pair_created_at=1790812800) for x in ("signal", "control")]
         state = {"market": {x: {"latest_price_usd": 1, "latest_mcap_usd": 100000, "latest_liquidity_usd": 10000,
                                 "latest_seen_at": "2026-10-03T00:00:00Z"} for x in ("signal", "control")}}
-        summaries = [{"pool": {"token_address": "control"}, "trade_fetch": {"source": "enhanced_transactions", "passes": [{"coverage_complete": True}]}}]
+        summaries = [{"pool": {"token_address": "control"}, "detector_executed": True, "trade_fetch": {"source": "enhanced_transactions", "passes": [{"coverage_complete": True}]}}]
         alerts = [{"pool": {"token_address": "signal"}, "score": 50, "signal_family": "reactivation_wave"}]
         dataset = capture_evaluation_rows(state, pools, summaries, alerts, "2026-10-03T00:00:00Z", "version1", s.outcome_market_snapshot)
         self.assertFalse(dataset["controls"]["control"]["signal_present"])
@@ -131,3 +131,94 @@ class RuntimeArchitectureTests(unittest.TestCase):
         summary = evaluate_signals({"generated_at": "2026-10-03T00:15:00Z", "signal_evaluation_dataset": dataset}, options=EvaluationOptions(bootstrap_samples=100))["summary"]
         self.assertEqual(summary["counts"]["primary_controls"], 1)
         self.assertFalse(summary["edge_claim"])
+
+    def test_prospective_horizon_uses_source_time_not_run_time(self):
+        start, end = "2026-10-03T00:00:00Z", "2026-10-03T01:00:00Z"
+        source_at = "2026-10-03T00:45:00Z"
+        pool = s.Pool(pool_address="pool", token_address="signal", source="dexscreener",
+            price_usd=1, mcap_usd=100000, liquidity_usd=10000, pair_created_at=1790812800,
+            market_snapshot_at=s.parse_timestamp(start))
+        state = {}
+        s.record_market_observations(state, [pool], start)
+        dataset = capture_evaluation_rows(state, [pool], [], [{"pool": {"token_address": "signal"}}],
+            start, "v1", s.outcome_market_snapshot)
+        pool.price_usd = 2
+        pool.market_snapshot_at = s.parse_timestamp(source_at)
+        s.record_market_observations(state, [pool], end)
+        self.assertEqual(s.parse_timestamp(state["market"]["signal"]["latest_seen_at"]),
+            s.parse_timestamp(source_at))
+        capture_evaluation_rows(state, [pool], [], [], end, "v1", s.outcome_market_snapshot)
+        self.assertNotIn("1h", dataset["episodes"]["signal"]["horizons"])
+        result = evaluate_signals({"generated_at": end, "signal_evaluation_dataset": dataset},
+            options=EvaluationOptions(horizons=("1h",), bootstrap_samples=100))
+        checkpoint = result["episode_diagnostics"][0]["outcomes"]["1h"]
+        self.assertEqual(checkpoint["status"], "missing")
+        self.assertIsNone(checkpoint["return_pct"])
+        for at, stale in ((0, False), (s.parse_timestamp(source_at), True)):
+            with self.subTest(source_at=at, stale=stale):
+                pool.market_snapshot_at, pool.market_snapshot_stale = at, stale
+                unknown_state = {}
+                s.record_market_observations(unknown_state, [pool], end)
+                entry = unknown_state["market"]["signal"]
+                self.assertTrue(entry["market_snapshot_stale"])
+                self.assertIsNone(s.outcome_market_snapshot(entry, end))
+                if not at:
+                    self.assertIsNone(entry["latest_seen_at"])
+
+    def test_prospective_missing_price_is_not_a_measured_zero_loss(self):
+        self.assertIsNone(s.Pool(pool_address="unknown").price_usd)
+        self.assertIsNone(s.gecko_pool_from_item({"attributes": {"address": "pool"}}, "gecko").price_usd)
+        self.assertIsNone(s.dexscreener_pool_from_pair({"pairAddress": "pool"}, "dexscreener").price_usd)
+        start, end = "2026-10-03T00:00:00Z", "2026-10-03T01:00:00Z"
+        for exit_price, basis, expected in ((None, "mcap_proxy", 20), (0, "price", -100)):
+            with self.subTest(exit_price=exit_price):
+                pool = s.Pool(pool_address="pool", token_address="signal", source="dexscreener",
+                    price_usd=1, mcap_usd=100000, liquidity_usd=10000, pair_created_at=1790812800,
+                    market_snapshot_at=s.parse_timestamp(start))
+                state = {}
+                s.record_market_observations(state, [pool], start)
+                dataset = capture_evaluation_rows(state, [pool], [], [{"pool": {"token_address": "signal"}}],
+                    start, "v1", s.outcome_market_snapshot)
+                pool.price_usd, pool.mcap_usd = exit_price, 120000
+                pool.market_snapshot_at = s.parse_timestamp(end)
+                s.record_market_observations(state, [pool], end)
+                capture_evaluation_rows(state, [pool], [], [], end, "v1", s.outcome_market_snapshot)
+                frozen = dataset["episodes"]["signal"]["horizons"]["1h"]
+                self.assertEqual(frozen["price_usd"], exit_price)
+                result = evaluate_signals({"generated_at": end, "signal_evaluation_dataset": dataset},
+                    options=EvaluationOptions(horizons=("1h",), bootstrap_samples=100))
+                checkpoint = result["episode_diagnostics"][0]["outcomes"]["1h"]
+                self.assertEqual(checkpoint["status"], "eligible")
+                self.assertEqual(checkpoint["return_basis"], basis)
+                self.assertAlmostEqual(checkpoint["return_pct"], expected)
+        self.assertIsNone(s.outcome_market_snapshot({"latest_price_usd": 1, "latest_mcap_usd": 100000}, end))
+        self.assertIsNone(s.outcome_market_snapshot({"latest_seen_at": end, "latest_price_usd": None}, end))
+
+    def test_prospective_controls_require_executed_unsuppressed_complete_scan(self):
+        at = "2026-10-03T00:00:00Z"
+        pool = s.Pool(pool_address="pool", token_address="control", pair_created_at=1790812800)
+        base = {"pool": {"token_address": "control"}, "detector_executed": True,
+            "wallet_classification_required": True, "candidate_buys": 3, "classified_buys": 3,
+            "trade_fetch": {"source": "enhanced_transactions", "passes": [{"coverage_complete": True}]}}
+        cases = [
+            ("fully_classified", {}, True),
+            ("detector_missing", {"detector_executed": None}, False),
+            ("detector_not_run", {"detector_executed": False}, False),
+            ("suppressed", {"market_snapshot_suppressed": True}, False),
+            ("stale_pool", {"pool": {"token_address": "control", "market_snapshot_stale": True}}, False),
+            ("stale_activity", {"trade_fetch": {**base["trade_fetch"], "market_activity_stale": True}}, False),
+            ("partial_pass", {"trade_fetch": {**base["trade_fetch"],
+                "passes": [{"coverage_complete": True}, {"coverage_complete": False}]}}, False),
+            ("classic_incomplete", {"classified_buys": 0}, False),
+            ("classification_policy_unknown", {"wallet_classification_required": None, "classified_buys": 0}, False),
+            ("wave_only", {"wallet_classification_required": False, "classified_buys": 0}, True),
+        ]
+        for name, changes, eligible in cases:
+            with self.subTest(case=name):
+                state = {"market": {"control": {"latest_seen_at": at, "latest_price_usd": 1,
+                    "latest_mcap_usd": 100000, "latest_liquidity_usd": 10000}}}
+                summary = {**copy.deepcopy(base), **copy.deepcopy(changes)}
+                if name == "detector_missing":
+                    summary.pop("detector_executed")
+                dataset = capture_evaluation_rows(state, [pool], [summary], [], at, "v1", s.outcome_market_snapshot)
+                self.assertEqual("control" in dataset["controls"], eligible)

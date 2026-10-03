@@ -116,3 +116,13 @@ class PagesPublicationTests(unittest.TestCase):
                     {"generation": snapshot["report"]["generated_at"], "files": {}},
                     Path(directory), fetcher=fetcher, max_seconds=0)
         fetcher.assert_not_called()
+
+    def test_operational_publication_can_defer_static_details_without_inventing_wallets(self):
+        snapshot, _, _ = self.published_fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = preserve_published_details(snapshot,
+                {"generation": snapshot["report"]["generated_at"], "files": {}},
+                Path(directory), fetcher=mock.Mock(), max_seconds=0, allow_partial=True)
+            self.assertEqual(manifest["files"], {})
+            self.assertEqual(manifest["preservation_status"], "partial_time_budget")
+            self.assertEqual(list(Path(directory).glob("*.json")), [])

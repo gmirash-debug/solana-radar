@@ -9,5 +9,6 @@ test("shadow evaluation keeps missing outcomes separate, escapes labels and neve
   assert.match(html,/24h&lt;script&gt;/);
   assert.doesNotMatch(html,/<script>/);
   assert.match(html,/<td>1<\/td><td>2<\/td><td>2<\/td><td>0<\/td>/);
-  assert.equal(renderEvaluationSummary(null),"");
+  assert.match(renderEvaluationSummary(null), /Prospective observations pending/);
+  assert.doesNotMatch(renderEvaluationSummary(null), /frozen signals|<td>0/);
 });

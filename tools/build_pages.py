@@ -111,7 +111,7 @@ def publish_token_details(snapshot, runtime_state, destination):
     return {"generation": generation, "files": files}
 
 
-def preserve_published_details(snapshot, manifest, destination, fetcher=requests.get, max_seconds=90):
+def preserve_published_details(snapshot, manifest, destination, fetcher=requests.get, max_seconds=90, allow_partial=False):
     """Reuse exact-generation public details if the runtime cache is older."""
     previous = snapshot.get("token_details") or {}
     if previous.get("generation") != manifest["generation"]:
@@ -125,10 +125,18 @@ def preserve_published_details(snapshot, manifest, destination, fetcher=requests
             raise ValueError("Unsafe published wallet detail path")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            if allow_partial:
+                manifest["preservation_status"] = "partial_time_budget"
+                break
             raise ValueError("Wallet detail preservation exceeded its publication budget")
-        response = fetcher(PUBLISHED_SNAPSHOT.rsplit("/data/", 1)[0] + "/" + path,
-                           timeout=min(15, remaining))
-        response.raise_for_status()
+        try:
+            response = fetcher(PUBLISHED_SNAPSHOT.rsplit("/data/", 1)[0] + "/" + path,
+                               timeout=min(15, remaining))
+            response.raise_for_status()
+        except requests.RequestException:
+            if not allow_partial: raise
+            manifest["preservation_status"] = "partial_provider_unavailable"
+            continue
         detail = response.json()
         summary, thesis = summaries[key], detail.get("thesis") or {}
         if (detail.get("ok") is not True or detail.get("token_key") != key
@@ -164,7 +172,9 @@ def main():
         runtime_state = {}
     detail_dir = Path(".pages/data/token-details")
     manifest = publish_token_details(selected, runtime_state, detail_dir)
-    manifest = preserve_published_details(selected, manifest, detail_dir)
+    # Ready operational data remains publishable while a bounded static-wallet
+    # copy is incomplete. Missing details stay absent and use the live API.
+    manifest = preserve_published_details(selected, manifest, detail_dir, allow_partial=True)
     selected = {**selected, "token_details": manifest}
     destination = Path(".pages/data/dashboard_fallback.json")
     destination.parent.mkdir(parents=True, exist_ok=True)

@@ -3,7 +3,7 @@ function esc(value) {
 }
 
 export function renderEvaluationSummary(summary) {
-  if (!summary || summary.mode !== "shadow") return "";
+  if (!summary || summary.mode !== "shadow") return `<section class="intelligence-section" data-evaluation-summary><h2>Signal quality</h2><p>Prospective observations pending.</p></section>`;
   const counts = summary.counts || {};
   const rows = Object.entries(summary.horizons || {}).map(([horizon, item]) => {
     const status = item.signal_outcome_status_counts || {};
