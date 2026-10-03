@@ -82,6 +82,10 @@ class RuntimeArchitectureTests(unittest.TestCase):
         self.assertEqual(fast["lanes"]["reactivation"]["age_min_hours"], 24)
         self.assertNotIn("active_pool_limit", config)
         self.assertFalse(fast["helius_initial_backfill_enabled"])
+        self.assertEqual(fast["scan_health_min_scanned_pools"], 1)
+        health = s.build_scan_health([{"pool": {"token_address": "only_due"}}],
+            {"reactivation": {"universe_pools": 100}}, fast)
+        self.assertNotEqual(health["status"], "unhealthy")
 
     def test_fast_queue_skips_expired_candidates_and_not_yet_due_theses(self):
         pools = [SimpleNamespace(pool_address=key) for key in ("expired", "candidate", "due", "later")]

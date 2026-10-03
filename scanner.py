@@ -13463,6 +13463,29 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
     return universe, summaries, all_alerts
 
 
+def publish_targeted_balance_report(rpc, universe, state, config, lane_configs, lane_stats):
+    generated_at = utc_now().isoformat().replace("+00:00", "Z")
+    report_config = report_config_for_lanes(config, lane_configs)
+    config["_scan_health"] = {"status": "degraded", "scanned_pools": 0,
+        "reasons": ["Cohort balances rechecked; no new pool transaction history scanned"],
+        "rpc_providers": rpc.provider_stats()}
+    save_runtime_state(state, config, "targeted_balances", generated_at)
+    report = build_report_payload(universe, [], [], rpc.calls, report_config, generated_at, state)
+    report.update(scan_profile="targeted", check_scope="cohort_balances_only",
+                  last_deep_scan_at=state.get("last_deep_scan_at"), lane_stats=lane_stats,
+                  lanes_scanned=list(lane_stats))
+    report["stats"]["scan_health"] = config["_scan_health"]
+    report["stats"]["rpc_providers"] = rpc.provider_stats()
+    report["signal_evaluation"] = evaluate_signals({"generated_at": generated_at,
+        "signal_evaluation_dataset": state.get("signal_evaluation_dataset", {})},
+        options=EvaluationOptions(bootstrap_samples=200, holdout_start=config.get("signal_evaluation_holdout_start")))["summary"]
+    config["_persistence"] = sync_remote_snapshot(report, state, config)
+    report["stats"]["persistence"] = config["_persistence"]
+    write_report_json(report)
+    write_dashboard_fallback(report, state, config)
+    render_report(report)
+
+
 def run_launch_history_tasks(rpc, universe, state, config, observed_at):
     if config.get("_scan_profile") == "targeted" or not config.get("launch_history_enabled", True):
         return {"status": "not_scheduled", "checked": 0}
@@ -13612,8 +13635,13 @@ def run_once(config, lane_name=None):
     config["_rpc_failovers"] = dict(rpc.route_failovers)
     config["_rpc_estimated_credits"] = int(rpc.estimated_credits)
     if config.get("_scan_profile") == "targeted" and not summaries:
-        save_runtime_state(state, config, "targeted_idle")
-        config["_targeted_idle"] = True
+        checks = sum(int(((lane.get("selection") or {}).get("cohort_monitor") or {}).get("checked") or 0)
+                     for lane in lane_stats.values())
+        if checks:
+            publish_targeted_balance_report(rpc, universe, state, config, lane_configs, lane_stats)
+        else:
+            save_runtime_state(state, config, "targeted_idle")
+            config["_targeted_idle"] = True
         return
     config["_rpc_providers"] = rpc.provider_stats()
     scan_health = build_scan_health(summaries, lane_stats, config)
@@ -13879,7 +13907,8 @@ def main():
             )
             sync_remote_scan_status(status, config)
             raise
-        status = write_scanner_status("ok", scan_health=config.get("_scan_health"), persistence=config.get("_persistence"))
+        status = write_scanner_status("idle" if config.get("_targeted_idle") else "ok",
+                                      scan_health=config.get("_scan_health"), persistence=config.get("_persistence"))
         sync_remote_scan_status(status, config)
         if not args.watch:
             break

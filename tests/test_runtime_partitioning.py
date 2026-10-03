@@ -3,6 +3,7 @@ import json
 import random
 import tempfile
 import unittest
+from unittest.mock import Mock
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +13,25 @@ from runtime_dashboard import dashboard_documents
 
 
 class RuntimePartitioningTests(unittest.TestCase):
+    def test_balance_only_report_publishes_without_inventing_a_new_signal_or_deep_scan(self):
+        state = {"last_deep_scan_at": "2026-10-03T00:00:00Z"}
+        rpc = Mock(calls={})
+        rpc.provider_stats.return_value = {}
+        config = {"_scan_profile": "targeted"}
+        with patch.object(s, "report_config_for_lanes", return_value={}), \
+             patch.object(s, "save_runtime_state"), \
+             patch.object(s, "build_report_payload", return_value={"stats": {}, "alerts": [], "signal_theses": [{"token_address": "updated"}]}), \
+             patch.object(s, "sync_remote_snapshot", return_value={"current_synced": True}) as sync, \
+             patch.object(s, "write_report_json"), patch.object(s, "write_dashboard_fallback"), patch.object(s, "render_report"):
+            s.publish_targeted_balance_report(rpc, [], state, config, {}, {})
+        report = sync.call_args.args[0]
+        self.assertEqual(report["signal_theses"][0]["token_address"], "updated")
+        self.assertEqual(report["alerts"], [])
+        self.assertEqual(report["scan_profile"], "targeted")
+        self.assertEqual(report["check_scope"], "cohort_balances_only")
+        self.assertEqual(report["last_deep_scan_at"], state["last_deep_scan_at"])
+        self.assertEqual(report["stats"]["scan_health"]["scanned_pools"], 0)
+
     def test_large_compressed_evidence_survives_partitioned_round_trip(self):
         rng = random.Random(13)
         state = {"evidence": rng.randbytes(10 * 1024 * 1024).hex()}

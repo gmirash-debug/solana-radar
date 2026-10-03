@@ -17,6 +17,9 @@ No supporting movement or statistical evidence confirms an alert by itself.
 - A large original cohort is checked in pieces. Each piece keeps its actual
   timestamp; a partial cycle is unknown, not evidence of sale or a full check.
   A cycle expires after two hours; a completed cycle is not an atomic snapshot.
+- Balance-only targeted passes publish updated cohorts without inventing new
+  alerts or advancing the deep-scan date. An idle pass leaves the previous report
+  and successful-scan time intact.
 - The extra balance allowance is 200 for deep and 60 for targeted passes.
 
 Timing is best effort: GitHub outages, long runs and exhausted provider budgets

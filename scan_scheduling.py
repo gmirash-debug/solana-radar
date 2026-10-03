@@ -23,6 +23,7 @@ def targeted_profile(config):
     result["_scan_profile"] = "targeted"
     overrides = {
         "active_pool_limit": int(config.get("targeted_pool_limit", 6)),
+        "scan_health_min_scanned_pools": 1,
         "max_wallet_classifications_per_scan": 35,
         "signal_thesis_extra_balance_budget": 60,
         "scan_priority_share": 0.8,
