@@ -1,8 +1,9 @@
-import { chooseDashboardPayload } from "./data-source.js?v=20261003-evidence-6";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-evidence-6";
-import { installTerminology } from "./terminology.js?v=20261003-evidence-6";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric } from "./decision-view.js?v=20261003-evidence-6";
-import { loadTokenDetail } from "./static-detail.js?v=20261003-evidence-6";
+import { chooseDashboardPayload } from "./data-source.js?v=20261003-runtime-7";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261003-runtime-7";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-runtime-7";
+import { installTerminology } from "./terminology.js?v=20261003-runtime-7";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric } from "./decision-view.js?v=20261003-runtime-7";
+import { loadTokenDetail } from "./static-detail.js?v=20261003-runtime-7";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -12,12 +13,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261003-evidence-6";
+} from "./token-state.js?v=20261003-runtime-7";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261003-evidence-6";
+} from "./filter-scope.js?v=20261003-runtime-7";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const DELETE_SYNC_ENDPOINT = "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/deleted-token";
@@ -3620,9 +3621,10 @@ function renderIntelligence() {
         </div>
         <button class="secondary-action" id="refreshIntelligence" type="button" ${intelligence.status === "loading" ? "disabled" : ""}>Refresh learning</button>
       </section>
+      ${renderEvaluationSummary(state.report?.signal_evaluation)}
       <section class="intelligence-kpis">
         ${detailMetric("Signal episodes", compact(overview.episodes || 0), `${compact(overview.resolved_72h || 0)} resolved at 72h`)}
-        ${detailMetric("Scanner precision", ratePct(overview.precision_2x_72h), "tradable 2x by 72h")}
+        ${detailMetric("Observed 2x", ratePct(overview.precision_2x_72h), "saved prices, not executed trades")}
         ${detailMetric("Wallet edge", ratePct(overview.edge_precision_2x_72h), overview.edge_lift ? `${Number(overview.edge_lift).toFixed(2)}x scanner baseline` : "needs more validated samples")}
         ${detailMetric("Wallets with edge", compact(overview.emerging_or_validated_wallets || 0), `${compact(overview.emerging_or_validated_clusters || 0)} evidence-based clusters`)}
       </section>

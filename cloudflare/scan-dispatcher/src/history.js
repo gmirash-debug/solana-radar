@@ -772,6 +772,66 @@ async function ingestHistoryEvent(env, rawEvent, now = nowIso(), derived = null)
   return { event_id: eventId, episode_id: episode.episode_id, wallets: wallets.length, scores_updated: scoresUpdated, clusters_updated: clustersUpdated };
 }
 
+export function createHistoryDerivedBatch() {
+  return { refreshBaseline: false, scoreWallets: new Set(), clusterWallets: new Set() };
+}
+
+export async function refreshHistoryDerivedBatch(env, derived, now = nowIso()) {
+  if (derived.refreshBaseline) await refreshMarketBaselines(env.RADAR_HISTORY_DB, now);
+  await refreshWalletScores(env.RADAR_HISTORY_DB, [...derived.scoreWallets], now);
+  if (derived.clusterWallets.size) await refreshClusters(env.RADAR_HISTORY_DB, [...derived.clusterWallets], now);
+}
+
+// The optional write hook reserves quota before each single-row upsert/batch.
+// This adapter deliberately has no operational RADAR_DB or archive dependency.
+function checkedHistoryDb(db, onWrite) {
+  const check = result => {
+    if (result?.success === false) throw new Error(result.error || "history_d1_write_failed");
+    return result;
+  };
+  const wrap = statement => ({
+    statement,
+    bind(...values) { return wrap(statement.bind(...values)); },
+    async run() { onWrite(1); return check(await statement.run()); },
+    async all() { return check(await statement.all()); },
+    async first(...args) { return statement.first(...args); },
+  });
+  return {
+    prepare(sql) { return wrap(db.prepare(sql)); },
+    async batch(statements) {
+      onWrite(statements.length);
+      const results = await db.batch(statements.map(item => item.statement));
+      if (!Array.isArray(results) || results.length !== statements.length) throw new Error("history_d1_batch_incomplete");
+      results.forEach(check);
+      return results;
+    },
+  };
+}
+
+export async function ingestHistoryBatch(env, events, { now = nowIso(), onWrite = () => {} } = {}) {
+  if (!hasHistoryDb(env)) throw new Error("history_db_not_configured");
+  if (!Array.isArray(events) || events.length > 25) throw new Error("history_batch_max_25");
+  const historyEnv = { RADAR_HISTORY_DB: checkedHistoryDb(env.RADAR_HISTORY_DB, onWrite) };
+  const derived = createHistoryDerivedBatch();
+  const ingested = [];
+  const failed = [];
+  for (const event of events) {
+    const perEvent = createHistoryDerivedBatch();
+    try {
+      const result = await ingestHistoryEvent(historyEnv, event, now, perEvent);
+      ingested.push(result);
+      derived.refreshBaseline ||= perEvent.refreshBaseline;
+      perEvent.scoreWallets.forEach(wallet => derived.scoreWallets.add(wallet));
+      perEvent.clusterWallets.forEach(wallet => derived.clusterWallets.add(wallet));
+    } catch (error) {
+      failed.push({ event_id: historyEventId(event), error: String(error?.message || error).slice(0, 500) });
+    }
+  }
+  // A throw here means NONE of the ingested events may be acknowledged.
+  await refreshHistoryDerivedBatch(historyEnv, derived, now);
+  return { ingested, failed };
+}
+
 export function historyEventsFromPayload(payload = {}) {
   const ledger = payload?.history_ledger;
   const events = Array.isArray(ledger?.events) ? ledger.events : [];

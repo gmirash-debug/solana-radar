@@ -1,4 +1,4 @@
-"""Offline, bounded SPL-token position evidence. No RPC or ownership inference.
+"""Bounded SPL-token position evidence. No implicit RPC or ownership inference.
 
 Contract
 --------
@@ -22,6 +22,10 @@ analyze_position seeds a frozen, disjoint purchase denominator per token account
  retained_upper_raw (default min(balance_raw, bought_raw))}. The seed is AFTER
 all transactions in from_slot; seed balances and attribution must share that
 boundary. Never seed a lower bound from min(current_balance, historical_buys).
+Receipt-derived seeds additionally require receipt_slot_boundary_verified=True
+as a trusted caller assertion; resolve_position_history sets this only after
+validating its adapter's seed_boundary coverage. History after the seed slot
+alone does not establish that a receipt post-balance was its slot-end balance.
 Each batch must come from parse_position_transaction. transaction_index is a
 caller-supplied canonical block order, NOT signature order. Ambiguous same-slot
 ordering degrades evidence instead of inventing an order.
@@ -65,7 +69,15 @@ Optional bounded ledger example (use only transactions already fetched)::
 
 Keep this descriptive evidence separate from actionable/confirmation logic.
 Current scanner float swap rows cannot supply exact raw seeds or swap witnesses.
-No helper follows unknown destinations, fetches history, or proves ownership.
+freeze_receipt_seeds can instead freeze one raw, reconciled pool receipt component
+per owner. This is NOT the entire original cohort or a verified protocol buy.
+Capture its result once per thesis, including unavailable entries; do not rerun
+selection against later buys. Receipt seeds require a verified seed-slot tail
+boundary before the slot-based resolver can establish retained provenance.
+resolve_position_history optionally follows exact token-account destinations via
+a caller-owned history callback. It never discovers accounts from a wallet's
+current balance or follows public-service destinations. See its callback contract
+before integration; it does not implement provider pagination or swap decoding.
 """
 
 from collections import defaultdict
@@ -328,6 +340,219 @@ def _sale_legs(witness, batch, outer, legs, programs):
         return None
 
 
+def freeze_receipt_seeds(mint, transactions, parsed_swaps, cohort_owners, *,
+                         service_owners=(), service_accounts=(), max_owners=40,
+                         max_transactions=256, max_swaps=512,
+                         max_instructions=512, max_accounts=256):
+    """Freeze one latest explicit successful pool-buy receipt component per owner.
+
+    Returns ``owners[owner]`` with {status, seed_slot, signature, bought_raw,
+    seeds, capture_key, issues}; each seed is an analyze_position-compatible raw
+    account row. All returned rows have scope='receipt_component_not_entire_cohort'.
+    bought_raw is the exact positive account delta, NOT any parsed/UI buy amount.
+    Both retained bounds equal that delta immediately after the receipt, even
+    when its post-balance also contains older inventory. Multiple positive token
+    accounts in that ONE receipt are disjoint; no amounts across buys are summed.
+
+    Parsed swaps only nominate signature/pool/token_recipient with kind='buy'
+    and exact token_address. No signer fallback, float conversion or largest-owner
+    heuristic is used. The existing raw parser must reconcile every mint leg as
+    a direct pool-owner -> recipient-owner transfer, with matching net deltas.
+    This establishes a token receipt component, NOT protocol swap/payment proof.
+    New/closed accounts without both raw snapshots and decimals fail closed.
+
+    Failed buys are skipped; a missing/ambiguous candidate cannot be ordered.
+    Duplicate signatures/swap rows, a latest-slot tie, or unsafe latest receipt
+    refuse that owner's capture, never silently fall back to an older buy. Known
+    pool owners and caller-classified public services cannot become seed owners.
+    Owner selection is a bounded prefix in caller order, default 40; oversized
+    receipt/swap inputs reject the whole observation set, never a partial prefix.
+
+    This function is stateless. The parent MUST store its capture once per thesis
+    before later rechecks, even if unavailable; do not replace it with rebuys.
+    A receipt post-state is not a slot-end state: adapter coverage must attest
+    seed_boundary={account, slot, signature, owner, mint, decimals, balance_raw,
+    bought_raw, no_later_successful_activity: True} on a finalized page for each
+    receipt seed. Amounts/identity must come from its finalized receipt, not be
+    echoed from an unverified capture or reconstructed from a current balance.
+    Without that proof the resolver
+    reports partial evidence, not guaranteed holdings or original sales. Different
+    owners' seed slots may differ; replay their components separately, not with
+    one invented shared slot or a reconstructed entire-cohort denominator.
+    """
+    if not _address(mint) or not all(isinstance(rows, Sequence) and not isinstance(rows, (str, bytes))
+                                   for rows in (transactions, parsed_swaps, cohort_owners)):
+        raise ValueError("Expected exact mint and bounded receipt/swap/owner sequences")
+    owner_limit, tx_limit, swap_limit, instruction_limit, account_limit = map(
+        _raw, (max_owners, max_transactions, max_swaps, max_instructions, max_accounts))
+    owners = list(cohort_owners[:owner_limit])
+    if not all(_address(owner) for owner in owners) or len(set(owners)) != len(owners):
+        raise ValueError("Selected cohort owners must be unique exact addresses")
+    scope = "receipt_component_not_entire_cohort"
+    issues = {"owner_limit"} if len(cohort_owners) > owner_limit else set()
+    entries = {owner: {"status": "unavailable", "scope": scope, "seeds": [],
+                       "issues": [], "seed_slot": None, "signature": None,
+                       "bought_raw": None, "capture_key": None} for owner in owners}
+    receipts, swaps, nomination_issues = defaultdict(list), defaultdict(list), defaultdict(set)
+    excluded_owners, excluded_accounts = set(service_owners), set(service_accounts)
+    if len(transactions) > tx_limit or len(parsed_swaps) > swap_limit:
+        issues.add("receipt_observation_limit")
+        transactions, parsed_swaps = [], []
+        for entry in entries.values():
+            entry["issues"] = ["receipt_observation_limit"]
+    for tx in transactions:
+        transaction = tx.get("transaction") if isinstance(tx, Mapping) else None
+        signatures = transaction.get("signatures") if isinstance(transaction, Mapping) else None
+        signature = _address(signatures[0]) if isinstance(signatures, list) and signatures else None
+        if signature:
+            receipts[signature].append(tx)
+    for swap in parsed_swaps:
+        if not isinstance(swap, Mapping):
+            continue
+        pool = _address(swap.get("pool_address"))
+        if pool:
+            excluded_owners.add(pool)
+        if swap.get("token_address") == mint:
+            signature = _address(swap.get("signature"))
+            if signature:
+                swaps[signature].append(swap)
+            elif swap.get("kind") == "buy" and _address(swap.get("token_recipient")) in entries:
+                nomination_issues[swap["token_recipient"]].add("missing_buy_receipt_signature")
+    for owner, entry in entries.items():
+        if owner in excluded_owners:
+            entry["issues"] = ["public_service_seed_owner"]
+            continue
+        candidates, problems = [], set(entry["issues"]) | nomination_issues[owner]
+        for signature, rows in swaps.items():
+            buys = [row for row in rows if row.get("kind") == "buy" and row.get("token_recipient") == owner]
+            if not buys:
+                continue
+            bodies = receipts.get(signature, [])
+            if len(bodies) != 1:
+                problems.add("duplicate_receipt_signature" if bodies else "missing_buy_receipt")
+                continue
+            tx, swap = bodies[0], buys[0]
+            meta = tx.get("meta")
+            if not isinstance(meta, Mapping) or "err" not in meta:
+                problems.add("missing_receipt_success_metadata")
+                continue
+            if meta["err"] is not None:
+                continue
+            try:
+                slot = _raw(tx.get("slot"))
+            except ValueError:
+                problems.add("missing_receipt_slot")
+                continue
+            candidates.append((slot, signature, swap, tx, len(rows)))
+        if problems or not candidates:
+            entry["issues"] = sorted(problems or {"no_successful_pool_buy_receipt"})
+            continue
+        latest_slot = max(row[0] for row in candidates)
+        latest = [row for row in candidates if row[0] == latest_slot]
+        if len(latest) != 1:
+            entry["issues"] = ["ambiguous_latest_buy_slot"]
+            continue
+        slot, signature, swap, tx, swap_count = latest[0]
+        entry.update(seed_slot=slot, signature=signature)
+        pool = _address(swap.get("pool_address"))
+        if swap_count != 1:
+            entry["issues"] = ["duplicate_or_conflicting_pool_swap_rows"]
+            continue
+        if not pool or swap.get("owner_resolution") == "unresolved":
+            entry["issues"] = ["unresolved_pool_buy_identity"]
+            continue
+        if "slot" in swap:
+            try:
+                if _raw(swap["slot"]) != slot:
+                    raise ValueError("Buy receipt slot mismatch")
+            except ValueError:
+                entry["issues"] = ["pool_buy_slot_mismatch"]
+                continue
+        batch = parse_position_transaction(tx, mint, max_instructions=instruction_limit,
+                                           max_accounts=account_limit)
+        if batch["status"] != "parsed":
+            entry["issues"] = sorted({"incomplete_buy_receipt"} | set(batch["issues"]))
+            continue
+        accounts = {account: row for account, row in batch["accounts"].items() if row["mint"] == mint}
+        if len({row["decimals"] for row in accounts.values()}) != 1:
+            entry["issues"] = ["inconsistent_mint_decimals"]
+            continue
+        deltas = {account: int(row["after_raw"]) - int(row["before_raw"])
+                  for account, row in accounts.items()}
+        positive = {account: amount for account, amount in deltas.items()
+                    if amount > 0 and accounts[account]["owner"] == owner}
+        total = sum(positive.values())
+        if not total or any(amount < 0 and accounts[account]["owner"] == owner for account, amount in deltas.items()):
+            entry["issues"] = ["non_positive_or_mixed_recipient_delta"]
+            continue
+        if any(accounts[account]["owner"] not in {owner, pool} and amount for account, amount in deltas.items()):
+            entry["issues"] = ["ambiguous_receipt_participants"]
+            continue
+        if any(account in excluded_accounts for account in positive):
+            entry["issues"] = ["public_service_seed_account"]
+            continue
+        legs = batch["transfers"]
+        credits = defaultdict(int)
+        if not legs or any(leg["source_owner"] != pool or leg["destination_owner"] != owner for leg in legs):
+            entry["issues"] = ["ambiguous_or_unverified_pool_receipt_flow"]
+            continue
+        for leg in legs:
+            credits[leg["destination_account"]] += int(leg["amount_raw"])
+        pool_delta = sum(amount for account, amount in deltas.items() if accounts[account]["owner"] == pool)
+        if dict(credits) != positive or pool_delta != -total:
+            entry["issues"] = ["pool_receipt_delta_mismatch"]
+            continue
+        ambiguous_slot = False
+        for other in transactions:
+            other_transaction = other.get("transaction") if isinstance(other, Mapping) else None
+            if not isinstance(other_transaction, Mapping):
+                continue
+            other_signatures = other_transaction.get("signatures")
+            if isinstance(other_signatures, list) and other_signatures and other_signatures[0] == signature:
+                continue
+            try:
+                other_slot = _raw(other.get("slot"))
+            except ValueError:
+                continue
+            if other_slot != slot:
+                continue
+            other_meta = other.get("meta")
+            if isinstance(other_meta, Mapping) and "err" in other_meta and other_meta["err"] is not None:
+                continue
+            message = other_transaction.get("message")
+            keys = message.get("accountKeys") if isinstance(message, Mapping) else None
+            if isinstance(keys, list) and (len(keys) > account_limit or any(
+                    (k.get("pubkey") if isinstance(k, Mapping) else k) in positive
+                    for k in keys if _address(k.get("pubkey") if isinstance(k, Mapping) else k))):
+                ambiguous_slot = True
+                break
+        if ambiguous_slot:
+            entry["issues"] = ["ambiguous_seed_slot_activity"]
+            continue
+        entry.update(status="frozen_receipt_component", pool_address=pool,
+            bought_raw=str(total), capture_key=f"{mint}:{owner}:{signature}",
+            seed_boundary="immediately_after_receipt", requires_seed_slot_tail_check=True,
+            buy_classification="caller_parsed_not_protocol_verified",
+            seeds=[{"mint": mint, "account": account, "owner": owner,
+                    "decimals": accounts[account]["decimals"], "bought_raw": str(amount),
+                    "balance_raw": accounts[account]["after_raw"],
+                    "retained_lower_raw": str(amount), "retained_upper_raw": str(amount),
+                    "scope": scope, "seed_slot": slot, "seed_signature": signature,
+                    "seed_boundary": "immediately_after_receipt"}
+                   for account, amount in sorted(positive.items())])
+    issues.update(issue for entry in entries.values() for issue in entry["issues"])
+    return {"version": VERSION, "mint": mint, "scope": scope,
+        "status": "partial" if any(entry["seeds"] for entry in entries.values()) else "unavailable",
+        "denominator": "selected_receipt_net_positive_raw_delta",
+        "original_cohort_denominator_complete": False, "wallet_history_complete": False,
+        "ownership": "not_established", "affects_original_cohort_retention": False,
+        "confirmation_eligible": False, "capture_policy": "once_per_thesis_never_replace_with_rebuys",
+        "supplied_owner_count": len(cohort_owners), "selected_owner_count": len(entries),
+        "owners": entries, "issues": sorted(issues),
+        "limits": {"owners": owner_limit, "transactions": tx_limit, "swaps": swap_limit,
+                   "instructions": instruction_limit, "accounts_per_transaction": account_limit}}
+
+
 def analyze_position(mint, seeds, batches, *, from_slot, to_slot,
                      history_complete=False, closing_balances=(),
                      service_accounts=(), service_owners=(),
@@ -345,6 +570,7 @@ def analyze_position(mint, seeds, batches, *, from_slot, to_slot,
     max_transactions, max_events, max_accounts, max_depth = map(_raw, (max_transactions, max_events, max_accounts, max_depth))
     excluded_accounts, excluded_owners = set(service_accounts), set(service_owners)
     originals, nodes, total = set(), {}, 0
+    receipt_boundary_unverified = False
     for seed in seeds:
         if not isinstance(seed, Mapping):
             raise ValueError("Seed rows must contain exact token account evidence")
@@ -353,6 +579,11 @@ def analyze_position(mint, seeds, batches, *, from_slot, to_slot,
             raise ValueError("Seeds require unique exact mint/account/owner scope")
         if account in excluded_accounts or owner in excluded_owners:
             raise ValueError("A public service cannot seed an original wallet position")
+        if seed.get("scope") == "receipt_component_not_entire_cohort":
+            if _raw(seed.get("seed_slot")) != start or not _address(seed.get("seed_signature")):
+                raise ValueError("Receipt components require their own exact seed slot and signature")
+            if seed.get("receipt_slot_boundary_verified") is not True:
+                receipt_boundary_unverified = True
         bought, balance = _raw(seed.get("bought_raw")), _raw(seed.get("balance_raw"))
         lower = _raw(seed.get("retained_lower_raw", 0))
         upper = _raw(seed.get("retained_upper_raw", min(balance, bought)))
@@ -382,6 +613,8 @@ def analyze_position(mint, seeds, batches, *, from_slot, to_slot,
 
     if not complete:
         gap("incomplete_history")
+    if receipt_boundary_unverified:
+        gap("receipt_seed_slot_boundary_unverified")
     # Conflicting duplicates poison the interval; identical repeated batches do not add volume.
     unique, conflicts = {}, set()
     if len(batches) > max_transactions:
@@ -509,6 +742,7 @@ def analyze_position(mint, seeds, batches, *, from_slot, to_slot,
                     "destination_account": destination, "destination_owner": leg["destination_owner"],
                     "amount_raw": str(amount), "attributed_lower_raw": str(lower),
                     "attributed_upper_raw": str(upper), "resolution": resolution,
+                    "disposition": "sale" if sale else "custody" if service else "transfer" if valid else "unknown",
                     "common_control": "not_established"})
         for account, row in accounts.items():
             if account not in nodes or row.get("mint") != mint or row.get("after_raw") is None:
@@ -580,6 +814,341 @@ def analyze_position(mint, seeds, batches, *, from_slot, to_slot,
         "limits": {"transactions": max_transactions, "events": max_events,
                    "accounts": max_accounts, "depth": max_depth},
         "confirmation_eligible": False}
+
+
+def resolve_position_history(mint, seeds, history_fetcher, *, from_slot, to_slot,
+                             decode_transaction=None, swap_program_ids=(),
+                             service_accounts=(), service_owners=(),
+                             max_depth=2, max_addresses=32, max_transactions=256,
+                             max_events=1024, max_pages=128, page_size=64,
+                             max_instructions=512, max_transaction_accounts=256):
+    """Fetch and replay one frozen position; all network access belongs to the caller.
+
+    ``history_fetcher(account, *, mint, from_slot, to_slot, cursor, limit)``
+    (or an adapter's ``history_page`` method) returns a mapping::
+
+        {"transactions": [jsonParsed_getTransaction_result, ...],
+         "next_cursor": "opaque cursor" or None,
+         "coverage": {"provider": "provider identifier", "account": account,
+                      "mint": mint, "from_slot": from_slot, "to_slot": to_slot,
+                      "scope": "all_token_account_activity",
+                      "commitment": "finalized", "complete": True},
+         "closing_balance": {"account": account, "owner": owner, "mint": mint,
+                             "slot": to_slot, "balance_raw": "0"}}
+
+    The interval is (from_slot, to_slot], with seeds AFTER from_slot. Each page
+    repeats its scope/provider; only a terminal page may assert complete=True.
+    This attests to ALL account activity across the accumulated pages, including
+    non-pool transfers, failed transactions, and available transaction bodies.
+    An empty page, exhausted cursor, missing/closed account, provider's retention
+    floor, or an RPC signature list alone is NOT evidence of complete history.
+    Adapters must paginate/filter correctly and pin the finalized horizon. An
+    optional closing balance is exact evidence at to_slot, not a live RPC balance.
+    Optional coverage.available_from_slot and coverage.gaps report pruning and
+    missing history; either contradicting the interval prevents completeness.
+    For freeze_receipt_seeds rows, coverage.seed_boundary must match the seed's
+    {account, slot, signature, owner, mint, decimals, balance_raw, bought_raw,
+    no_later_successful_activity: True} on a finalized page. Raw amounts and
+    identity must match the finalized seed receipt, not merely its signature.
+    This attests that its receipt post-state is also its slot-end state;
+    absent proof degrades all original attribution. Merely exhausting a cursor
+    for slots strictly AFTER the seed cannot verify the seed-slot tail.
+
+    ``decode_transaction(tx)`` optionally returns {transaction_index,
+    swap_witnesses}. It supplies canonical block order and trusted protocol swap
+    witnesses, NOT a buy/sell label; the existing parser validates exact legs.
+
+    Limits bound token-account addresses (not owners), accepted transaction rows
+    INCLUDING duplicates, total page calls, replay events and parser work. A page
+    exceeding the requested row limit is rejected, not truncated. Each account
+    is fetched once with bounded pagination; cycles/overlapping histories replay
+    each signature once. Discovery uses only possible original-position flow,
+    not new buys. Public services are terminal custody observations, not owned
+    children or proven sales. Custody remains in the unknown amount partition.
+
+    The existing summary schema is preserved, with coverage and marginal
+    original_position_bounds_raw added. Missing coverage anywhere deliberately
+    degrades the whole position; per-account independent retention is not proved.
+    With full provider coverage, an uninterpretable later batch clears ongoing
+    provenance but does not reverse an original-position sale already proved.
+    For targeted rechecks, seed the disjoint frozen accounts of selected owners
+    jointly and label the report as that subset, never the entire cohort. Replace
+    overlapping shadow snapshots rather than summing them. Current UI balances
+    or historical float buy amounts cannot manufacture exact attributed seeds.
+    max_pages bounds callback calls, not their internal RPCs: the adapter must
+    enforce the parent's shared request budget, retry limits and timeouts.
+    Nothing here changes scanner retention/invalidation or confirms a signal.
+    Invalid caller inputs raise ValueError before IO; provider/decoder failures
+    become partial evidence. Inputs and callback transaction objects are not mutated.
+    """
+    fetch = history_fetcher if callable(history_fetcher) else getattr(history_fetcher, "history_page", None)
+    if not callable(fetch) or (decode_transaction is not None and not callable(decode_transaction)):
+        raise ValueError("Expected a history callback/adapter and optional decoder callback")
+    if not isinstance(seeds, Sequence) or isinstance(seeds, (str, bytes)) or not seeds:
+        raise ValueError("At least one frozen token-account seed is required")
+    start, end = _raw(from_slot), _raw(to_slot)
+    depth, addresses, transactions, events, pages, size, instructions, tx_accounts = map(
+        _raw, (max_depth, max_addresses, max_transactions, max_events, max_pages,
+               page_size, max_instructions, max_transaction_accounts))
+    if not size:
+        raise ValueError("page_size must be positive")
+    seeds = deepcopy(list(seeds))
+    services, owners, programs = tuple(service_accounts), tuple(service_owners), tuple(swap_program_ids)
+    replay_options = dict(from_slot=start, to_slot=end, service_accounts=services,
+                          service_owners=owners, max_transactions=transactions,
+                          max_events=events, max_accounts=addresses, max_depth=depth)
+    # Validate the whole seed denominator before any provider calls, even if capped.
+    initial = analyze_position(mint, seeds, [], **replay_options)
+    receipt_seeds = {}
+    for seed in seeds:
+        if seed.get("scope") == "receipt_component_not_entire_cohort":
+            if _raw(seed.get("seed_slot")) != start or not _address(seed.get("seed_signature")):
+                raise ValueError("Receipt components require their own exact seed slot and signature")
+            receipt_seeds[seed["account"]] = seed
+    collected, raw_transactions, conflicts = {}, {}, set()
+    records, calls = 0, 0
+    issues = set()
+    interpretation_issues = {"incomplete_transaction_data", "transaction_decode_error", "invalid_swap_witnesses"}
+    histories = {}
+    queue = []
+    closing = []
+
+    def batches():
+        return [dict(batch, status="unavailable", transfers=[]) if signature in conflicts else batch
+                for signature, batch in collected.items()]
+
+    def discover(summary):
+        issues.update(set(summary["issues"]) & {"account_limit", "depth_limit", "event_limit"})
+        for location in sorted(summary["locations"], key=lambda row: (row["depth"], row["account"])):
+            account = location["account"]
+            if account not in histories:
+                histories[account] = {"account": account, "owner": location["owner"],
+                    "depth": location["depth"], "provider": None, "commitment": None,
+                    "providers": [], "available_from_slot": None, "reported_gap_pages": 0,
+                    "from_slot": start, "to_slot": end, "history_complete": False,
+                    "provider_history_complete": False,
+                    "receipt_boundary_verified": False if account in receipt_seeds else None,
+                    "cursor_exhausted": False, "pages": 0, "transactions_received": 0,
+                    "status": "unavailable", "issues": []}
+                queue.append(account)
+
+    discover(initial)
+    while queue:
+        account = queue.pop(0)
+        history = histories[account]
+        account_issues = set()
+        cursor, seen_cursors = None, {None}
+        while True:
+            if calls >= pages or records >= transactions:
+                account_issues.add("page_limit" if calls >= pages else "transaction_limit")
+                break
+            limit = min(size, transactions - records)
+            calls += 1
+            history["pages"] += 1
+            try:
+                page = fetch(account, mint=mint, from_slot=start, to_slot=end,
+                             cursor=cursor, limit=limit)
+            except Exception:
+                # Provider exceptions can contain credentials; do not export their text.
+                account_issues.add("history_fetch_error")
+                break
+            if not isinstance(page, Mapping) or not isinstance(page.get("transactions"), list):
+                account_issues.add("invalid_history_page")
+                break
+            rows = page["transactions"]
+            if len(rows) > limit:
+                account_issues.add("history_page_transaction_limit")
+                break
+            coverage = page.get("coverage")
+            if not isinstance(coverage, Mapping):
+                coverage = {}
+            provider = _address(coverage.get("provider"))
+            if not provider:
+                account_issues.add("missing_provider_identity")
+            else:
+                if provider not in history["providers"]:
+                    history["providers"].append(provider)
+                if history["provider"] is None:
+                    history["provider"] = provider
+                elif history["provider"] != provider:
+                    account_issues.add("history_provider_changed")
+            try:
+                scope_start, scope_end = _raw(coverage.get("from_slot")), _raw(coverage.get("to_slot"))
+            except ValueError:
+                scope_start = scope_end = None
+            if (coverage.get("account") != account or coverage.get("mint") != mint
+                    or scope_start != start or scope_end != end
+                    or coverage.get("scope") != "all_token_account_activity"):
+                account_issues.add("invalid_history_coverage_scope")
+            if "available_from_slot" in coverage:
+                try:
+                    floor = _raw(coverage["available_from_slot"])
+                    history["available_from_slot"] = max(floor, history["available_from_slot"] or 0)
+                    if start < end and floor > start + 1:
+                        account_issues.add("provider_history_pruned")
+                except ValueError:
+                    account_issues.add("invalid_provider_history_floor")
+            if coverage.get("gaps"):
+                history["reported_gap_pages"] += 1
+                account_issues.add("provider_reported_history_gaps")
+            commitment = coverage.get("commitment")
+            history["commitment"] = commitment if isinstance(commitment, str) else None
+            if commitment != "finalized":
+                account_issues.add("unfinalized_history")
+            if account in receipt_seeds and "seed_boundary" in coverage:
+                proof = coverage["seed_boundary"]
+                try:
+                    valid_boundary = (isinstance(proof, Mapping) and proof.get("account") == account
+                        and _raw(proof.get("slot")) == start
+                        and proof.get("signature") == receipt_seeds[account]["seed_signature"]
+                        and proof.get("owner") == receipt_seeds[account]["owner"]
+                        and proof.get("mint") == mint
+                        and _raw(proof.get("decimals")) == _raw(receipt_seeds[account].get("decimals"))
+                        and _raw(proof.get("balance_raw")) == _raw(receipt_seeds[account]["balance_raw"])
+                        and _raw(proof.get("bought_raw")) == _raw(receipt_seeds[account]["bought_raw"])
+                        and proof.get("no_later_successful_activity") is True and commitment == "finalized")
+                except ValueError:
+                    valid_boundary = False
+                if valid_boundary:
+                    history["receipt_boundary_verified"] = "receipt_seed_slot_boundary_unverified" not in account_issues
+                else:
+                    history["receipt_boundary_verified"] = False
+                    account_issues.add("receipt_seed_slot_boundary_unverified")
+            next_cursor = page.get("next_cursor")
+            if next_cursor is not None and not _address(next_cursor):
+                account_issues.add("invalid_history_cursor")
+                break
+            if next_cursor is not None and coverage.get("complete") is True:
+                account_issues.add("premature_history_complete")
+            balance = page.get("closing_balance")
+            if balance is not None:
+                if isinstance(balance, Mapping) and balance.get("account") == account:
+                    closing.append(deepcopy(balance))
+                else:
+                    account_issues.add("invalid_closing_balance_scope")
+            records += len(rows)
+            history["transactions_received"] += len(rows)
+            for tx in rows:
+                signature = None
+                if isinstance(tx, Mapping) and isinstance(tx.get("transaction"), Mapping):
+                    signatures = tx["transaction"].get("signatures")
+                    if isinstance(signatures, list) and signatures:
+                        signature = _address(signatures[0])
+                if not signature:
+                    account_issues.add("unavailable_transaction")
+                    continue
+                message = tx["transaction"].get("message")
+                keys = message.get("accountKeys") if isinstance(message, Mapping) else None
+                if (not isinstance(keys, list) or len(keys) > tx_accounts
+                        or not any((key.get("pubkey") if isinstance(key, Mapping) else key) == account for key in keys)):
+                    account_issues.add("transaction_missing_queried_account")
+                if signature in raw_transactions:
+                    if tx != raw_transactions[signature]:
+                        conflicts.add(signature)
+                        account_issues.add("conflicting_duplicate_transaction")
+                    if collected[signature]["status"] not in {"parsed", "failed"}:
+                        account_issues.add("incomplete_transaction_data")
+                    continue
+                metadata = {}
+                decoder_issue = None
+                if decode_transaction is not None:
+                    try:
+                        metadata = decode_transaction(deepcopy(tx))
+                        if not isinstance(metadata, Mapping):
+                            raise ValueError("Invalid transaction decoder result")
+                    except Exception:
+                        account_issues.add("transaction_decode_error")
+                        decoder_issue = "transaction_decode_error"
+                        metadata = {}
+                witnesses = metadata.get("swap_witnesses", ())
+                if (not isinstance(witnesses, Sequence) or isinstance(witnesses, (str, bytes))
+                        or len(witnesses) > instructions):
+                    account_issues.add("invalid_swap_witnesses")
+                    decoder_issue = "invalid_swap_witnesses"
+                    witnesses = ()
+                batch = parse_position_transaction(tx, mint,
+                    transaction_index=metadata.get("transaction_index"),
+                    swap_witnesses=witnesses, swap_program_ids=programs,
+                    max_instructions=instructions, max_accounts=tx_accounts)
+                if decoder_issue and batch["status"] == "parsed":
+                    batch["status"] = "partial"
+                    batch["issues"] = sorted(set(batch["issues"]) | {decoder_issue})
+                raw_transactions[signature] = deepcopy(tx)
+                collected[signature] = batch
+                if batch["status"] not in {"parsed", "failed"}:
+                    account_issues.add("incomplete_transaction_data")
+                if batch["slot"] is None or not start < batch["slot"] <= end:
+                    account_issues.add("transaction_outside_horizon")
+            if next_cursor is None:
+                history["cursor_exhausted"] = True
+                if coverage.get("complete") is not True:
+                    account_issues.add("incomplete_account_history")
+                if account in receipt_seeds and not history["receipt_boundary_verified"]:
+                    account_issues.add("receipt_seed_slot_boundary_unverified")
+                history["history_complete"] = not account_issues
+                history["provider_history_complete"] = not (account_issues - interpretation_issues)
+                break
+            if next_cursor in seen_cursors:
+                account_issues.add("history_cursor_cycle")
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        history["issues"] = sorted(account_issues)
+        history["status"] = "complete" if history["history_complete"] else "partial" if history["pages"] else "unavailable"
+        issues.update(account_issues)
+        # Discovery needs possible flow only, never a fabricated complete-history claim.
+        discover(analyze_position(mint, seeds, batches(), **replay_options))
+
+    coverage_complete = bool(histories) and not (issues - interpretation_issues) and all(
+        history["provider_history_complete"] for history in histories.values())
+    replay_seeds = [dict(seed, receipt_slot_boundary_verified=coverage_complete
+                        and histories.get(seed["account"], {}).get("receipt_boundary_verified") is True)
+                    if seed["account"] in receipt_seeds else seed for seed in seeds]
+    result = analyze_position(mint, replay_seeds, batches(), history_complete=coverage_complete,
+                              closing_balances=closing, **replay_options)
+    result["issues"] = sorted(set(result["issues"]) | issues)
+    if result["issues"]:
+        result["status"] = "partial"
+    result["history_basis"] = "provider_asserted_token_account_history" if coverage_complete else "bounded_partial_account_history"
+    result["resolver_version"] = 1
+    if receipt_seeds:
+        result["scope"] = "receipt_component_not_entire_cohort"
+        result["denominator"] = "selected_receipt_net_positive_raw_delta"
+        result["original_cohort_denominator_complete"] = False
+    result["coverage"] = {"scope": "bounded_token_account_history", "from_slot": start,
+        "to_slot": end, "providers": sorted({p for h in histories.values() for p in h["providers"]}),
+        "provider_history_complete": coverage_complete,
+        "complete": result["history_complete"] and not result["issues"],
+        "accounts": list(histories.values()), "addresses_discovered": len(histories),
+        "addresses_requested": sum(h["pages"] > 0 for h in histories.values()),
+        "pages_requested": calls, "transactions_received": records,
+        "unique_transactions": len(collected), "conflicting_signatures": sorted(conflicts),
+        "transaction_issues": [{"signature": b["signature"], "slot": b["slot"],
+                                "status": b["status"], "issues": b["issues"]}
+                               for b in collected.values() if b["issues"]],
+        "limits_reached": sorted(set(result["issues"]) & {"account_limit", "depth_limit", "event_limit",
+                                                           "transaction_limit", "page_limit", "history_page_transaction_limit"}),
+        "cycle_policy": "fetch_account_once_replay_signature_once"}
+    result["original_position_bounds_raw"] = {
+        kind: {"lower_raw": value, "upper_raw": result["upper_bounds_raw"][kind]}
+        for kind, value in result["amounts_raw"].items()}
+    result["affects_original_cohort_retention"] = False
+    result["limits"].update(addresses=addresses, pages=pages, page_size=size,
+                            instructions=instructions, transaction_accounts=tx_accounts)
+    for edge in result["edges"]:
+        destination = edge["destination_account"]
+        if edge["disposition"] == "sale":
+            follow = "sale_terminal"
+        elif edge["disposition"] == "custody":
+            follow = "public_service_terminal_beneficiary_unresolved"
+        elif edge["disposition"] == "unknown":
+            follow = "unsupported_flow"
+        elif destination in histories:
+            follow = "account_history_" + histories[destination]["status"]
+        else:
+            follow = "outside_bounded_lineage"
+        edge["follow_status"] = follow
+    return result
 
 
 def _timestamp(value):

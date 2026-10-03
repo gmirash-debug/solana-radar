@@ -23,7 +23,14 @@ import requests
 from gmgn_context import token_ath, VERSION as GMGN_VERSION
 from coordinated_activity import analyze_coordinated_activity, compact_coordinated_activity
 from wallet_links import SERVICE_KINDS, infrastructure_sources, normalize_link as normalize_wallet_link, source_kind
-from solana_position_lineage import annotate_pool_activity
+from solana_position_lineage import annotate_pool_activity, freeze_receipt_seeds
+from position_history_rpc import check_receipt_positions
+from runtime_checkpoint import build_checkpoint, restore_checkpoint
+from rpc_budget import configure_monthly_budgets, request_reservation
+from scan_scheduling import targeted_profile, fast_candidate_pools
+from launch_history import advance_launch_history
+from prospective_evidence import capture_evaluation_rows
+from signal_evaluation import evaluate_signals, EvaluationOptions
 
 
 ROOT = Path(__file__).resolve().parent
@@ -290,6 +297,7 @@ def save_runtime_state(state, config, writer, observed_at=None):
         observed_at,
     )
     save_json(STATE_PATH, state, compact=bool(config.get("state_json_compact", True)))
+    sync_runtime_checkpoint(state, config, "deep")
     return state["_runtime"]
 
 
@@ -405,6 +413,7 @@ def save_discovery_state(state, config, observed_at=None):
         state,
         compact=bool(config.get("state_json_compact", True)),
     )
+    sync_runtime_checkpoint(state, config, "discovery")
     return state["_runtime"]
 
 
@@ -1283,11 +1292,52 @@ def remote_api_call(method, path, config, payload=None, params=None):
     return result
 
 
+def load_runtime_checkpoint(state, config, kind):
+    if not remote_data_url_from_env() or not remote_ingest_secret():
+        return state
+    try:
+        result = remote_api_call("GET", "/api/runtime/checkpoint", config, params={"kind": kind})
+        payload = (result.get("document") or {}).get("value")
+        if payload:
+            state, recovered = restore_checkpoint(state, payload)
+            config[f"_runtime_{kind}_recovered"] = recovered
+            config[f"_runtime_{kind}_available"] = True
+    except Exception as exc:
+        config[f"_runtime_{kind}_restore_error"] = str(exc)[:300]
+        print(f"Durable checkpoint restore unavailable: {exc}", file=sys.stderr)
+    return state
+
+
+def sync_runtime_checkpoint(state, config, kind):
+    if not remote_data_url_from_env() or not remote_ingest_secret():
+        return {"status": "local_only"}
+    try:
+        runtime = state.get("_runtime", {})
+        result = remote_api_call("POST", "/api/runtime/checkpoint", config, {
+            "checkpoint": build_checkpoint(state), "updated_at": runtime.get("updated_at"),
+            "revision": runtime.get("revision", 0)}, params={"kind": kind})
+        config[f"_runtime_{kind}_saved"] = result
+        return result
+    except Exception as exc:
+        result = {"ok": False, "error": str(exc)[:300]}
+        config[f"_runtime_{kind}_saved"] = result
+        print(f"Durable checkpoint save unavailable; local state kept: {exc}", file=sys.stderr)
+        return result
+
+
 def sync_remote_snapshot(report_payload, state, config):
     base_url = remote_data_url_from_env()
     if not base_url:
         return {"status": "disabled", "pending": 0}
     body = build_dashboard_snapshot(report_payload, state, config, include_detail=True)
+    durable_synced = False
+    durable_error = None
+    try:
+        ready = {key: value for key, value in body.items() if key != "history_ledger"}
+        published = remote_api_call("POST", "/api/runtime/dashboard", config, ready)
+        durable_synced = bool(published.get("accepted"))
+    except Exception as exc:
+        durable_error = str(exc)[:300]
     REMOTE_OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
     (REMOTE_OUTBOX_DIR / ".keep").touch()
     generated_at = str(report_payload.get("generated_at") or utc_now().isoformat())
@@ -1300,7 +1350,7 @@ def sync_remote_snapshot(report_payload, state, config):
     # A poison historical item must never block today's operational dashboard.
     selected = list(dict.fromkeys([current, *paths[:2]]))
     error = None
-    current_synced = False
+    current_synced = durable_synced
     deadline = time.monotonic() + max(30, int(config.get("remote_sync_run_budget_seconds", 240)))
     for path in selected:
         pending_body = None
@@ -1326,6 +1376,8 @@ def sync_remote_snapshot(report_payload, state, config):
             continue
     pending = len(list(REMOTE_OUTBOX_DIR.glob("*.json.gz")))
     return {"status": "pending" if pending else "synced", "current_synced": current_synced,
+            "durable_dashboard_synced": durable_synced, "durable_dashboard_error": durable_error,
+            "checkpoint": config.get("_runtime_deep_saved", {}),
             "pending": pending, "error": error, "checked_at": utc_now().isoformat()}
 
 
@@ -1343,8 +1395,19 @@ def send_remote_snapshot(payload, config, deadline=None):
             raise RuntimeError("remote sync time budget deferred remaining evidence batches")
         remote_api_call("POST", path, config, body)
         progress[part] = end
-    send("summary", 1, "/api/ingest/snapshot", summary)
     generated_at = (payload.get("report") or {}).get("generated_at") or payload.get("generated_at")
+    events = (payload.get("history_ledger") or {}).get("events") or []
+    # Archive events before any operational D1 write: its daily quota can be exhausted.
+    start = int(progress.get("durable_history_ledger") or 0)
+    while start < len(events):
+        batch = events[start:start + 25]
+        while len(batch) > 1 and len(json.dumps(batch, separators=(",", ":")).encode()) > 900_000:
+            batch = batch[:max(1, len(batch) // 2)]
+        end = start + len(batch)
+        send("durable_history_ledger", end, "/api/runtime/history",
+             {"generated_at": generated_at, "history_ledger": {"events": batch}})
+        start = end
+    send("summary", 1, "/api/ingest/snapshot", summary)
     # Bounded requests resume from the last acknowledged batch after a failure.
     for field in ("detail_current_alerts", "detail_history", "detail_signal_theses"):
         rows = payload.get(field) or []
@@ -1355,7 +1418,6 @@ def send_remote_snapshot(payload, config, deadline=None):
     for start in range(0, len(market), 25):
         send("market", start + len(market[start:start + 25]), "/api/ingest/details",
             {"generated_at": generated_at, "market": dict(market[start:start + 25])})
-    events = (payload.get("history_ledger") or {}).get("events") or []
     for start in range(0, len(events), 25):
         send("history_ledger", start + len(events[start:start + 25]), "/api/ingest/details",
             {"generated_at": generated_at, "history_ledger": {"events": events[start:start + 25]}})
@@ -1621,6 +1683,13 @@ def to_float(value, default=0.0):
         return default
 
 
+def nullable_market_number(value):
+    if value is None or isinstance(value, bool) or value == "":
+        return None
+    number = to_float(value, None)
+    return number if number is not None and math.isfinite(number) and number >= 0 else None
+
+
 def chunked(items, size):
     for index in range(0, len(items), size):
         yield items[index : index + size]
@@ -1652,7 +1721,7 @@ class Pool:
     volume_5m_usd: float = 0.0
     volume_1h_usd: float = 0.0
     volume_24h_usd: float = 0.0
-    price_usd: float = 0.0
+    price_usd: float | None = None
     txns_5m: int = 0
     txns_1h: int = 0
     pair_created_at: int = 0
@@ -1768,6 +1837,7 @@ class SolanaRpcProvider:
         self.retries = Counter()
         self.estimated_credits = 0
         self.credit_budget = max(0, int(credit_budget or 0))
+        self.monthly_budget = None
         self.latency_seconds = defaultdict(list)
         self.token_supply_cache = {}
         self.token_balance_cache = {}
@@ -1838,7 +1908,7 @@ class SolanaRpcProvider:
                 "getAccountInfo": 10,
                 "getBalance": 10,
                 "getTokenAccountsByOwner": 10,
-                "getMultipleAccounts": 10,
+                "getMultipleAccounts": 20,
                 "getHealth": 20,
                 "getTokenLargestAccounts": 20,
                 "getTokenAccountBalance": 20,
@@ -1861,6 +1931,8 @@ class SolanaRpcProvider:
         ):
             return False
         minimum_cost = self.credit_cost(method, None)
+        if self.monthly_budget and not self.monthly_budget.allows(self.credit_cost(method, None)):
+            return False
         return not self.credit_budget or (
             self.estimated_credits + minimum_cost <= self.credit_budget
         )
@@ -1946,6 +2018,8 @@ class SolanaRpcProvider:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []}
         retryable_statuses = {429, 500, 502, 503, 504}
         for attempt in range(self.max_retries + 1):
+            if self.monthly_budget and not self.monthly_budget.reserve(request_reservation(self, method, params)):
+                raise HeliusRpcError(method, "quota", "shared monthly estimated budget reached", provider=self.provider_name)
             self.wait_for_rate_slot(method)
             self.calls[method] += 1
             request_started = time.perf_counter()
@@ -2619,6 +2693,7 @@ class RoutedSolanaRpc:
             else:
                 status = "ready"
             stats[name] = {
+                "monthly_usage": provider.monthly_budget.snapshot() if provider.monthly_budget else None,
                 "status": status,
                 "health": health.get("status"),
                 "enhanced_history": provider.enhanced_history,
@@ -2873,7 +2948,7 @@ def gecko_pool_from_item(item, source):
         volume_5m_usd=to_float(volume.get("m5")),
         volume_1h_usd=to_float(volume.get("h1")),
         volume_24h_usd=to_float(volume.get("h24")),
-        price_usd=to_float(attrs.get("base_token_price_usd")),
+        price_usd=nullable_market_number(attrs.get("base_token_price_usd")),
         txns_5m=int(to_float(tx_m5.get("buys")) + to_float(tx_m5.get("sells"))),
         txns_1h=int(to_float(tx_h1.get("buys")) + to_float(tx_h1.get("sells"))),
         pair_created_at=parse_timestamp(attrs.get("pool_created_at") or attrs.get("created_at")),
@@ -2900,7 +2975,7 @@ def dexscreener_pool_from_pair(pair, source):
         volume_5m_usd=to_float(volume.get("m5")),
         volume_1h_usd=to_float(volume.get("h1")),
         volume_24h_usd=to_float(volume.get("h24")),
-        price_usd=to_float(pair.get("priceUsd")),
+        price_usd=nullable_market_number(pair.get("priceUsd")),
         txns_5m=int(to_float(tx_m5.get("buys")) + to_float(tx_m5.get("sells"))),
         txns_1h=int(to_float(tx_h1.get("buys")) + to_float(tx_h1.get("sells"))),
         pair_created_at=parse_timestamp(pair.get("pairCreatedAt")),
@@ -2916,7 +2991,7 @@ def gmgn_pool_from_trenches_item(item):
         exchange = "pumpfun-amm"
     total_supply = to_float(item.get("total_supply"))
     mcap_usd = to_float(item.get("usd_market_cap") or item.get("market_cap"))
-    price_usd = mcap_usd / total_supply if mcap_usd > 0 and total_supply > 0 else 0.0
+    price_usd = mcap_usd / total_supply if mcap_usd > 0 and total_supply > 0 else None
     return Pool(
         pool_address=pool_address,
         token_address=mint,
@@ -3257,7 +3332,7 @@ def registry_pool_from_market_entry(entry, now=None, activity_max_age_seconds=5_
         volume_5m_usd=0.0 if activity_stale else to_float(entry.get("latest_volume_5m_usd")),
         volume_1h_usd=0.0 if activity_stale else to_float(entry.get("latest_volume_1h_usd")),
         volume_24h_usd=0.0 if activity_stale else to_float(entry.get("latest_volume_24h_usd")),
-        price_usd=to_float(entry.get("latest_price_usd") or entry.get("scan_price_usd")),
+        price_usd=nullable_market_number(entry.get("latest_price_usd") if entry.get("latest_price_usd") is not None else entry.get("scan_price_usd")),
         txns_5m=0 if activity_stale else int(to_float(entry.get("latest_txns_5m"))),
         txns_1h=0 if activity_stale else int(to_float(entry.get("latest_txns_1h"))),
         pair_created_at=parse_timestamp(entry.get("pair_created_at")),
@@ -6968,11 +7043,26 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
     checked_at = checked_at or utc_now().isoformat().replace("+00:00", "Z")
     checked = []
     errors = 0
+    wallet_limit = max(0, int(config.get("_cohort_check_wallet_limit", len(cohort))))
+    cycle_at = thesis.get("check_cycle_started_at")
+    continuing_cycle = bool(cycle_at)
+    if not cycle_at or parse_timestamp(checked_at) - parse_timestamp(cycle_at) > int(config.get("cohort_check_cycle_max_age_seconds", 7200)):
+        continuing_cycle = False
+        cycle_at = checked_at
+        thesis["check_cycle_started_at"] = cycle_at
+        thesis["check_cycle_verified_owners"] = []
+    verified_owners = set(thesis.get("check_cycle_verified_owners") or [])
+    pending = [row for row in cohort if row["owner"] not in verified_owners]
+    to_check = pending[:wallet_limit]
+    for row in cohort:
+        if continuing_cycle and row["owner"] in verified_owners:
+            checked.append((row, max(0.0, float(row.get("attributed_tokens") or 0)),
+                            max(0.0, float(row.get("current_retained_tokens") or 0)), bool(row.get("is_holder"))))
     holder_min_pct = max(
         0.0,
         float(config.get("signal_thesis_wallet_holder_min_pct", 10)),
     )
-    for row in cohort:
+    for row in to_check:
         attributed = max(0.0, float(row.get("attributed_tokens") or 0))
         try:
             value = rpc.token_balance(row["owner"], pool.token_address)
@@ -7006,6 +7096,7 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
         )
         row["is_holder"] = is_holder
         row["checked_at"] = checked_at
+        verified_owners.add(row["owner"])
         checked.append((row, attributed, retained, is_holder))
 
     balance_coverage_pct = len(checked) / len(cohort) * 100 if cohort else 0.0
@@ -7020,6 +7111,9 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
     thesis["balance_coverage_pct"] = balance_coverage_pct
     thesis["token_balance_coverage_pct"] = token_balance_coverage_pct
     thesis["balance_errors"] = errors
+    thesis["check_cycle_pending_wallets"] = len(cohort) - len(checked)
+    thesis["check_cycle_verified_owners"] = sorted(verified_owners)
+    thesis["check_cycle_requests"] = len(to_check)
     thesis["holder_min_pct"] = holder_min_pct
     thesis["last_checked_at"] = checked_at
     thesis["updated_at"] = checked_at
@@ -7031,6 +7125,7 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
     )
     if (
         not checked
+        or len(checked) < len(cohort)
         or balance_coverage_pct < min_coverage
         or token_balance_coverage_pct < min_token_coverage
     ):
@@ -7046,6 +7141,9 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
             thesis["status_changed_at"] = checked_at
         update_thesis_coordination(thesis, config, checked_at)
         return thesis
+
+    thesis.pop("check_cycle_started_at", None)
+    thesis.pop("check_cycle_verified_owners", None)
 
     current_retained = sum(item[2] for item in checked)
     retention_pct = (
@@ -7363,6 +7461,7 @@ def refresh_signal_thesis(
                 captured_at=checked_at,
             )
             if replacement_captured:
+                captured = True
                 thesis = recheck_signal_thesis(
                     rpc,
                     pool,
@@ -7388,6 +7487,15 @@ def refresh_signal_thesis(
     elif not isinstance(thesis, dict):
         schedule_signal_recheck(pool_state, alerts, config)
     if isinstance(thesis, dict) and observed_transactions is not None:
+        if "receipt_position_seeds" not in thesis:
+            try:
+                thesis["receipt_position_seeds"] = freeze_receipt_seeds(
+                    pool.token_address, observed_transactions, observed_swaps or [],
+                    [row["owner"] for row in thesis.get("cohort") or [] if row.get("owner")],
+                    service_owners=[pool.pool_address, SOL_MINT, SOLANA_INCINERATOR, *infrastructure_sources(config)]) if captured else {
+                        "owners": {}, "status": "unavailable", "reason": "original_capture_receipts_not_available"}
+            except (TypeError, ValueError):
+                thesis["receipt_position_seeds"] = {"owners": {}, "status": "unavailable", "reason": "ambiguous_capture_receipts"}
         try:
             thesis["observed_position_activity"] = annotate_pool_activity(
                 pool.token_address, observed_transactions, observed_swaps or [],
@@ -10606,6 +10714,8 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
         "lane": config.get("lane") or config.get("mode"),
         "trade_source": "enhanced_transactions",
         "new_signatures": len(txs),
+        "detector_executed": True,
+        "wallet_classification_required": classify_wallets,
         "transactions_scanned": len(txs),
         "parsed_swaps": len(swaps),
         "candidate_buys": candidate_buys,
@@ -11677,6 +11787,12 @@ def record_market_observations(state, pools, observed_at):
         if not key:
             continue
         entry = market.setdefault(key, {})
+        snapshot_at = int(pool.market_snapshot_at or 0)
+        snapshot_stale = bool(pool.market_snapshot_stale or not snapshot_at
+            or snapshot_at > parse_timestamp(observed_at) + 300)
+        if snapshot_at and parse_timestamp(entry.get("latest_seen_at")) > snapshot_at:
+            continue
+        snapshot_time = iso(snapshot_at) if snapshot_at else None
         entry.update(
             {
                 "token_address": pool.token_address,
@@ -11693,16 +11809,16 @@ def record_market_observations(state, pools, observed_at):
                 "latest_volume_24h_usd": pool.volume_24h_usd,
                 "latest_txns_5m": pool.txns_5m,
                 "latest_txns_1h": pool.txns_1h,
-                "latest_seen_at": observed_at,
-                "market_snapshot_at": observed_at,
-                "current_market_verified_at": observed_at,
+                "latest_seen_at": snapshot_time,
+                "market_snapshot_at": snapshot_time,
+                "current_market_verified_at": snapshot_time if not snapshot_stale else None,
                 "market_snapshot_checked_at": observed_at,
-                "market_snapshot_stale": False,
+                "market_snapshot_stale": snapshot_stale,
                 "market_source": pool.source,
                 "scan_mcap_usd": pool.mcap_usd,
                 "scan_price_usd": pool.price_usd,
                 "scan_liquidity_usd": pool.liquidity_usd,
-                "scan_mcap_at": observed_at,
+                "scan_mcap_at": snapshot_time,
                 "scan_source": pool.source or "scanner_snapshot",
             }
         )
@@ -11838,12 +11954,11 @@ def outcome_market_snapshot(entry, observed_at):
     at = (
         entry.get("latest_seen_at")
         or entry.get("market_snapshot_at")
-        or observed_at
     )
-    mcap = to_float(entry.get("latest_mcap_usd"))
-    price = to_float(entry.get("latest_price_usd"))
-    liquidity = to_float(entry.get("latest_liquidity_usd"))
-    if mcap <= 0 and price <= 0:
+    mcap = nullable_market_number(entry.get("latest_mcap_usd"))
+    price = nullable_market_number(entry.get("latest_price_usd"))
+    liquidity = nullable_market_number(entry.get("latest_liquidity_usd"))
+    if not at or (price is None and not mcap):
         return None
     return {
         "at": at,
@@ -13096,12 +13211,17 @@ def monitor_due_cohorts(rpc, universe, state, config, observed_at):
     checked, used = 0, 0
     for _, pool, pool_state in sorted(due, key=lambda item: item[0]):
         cost = len(pool_state["signal_thesis"].get("cohort") or [])
-        if not cost or cost > remaining:
+        if not cost or remaining <= 0:
             continue
-        recheck_signal_thesis(rpc, pool, pool_state, reactivation_stage_config(pool, config), observed_at)
+        check_config = dict(reactivation_stage_config(pool, config))
+        check_config["_cohort_check_wallet_limit"] = min(cost, remaining)
+        recheck_signal_thesis(rpc, pool, pool_state, check_config, observed_at)
+        cost = int(pool_state["signal_thesis"].get("check_cycle_requests") or min(cost, remaining))
         if pool_state["signal_thesis"].get("status") == "invalidated":
             capture_signal_thesis(pool_state, [], config, captured_at=observed_at)
         schedule_signal_recheck(pool_state, [], config)
+        if pool_state["signal_thesis"].get("check_cycle_pending_wallets"):
+            pool_state["signal_recheck_due_at"] = iso(parse_timestamp(observed_at) + 900)
         checked += 1
         used += cost
         remaining -= cost
@@ -13170,7 +13290,8 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
         )
         universe.extend(thesis_monitor_pools)
     cohort_monitor = monitor_due_cohorts(rpc, universe, state, config, observed_at)
-    scan_targets, selection_stats = select_scan_targets(universe, state, config)
+    candidates = fast_candidate_pools(universe, state, int(time.time())) if config.get("_scan_profile") == "targeted" else universe
+    scan_targets, selection_stats = select_scan_targets(candidates, state, config)
     selection_stats["cohort_monitor"] = cohort_monitor
     selection_stats["thesis_monitor_universe"] = len(thesis_monitor_pools)
     config["_selection_stats"] = selection_stats
@@ -13305,27 +13426,72 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
     return universe, summaries, all_alerts
 
 
+def run_launch_history_tasks(rpc, universe, state, config, observed_at):
+    if config.get("_scan_profile") == "targeted" or not config.get("launch_history_enabled", True):
+        return {"status": "not_scheduled", "checked": 0}
+    candidates = []
+    for pool in universe:
+        entry = state.get("pools", {}).get(pool.pool_address, {})
+        task = entry.get("launch_history", {})
+        if entry.get("signal_thesis") and pool.pair_created_at and task.get("status") not in {"complete", "query_exhausted", "bounded_partial"}:
+            candidates.append((parse_timestamp(task.get("checked_at")), pool.pool_address, pool))
+    checked = errors = 0
+    for _, _, pool in sorted(candidates)[:max(0, int(config.get("launch_history_tasks_per_scan", 1)))]:
+        entry = state["pools"][pool.pool_address]
+        try:
+            entry["launch_history"] = advance_launch_history(rpc, pool, entry.get("launch_history"), parse_pool_swap,
+                now=observed_at, window_seconds=int(config.get("launch_history_window_seconds", 21600)))
+            checked += 1
+        except Exception as exc:
+            entry.setdefault("launch_history", {}).update(status="unavailable", checked_at=observed_at, error=str(exc)[:200])
+            errors += 1
+    return {"checked": checked, "errors": errors, "pending": len(candidates) - checked,
+            "scope": "independent_pool_launch_evidence", "affects_confirmation": False}
+
+
+def run_position_history_task(rpc, universe, state, config, observed_at):
+    if config.get("_scan_profile") == "targeted" or not config.get("position_history_shadow_enabled", True):
+        return {"status": "not_scheduled", "checked": 0}
+    candidates = []
+    for pool in universe:
+        thesis = (state.get("pools", {}).get(pool.pool_address) or {}).get("signal_thesis") or {}
+        reduced = {row.get("owner") for row in thesis.get("cohort", []) if row.get("movement_status") == "reduced_unresolved"}
+        seeds = (thesis.get("receipt_position_seeds") or {}).get("owners") or {}
+        if reduced and any(owner in reduced and row.get("seeds") for owner, row in seeds.items()):
+            candidates.append(((thesis.get("receipt_position_history") or {}).get("checked_at") or "", pool.pool_address, pool, thesis))
+    for _, _, pool, thesis in sorted(candidates)[:1]:
+        try:
+            thesis["receipt_position_history"] = check_receipt_positions(rpc, thesis, pool.token_address,
+                services=[pool.pool_address, *infrastructure_sources(config)], checked_at=observed_at)
+            return {"status": "shadow", "checked": 1, "page_calls": thesis["receipt_position_history"].get("page_calls", 0)}
+        except Exception:
+            thesis["receipt_position_history"] = {"status": "partial", "checked_at": observed_at,
+                "reason": "history_unavailable", "confirmation_eligible": False}
+            return {"status": "partial", "checked": 0}
+    return {"status": "idle", "checked": 0}
+
+
 def run_once(config, lane_name=None):
     load_env()
+    state = migrate_scanner_state(load_runtime_checkpoint(
+        load_json(STATE_PATH, {"pools": {}, "wallet_cache": {}}), config, "deep"))
+    config["_active_runtime_state"] = state
+    discovery = load_runtime_checkpoint(load_discovery_state(), config, "discovery")
+    config["_discovery_state_merge"] = merge_discovery_state(state, discovery)
     config["_gmgn_token_info_cache"] = {}
     config["_gmgn_profile_cache"] = {}
     config["_gmgn_ath_result_cache"] = {}
     http = Http()
     rpc = build_rpc_router(config)
+    configure_monthly_budgets(rpc, state, config)
     config["_rpc_router"] = rpc
     health = rpc.health()
     config["_rpc_providers"] = rpc.provider_stats()
     if health != "ok":
         raise SystemExit(f"Solana RPC health is not ok: {health}")
 
-    state = migrate_scanner_state(
-        load_json(STATE_PATH, {"pools": {}, "wallet_cache": {}})
-    )
-    config["_discovery_state_merge"] = merge_discovery_state(
-        state,
-        load_discovery_state(),
-    )
-    load_remote_discovery_state(state, config)
+    if not config.get("_runtime_discovery_available"):
+        load_remote_discovery_state(state, config)
     config["_signal_thesis_bootstrap"] = bootstrap_signal_theses(
         state,
         load_alert_history(),
@@ -13408,6 +13574,10 @@ def run_once(config, lane_name=None):
     config["_rpc_failures"] = dict(rpc.failures)
     config["_rpc_failovers"] = dict(rpc.route_failovers)
     config["_rpc_estimated_credits"] = int(rpc.estimated_credits)
+    if config.get("_scan_profile") == "targeted" and not summaries:
+        save_runtime_state(state, config, "targeted_idle")
+        config["_targeted_idle"] = True
+        return
     config["_rpc_providers"] = rpc.provider_stats()
     scan_health = build_scan_health(summaries, lane_stats, config)
     config["_scan_health"] = scan_health
@@ -13418,6 +13588,14 @@ def run_once(config, lane_name=None):
         raise RuntimeError("unhealthy scan rejected: " + "; ".join(scan_health["reasons"]))
 
     generated_at = utc_now().isoformat().replace("+00:00", "Z")
+    if config.get("_scan_profile") != "targeted":
+        state["last_deep_scan_at"] = generated_at
+    config["_launch_history_stats"] = run_launch_history_tasks(rpc, universe, state, config, generated_at)
+    config["_position_history_stats"] = run_position_history_task(rpc, universe, state, config, generated_at)
+    config["_rpc_retries"] = dict(rpc.retries)
+    config["_rpc_failures"] = dict(rpc.failures)
+    config["_rpc_failovers"] = dict(rpc.route_failovers)
+    config["_rpc_estimated_credits"] = int(rpc.estimated_credits)
     record_market_observations(state, universe, generated_at)
     refreshed_caught_pools = refresh_caught_market_observations(http, state, all_alerts, config, generated_at)
     enrich_market_ath(http, state, [*universe, *refreshed_caught_pools], all_alerts, config, generated_at)
@@ -13429,6 +13607,9 @@ def run_once(config, lane_name=None):
         config,
     )
     update_signal_outcomes(state, outcome_alerts, generated_at, config)
+    capture_evaluation_rows(state, universe, summaries, all_alerts, generated_at,
+        config.get("_evaluation_config_version") or effective_config_version(config), outcome_market_snapshot,
+        targeted=config.get("_scan_profile") == "targeted")
     record_market_activity_baselines(
         state,
         [*universe, *refreshed_caught_pools],
@@ -13444,7 +13625,7 @@ def run_once(config, lane_name=None):
     config["_scan_health"] = build_scan_health(summaries, lane_stats, config)
     prune_wallet_cache(state, config)
     compact_state(state, universe, all_alerts, config, generated_at)
-    save_runtime_state(state, config, "deep_scan", generated_at)
+    save_runtime_state(state, config, config.get("_scan_profile") or "deep_scan", generated_at)
     write_alerts(all_alerts, config)
     report_config = report_config_for_lanes(config, lane_configs)
     report_payload = build_report_payload(
@@ -13458,6 +13639,14 @@ def run_once(config, lane_name=None):
     )
     report_payload["lane_stats"] = lane_stats
     report_payload["lanes_scanned"] = list(lane_stats)
+    report_payload["scan_profile"] = config.get("_scan_profile") or "deep"
+    report_payload["last_deep_scan_at"] = state.get("last_deep_scan_at")
+    report_payload["signal_evaluation"] = evaluate_signals({"generated_at": generated_at,
+        "signal_evaluation_dataset": state.get("signal_evaluation_dataset", {})},
+        options=EvaluationOptions(bootstrap_samples=200, holdout_start=config.get("signal_evaluation_holdout_start"))) ["summary"]
+    report_payload["stats"]["launch_history"] = config.get("_launch_history_stats", {})
+    report_payload["stats"]["position_history"] = config.get("_position_history_stats", {})
+    report_payload["stats"]["rpc_providers"] = rpc.provider_stats()
     write_report_json(report_payload)
     write_dashboard_fallback(report_payload, state, config)
     render_report(report_payload)
@@ -13515,8 +13704,9 @@ def discovery_pulse_config(config):
 def run_discovery_once(config):
     load_env()
     http = Http()
-    state = load_discovery_state()
-    load_remote_discovery_state(state, config)
+    state = load_runtime_checkpoint(load_discovery_state(), config, "discovery")
+    if not config.get("_runtime_discovery_recovered"):
+        load_remote_discovery_state(state, config)
     lane_config = discovery_pulse_config(config)
     observed_at = utc_now().isoformat().replace("+00:00", "Z")
     discovered = discover_market_pools(http, lane_config)
@@ -13583,6 +13773,7 @@ def main():
     parser = argparse.ArgumentParser(description="Solana token reactivation radar.")
     parser.add_argument("--once", action="store_true", help="Run one scan and exit.")
     parser.add_argument("--watch", action="store_true", help="Run forever on scan_interval_seconds.")
+    parser.add_argument("--targeted", action="store_true", help="Bounded address-specific rechecks between hourly scans.")
     parser.add_argument(
         "--discovery-only",
         action="store_true",
@@ -13604,6 +13795,9 @@ def main():
         config.pop("lane", None)
     else:
         config["lane"] = args.lane or config.get("lane") or "all"
+    if args.targeted:
+        config["_evaluation_config_version"] = effective_config_version(config)
+        config = targeted_profile(config)
     if args.discovery_only:
         write_discovery_status("running")
         try:
@@ -13629,6 +13823,12 @@ def main():
                 scan_health.setdefault("reasons", [str(exc)[:300]])
                 scan_health["rpc_providers"] = config["_rpc_providers"]
                 config["_scan_health"] = scan_health
+            failed_state = config.get("_active_runtime_state")
+            if isinstance(failed_state, dict):
+                try:
+                    save_runtime_state(failed_state, config, "failed_attempt")
+                except Exception as state_exc:
+                    print(f"Failed-attempt checkpoint could not be saved: {state_exc}", file=sys.stderr)
             status = write_scanner_status(
                 "failed",
                 error=exc,

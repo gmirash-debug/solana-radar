@@ -3,7 +3,7 @@ main = "src/index.js"
 compatibility_date = "2026-05-13"
 
 [triggers]
-crons = ["*/5 * * * *", "7 * * * *", "37 * * * *"]
+crons = ["*/5 * * * *", "7 * * * *", "37 * * * *", "22,37,52 * * * *"]
 
 [[durable_objects.bindings]]
 name = "DISPATCH_BUCKETS"
@@ -12,6 +12,22 @@ class_name = "DispatchBuckets"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["DispatchBuckets"]
+
+[[durable_objects.bindings]]
+name = "RUNTIME_SNAPSHOTS"
+class_name = "RuntimeSnapshots"
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RuntimeSnapshots"]
+
+[[durable_objects.bindings]]
+name = "HISTORY_QUEUE"
+class_name = "HistoryQueue"
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["HistoryQueue"]
 
 [vars]
 GITHUB_OWNER = "gmirash-debug"

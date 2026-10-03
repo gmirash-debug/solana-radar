@@ -24,6 +24,14 @@ on:
       - "gmgn_context.py"
       - "relay_context.py"
       - "position_evidence.py"
+      - "solana_position_lineage.py"
+      - "runtime_checkpoint.py"
+      - "rpc_budget.py"
+      - "scan_scheduling.py"
+      - "launch_history.py"
+      - "position_history_rpc.py"
+      - "prospective_evidence.py"
+      - "signal_evaluation.py"
       - "lifi_context.py"
       - "package.json"
       - "package-lock.json"
@@ -76,6 +84,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Set up test runtime
+        if: github.event_name == 'push' || !startsWith(inputs.source, 'cloudflare-')
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
       - name: Check scan freshness
         id: freshness
         env:
@@ -96,6 +110,7 @@ jobs:
           except Exception:
               pass
           dispatch_source = (event.get("inputs") or {}).get("source", "")
+          targeted = dispatch_source == "cloudflare-targeted"
           if event_name == "workflow_dispatch" and dispatch_source == "robinhood":
               print("should_scan=false")
               print("reason=robinhood_only")
@@ -123,7 +138,7 @@ jobs:
               report = {}
 
           try:
-              generated_at = report.get("generated_at", "")
+              generated_at = report.get("generated_at", "") if targeted else report.get("last_deep_scan_at") or report.get("generated_at", "")
               generated = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
               age_seconds = (datetime.now(timezone.utc) - generated).total_seconds()
           except Exception:
@@ -177,7 +192,7 @@ jobs:
               print(f"reason=provider_backoff_{int(failed_age_seconds)}s")
               raise SystemExit
 
-          if age_seconds < 50 * 60:
+          if age_seconds < (10 if targeted else 50) * 60:
               print("should_scan=false")
               print(f"reason=fresh_{event_name}_{int(age_seconds)}s")
           else:
@@ -225,11 +240,11 @@ jobs:
           npm install -g gmgn-cli@1.6.1
 
       - name: Validate scanner and dashboard
-        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push'
+        if: github.event_name == 'push' || (steps.freshness.outputs.should_scan == 'true' && !startsWith(inputs.source, 'cloudflare-'))
         run: |
           python -m unittest discover -s tests -v
           python -m json.tool config.example.json > /dev/null
-          node --test cloudflare/scan-dispatcher/test/index.test.mjs dashboard/test/*.test.mjs
+          node --test cloudflare/scan-dispatcher/test/*.test.mjs dashboard/test/*.test.mjs
           node --check dashboard/app.js
 
       - name: Run scanner
@@ -250,9 +265,12 @@ jobs:
           # D1 is canonical; the compact Pages snapshot remains available if
           # the remote write is temporarily unavailable.
           RADAR_REMOTE_SYNC_REQUIRED: "false"
+          SCAN_SOURCE: ${{ inputs.source }}
         run: |
           set +e
-          timeout --signal=TERM --kill-after=30s 25m python scanner.py --once --lane reactivation
+          scan_args=()
+          if [ "$SCAN_SOURCE" = "cloudflare-targeted" ] || [ "$SCAN_SOURCE" = "manual-targeted" ]; then scan_args+=(--targeted); fi
+          timeout --signal=TERM --kill-after=30s 25m python scanner.py --once --lane reactivation "${scan_args[@]}"
           status=$?
           if [ "$status" = "124" ]; then
             python - <<'PY'
@@ -318,7 +336,7 @@ jobs:
           key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}
 
       - name: Restore independent Robinhood observations
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && !endsWith(inputs.source, '-targeted')
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -330,7 +348,7 @@ jobs:
 
       - name: Recover durable Robinhood backup
         id: robinhood_backup
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && !endsWith(inputs.source, '-targeted')
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -338,7 +356,7 @@ jobs:
 
       - name: Observe Robinhood mainnet
         id: robinhood
-        if: github.event_name == 'workflow_dispatch' && steps.robinhood_backup.outcome == 'success'
+        if: github.event_name == 'workflow_dispatch' && !endsWith(inputs.source, '-targeted') && steps.robinhood_backup.outcome == 'success'
         timeout-minutes: 10
         continue-on-error: true
         env:

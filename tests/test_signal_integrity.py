@@ -237,11 +237,12 @@ class SignalIntegrityTests(unittest.TestCase):
                 "market": {str(i): {} for i in range(26)},
                 "history_ledger": {"events": [{"event_id": str(i)} for i in range(26)]}}
         with patch.object(s, "remote_api_call") as remote:
-            remote.side_effect = [{"ok": True}, {"ok": True}, RuntimeError("temporary quota")]
+            remote.side_effect = [{"ok": True}, {"ok": True}, {"ok": True}, {"ok": True}, RuntimeError("temporary quota")]
             with self.assertRaisesRegex(RuntimeError, "quota"):
                 s.send_remote_snapshot(body, {})
             self.assertEqual(body["_sync_progress"]["detail_signal_theses"], 25)
             self.assertEqual(body["_sync_progress"]["summary"], 1)
+            self.assertEqual(body["_sync_progress"]["durable_history_ledger"], 26)
             remote.reset_mock()
             remote.side_effect = None
             remote.return_value = {"ok": True}
