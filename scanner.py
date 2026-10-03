@@ -8,6 +8,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -13769,6 +13770,12 @@ def run_discovery_once(config):
     return payload
 
 
+def interrupt_scan(signum, frame):
+    # SystemExit bypasses inner provider retry handlers and reaches main's
+    # failed-attempt checkpoint before the workflow's forced kill deadline.
+    raise SystemExit("scanner interrupted by SIGTERM (workflow timeout or cancellation)")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Solana token reactivation radar.")
     parser.add_argument("--once", action="store_true", help="Run one scan and exit.")
@@ -13844,4 +13851,5 @@ def main():
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, interrupt_scan)
     main()

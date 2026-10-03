@@ -36,6 +36,8 @@ Public dashboard projections and token details are produced inside the object
 and streamed through the Worker. Health reads metadata, not the whole snapshot.
 Private checkpoint/history ingestion requires the existing server ingest secret.
 GitHub Actions cache is a backup/performance layer, not the only durable copy.
+Graceful SIGTERM interruption follows the failed-attempt checkpoint path; an
+abrupt machine failure or forced kill before that write cannot preserve new work.
 When a snapshot is absent, the previous D1/static fallback remains available.
 
 ## Historical event outbox

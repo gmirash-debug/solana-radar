@@ -14,6 +14,23 @@ from signal_evaluation import evaluate_signals, EvaluationOptions
 
 
 class RuntimeArchitectureTests(unittest.TestCase):
+    def test_termination_preserves_active_state_and_monthly_usage(self):
+        active = {"rpc_monthly_usage": {"2026-10": {"alchemy": {"estimated_units": 100}}},
+                  "pools": {"pool": {"cursor": "preserved"}}}
+        def interrupted(config, lane):
+            config["_active_runtime_state"] = active
+            s.interrupt_scan(15, None)
+        with patch("sys.argv", ["scanner.py", "--once", "--lane", "reactivation"]), \
+                patch.object(s, "load_json", return_value={}), \
+                patch.object(s, "run_once", side_effect=interrupted), \
+                patch.object(s, "save_runtime_state") as save, \
+                patch.object(s, "write_scanner_status", return_value={}), \
+                patch.object(s, "sync_remote_scan_status"):
+            with self.assertRaisesRegex(SystemExit, "workflow timeout or cancellation"):
+                s.main()
+        self.assertIs(save.call_args.args[0], active)
+        self.assertEqual(save.call_args.args[2], "failed_attempt")
+
     def test_checkpoint_preserves_cursors_cohorts_buffers_and_monthly_usage(self):
         state = {"_runtime": {"revision": 3, "updated_at": "2026-10-03T00:00:00Z"},
             "pools": {"p": {"helius_rolling_backlogs": [{"cursor": "opaque"}],
