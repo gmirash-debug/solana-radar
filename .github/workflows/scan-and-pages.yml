@@ -29,6 +29,7 @@ on:
       - "runtime_dashboard.py"
       - "history_contract.py"
       - "rpc_budget.py"
+      - "rpc_routing.py"
       - "scan_scheduling.py"
       - "launch_history.py"
       - "position_history_rpc.py"

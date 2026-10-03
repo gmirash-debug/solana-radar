@@ -18,7 +18,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 import requests
 from gmgn_context import token_ath, VERSION as GMGN_VERSION
@@ -30,6 +30,7 @@ from runtime_checkpoint import build_checkpoint, restore_checkpoint, checkpoint_
 from runtime_dashboard import dashboard_documents
 from history_contract import history_event_error, source_time
 from rpc_budget import configure_monthly_budgets, request_reservation
+from rpc_routing import STANDARD_ORDER, HISTORY_ORDER, BALANCE_ORDER, METHOD_ORDERS, validate_result
 from scan_scheduling import targeted_profile, fast_candidate_pools
 from launch_history import advance_launch_history
 from prospective_evidence import capture_evaluation_rows
@@ -1753,7 +1754,7 @@ def rpc_token_amount(amount_info):
             return int(amount) / (10**decimals)
         except (TypeError, ValueError):
             pass
-    return to_float(amount_info.get("uiAmount"))
+    return to_float(amount_info.get("uiAmountString") if amount_info.get("uiAmountString") is not None else amount_info.get("uiAmount"))
 
 
 @dataclass
@@ -1885,6 +1886,7 @@ class SolanaRpcProvider:
         self.calls = Counter()
         self.retries = Counter()
         self.estimated_credits = 0
+        self.attempted_credits = 0
         self.credit_budget = max(0, int(credit_budget or 0))
         self.monthly_budget = None
         self.latency_seconds = defaultdict(list)
@@ -1914,6 +1916,7 @@ class SolanaRpcProvider:
         self.last_error = None
         self.circuit_open_reason = None
         self.method_circuit_open_reasons = {}
+        self.method_cooldowns = {}
         self.last_success_at = None
 
     def request_timeout(self, timeout):
@@ -1972,18 +1975,24 @@ class SolanaRpcProvider:
             return 0 if method == "getHealth" else 20
         return 1
 
-    def can_call(self, method):
+    def can_call(self, method, params=None):
+        until = self.method_cooldowns.get(method)
+        if until is not None and time.monotonic() >= until:
+            self.method_cooldowns.pop(method, None)
+            self.method_circuit_open_reasons.pop(method, None)
+            self.method_consecutive_failures[method] = 0
         if (
             self.circuit_open_reason
             or method in self.method_circuit_open_reasons
             or method in self.unsupported_methods
+            or method in self.method_cooldowns
         ):
             return False
-        minimum_cost = self.credit_cost(method, None)
-        if self.monthly_budget and not self.monthly_budget.allows(self.credit_cost(method, None)):
+        minimum_cost = request_reservation(self, method, params)
+        if self.monthly_budget and not self.monthly_budget.allows(minimum_cost):
             return False
         return not self.credit_budget or (
-            self.estimated_credits + minimum_cost <= self.credit_budget
+            max(self.estimated_credits, self.attempted_credits) + minimum_cost <= self.credit_budget
         )
 
     def error_category(self, status=None, code=None, detail=""):
@@ -1993,10 +2002,17 @@ class SolanaRpcProvider:
             "only available on dedicated nodes",
             "indexed requests require a personal token",
             "method is not available", "method not found",
+            "method is not supported on", "method not supported on",
+            "not supported in your plan", "not available for your plan",
         )):
             return "unsupported"
         if status in (401, 403) or any(marker in detail for marker in ("unauthorized", "forbidden", "invalid api key")):
             return "auth"
+        usage_exhausted = any(marker in detail for marker in (
+            "max usage", "usage reached", "quota", "credits exhausted", "credit limit", "insufficient credit",
+        ))
+        if (status == 429 or code == -32429 or "rate limit" in detail or "too many requests" in detail) and not usage_exhausted:
+            return "rate_limit"
         if status == 402 or code == 35 or any(
             marker in detail
             for marker in (
@@ -2034,11 +2050,24 @@ class SolanaRpcProvider:
                 self.circuit_open_reason = str(error)
         elif category in {"rate_limit", "provider", "temporary"}:
             self.method_consecutive_failures[method] += 1
+            self.method_cooldowns[method] = time.monotonic() + max(2, min(30, self.retry_max_seconds))
             if (
                 self.method_consecutive_failures[method]
                 >= self.circuit_failure_threshold
             ):
                 self.method_circuit_open_reasons[method] = str(error)
+
+    def safe_error_detail(self, detail):
+        text = str(detail).replace(self.url, "[RPC endpoint]")
+        parsed = urlparse(self.url)
+        secrets = [value for values in parse_qs(parsed.query).values() for value in values]
+        tail = parsed.path.rsplit("/", 1)[-1]
+        if len(tail) >= 16:
+            secrets.append(tail)
+        for secret in secrets:
+            if len(secret) >= 6:
+                text = text.replace(secret, "[redacted]")
+        return text[:300]
 
     def record_success(self, method):
         self.consecutive_failures = 0
@@ -2046,18 +2075,16 @@ class SolanaRpcProvider:
         self.last_success_at = utc_now().isoformat().replace("+00:00", "Z")
 
     def call(self, method, params=None, timeout=None):
+        self.can_call(method, params)
         if self.circuit_open_reason and method != "getHealth":
             raise HeliusCircuitOpen(f"{self.provider_name} circuit open: {self.circuit_open_reason}")
-        if method in self.method_circuit_open_reasons:
+        if method in self.method_circuit_open_reasons or method in self.method_cooldowns:
             raise HeliusCircuitOpen(
                 f"{self.provider_name} {method} circuit open: "
-                f"{self.method_circuit_open_reasons[method]}"
+                f"{self.method_circuit_open_reasons.get(method, 'temporary cooldown')}"
             )
-        minimum_cost = self.credit_cost(method, None)
-        if (
-            self.credit_budget
-            and self.estimated_credits + minimum_cost > self.credit_budget
-        ):
+        minimum_cost = request_reservation(self, method, params)
+        if self.credit_budget and max(self.estimated_credits, self.attempted_credits) + minimum_cost > self.credit_budget:
             raise HeliusRpcError(
                 method,
                 "quota",
@@ -2067,10 +2094,13 @@ class SolanaRpcProvider:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []}
         retryable_statuses = {429, 500, 502, 503, 504}
         for attempt in range(self.max_retries + 1):
+            if self.credit_budget and max(self.estimated_credits, self.attempted_credits) + minimum_cost > self.credit_budget:
+                raise HeliusRpcError(method, "quota", "local per-scan credit budget reached", provider=self.provider_name)
             if self.monthly_budget and not self.monthly_budget.reserve(request_reservation(self, method, params)):
                 raise HeliusRpcError(method, "quota", "shared monthly estimated budget reached", provider=self.provider_name)
             self.wait_for_rate_slot(method)
             self.calls[method] += 1
+            self.attempted_credits += minimum_cost
             request_started = time.perf_counter()
             try:
                 response = self.session.post(self.url, json=payload, timeout=self.request_timeout(timeout))
@@ -2121,7 +2151,7 @@ class SolanaRpcProvider:
                 error = HeliusRpcError(
                     method,
                     category,
-                    detail,
+                    self.safe_error_detail(detail),
                     status=response.status_code,
                     code=code,
                     provider=self.provider_name,
@@ -2139,6 +2169,10 @@ class SolanaRpcProvider:
                 )
                 self.record_failure(error)
                 raise error from exc
+            if not isinstance(body, dict) or ("result" not in body and not body.get("error")):
+                error = HeliusRpcError(method, "provider", "missing RPC result envelope", provider=self.provider_name)
+                self.record_failure(error)
+                raise error
             if body.get("error"):
                 error = body["error"]
                 message = str(error.get("message") if isinstance(error, dict) else error)
@@ -2159,7 +2193,7 @@ class SolanaRpcProvider:
                 rpc_error = HeliusRpcError(
                     method,
                     self.error_category(code=code, detail=message),
-                    message[:300],
+                    self.safe_error_detail(message),
                     code=code,
                     provider=self.provider_name,
                 )
@@ -2278,6 +2312,10 @@ class SolanaRpcProvider:
             return []
         if addresses in self.multiple_accounts_cache:
             return self.multiple_accounts_cache[addresses]
+        if len(addresses) > 100:
+            rows = [row for group in chunked(addresses, 100) for row in self.multiple_accounts(group)]
+            self.multiple_accounts_cache[addresses] = rows
+            return rows
         result = self.call(
             "getMultipleAccounts",
             [list(addresses), {"encoding": "jsonParsed"}],
@@ -2331,15 +2369,15 @@ class AlchemyRpc(SolanaRpcProvider):
 
 class ChainstackRpc(SolanaRpcProvider):
     def __init__(self, url, **kwargs):
+        unsupported_methods = kwargs.pop("unsupported_methods", {
+            "getSignaturesForAddress", "getTokenAccountsByOwner", "getTokenLargestAccounts",
+        })
         super().__init__(
             "chainstack",
             url,
             enhanced_history=False,
             credit_model="chainstack",
-            unsupported_methods={
-                "getSignaturesForAddress",
-                "getTokenAccountsByOwner",
-            },
+            unsupported_methods=unsupported_methods,
             **kwargs,
         )
 
@@ -2376,31 +2414,59 @@ class RoutedSolanaRpc:
         standard_order=None,
         enhanced_order=None,
         balance_order=None,
+        method_orders=None,
+        archive_order=None,
     ):
         self.providers = {provider.provider_name: provider for provider in providers}
         self.standard_order = self._ordered_names(
             standard_order
-            or ["chainstack", "drpc", "publicnode", "alchemy", "helius"]
+            or STANDARD_ORDER
         )
         self.enhanced_order = self._ordered_names(
-            enhanced_order or ["alchemy", "helius"],
+            enhanced_order or HISTORY_ORDER,
             enhanced_only=True,
         )
         self.balance_order = self._ordered_names(
             balance_order
-            or ["drpc", "publicnode", "alchemy", "helius", "chainstack"]
+            or BALANCE_ORDER
         )
+        self.method_orders = {
+            method: self._ordered_names(names, enhanced_only=method == "getTransactionsForAddress")
+            for method, names in (method_orders or {}).items()
+        }
+        self.archive_order = self._ordered_names(archive_order or ["helius", "alchemy"], enhanced_only=True)
         self.blocked_providers = {}
         self.unsupported_methods = defaultdict(set)
         for name, provider in self.providers.items():
             self.unsupported_methods[name].update(provider.unsupported_methods)
         self.route_failovers = Counter()
+        self.null_transactions = Counter()
+        self.route_calls = Counter()
         self.last_provider_by_method = {}
         self.health_results = {}
         self.token_supply_cache = {}
         self.token_balance_cache = {}
         self.largest_token_accounts_cache = {}
         self.multiple_accounts_cache = {}
+        self.capability_cache = None
+        self.capability_cache_seconds = 86400
+
+    def configure_capabilities(self, state, config):
+        self.capability_cache = state.setdefault("rpc_capabilities", {})
+        self.capability_cache_seconds = max(0, float(config.get("rpc_capability_cache_hours", 24)) * 3600)
+        now = time.time()
+        for name, provider in self.providers.items():
+            fingerprint = hashlib.sha256(provider.url.encode()).hexdigest()
+            entry = self.capability_cache.get(name, {})
+            if entry.get("endpoint_fingerprint") != fingerprint:
+                entry = {"endpoint_fingerprint": fingerprint, "unsupported": {}}
+                self.capability_cache[name] = entry
+            learned = entry.setdefault("unsupported", {})
+            for method, expires in list(learned.items()):
+                if not self.capability_cache_seconds or float(expires) <= now:
+                    del learned[method]
+                else:
+                    self.unsupported_methods[name].add(method)
 
     def _ordered_names(self, names, enhanced_only=False):
         ordered = []
@@ -2465,12 +2531,16 @@ class RoutedSolanaRpc:
         names = [preferred] if preferred else list(order)
         for name in names:
             provider = self.providers.get(name)
+            if provider:
+                provider.can_call(method)
             if (
                 not provider
+                or (method == "getTransactionsForAddress" and not provider.enhanced_history)
                 or name in excluded
                 or name in self.blocked_providers
                 or provider.circuit_open_reason
                 or method in provider.method_circuit_open_reasons
+                or method in provider.method_cooldowns
                 or method in self.unsupported_methods.get(name, set())
             ):
                 continue
@@ -2503,14 +2573,28 @@ class RoutedSolanaRpc:
         category = getattr(exc, "category", "")
         if category == "unsupported":
             self.unsupported_methods[provider_name].add(method)
+            self.providers[provider_name].unsupported_methods.add(method)
+            if self.capability_cache is not None and self.capability_cache_seconds:
+                self.capability_cache[provider_name]["unsupported"][method] = time.time() + self.capability_cache_seconds
         elif category in {"auth", "quota"}:
+            # A costly method may exhaust its allowance while cheap reads still fit.
+            if "local per-scan" in str(exc) or "shared monthly estimated budget" in str(exc):
+                return
             self.blocked_providers[provider_name] = str(exc)
 
     def _route_call(self, method, params=None, preferred=None, order=None, timeout=None, excluded=None):
         errors = []
+        null_provider = None
+        route = order if order is not None else self.method_orders.get(method) or (
+            self.enhanced_order if method == "getTransactionsForAddress" else
+            self.balance_order if method == "getTokenAccountsByOwner" else self.standard_order
+        )
+        # A provider-specific cursor must never be silently sent to another host.
+        if method == "getTransactionsForAddress" and not preferred and len(params or []) > 1 and params[1].get("paginationToken"):
+            raise ValueError("indexed cursor requires its originating provider")
         names = list(
             self._eligible_names(
-                order or self.standard_order,
+                route,
                 method,
                 preferred=preferred,
                 excluded=excluded,
@@ -2523,6 +2607,12 @@ class RoutedSolanaRpc:
                 if provider_timeout is None and method == "getTransactionsForAddress":
                     provider_timeout = provider.transactions_timeout_seconds
                 result = provider.call(method, params=params, timeout=provider_timeout)
+                try:
+                    validate_result(method, params or [], result)
+                except (ValueError, TypeError, AttributeError) as exc:
+                    error = HeliusRpcError(method, "provider", "invalid read response: " + str(exc), provider=name)
+                    provider.record_failure(error)
+                    raise error from exc
             except (HeliusRpcError, HeliusCircuitOpen) as exc:
                 self._record_provider_error(name, method, exc)
                 if getattr(exc, "category", None) == "client":
@@ -2531,8 +2621,17 @@ class RoutedSolanaRpc:
                 if index + 1 < len(names):
                     self.route_failovers[method] += 1
                 continue
+            self.route_calls[f"{method}:{name}"] += 1
+            if method == "getTransaction" and result is None:
+                self.null_transactions[name] += 1
+                null_provider = name
+                if index + 1 < len(names):
+                    self.route_failovers[method] += 1
+                continue
             self.last_provider_by_method[method] = name
             return result, name
+        if null_provider:
+            return None, null_provider
         detail = ", ".join(errors) if errors else "no configured provider supports this method"
         raise RpcProvidersUnavailable(f"all RPC providers failed for {method}: {detail}")
 
@@ -2576,7 +2675,6 @@ class RoutedSolanaRpc:
         result, _provider = self._route_call(
             "getSignaturesForAddress",
             [address, opts],
-            order=self.standard_order,
         )
         return result or []
 
@@ -2584,7 +2682,6 @@ class RoutedSolanaRpc:
         result, _provider = self._route_call(
             "getTransaction",
             [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": MAX_SUPPORTED_TRANSACTION_VERSION}],
-            order=self.standard_order,
         )
         return result
 
@@ -2598,6 +2695,7 @@ class RoutedSolanaRpc:
         status="succeeded",
         provider_name=None,
         excluded_providers=None,
+        history_task="live",
     ):
         filters = {"status": status}
         if block_time:
@@ -2616,7 +2714,7 @@ class RoutedSolanaRpc:
             "getTransactionsForAddress",
             [address, opts],
             preferred=provider_name,
-            order=self.enhanced_order,
+            order=self.archive_order if history_task == "archive" else None,
             timeout=(
                 self.providers[provider_name].transactions_timeout_seconds
                 if provider_name in self.providers
@@ -2635,10 +2733,10 @@ class RoutedSolanaRpc:
         routed_result["_provider"] = provider
         return routed_result
 
-    def next_enhanced_provider(self, excluded=None):
+    def next_enhanced_provider(self, excluded=None, history_task="live"):
         return next(
             self._eligible_names(
-                self.enhanced_order,
+                self.archive_order if history_task == "archive" else self.enhanced_order,
                 "getTransactionsForAddress",
                 excluded=excluded,
             ),
@@ -2651,7 +2749,6 @@ class RoutedSolanaRpc:
         result, _provider = self._route_call(
             "getTokenSupply",
             [mint],
-            order=self.standard_order,
         )
         supply = rpc_token_amount((result or {}).get("value"))
         self.token_supply_cache[mint] = supply
@@ -2664,7 +2761,6 @@ class RoutedSolanaRpc:
         result, _provider = self._route_call(
             "getTokenAccountsByOwner",
             [owner, {"mint": mint}, {"encoding": "jsonParsed"}],
-            order=self.balance_order,
         )
         total = 0.0
         for item in (result or {}).get("value") or []:
@@ -2686,7 +2782,6 @@ class RoutedSolanaRpc:
         result, _provider = self._route_call(
             "getTokenLargestAccounts",
             [mint],
-            order=self.standard_order,
         )
         rows = []
         for item in ((result or {}).get("value") or [])[:limit]:
@@ -2708,10 +2803,13 @@ class RoutedSolanaRpc:
             return []
         if addresses in self.multiple_accounts_cache:
             return self.multiple_accounts_cache[addresses]
+        if len(addresses) > 100:
+            rows = [row for group in chunked(addresses, 100) for row in self.multiple_accounts(group)]
+            self.multiple_accounts_cache[addresses] = rows
+            return rows
         result, _provider = self._route_call(
             "getMultipleAccounts",
             [list(addresses), {"encoding": "jsonParsed"}],
-            order=self.standard_order,
         )
         rows = list((result or {}).get("value") or [])
         self.multiple_accounts_cache[addresses] = rows
@@ -2730,11 +2828,11 @@ class RoutedSolanaRpc:
             health = self.health_results.get(name) or {}
             if name in self.blocked_providers or provider.circuit_open_reason:
                 status = "blocked"
-            elif provider.method_circuit_open_reasons:
+            elif provider.method_circuit_open_reasons or provider.method_cooldowns:
                 status = "degraded"
             elif (
                 provider.credit_budget
-                and provider.estimated_credits >= provider.credit_budget
+                and max(provider.estimated_credits, provider.attempted_credits) >= provider.credit_budget
             ):
                 status = "budget_exhausted"
             elif sum(provider.calls.values()):
@@ -2742,6 +2840,12 @@ class RoutedSolanaRpc:
             else:
                 status = "ready"
             stats[name] = {
+                "routing": {"policy": "task_specific", "primary_methods": [method for method, order in self.method_orders.items() if order and order[0] == name],
+                            "null_transactions": self.null_transactions[name],
+                            "successful_calls": {key.split(":", 1)[0]: count for key, count in self.route_calls.items() if key.endswith(":" + name)}},
+                "unsupported_methods": sorted(self.unsupported_methods[name]),
+                "attempted_credits": int(provider.attempted_credits),
+                "method_cooldowns": sorted(provider.method_cooldowns),
                 "monthly_usage": provider.monthly_budget.snapshot() if provider.monthly_budget else None,
                 "status": status,
                 "health": health.get("status"),
@@ -2750,19 +2854,20 @@ class RoutedSolanaRpc:
                 "retries": dict(provider.retries),
                 "failures": dict(provider.failures),
                 "method_circuits": dict(provider.method_circuit_open_reasons),
-                "estimated_credits": int(provider.estimated_credits),
+                "estimated_credits": int(max(provider.estimated_credits, provider.attempted_credits)),
+                "successful_response_credits": int(provider.estimated_credits),
                 "credit_budget": int(provider.credit_budget),
                 "credit_remaining": (
                     max(
                         0,
-                        int(provider.credit_budget - provider.estimated_credits),
+                        int(provider.credit_budget - max(provider.estimated_credits, provider.attempted_credits)),
                     )
                     if provider.credit_budget
                     else None
                 ),
                 "credit_budget_used_pct": (
                     round(
-                        provider.estimated_credits
+                        max(provider.estimated_credits, provider.attempted_credits)
                         / provider.credit_budget
                         * 100,
                         1,
@@ -2821,6 +2926,7 @@ def build_rpc_router(config):
                 credit_budget=int(
                     config.get("helius_rpc_credit_budget_per_scan", 5000)
                 ),
+                min_interval_seconds=float(config.get("helius_rpc_min_interval_seconds", 0.12)),
             )
         )
 
@@ -2962,16 +3068,22 @@ def build_rpc_router(config):
         providers,
         standard_order=_provider_order(
             config.get("rpc_standard_provider_order"),
-            ["chainstack", "drpc", "publicnode", "alchemy", "helius"],
+            STANDARD_ORDER,
         ),
         enhanced_order=_provider_order(
             config.get("rpc_enhanced_provider_order"),
-            ["alchemy", "helius"],
+            HISTORY_ORDER,
         ),
         balance_order=_provider_order(
             config.get("rpc_balance_provider_order"),
-            ["drpc", "publicnode", "alchemy", "helius", "chainstack"],
+            BALANCE_ORDER,
         ),
+        method_orders={method: _provider_order((config.get("rpc_method_provider_orders") or {}).get(method),
+            _provider_order(config.get("rpc_balance_provider_order"), names) if method == "getTokenAccountsByOwner" else
+            _provider_order(config.get("rpc_enhanced_provider_order"), names) if method == "getTransactionsForAddress" else
+            _provider_order(config.get("rpc_standard_provider_order"), names) if names == STANDARD_ORDER else names)
+            for method, names in METHOD_ORDERS.items()},
+        archive_order=_provider_order(config.get("rpc_archive_provider_order"), ["helius", "alchemy"]),
     )
 
 
@@ -3200,6 +3312,10 @@ def fetch_gmgn_trenches_universe(config):
             "direction": "desc",
         }
     ]
+    # CLI 1.6.1 applies these sorts locally to one capped completed list.
+    # Repeating the same server-side filters does not expand market coverage.
+    queries = [next((query for query in queries if isinstance(query, dict)), {})]
+    config["_gmgn_trenches_requests"] = {"server_queries": 1, "coverage": "bounded_ranked_list_not_all_pools"}
     errors = []
     for query in queries:
         if not isinstance(query, dict):
@@ -9613,6 +9729,7 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
     ):
         cursor = pagination_token
         provider_name = pagination_provider
+        history_task = "archive" if name == "launch_backfill" else "live"
         pages = 0
         attempted_providers = set()
         pass_stats = {
@@ -9644,6 +9761,7 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
                     if isinstance(rpc, RoutedSolanaRpc):
                         kwargs["provider_name"] = provider_name
                         kwargs["excluded_providers"] = attempted_providers
+                        kwargs["history_task"] = history_task
                     result = rpc.transactions_for_address(pool.pool_address, **kwargs)
                     actual_provider = (
                         result.get("_provider")
@@ -9699,7 +9817,7 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
                     raise
                 if provider_name:
                     attempted_providers.add(provider_name)
-                next_provider = rpc.next_enhanced_provider(excluded=attempted_providers)
+                next_provider = rpc.next_enhanced_provider(excluded=attempted_providers, history_task=history_task)
                 if not next_provider:
                     raise
                 failover = {
@@ -13076,6 +13194,7 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "scan_health": config.get("_scan_health", {}),
             "discovery": config.get("_discovery_stats", {}),
             "gmgn_ath": (state.get("maintenance") or {}).get("gmgn_ath", {}),
+            "gmgn_discovery": config.get("_gmgn_trenches_requests", {}),
             "caught_market_refresh": (state.get("maintenance") or {}).get("caught_market_refresh", {}),
             "signal_outcomes": (state.get("maintenance") or {}).get("signal_outcomes", {}),
             "supply_integrity": (
@@ -13112,6 +13231,7 @@ def report_config_for_lanes(config, lane_configs):
         "_rpc_providers",
         "_scan_health",
         "_discovery_stats",
+        "_gmgn_trenches_requests",
     ):
         if key in config:
             report_config[key] = config[key]
@@ -13556,6 +13676,7 @@ def run_once(config, lane_name=None):
     http = Http()
     rpc = build_rpc_router(config)
     configure_monthly_budgets(rpc, state, config)
+    rpc.configure_capabilities(state, config)
     config["_rpc_router"] = rpc
     health = rpc.health()
     config["_rpc_providers"] = rpc.provider_stats()

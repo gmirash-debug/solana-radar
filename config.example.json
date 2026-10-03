@@ -476,22 +476,30 @@
   "helius_transactions_fallback_signatures": true,
   "rpc_standard_provider_order": [
     "chainstack",
-    "drpc",
-    "publicnode",
+    "helius",
     "alchemy",
-    "helius"
+    "drpc",
+    "publicnode"
   ],
   "rpc_enhanced_provider_order": [
     "alchemy",
     "helius"
   ],
+  "rpc_archive_provider_order": ["helius", "alchemy"],
   "rpc_balance_provider_order": [
+    "helius",
+    "alchemy",
     "drpc",
     "publicnode",
-    "alchemy",
-    "helius",
     "chainstack"
   ],
+  "rpc_method_provider_orders": {
+    "getSignaturesForAddress": ["helius", "alchemy", "drpc", "publicnode"],
+    "getTokenLargestAccounts": ["alchemy", "helius", "drpc", "publicnode"],
+    "getTokenAccountsByOwner": ["helius", "alchemy", "drpc"],
+    "getTransactionsForAddress": ["alchemy", "helius"]
+  },
+  "rpc_capability_cache_hours": 24,
   "alchemy_rpc_timeout_seconds": 20,
   "alchemy_transactions_timeout_seconds": 35,
   "alchemy_rpc_max_retries": 4,
@@ -532,6 +540,7 @@
   "helius_rpc_retry_max_seconds": 120,
   "helius_rpc_circuit_failure_threshold": 2,
   "helius_rpc_credit_budget_per_scan": 5000,
+  "helius_rpc_min_interval_seconds": 0.12,
   "actionable_max_history_gap_seconds": 60,
   "actionable_min_classification_coverage_pct": 35,
   "actionable_min_balance_coverage_pct": 80,

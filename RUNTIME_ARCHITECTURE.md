@@ -85,6 +85,44 @@ allowances, NOT account billing data: other applications and earlier untracked
 usage are not included. Providers remain eligible only within their existing
 per-pass/method limits and the shared estimated allowance.
 
+### Task-specific RPC routing
+
+Routes use capabilities and native budgets, not a comparison between unrelated
+provider credit units. Defaults and per-method overrides live in `rpc_routing.py`
+and `rpc_method_provider_orders`:
+
+| Task | Primary | Fallback |
+| --- | --- | --- |
+| Full transaction, supply, parsed account batches | Chainstack | Helius, Alchemy, configured public reserves |
+| Owner balances and signature lists | Helius | Alchemy, configured public reserves |
+| Largest token accounts | Alchemy | Helius, configured public reserves |
+| Live indexed pool pages | Alchemy | Helius |
+| New launch backfill and receipt-position history | Helius | Alchemy |
+| Market discovery and reported ATH | GMGN | Existing market/registry fallbacks, never synthetic RPC ATH |
+
+Existing indexed cursors remain pinned to their originating provider. Live
+window failover restarts the bounded window without the old cursor and deduplicates
+signatures. Shadow receipt checks fail closed if their provider changes. Routing
+does not make a query-exhausted history sample proof of complete archive coverage.
+
+Known Chainstack shared-node restrictions skip owner, signature and largest-account
+indexed reads. Newly learned unsupported methods persist for 24 hours and reset
+when the endpoint changes. Rate-limit/temporary failures cool down only that method;
+other reads continue. Auth or actual account quota failures disable the provider.
+A local budget too small for a costly method does not disable remaining cheap reads.
+Attempts and retries reserve the per-scan allowance, not only successful responses.
+
+Missing/malformed balance lists are unavailable, not zero. An explicit empty
+account list is a valid zero. Null transaction details try another archive source.
+GMGN 1.6.1 Trenches sorting is local: one server query replaces repeated identical
+completed-list requests, without claiming full pool coverage.
+
+`tools/probe_rpc_routes.py` and the manual `Read-only RPC routing check` workflow
+test the configured credentials without touching scanner state. They report method
+access and bounded 7-15-day history samples, not full-market or full-archive coverage.
+Runtime provider stats include task assignments, null counts, unsupported methods,
+attempted units and native estimated monthly usage. Never print endpoint credentials.
+
 Live gap repair retains its own cursors. A separate launch task investigates one
 pool's first six hours per deep pass with bounded pagination and independent
 cursors. Pool creation is not necessarily token creation; cursor exhaustion
