@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import {createHash} from "node:crypto";
 import test from "node:test";
 import { historyEventId, ingestHistoryBatch, historyWallets, historyWalletDetail,
   historyEpisodeDetail, historyClusters, normalizedWallet, normalizedOutcome } from "../src/history.js";
@@ -132,6 +133,27 @@ function fixture(t, overrides = {}) {
     rows() { return store.db.prepare("SELECT * FROM history_queue_events ORDER BY source_at,event_id").all(); },
     meta() { return store.db.prepare("SELECT * FROM history_queue_meta").get(); },
   };
+}
+
+function evidenceBucket() {
+  const objects = new Map(), calls = [];
+  const store = {objects,calls,before:null};
+  const metadata = row => ({key:row.key,size:row.bytes.byteLength,customMetadata:structuredClone(row.metadata),
+    checksums:{sha256:Uint8Array.from(Buffer.from(row.checksum,"hex")).buffer}});
+  store.head = async key => {calls.push({method:"head",key}); await store.before?.("head",key);
+    const row=objects.get(key);return row?metadata(row):null;};
+  store.put = async (key,bytes,options) => {
+    calls.push({method:"put",key});await store.before?.("put",key);
+    assert.equal(options.onlyIf.get("If-None-Match"),"*");
+    if(objects.has(key))return null;
+    const checksum=createHash("sha256").update(bytes).digest("hex");
+    assert.equal(checksum,options.sha256);
+    const row={key,bytes:Uint8Array.from(bytes),metadata:structuredClone(options.customMetadata),checksum};
+    objects.set(key,row);return metadata(row);
+  };
+  store.get = async key => {calls.push({method:"get",key});await store.before?.("get",key);
+    const row=objects.get(key);return row?{...metadata(row),body:new Blob([row.bytes]).stream()}:null;};
+  return store;
 }
 
 test("enqueue retains the entire event and never accesses RADAR_DB", async t => {
@@ -523,6 +545,7 @@ async function drain(f, maximum = 300) {
       const result=await flushDurableHistory(f.env);
       assert.equal(result.failed,0,result.error);
       assert.ok(result.history_queries<=HISTORY_QUEUE_LIMITS.flushQueries);
+      assert.ok(result.history_requests<=HISTORY_QUEUE_LIMITS.flushRequests);
       assert.ok(result.history_write_units<=HISTORY_QUEUE_LIMITS.flushHistoryWriteUnits);
       totals.units+=result.history_write_units;
       totals.flushes++;
@@ -875,4 +898,430 @@ test("I01 steady state: two days of 100 forty-wallet cohorts/hour, outcomes and 
   assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM history_queue_events WHERE event_id LIKE 'expired-%'").get().n,
     HISTORY_QUEUE_LIMITS.receiptRows-4952-1);
   assert.ok(f.requests.filter(request=>new URL(request.url).pathname==="/flush").length<=1152);
+});
+
+test("R2 mode persists only tiny references after upload and confirmation; SQL sees verified original evidence", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive});
+  const raw=event("r2"),before=structuredClone(raw);
+  raw.large_evidence="x".repeat(60000);before.large_evidence=raw.large_evidence;
+  const result=await enqueueDurableHistory(f.env,ledger([raw]));
+  assert.equal(result.queued,1);
+  const queued=f.rows()[0],envelope=JSON.parse(queued.payload_json);
+  assert.equal(envelope.archive_queue_version,1); assert.equal(queued.archive_version,1);
+  assert.ok(queued.payload_bytes<1500);
+  assert.equal(envelope.episode,undefined); assert.equal(envelope.wallets,undefined);
+  assert.equal(envelope.archive_ref.event_id,"r2");
+  assert.deepEqual(archive.calls.map(call=>call.method),["head","put","head"]);
+  assert.equal(f.db.calls.length,0);
+  assert.deepEqual(raw,before);
+  const flushed=await flushDurableHistory(f.env);
+  assert.equal(flushed.delivered,1);assert.equal(flushed.history_queries,2);
+  const stored=f.db.db.prepare("SELECT payload_json FROM signal_episode_events WHERE event_id='r2'").get();
+  const sql=JSON.parse(stored.payload_json);
+  assert.equal(sql.archive_ref.key,envelope.archive_ref.key);
+  const status=await durableHistoryStatus(f.env);
+  assert.equal(status.archive_write_requests,1); assert.equal(status.archive_read_requests,3);
+  assert.equal(status.pending_bytes,0);
+});
+
+test("R2 unavailable cannot acknowledge ingress; failed confirmation retries preserve caller identity", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive});
+  const raw=event("outbox");
+  archive.before=method=>{if(method==="put")throw new Error("R2 unavailable");};
+  const request=()=>new Request("https://queue/ingest",{method:"POST",body:JSON.stringify(ledger([raw]))});
+  assert.equal((await f.queue.fetch(request())).status,503);
+  assert.equal(f.rows().length,0); assert.equal(f.meta().pending_rows,0); assert.equal(f.db.calls.length,0);
+  let heads=0;
+  archive.before=method=>{if(method==="head"&&++heads===2)throw new Error("confirmation lost");};
+  await assert.rejects(enqueueDurableHistory(f.env,ledger([raw])),/history_archive_unavailable/);
+  assert.equal(f.rows().length,0); assert.equal(archive.objects.size,1);
+  archive.before=null;
+  assert.equal((await enqueueDurableHistory(f.env,ledger([raw]))).queued,1);
+  const calls=archive.calls.length;
+  archive.before=()=>{throw new Error("R2 now unavailable");};
+  assert.equal((await enqueueDurableHistory(f.env,ledger([{...raw,full_evidence:{changed:true}}]))).duplicates,1);
+  assert.equal(archive.calls.length,calls);
+  assert.equal(JSON.parse(f.rows()[0].payload_json).archive_ref.event_id,raw.event_id);
+});
+
+test("corrupt or mismatched archive refs never execute SQL and remain pending through restart", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive});
+  await enqueueDurableHistory(f.env,ledger([event("corrupt")]));
+  const row=f.rows()[0],ref=JSON.parse(row.payload_json).archive_ref,object=archive.objects.get(ref.key);
+  object.bytes[10]^=1;
+  const failed=await flushDurableHistory(f.env);
+  assert.equal(failed.failed,1); assert.equal(failed.delivered,0); assert.equal(failed.history_write_units,0);
+  assert.equal(f.db.calls.length,0); assert.equal(f.rows()[0].status,"pending");
+  assert.equal(f.rows()[0].payload_json,row.payload_json);
+  f.restart();f.advance(120001);object.bytes[10]^=1;
+  object.metadata.event_id="foreign";
+  assert.equal((await flushDurableHistory(f.env)).failed,1);
+  assert.equal(f.db.calls.length,0);
+  object.metadata.event_id=ref.event_id;f.advance(240001);
+  assert.equal((await flushDurableHistory(f.env)).delivered,1);
+});
+
+test("R2 read outage after acceptance preserves reference, progress and backoff", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive});
+  await enqueueDurableHistory(f.env,ledger([event("read-outage")]));
+  const payload=f.rows()[0].payload_json;
+  archive.before=method=>{if(method==="get")throw new Error("offline");};
+  assert.equal((await flushDurableHistory(f.env)).failed,1);
+  assert.equal(f.db.calls.length,0);assert.equal(f.rows()[0].payload_json,payload);
+  const retry=f.rows()[0].next_attempt_at,progress=f.rows()[0].progress_json;
+  f.restart();
+  await enqueueDurableHistory(f.env,ledger([event("read-outage")]));
+  assert.equal(f.rows()[0].next_attempt_at,retry);assert.equal(f.rows()[0].progress_json,progress);
+  archive.before=null;f.advance(120001);
+  assert.equal((await flushDurableHistory(f.env)).delivered,1);
+});
+
+test("legacy spill is incremental and preserves pending identity, progress, timers and receipts", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{RADAR_ARCHIVE:archive});
+  const rows=Array.from({length:26},(_,i)=>({...event(`legacy-${String(i).padStart(2,"0")}`),evidence:"x".repeat(30000)}));
+  await enqueueDurableHistory(f.env,ledger(rows.slice(0,25)));await enqueueDurableHistory(f.env,ledger(rows.slice(25)));
+  f.store.db.prepare("UPDATE history_queue_events SET next_attempt_at=?,attempts=3,progress_json=?").run(NOW+3600000,JSON.stringify({version:1,phase:"event"}));
+  const before=f.rows(),pendingBytes=f.meta().pending_bytes;
+  f.env.HISTORY_ARCHIVE_MODE="r2";f.restart();
+  const flush=await flushDurableHistory(f.env);
+  assert.equal(flush.spilled,5);assert.equal(flush.delivered,0);assert.equal(flush.pending,26);
+  assert.ok(f.meta().pending_bytes<pendingBytes);
+  const after=f.rows();
+  for(let i=0;i<26;i++){
+    for(const key of ["event_id","episode_id","source_at","next_attempt_at","attempts","progress_json","status","delivered_at"])assert.equal(after[i][key],before[i][key]);
+    assert.equal(after[i].archive_version,i<5?1:0);
+  }
+  assert.equal(f.db.calls.length,0);
+  const second=await flushDurableHistory(f.env);
+  assert.equal(second.spilled,5);assert.equal(f.rows().filter(row=>row.archive_version===0).length,16);
+  for (let i=0;i<4;i++) await flushDurableHistory(f.env);
+  assert.equal(f.rows().filter(row=>row.archive_version===0).length,0);
+  assert.ok(f.meta().pending_bytes<pendingBytes/10);
+  assert.equal(f.meta().pending_rows,26);
+});
+
+test("legacy R2 upload or spill commit failure leaves original raw event and counters intact", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{RADAR_ARCHIVE:archive});
+  const raw={...event("legacy-safe"),evidence:"x".repeat(50000)};
+  await enqueueDurableHistory(f.env,ledger([raw]));
+  const before=f.rows()[0],bytes=f.meta().pending_bytes;
+  f.env.HISTORY_ARCHIVE_MODE="r2";f.restart();
+  archive.before=()=>{throw new Error("archive offline");};
+  await assert.rejects(flushDurableHistory(f.env),/history_archive_unavailable/);
+  assert.deepEqual(f.rows()[0],before);assert.equal(f.meta().pending_bytes,bytes);assert.equal(f.db.calls.length,0);
+  archive.before=null;
+  f.store.before=sql=>{if(/SET payload_json=\?,payload_bytes=\?,archive_version=1/.test(sql))throw new Error("spill commit failed");};
+  await assert.rejects(flushDurableHistory(f.env),/spill commit failed/);
+  assert.deepEqual(f.rows()[0],before);assert.equal(f.meta().pending_bytes,bytes);assert.equal(f.db.calls.length,0);
+  f.store.before=null;
+  assert.equal((await flushDurableHistory(f.env)).delivered,1);
+  assert.equal(f.rows()[0].event_id,before.event_id);
+});
+
+test("references survive SQL outage, lease replay, failed acknowledgements and feature rollback", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive});
+  await enqueueDurableHistory(f.env,ledger([event("replay")]));
+  const payload=f.rows()[0].payload_json;
+  f.db.before=()=>{throw new Error("SQL down");};
+  assert.equal((await flushDurableHistory(f.env)).failed,1);
+  f.db.before=null;f.advance(120001);
+  f.store.before=sql=>{if(/SET status='delivered'/.test(sql))throw new Error("ack failed");};
+  await assert.rejects(flushDurableHistory(f.env),/ack failed/);
+  assert.equal(f.rows()[0].payload_json,payload);assert.equal(f.rows()[0].status,"pending");
+  delete f.env.HISTORY_ARCHIVE_MODE;f.store.before=null;f.restart();f.advance(HISTORY_QUEUE_LIMITS.leaseMs+1);
+  assert.equal((await flushDurableHistory(f.env)).delivered,1);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM signal_episode_events").get().n,1);
+  const calls=archive.calls.length;
+  assert.equal((await enqueueDurableHistory(f.env,ledger([event("replay")]))).duplicates,1);
+  assert.equal(archive.calls.length,calls);
+});
+
+test("archive queue protects unknown pending schemas; ref/queue identity mismatch fails before SQL", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive});
+  await enqueueDurableHistory(f.env,ledger([event("protected")]));
+  const row=f.rows()[0],envelope=JSON.parse(row.payload_json);
+  envelope.archive_queue_version=2;
+  f.store.db.prepare("UPDATE history_queue_events SET payload_json=?").run(JSON.stringify(envelope));
+  await assert.rejects(flushDurableHistory(f.env),/history_archive_queue_version_invalid/);
+  assert.equal(f.rows()[0].status,"pending");assert.equal(f.rows()[0].attempts,0);assert.equal(f.db.calls.length,0);
+  envelope.archive_queue_version=1;
+  f.store.db.prepare("UPDATE history_queue_events SET payload_json=?,episode_id='foreign'").run(JSON.stringify(envelope));
+  assert.equal((await flushDurableHistory(f.env)).failed,1);assert.equal(f.db.calls.length,0);
+  assert.equal(f.rows()[0].status,"pending");
+});
+
+test("archive budgets bound requests and compressed bytes without acknowledgements or raw loss", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive,HISTORY_ARCHIVE_DAILY_WRITES:1});
+  await enqueueDurableHistory(f.env,ledger([event("budget-1")]));
+  await assert.rejects(enqueueDurableHistory(f.env,ledger([event("budget-2")])),/history_archive_daily_budget/);
+  assert.equal(f.rows().length,1);assert.equal(f.meta().archive_writes,1);
+  f.advance(86400000);
+  assert.equal((await enqueueDurableHistory(f.env,ledger([event("budget-2")]))).queued,1);
+  f.advance(86400000);f.env.HISTORY_ARCHIVE_DAILY_WRITE_BYTES=1;f.restart();
+  await assert.rejects(enqueueDurableHistory(f.env,ledger([event("byte-budget")])),/history_archive_daily_budget/);
+  assert.equal(f.rows().length,2);assert.equal(archive.objects.size,2);
+  assert.equal(f.db.calls.length,0);
+});
+
+test("R2 requests retain whole-batch ingress limits and invalid batches perform no archive operations", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive});
+  await assert.rejects(enqueueDurableHistory(f.env,ledger(Array.from({length:26},(_,i)=>event(`many-${i}`)))),/history_batch_max_25/);
+  await assert.rejects(enqueueDurableHistory(f.env,ledger([event("valid"),{...event("invalid"),wallets:{}}])),/history_wallets_must_be_array/);
+  const large=Array.from({length:12},(_,i)=>({...event(`big-${i}`),evidence:"x".repeat(95000)}));
+  const response=await f.queue.fetch(new Request("https://queue/enqueue",{method:"POST",body:JSON.stringify({events:large})}));
+  assert.equal(response.status,413);assert.equal(archive.calls.length,0);assert.equal(f.rows().length,0);
+});
+
+test("Turso cutover uses a separate estimate day while leaving DO cap, leases and cursors unchanged", async t => {
+  const f=fixture(t);
+  await enqueueDurableHistory(f.env,ledger([event("switch")]));
+  f.store.db.prepare("UPDATE history_queue_events SET progress_json=?").run(JSON.stringify({version:1,phase:"event"}));
+  f.store.db.prepare("UPDATE history_queue_meta SET hist_day=?,hist_writes=80000").run(iso(NOW).slice(0,10));
+  const row=f.rows()[0],doWrites=f.meta().do_writes;
+  f.env.STORAGE_SQL_BACKEND="turso";f.env.TURSO_DATABASE_URL="libsql://unit.turso.io";f.env.TURSO_AUTH_TOKEN="unit-test";
+  f.restart();
+  assert.equal(f.queue.historyBudget,180000);
+  assert.equal(f.queue.meta(NOW).hist_day,"turso:2026-10-03");
+  assert.equal(f.queue.meta(NOW).hist_writes,0);assert.equal(f.queue.meta(NOW).do_writes,doWrites);
+  const claim=f.queue.claim(NOW);
+  assert.equal(claim.day,"turso:2026-10-03");assert.equal(claim.doDay,"2026-10-03");
+  assert.equal(claim.rows.length,1);assert.equal(claim.rows[0].progress_json,row.progress_json);
+  assert.ok(f.queue.env.RADAR_HISTORY_DB!==f.db);
+  assert.equal(f.meta().hist_writes,40000);
+  f.queue.finish(claim,{ingested:[],failed:[],deferred:["switch"],progress:new Map()},0,null,NOW);
+  assert.equal(f.meta().hist_writes,0);
+  assert.ok(f.meta().do_writes<=50000);
+});
+
+test("D1 cannot opt into Turso estimates; only Turso permits at most one million daily estimate units", t => {
+  const store=storage(t),env={STORAGE_SQL_BACKEND:"turso",TURSO_DATABASE_URL:"libsql://unit.turso.io",TURSO_AUTH_TOKEN:"unit-test"};
+  assert.throws(()=>new HistoryQueue({storage:store},{HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:180000}),/invalid_/);
+  assert.throws(()=>new HistoryQueue({storage:store},{HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:480000}),/invalid_/);
+  assert.equal(new HistoryQueue({storage:store},{...env,HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:180000}).historyBudget,180000);
+  assert.equal(new HistoryQueue({storage:store},{...env,HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:1000000}).historyBudget,1000000);
+  assert.throws(()=>new HistoryQueue({storage:store},{...env,HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:1000001}),/invalid_/);
+});
+
+test("archived cluster work resumes without replaying the captured cohort", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive,HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:24});
+  const wallets=["a","b","c"].map(wallet_address=>({wallet_address,common_funder:"cluster",bought_tokens:100}));
+  await enqueueDurableHistory(f.env,ledger([event("archived-cluster",{type:"signal",wallets})]));
+  const first=await flushDurableHistory(f.env);
+  assert.equal(first.delivered,0);assert.equal(first.continued,1);assert.ok(f.rows()[0].progress_json);
+  const payload=f.rows()[0].payload_json;
+  for(let i=0;i<100&&f.meta().pending_rows;i++){
+    f.advance(86400000);f.restart();await flushDurableHistory(f.env);
+    if(f.meta().pending_rows)assert.equal(f.rows()[0].payload_json,payload);
+  }
+  assert.equal(f.meta().pending_rows,0);
+  assert.equal(f.db.calls.filter(call=>/INSERT OR IGNORE INTO signal_episode_events/.test(call.sql)).length,1);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM signal_wallets").get().n,3);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM wallet_cluster_edge_evidence").get().n,3);
+  assert.equal(f.db.db.prepare("SELECT job_id FROM history_cluster_lock").get().job_id,null);
+});
+
+test("expired raw leases require archive verification before SQL after cutover", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{RADAR_ARCHIVE:archive});
+  await enqueueDurableHistory(f.env,ledger([event("old-lease")]));
+  const claim=f.queue.claim(NOW),raw=f.rows()[0].payload_json;
+  assert.ok(claim.rows[0].lease_token);
+  f.env.HISTORY_ARCHIVE_MODE="r2";f.restart();f.advance(HISTORY_QUEUE_LIMITS.leaseMs+1);
+  archive.before=method=>{if(method==="get")throw new Error("cannot verify");};
+  const failed=await flushDurableHistory(f.env);
+  assert.equal(failed.failed,1);assert.equal(f.db.calls.length,0);assert.equal(f.rows()[0].payload_json,raw);
+  archive.before=null;f.advance(240001);
+  assert.equal((await flushDurableHistory(f.env)).delivered,1);
+  assert.equal(f.meta().pending_bytes,0);
+});
+
+test("archive PUT allowance exhaustion does not block previously archived reference delivery", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{RADAR_ARCHIVE:archive,HISTORY_ARCHIVE_DAILY_WRITES:1});
+  await enqueueDurableHistory(f.env,ledger([event("legacy"),event("already-archived")]));
+  f.env.HISTORY_ARCHIVE_MODE="r2";f.restart();
+  // Spill one row, then hit the PUT cap on the next; accepted archived work can still finish via GET.
+  const result=await flushDurableHistory(f.env);
+  assert.equal(result.delivered,1);assert.equal(result.failed,1);assert.equal(result.pending,1);
+  assert.equal(f.rows().find(row=>row.status==="pending").archive_version,0);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM signal_episode_events").get().n,1);
+});
+
+test("known full row capacity fails before creating billable orphan archive objects", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive,HISTORY_QUEUE_MAX_PENDING_ROWS:1});
+  await enqueueDurableHistory(f.env,ledger([event("full")]));
+  const calls=archive.calls.length;
+  await assert.rejects(enqueueDurableHistory(f.env,ledger([event("new-full")])),/history_queue_pending_capacity/);
+  assert.equal(archive.calls.length,calls);assert.equal(archive.objects.size,1);
+});
+
+test("concurrent archived duplicate enqueues retain first accepted evidence without repeated PUT", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive});
+  let release,entered;
+  const gate=new Promise(resolve=>{release=resolve;}),started=new Promise(resolve=>{entered=resolve;});
+  archive.before=async method=>{if(method==="put"){entered();await gate;}};
+  const raw=event("concurrent"),changed={...raw,full_evidence:{source:"second"}};
+  const first=enqueueDurableHistory(f.env,ledger([raw]));await started;
+  const second=enqueueDurableHistory(f.env,ledger([changed]));release();
+  assert.equal((await first).queued,1);assert.equal((await second).duplicates,1);
+  assert.equal(archive.calls.filter(call=>call.method==="put").length,1);
+  archive.before=null;await flushDurableHistory(f.env);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM signal_episode_events").get().n,1);
+});
+
+test("archive success followed by batch queue failure never acknowledges; retry reuses both immutable objects", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive});
+  f.store.before=(sql,values)=>{if(/INSERT INTO history_queue_events/.test(sql)&&values[0]==="second")throw new Error("queue failed");};
+  await assert.rejects(enqueueDurableHistory(f.env,ledger([event("first"),event("second")])),/queue failed/);
+  assert.equal(f.rows().length,0);assert.equal(f.meta().pending_rows,0);assert.equal(f.meta().pending_bytes,0);
+  assert.equal(archive.objects.size,2);assert.equal(f.db.calls.length,0);
+  f.store.before=null;
+  assert.equal((await enqueueDurableHistory(f.env,ledger([event("first"),event("second")]))).queued,2);
+  assert.equal(archive.calls.filter(call=>call.method==="put").length,2);
+  assert.equal((await flushDurableHistory(f.env)).delivered,2);
+});
+
+test("daily derived-mode estimates batch lightweight inline and archived work within the same 40-query cap", async t => {
+  const f=fixture(t,{HISTORY_DERIVED_MODE:"daily",RADAR_ARCHIVE:evidenceBucket()});
+  const rows=Array.from({length:10},(_,i)=>outcome(`daily-${i}`));
+  await enqueueDurableHistory(f.env,ledger(rows));
+  const inline=f.queue.claim(NOW);
+  assert.equal(inline.rows.length,5);
+  f.queue.finish(inline,{ingested:[],failed:[],deferred:inline.rows.map(row=>row.event_id),progress:new Map()},0,null,NOW);
+  f.store.db.prepare("UPDATE history_queue_events SET progress_json=?,next_attempt_at=?").run(JSON.stringify({phase:"derived_dirty"}),NOW);
+  assert.equal(f.queue.claim(NOW).rows.length,10);
+  // Reuse the same fixture after clearing expired leases, then safely migrate the raw payloads to references.
+  f.advance(HISTORY_QUEUE_LIMITS.leaseMs+1);
+  f.store.db.prepare("UPDATE history_queue_events SET lease_token=NULL,progress_json=NULL,next_attempt_at=?").run(NOW);
+  f.env.HISTORY_ARCHIVE_MODE="r2";f.restart();await f.queue.spillLegacyRows();
+  const archived=f.queue.claim(NOW+HISTORY_QUEUE_LIMITS.leaseMs+1);
+  assert.equal(archived.rows.length,5);
+  assert.equal(JSON.parse(archived.rows[0].payload_json).work.initial_queries,8);
+  f.queue.finish(archived,{ingested:[],failed:[],deferred:archived.rows.map(row=>row.event_id),progress:new Map()},0,null);
+  f.store.db.prepare("UPDATE history_queue_events SET progress_json=?,next_attempt_at=?").run(JSON.stringify({phase:"derived_dirty"}),NOW);
+  assert.equal(f.queue.claim(NOW+HISTORY_QUEUE_LIMITS.leaseMs+1).rows.length,10);
+});
+
+test("25-event R2 ingress keeps its atomic client wire within the internal-service budget", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive});
+  const rows=Array.from({length:25},(_,i)=>event(`ingress-${String(i).padStart(2,"0")}`));
+  f.store.before=(sql,values)=>{if(/INSERT INTO history_queue_events/.test(sql)&&values[0]===rows[12].event_id)throw new Error("atomic commit failed");};
+  await assert.rejects(enqueueDurableHistory(f.env,ledger(rows)),/atomic commit failed/);
+  assert.equal(archive.calls.length,75);assert.equal(archive.objects.size,25);
+  assert.equal(f.rows().length,0);assert.equal(f.meta().pending_rows,0);assert.equal(f.meta().pending_bytes,0);
+  assert.equal(f.db.calls.length,0);assert.equal(f.requests.length,1);
+  f.store.before=null;
+  const before=archive.calls.length,retry=await enqueueDurableHistory(f.env,ledger(rows));
+  assert.equal(retry.queued,25);assert.equal(archive.calls.length-before,25);
+  assert.ok(archive.calls.slice(before).every(call=>call.method==="head"));
+  assert.equal(f.requests.length,2);assert.equal(f.rows().filter(row=>row.archive_version===1).length,25);
+  const replay=archive.calls.length;
+  assert.equal((await enqueueDurableHistory(f.env,ledger(rows))).duplicates,25);
+  assert.equal(archive.calls.length,replay);
+});
+
+test("archived lightweight flush planning shares the cap between hydration and SQL", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive});
+  await enqueueDurableHistory(f.env,ledger(Array.from({length:25},(_,i)=>event(`bounded-${String(i).padStart(2,"0")}`))));
+  const before=archive.calls.length,queries=f.db.calls.length,result=await flushDurableHistory(f.env);
+  assert.equal(result.delivered,15);assert.equal(result.pending,10);assert.equal(result.continued,0);
+  assert.equal(result.history_requests,45);assert.equal(result.archive_requests,15);assert.equal(result.history_queries,30);
+  assert.equal(result.external_history_requests,0);
+  assert.equal(archive.calls.length-before+f.db.calls.length-queries,result.history_requests);
+  await drain(f);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM signal_episode_events").get().n,25);
+});
+
+test("legacy spill and resumable graph processing never exceed one shared 45-request invocation", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{RADAR_ARCHIVE:archive});
+  const wallets=Array.from({length:60},(_,i)=>({wallet_address:`budget-${i}`,common_funder:"private-funder",bought_tokens:100}));
+  const raw=event("00-heavy",{type:"signal",wallets});
+  const legacy=Array.from({length:5},(_,i)=>event(`light-${i}`));
+  await enqueueDurableHistory(f.env,ledger([raw,...legacy]));
+  f.store.db.prepare("UPDATE history_queue_events SET next_attempt_at=? WHERE event_id<>'00-heavy'").run(NOW+3600000);
+  f.env.HISTORY_ARCHIVE_MODE="r2";f.restart();
+  const before=archive.calls.length,first=await flushDurableHistory(f.env);
+  assert.equal(first.spilled,5);assert.equal(first.archive_requests,16);assert.equal(first.history_queries,29);
+  assert.equal(first.history_requests,45);assert.equal(archive.calls.length-before,16);
+  assert.equal(first.continued,1);assert.equal(first.failed,0);assert.equal(first.error,null);
+  const captured=f.rows().find(row=>row.event_id===raw.event_id).payload_json;
+  assert.ok(f.rows().find(row=>row.event_id===raw.event_id).progress_json);
+  for (let i=0;i<80&&f.rows().find(row=>row.event_id===raw.event_id).status==="pending";i++) {
+    f.advance(1001);f.restart();
+    const calls=archive.calls.length,result=await flushDurableHistory(f.env);
+    assert.ok(result.history_requests<=45);assert.ok(result.history_queries<=40);
+    assert.equal(result.archive_requests,archive.calls.length-calls);assert.equal(result.failed,0);
+    if (f.rows().find(row=>row.event_id===raw.event_id).status==="pending") {
+      assert.equal(f.rows().find(row=>row.event_id===raw.event_id).payload_json,captured);
+    }
+  }
+  assert.equal(f.rows().find(row=>row.event_id===raw.event_id).status,"delivered");
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM signal_episode_events WHERE event_id='00-heavy'").get().n,1);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM signal_wallets").get().n,60);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM wallet_cluster_edge_evidence").get().n,1770);
+  assert.equal(f.db.db.prepare("SELECT job_id FROM history_cluster_lock").get().job_id,null);
+  assert.ok(f.rows().filter(row=>row.event_id!==raw.event_id).every(row=>row.status==="pending"&&row.next_attempt_at===NOW+3600000));
+});
+
+test("Turso SQL requests are classified external and retain the 40-query cap alongside R2", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive,
+    STORAGE_SQL_BACKEND:"turso",TURSO_DATABASE_URL:"libsql://unit.turso.io",TURSO_AUTH_TOKEN:"unit-test"});
+  // Execute the identical checked SQL interface locally; real provider timing requires a live tail smoke.
+  f.queue.env.RADAR_HISTORY_DB=f.db;
+  await enqueueDurableHistory(f.env,ledger(Array.from({length:25},(_,i)=>event(`external-${i}`))));
+  const result=await flushDurableHistory(f.env);
+  assert.equal(result.external_history_requests,result.history_queries);assert.equal(result.external_history_requests,30);
+  assert.equal(result.archive_requests,15);assert.equal(result.history_requests,45);
+  assert.equal(result.failed,0);assert.equal(result.delivered,15);
+});
+
+test("flush query override is only lowerable and status reports its active value", async t => {
+  const f=fixture(t,{HISTORY_QUEUE_FLUSH_QUERIES:"24"});
+  assert.equal(f.queue.queryLimit,24);
+  assert.equal((await durableHistoryStatus(f.env)).limits.flushQueries,24);
+  assert.equal(f.queue.historyBudget,80000);
+  assert.equal(new HistoryQueue({storage:f.store},{}).queryLimit,40);
+  for (const value of [0,41,-1,1.5,"invalid"]) {
+    assert.throws(()=>new HistoryQueue({storage:f.store},{HISTORY_QUEUE_FLUSH_QUERIES:value}),/invalid_HISTORY_QUEUE_FLUSH_QUERIES/);
+  }
+});
+
+test("Turso 24-query flush resumes archived daily-mode graph work across ticks and restarts", async t => {
+  const archive=evidenceBucket(),f=fixture(t,{HISTORY_ARCHIVE_MODE:"r2",RADAR_ARCHIVE:archive,
+    STORAGE_SQL_BACKEND:"turso",TURSO_DATABASE_URL:"libsql://unit.turso.io",TURSO_AUTH_TOKEN:"unit-test",
+    HISTORY_QUEUE_FLUSH_QUERIES:24,HISTORY_DERIVED_MODE:"daily"});
+  f.db.db.exec(readFileSync(new URL("../migrations-storage/0001_daily_learning.sql",import.meta.url),"utf8"));
+  let roundTrips=0;
+  const wrap=statement=>({statement,
+    bind:(...values)=>wrap(statement.bind(...values)),
+    run:()=>{roundTrips++;return statement.run();},
+    all:()=>{roundTrips++;return statement.all();},
+    first:(...args)=>{roundTrips++;return statement.first(...args);},
+  });
+  const counted={prepare:sql=>wrap(f.db.prepare(sql)),
+    batch:statements=>{roundTrips++;return f.db.batch(statements.map(item=>item.statement));}};
+  f.queue.env.RADAR_HISTORY_DB=counted;
+  const wallets=Array.from({length:60},(_,i)=>({wallet_address:`limited-${i}`,common_funder:"private-funder",bought_tokens:100}));
+  await enqueueDurableHistory(f.env,ledger([event("limited",{type:"signal",wallets})]));
+  const payload=f.rows()[0].payload_json;
+  assert.equal(JSON.parse(payload).work.initial_queries,40);
+  let ticks=0;
+  while (f.meta().pending_rows&&ticks<80) {
+    const before=roundTrips,result=await flushDurableHistory(f.env);
+    assert.ok(roundTrips-before<=24);
+    assert.equal(result.history_queries,roundTrips-before);
+    assert.equal(result.external_history_requests,roundTrips-before);
+    assert.ok(result.history_requests<=45);assert.equal(result.failed,0,result.error);assert.equal(result.error,null);
+    if (!ticks) { assert.equal(result.history_queries,24);assert.equal(result.continued,1); }
+    ticks++;
+    if (f.meta().pending_rows) {
+      assert.equal(f.rows()[0].payload_json,payload);assert.ok(f.rows()[0].progress_json);
+      f.advance(1001);f.restart();f.queue.env.RADAR_HISTORY_DB=counted;
+      assert.equal(f.queue.queryLimit,24);
+    }
+  }
+  assert.ok(ticks>1);assert.equal(f.meta().pending_rows,0);assert.equal(f.rows()[0].status,"delivered");
+  assert.equal((await durableHistoryStatus(f.env)).limits.flushQueries,24);
+  assert.equal(f.db.calls.filter(call=>/INSERT OR IGNORE INTO signal_episode_events/.test(call.sql)).length,1);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM signal_wallets").get().n,60);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM wallet_cluster_edge_evidence").get().n,1770);
+  assert.equal(f.db.db.prepare("SELECT job_id FROM history_cluster_lock").get().job_id,null);
 });

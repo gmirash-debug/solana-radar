@@ -2,6 +2,32 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import worker from "../src/index.js";
 
+test("cutover freeze stops all cron work and mutations but keeps reads available", async () => {
+  const tasks=[];
+  const env={STORAGE_WRITES_FROZEN:"true",SCHEDULER_ENABLED:"auto",RADAR_INGEST_SECRET:"secret"};
+  for (const cron of ["*/5 * * * *", "7 * * * *", "37 * * * *", "22,37,52 * * * *"]) {
+    await worker.scheduled({cron},env,{waitUntil:task=>tasks.push(task)});
+  }
+  assert.equal(tasks.length,0);
+  for (const path of ["/dispatch", "/deleted-token", "/api/ingest", "/api/runtime/history/flush", "/api/storage/maintenance"]) {
+    const response=await worker.fetch(new Request(`https://worker.example${path}`,{method:"POST"}),env,{});
+    assert.equal(response.status,503);
+    assert.equal(response.headers.get("retry-after"),"120");
+    assert.equal((await response.json()).error,"storage_cutover_writes_frozen");
+  }
+  const response=await worker.fetch(new Request("https://worker.example/health"),env,{});
+  assert.equal(response.status,200);
+  assert.equal((await response.json()).storage_writes_frozen,true);
+  const checkpoint=await worker.fetch(new Request("https://worker.example/api/runtime/checkpoint?kind=invalid",{
+    headers:{"x-radar-ingest-secret":"secret"},
+  }),env,{});
+  assert.equal(checkpoint.status,400);
+  const read=await worker.fetch(new Request("https://worker.example/api/storage/archive/read",{
+    method:"POST",headers:{"x-radar-ingest-secret":"secret"},body:"{}",
+  }),env,{});
+  assert.notEqual((await read.json()).error,"storage_cutover_writes_frozen");
+});
+
 test("archive cron is isolated from frequent discovery and deep scans", async () => {
   assert.equal(shouldFlushScheduledHistory({cron:"*/5 * * * *"}, {}), false);
   assert.equal(shouldFlushScheduledHistory({cron:"7 * * * *"}, {}), false);
@@ -104,6 +130,38 @@ test("new evidence ingestion route requires the server ingest secret", async () 
     method:"POST",body:JSON.stringify({generated_at:"2026-10-03T00:00:00Z"}),
   }), {RADAR_INGEST_SECRET:"test-secret",RADAR_DB:recordingDb()}, {});
   assert.equal(response.status, 401);
+});
+
+test("storage endpoints require authorization and reject unbounded or malformed JSON", async () => {
+  const env = {RADAR_INGEST_SECRET:"secret", HISTORY_ARCHIVE_MODE:"r2"};
+  const call = (path, body, authorized=true) => worker.fetch(new Request(`https://worker.example${path}`, {
+    method:"POST", headers:authorized ? {"x-radar-ingest-secret":"secret"} : {}, body,
+  }),env,{});
+  assert.equal((await call("/api/storage/archive", "{}", false)).status,401);
+  assert.equal((await call("/api/storage/archive", "x".repeat(151*1024))).status,413);
+  assert.equal((await call("/api/storage/archive/read", "x".repeat(4097))).status,413);
+  assert.equal((await call("/api/storage/archive/read", "{" )).status,400);
+});
+
+test("overlapping ingest rotation accepts old and next keys, never arbitrary or empty keys", async () => {
+  const env={RADAR_INGEST_SECRET:"old",RADAR_INGEST_SECRET_NEXT:"next"};
+  const call=key=>worker.fetch(new Request("https://worker.example/api/runtime/checkpoint?kind=invalid", {
+    headers:{"x-radar-ingest-secret":key},
+  }),env,{});
+  assert.equal((await call("old")).status,400);
+  assert.equal((await call("next")).status,400);
+  assert.equal((await call("bad")).status,401);
+  assert.equal((await call("")).status,401);
+});
+
+test("identical state and thesis replays avoid unnecessary SQL row writes", async () => {
+  const db = recordingDb(), generated_at="2026-10-03T00:00:00Z";
+  await ingestSnapshotDetails({RADAR_DB:db}, {generated_at,
+    detail_signal_theses:[{token_address:"a",signal_at:generated_at}],
+  });
+  const query = db.writes.find(row=>row.sql.includes("INSERT INTO state_docs")).sql;
+  assert.ok(query.includes("state_docs.payload_json IS NOT excluded.payload_json"));
+  assert.ok(query.includes("state_docs.source_updated_at IS NOT excluded.source_updated_at"));
 });
 
 function githubContent(data, sha) {

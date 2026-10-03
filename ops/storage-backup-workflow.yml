@@ -1,0 +1,56 @@
+# Install ONLY as .github/workflows/storage-backup.yml in the PRIVATE backup
+# repository, together with tools/storage_backup.py and its test file.
+# Variable: TURSO_DATABASE_URL. Secret: TURSO_AUTH_TOKEN (read-only db token).
+# GITHUB_TOKEN is scoped to this private repository; no Cloudflare/RPC keys.
+# Coverage: entire Turso SQL database, including external-object references.
+# Referenced R2 object/evidence bodies are NOT copied by this SQL backup.
+# Trigger workflow_dispatch after initial setup; accept recovery readiness only
+# after the full remote snapshot passes restore verification and original-row
+# comparison. Passing credential-free tests alone does not prove cloud coverage.
+# Local tests may need SSL_CERT_FILE pointing at trusted system CA roots; the
+# Ubuntu runner normally already has valid roots. Never disable TLS validation.
+# After a failed/expired stream, rerun from scratch; no partial snapshot resumes.
+# Restore check: python tools/storage_backup.py verify radar.sqlite.gz manifest.json
+# End-to-end tool budget is 1000 seconds, capped at 1080 if configured manually.
+# Job limit is 20 minutes, including setup/tests; requests remain capped at 20s.
+name: Private daily database backup
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: private-storage-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    if: github.event.repository.private == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out private backup code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test backup contracts without production credentials
+        run: python -m unittest discover -s tests -p test_storage_backup.py
+      - name: Export, verify and retain seven private backups
+        env:
+          TURSO_DATABASE_URL: ${{ vars.TURSO_DATABASE_URL }}
+          TURSO_BACKUP_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/storage_backup.py backup --repository "$GITHUB_REPOSITORY" --publish --keep 7 --max-seconds 1000
+      # No cache or upload-artifact steps: database contents remain solely in
+      # checksum-verified Releases of this private repository.
+      # Seven verified recovery points are retained. Failed unverified uploads
+      # never prune older verified copies; a verified draft may survive a
+      # publication failure and is recoverable from the repository Releases.

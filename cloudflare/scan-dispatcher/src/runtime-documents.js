@@ -70,9 +70,14 @@ export async function collectOldBlobs(tx, root, protectedIds, now = Date.now()) 
   let last = null;
   for (const [key, index] of entries) {
     last = key;
-    if (protectedIds.has(index.id) || now - Math.max(index.staged_at, index.superseded_at || 0) < 3600000) continue;
+    if (!isContentId(index?.id) || !Number.isFinite(index.staged_at) || index.staged_at < 1
+        || (index.superseded_at !== undefined && !Number.isFinite(index.superseded_at))
+        || protectedIds.has(index.id) || now - Math.max(index.staged_at, index.superseded_at || 0) < 3600000) continue;
     const name = `${root}:blob:${index.id}`;
     const meta = await tx.get(`${name}:meta`);
+    if (meta?.archive_ref) {
+      await tx.put({[`${root}:archive-gc:${index.id}`]:{id:index.id, archive_ref:meta.archive_ref}});
+    }
     const keys = [key, `${name}:meta`, ...Array.from({length:meta?.chunks || 0}, (_, i) => `${name}:part:${i}`)];
     for (let start = 0; start < keys.length; start += 128) await tx.delete(keys.slice(start, start + 128));
     if (++removed >= 16) break;

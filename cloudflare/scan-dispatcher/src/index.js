@@ -16,6 +16,10 @@ import {
 import {runtimeDocument, runtimeDashboardResponse, runtimeCheckpointResponse, runtimeMetadata} from "./runtime.js";
 import {durableHistoryIngestResponse, flushDurableHistory, durableHistoryStatus, HISTORY_QUEUE_LIMITS} from "./runtime-history.js";
 import {historySchemaState} from "./history-schema.js";
+import {resolveStorageEnv} from "./storage-sql.js";
+import {archiveHistoryEvent, readHistoryArchive} from "./archive.js";
+import {validateHistoryEvents} from "./runtime-history.js";
+import {runHistoryMaintenance, historyMaintenanceStatus, pruneArchivedHistoryOutbox} from "./history-maintenance.js";
 export {RuntimeSnapshots} from "./runtime.js";
 export {HistoryQueue} from "./runtime-history.js";
 
@@ -55,6 +59,28 @@ function json(body, status = 200, headers = {}) {
       ...headers,
     },
   });
+}
+
+async function storageRequestJson(request, maximum = 150 * 1024) {
+  const reader = request.body?.getReader();
+  if (!reader) throw Object.assign(new Error("storage_request_body_required"), {status:400});
+  const decoder = new TextDecoder("utf-8", {fatal:true});
+  let size = 0, body = "";
+  try {
+    while (true) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maximum) throw Object.assign(new Error("storage_request_oversize"), {status:413});
+      body += decoder.decode(value, {stream:true});
+    }
+    body += decoder.decode();
+    return JSON.parse(body);
+  } catch (error) {
+    reader.cancel().catch(() => {});
+    if (error.status) throw error;
+    throw Object.assign(new Error("storage_request_json_invalid"), {status:400});
+  } finally { reader.releaseLock(); }
 }
 
 function requireEnv(env, name) {
@@ -268,9 +294,10 @@ function timestampMs(value) {
 
 function ingestAccess(request, env) {
   const expected = normalizeId(env.RADAR_INGEST_SECRET);
-  if (!expected) return { ok: false, status: 503, error: "ingest_not_configured" };
+  const next = normalizeId(env.RADAR_INGEST_SECRET_NEXT);
+  if (!expected && !next) return { ok: false, status: 503, error: "ingest_not_configured" };
   const supplied = normalizeId(request.headers.get("x-radar-ingest-secret"));
-  if (!supplied || supplied !== expected) return { ok: false, status: 401, error: "unauthorized" };
+  if (!supplied || (supplied !== expected && supplied !== next)) return { ok: false, status: 401, error: "unauthorized" };
   return { ok: true };
 }
 
@@ -305,6 +332,8 @@ async function upsertStateDoc(db, key, payload, sourceUpdatedAt, now = isoNow())
       source_updated_at = excluded.source_updated_at,
       updated_at = excluded.updated_at
     WHERE excluded.source_updated_at >= state_docs.source_updated_at
+      AND (state_docs.payload_json IS NOT excluded.payload_json
+        OR state_docs.source_updated_at IS NOT excluded.source_updated_at)
   `).bind(key, serializePayload(payload), sourceUpdatedAt || now, now).run();
   return Number(result?.meta?.changes || 0) > 0;
 }
@@ -324,6 +353,8 @@ async function upsertSignalThesisDetails(db, theses, sourceUpdatedAt, now) {
         source_updated_at = excluded.source_updated_at,
         updated_at = excluded.updated_at
       WHERE excluded.source_updated_at >= state_docs.source_updated_at
+        AND (state_docs.payload_json IS NOT excluded.payload_json
+          OR state_docs.source_updated_at IS NOT excluded.source_updated_at)
     `).bind(`signal_thesis:${tokenKey}`, payload, sourceUpdatedAt || now, now));
   }
   await runD1Batch(db, statements);
@@ -341,6 +372,10 @@ async function upsertScanRun(db, report, now) {
       lanes_scanned_json = excluded.lanes_scanned_json,
       stats_json = excluded.stats_json,
       lane_stats_json = excluded.lane_stats_json
+    WHERE scan_runs.lane IS NOT excluded.lane OR scan_runs.profile IS NOT excluded.profile
+      OR scan_runs.lanes_scanned_json IS NOT excluded.lanes_scanned_json
+      OR scan_runs.stats_json IS NOT excluded.stats_json
+      OR scan_runs.lane_stats_json IS NOT excluded.lane_stats_json
   `).bind(
     generatedAt,
     generatedAt,
@@ -373,6 +408,8 @@ async function upsertAlerts(db, history, fallbackGeneratedAt, now) {
         payload_json = excluded.payload_json,
         updated_at = excluded.updated_at
       WHERE excluded.updated_at >= alerts.updated_at
+        AND (alerts.payload_json IS NOT excluded.payload_json OR alerts.score IS NOT excluded.score
+          OR alerts.tier IS NOT excluded.tier OR alerts.generated_at IS NOT excluded.generated_at)
     `).bind(
       identity.alertKey,
       identity.generatedAt,
@@ -412,7 +449,9 @@ async function upsertDeletedTokenIndex(db, deletedTokens, now = isoNow()) {
     rows.push({ key: `pool:${pool}`, kind: "pool", tokenAddress: null, poolAddress: pool, symbol: null, name: null, deletedAt: now });
   }
   const statements = [
-    db.prepare("UPDATE deleted_tokens SET active = 0, restored_at = ?1, updated_at = ?1 WHERE active = 1").bind(now),
+    db.prepare(`UPDATE deleted_tokens SET active = 0, restored_at = ?1, updated_at = ?1
+      WHERE active = 1 AND key NOT IN (SELECT value FROM json_each(?2))`)
+      .bind(now, JSON.stringify(rows.map(row => row.key))),
   ];
   for (const row of rows) {
     statements.push(db.prepare(`
@@ -427,6 +466,9 @@ async function upsertDeletedTokenIndex(db, deletedTokens, now = isoNow()) {
         deleted_at = excluded.deleted_at,
         restored_at = NULL,
         updated_at = excluded.updated_at
+      WHERE deleted_tokens.active = 0 OR deleted_tokens.token_address IS NOT excluded.token_address
+        OR deleted_tokens.pool_address IS NOT excluded.pool_address OR deleted_tokens.symbol IS NOT excluded.symbol
+        OR deleted_tokens.name IS NOT excluded.name
     `).bind(row.key, row.kind, row.tokenAddress, row.poolAddress, row.symbol, row.name, row.deletedAt, now));
   }
   await runD1Batch(db, statements);
@@ -499,7 +541,7 @@ async function ingestDashboardSnapshot(env, payload) {
   // The operational dashboard stays available if the analytics store is
   // temporarily unavailable. Events remain in the outbox and retry on cron.
   const historySync = { enabled: hasHistoryDb(env), pending: historyQueued.queued, status: "queued_for_background_flush" };
-  await pruneRadarData(env.RADAR_DB, now);
+  if (env.STORAGE_SQL_BACKEND !== "turso") await pruneRadarData(env.RADAR_DB, now);
   return {
     ok: true,
     generated_at: generatedAt,
@@ -710,13 +752,14 @@ async function dashboardData(env, historyLimit = 40) {
     discovery_status: parsePayload(discoveryStatusDoc?.payload_json, {}),
     scan_status: parsePayload(scanStatusDoc?.payload_json, {
       running: false,
-      source: "cloudflare_d1",
+      source: env.STORAGE_SQL_BACKEND === "turso" ? "turso_sql" : "cloudflare_d1",
       static_mode: false,
       finished_at: report.generated_at || reportDoc?.updated_at || null,
       returncode: 0,
     }),
     history_status: parsePayload(historyStatusDoc?.payload_json, {}),
     report_source_updated_at: reportDoc?.source_updated_at || reportDoc?.updated_at || null,
+    storage_source: env.STORAGE_SQL_BACKEND === "turso" ? "turso_sql" : "d1",
   };
 }
 
@@ -1099,15 +1142,36 @@ async function flushAndPublishHistoryHealth(env, maximum = 1, {upgradeSchema=fal
   return {result,status,error,checked_at:checkedAt,...(schema.enabled ? {history_schema:schema} : {})};
 }
 
+async function runArchiveRetention(env) {
+  if (env.STORAGE_SQL_BACKEND !== "turso" || env.HISTORY_ARCHIVE_MODE !== "r2") return {enabled:false};
+  const key = "storage_retention_cursor";
+  const row = await env.RADAR_DB.prepare("SELECT payload_json FROM state_docs WHERE key=?1").bind(key).first();
+  const previous = parsePayload(row?.payload_json, {});
+  const result = await pruneArchivedHistoryOutbox(env, {after:previous.after || "", maxQueries:12,
+    maxWrites:5, maxRequests:16, pageSize:5});
+  const after = result.complete ? "" : result.after;
+  if (result.checked || after !== (previous.after || "")) {
+    await upsertStateDoc(env.RADAR_DB, key, {after, last_checked_at:isoNow(), last_result:result}, isoNow());
+  }
+  return result;
+}
+
 export default {
   async scheduled(_event, env, ctx) {
+    env = resolveStorageEnv(env);
+    if (env.STORAGE_WRITES_FROZEN === "true") return;
     const mode = schedulerMode(env);
+    const turso = env.STORAGE_SQL_BACKEND === "turso";
     const historyTask = env.HISTORY_QUEUE && hasHistoryDb(env) && _event?.cron === DISCOVERY_CRON
-      ? flushAndPublishHistoryHealth(env,HISTORY_QUEUE_LIMITS.scheduledFlushes,{upgradeSchema:true})
+      ? flushAndPublishHistoryHealth(env,turso ? 1 : HISTORY_QUEUE_LIMITS.scheduledFlushes,{upgradeSchema:true})
       : shouldFlushScheduledHistory(_event, env) && hasHistoryDb(env)
         ? env.HISTORY_SCHEMA_AUTO_UPGRADE !== undefined
           ? flushAndPublishHistoryHealth(env,1,{legacy:true})
           : flushHistoryOutbox(env).catch(() => null) : Promise.resolve(null);
+    if (_event?.cron === DISCOVERY_CRON && env.HISTORY_DERIVED_MODE === "daily") {
+      ctx.waitUntil(runHistoryMaintenance(env,{maxQueries:turso ? 16 : 32,maxWrites:turso ? 50 : 100}));
+    }
+    if (shouldFlushScheduledHistory(_event, env)) ctx.waitUntil(runArchiveRetention(env));
     if (mode === "disabled" || shouldFlushScheduledHistory(_event, env)) {
       ctx.waitUntil(historyTask);
       return;
@@ -1117,6 +1181,8 @@ export default {
   },
 
   async fetch(request, env) {
+    try { env = resolveStorageEnv(env); }
+    catch (error) { return json({ok:false, error:error.message}, 503); }
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
@@ -1128,6 +1194,13 @@ export default {
         status: 204,
         headers,
       });
+    }
+
+    if (env.STORAGE_WRITES_FROZEN === "true"
+        && !["GET", "HEAD"].includes(request.method)
+        && !(request.method === "POST" && url.pathname === "/api/storage/archive/read")) {
+      return json({ok:false, error:"storage_cutover_writes_frozen"}, 503,
+        {...corsHeaders(request, env), "retry-after":"120"});
     }
 
     if (url.pathname === "/health") {
@@ -1153,9 +1226,16 @@ export default {
         delete_access_configured: Boolean(env.CLOUDFLARE_ACCESS_AUD && env.CLOUDFLARE_ACCESS_TEAM_DOMAIN),
         ingest_secret_configured: Boolean(env.RADAR_INGEST_SECRET),
         scheduler_dedupe_configured: Boolean(env.DISPATCH_BUCKETS),
-        d1_configured: hasRadarDb(env),
-        d1_healthy: d1Healthy,
-        d1_error: d1Error,
+        d1_configured: env.STORAGE_SQL_BACKEND !== "turso" && hasRadarDb(env),
+        d1_healthy: env.STORAGE_SQL_BACKEND !== "turso" && d1Healthy,
+        d1_error: env.STORAGE_SQL_BACKEND !== "turso" ? d1Error : null,
+        sql_backend: env.STORAGE_SQL_BACKEND || "d1",
+        storage_writes_frozen: env.STORAGE_WRITES_FROZEN === "true",
+        sql_healthy: d1Healthy,
+        sql_error: d1Error,
+        archive_configured: Boolean(env.RADAR_ARCHIVE),
+        history_archive_mode: env.HISTORY_ARCHIVE_MODE || "durable",
+        runtime_archive_mode: env.RUNTIME_ARCHIVE_MODE || "durable",
         history: historical,
       }, 200, corsHeaders(request, env));
     }
@@ -1244,6 +1324,30 @@ export default {
       const access = ingestAccess(request, env);
       if (!access.ok) return json({ ok: false, error: access.error }, access.status, corsHeaders(request, env));
       try {
+        if (url.pathname === "/api/storage/archive") {
+          if (request.method !== "POST") return json({ok:false,error:"POST required"},405);
+          if (env.HISTORY_ARCHIVE_MODE !== "r2") return json({ok:false,error:"history_archive_disabled"},503);
+          const payload = await storageRequestJson(request);
+          validateHistoryEvents([payload?.event]);
+          return json({ok:true, archive_ref:await archiveHistoryEvent(env,payload.event)});
+        }
+        if (url.pathname === "/api/storage/archive/read") {
+          if (request.method !== "POST") return json({ok:false,error:"POST required"},405);
+          const payload = await storageRequestJson(request, 4096);
+          return json({ok:true,event:await readHistoryArchive(env,payload?.archive_ref)});
+        }
+        if (url.pathname === "/api/storage/status") {
+          if (request.method !== "GET") return json({ok:false,error:"GET required"},405);
+          return json({ok:true,sql_backend:env.STORAGE_SQL_BACKEND || "d1",
+            archive_configured:Boolean(env.RADAR_ARCHIVE),
+            history_schema:await historySchemaState(env),
+            learning:await historyMaintenanceStatus(env)});
+        }
+        if (url.pathname === "/api/storage/maintenance") {
+          if (request.method !== "POST") return json({ok:false,error:"POST required"},405);
+          return json({ok:true,...await runHistoryMaintenance(env,{maxQueries:20,maxWrites:50}),
+            retention:await runArchiveRetention(env)});
+        }
         if (url.pathname === "/api/runtime/checkpoint") {
           const kind = url.searchParams.get("kind") || "deep";
           if (!["deep", "discovery"].includes(kind)) return json({ok:false, error:"invalid_checkpoint_kind"}, 400);
@@ -1333,7 +1437,9 @@ export default {
         }
         return json({ ok: false, error: "unknown_api_path" }, 404, corsHeaders(request, env));
       } catch (error) {
-        return json({ ok: false, error: error.message }, 500, corsHeaders(request, env));
+        const status = url.pathname.startsWith("/api/storage/")
+          && [400, 413, 429, 503].includes(error.status) ? error.status : 500;
+        return json({ ok: false, error: error.message }, status, corsHeaders(request, env));
       }
     }
 

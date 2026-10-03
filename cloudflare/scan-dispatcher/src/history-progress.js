@@ -2,6 +2,7 @@ import {normalizedEpisode, normalizedWallet, historyEventEffects, historyEventId
   upsertEpisode, upsertEpisodeEvent, upsertWallets, upsertOutcomes, upsertClusterEdges,
   existingPriorScores, refreshMarketBaselines, refreshWalletScores, infrastructureSource, hash} from "./history.js";
 import {stepClusterJob,refreshClusterScoreStep} from "./history-clusters.js";
+import {markHistoryDerivedDirty} from "./history-maintenance.js";
 
 const PAGE = 25;
 
@@ -53,8 +54,17 @@ export function minimumProgressWork(event, state = {}, infra = []) {
   return 8;
 }
 
-export function estimatedHistoryQueries(event, state = {}) {
+export function estimatedHistoryQueries(event, state = {}, derivedMode="per_event") {
   if (state.phase === "done") return 0;
+  if (derivedMode === "daily") {
+    if (state.phase === "derived_dirty") return 1;
+    if (["baselines", "scores", "cluster_scores", "unlock"].includes(state.phase)) return state.locked ? 2 : 1;
+    const effects=historyEventEffects(event.event.event_type);
+    if (effects.isOutcomeEvent && (!state.phase || state.phase === "episode")) {
+      const pages=Math.ceil((event.wallets || []).length/PAGE);
+      return Math.min(40,8+pages*2+(pages ? 1 : 0));
+    }
+  }
   if (state.phase && state.phase !== "episode") return 40;
   const effects=historyEventEffects(event.event.event_type);
   if (effects.refreshesClusters) return effects.isSignalEvent ? 40 : 22;
@@ -63,7 +73,8 @@ export function estimatedHistoryQueries(event, state = {}) {
 
 // Cursor transitions happen only after committed writes. A failed SQL batch
 // replays at most that bounded idempotent batch, never earlier event phases.
-export async function resumeHistoryEvent(db, raw, state, {now, remaining, infra=[]}) {
+export async function resumeHistoryEvent(db, raw, state, {now, remaining, infra=[], derivedMode="per_event"}) {
+  if (!["per_event", "daily"].includes(derivedMode)) throw new Error("history_derived_mode_invalid");
   const episode = normalizedEpisode(raw.episode,now);
   const event = raw.event;
   const effects = historyEventEffects(event.event_type);
@@ -152,10 +163,11 @@ export async function resumeHistoryEvent(db, raw, state, {now, remaining, infra=
           Object.assign(state,{group,left,right}); break;
         }
         if (group<groups.length) requireWrites(3);
-        state.phase=effects.refreshesScores ? "baselines" : "cluster_seeds";
+        state.phase=effects.refreshesScores ? derivedMode === "daily" ? "derived_dirty" : "baselines" : "cluster_seeds";
         state.index=0; state.after=""; break;
       }
       case "baselines": {
+        if (derivedMode === "daily") { state.phase=state.locked ? "unlock" : "derived_dirty"; break; }
         const horizons=Object.values(OUTCOME_HORIZONS);
         if (state.index<horizons.length) {
           requireWrites(1); await refreshMarketBaselines(db,now,episode,horizons[state.index]);
@@ -164,6 +176,7 @@ export async function resumeHistoryEvent(db, raw, state, {now, remaining, infra=
         state.phase="scores"; state.after=""; break;
       }
       case "scores": {
+        if (derivedMode === "daily") { state.phase=state.locked ? "unlock" : "derived_dirty"; break; }
         const next=await db.prepare(`SELECT DISTINCT wallet_address FROM signal_wallets WHERE episode_id=?1
           AND cohort_role='at_catch' AND wallet_address>?2 ORDER BY wallet_address LIMIT 1`)
           .bind(episode.episode_id,state.after).first();
@@ -172,6 +185,7 @@ export async function resumeHistoryEvent(db, raw, state, {now, remaining, infra=
         state.after=next.wallet_address; break;
       }
       case "cluster_scores":
+        if (derivedMode === "daily") { state.phase=state.locked ? "unlock" : "derived_dirty"; break; }
         requireWrites(1);
         if (await refreshClusterScoreStep(db,episode.episode_id,state,now)) state.phase="done";
         break;
@@ -183,7 +197,7 @@ export async function resumeHistoryEvent(db, raw, state, {now, remaining, infra=
         const page=await db.prepare(`SELECT DISTINCT wallet_address FROM signal_wallets WHERE episode_id=?1
           AND wallet_address>?2 ORDER BY wallet_address LIMIT ${limit}`).bind(episode.episode_id,state.after).all();
         if (!page.results.length) {
-          state.phase=state.after ? "clusters" : state.locked ? "unlock" : "done";
+          state.phase=state.after ? "clusters" : state.locked ? "unlock" : derivedMode === "daily" ? "derived_dirty" : "done";
           state.cluster={phase:"old_members",after:""}; break;
         }
         requireWrites(page.results.length);
@@ -198,7 +212,12 @@ export async function resumeHistoryEvent(db, raw, state, {now, remaining, infra=
       case "unlock":
         requireWrites(1);
         await db.prepare("UPDATE history_cluster_lock SET job_id=NULL WHERE id=1 AND job_id=?1").bind(job).run();
-        state.locked=false; state.phase="done";
+        state.locked=false; state.phase=derivedMode === "daily" ? "derived_dirty" : "done";
+        break;
+      case "derived_dirty":
+        requireWrites(1);
+        await markHistoryDerivedDirty(db, raw, now);
+        state.phase="done";
         break;
       case "done": return {event_id:eventId,episode_id:episode.episode_id};
       default: throw new Error("history_progress_phase_invalid");
