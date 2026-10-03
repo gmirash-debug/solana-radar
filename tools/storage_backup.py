@@ -7,6 +7,42 @@ copied; this is a SQL recovery point, not a backup of all external archives.
 An interrupted read transaction is discarded, never resumed against a new
 snapshot. Turso's generation export can omit its newer WAL/log, so this uses a
 single Hrana v3 read transaction with autocommit guards for every page instead.
+
+Private-repository installation (no scanner checkout or dependencies required):
+  tools/storage_backup.py
+  tests/test_storage_backup.py
+  .github/workflows/storage-backup.yml (from ops/storage-backup-workflow.yml)
+Configure repository variable TURSO_DATABASE_URL and secret TURSO_AUTH_TOKEN,
+containing a read-only database token, not an account-wide token. The workflow
+maps that secret to TURSO_BACKUP_AUTH_TOKEN and uses its own GITHUB_TOKEN for
+private Releases. Python 3.12 and trusted HTTPS CA roots are sufficient.
+
+Run/verify:
+  python tools/storage_backup.py backup --repository OWNER/PRIVATE_REPO --publish --keep 7 --max-seconds 1000
+  python tools/storage_backup.py verify radar.sqlite.gz manifest.json
+For local tests, set SSL_CERT_FILE to a trusted CA file if the Python runtime
+lacks system trust roots; never bypass TLS verification. A non-published local
+backup requires --output pointing to an empty private directory.
+
+The 1000-second workflow budget includes export, full local verification, gzip
+restoration verification and upload. Requests have at most 20-second timeouts.
+The job is capped at 20 minutes; configurable tool budgets cannot exceed 1080
+seconds, preserving setup/termination headroom. Runtime on the complete remote
+dataset must be measured before declaring the daily recovery path ready.
+Payload groups target 8 MiB; size planning reads at most 1000 upcoming keys,
+not a whole-table MAX. Its CPU time is still subject to the request timeout.
+Expired streams, transport errors and interrupted reads are not replayed or
+resumed into a different snapshot. Re-run the job from scratch after failure.
+Only checksum-verified replacements may rotate the seven retained recovery
+points. A verified draft after a publication failure remains recoverable;
+unverified/uncertain drafts never replace previous verified backups.
+
+The manifest contains complete stable-order per-table row counts and lossless
+typed SHA-256 digests (including hidden rowids), a schema fingerprint and raw/
+compressed file hashes. sqlite_fingerprints(), compare_fingerprints() and
+validate_sqlite() are reusable for original-vs-restored SQL verification.
+Schema/table names and fingerprints stay in the private release manifest.
+Logs show only numeric progress and allowlisted failure reasons.
 """
 import argparse
 import base64
@@ -15,11 +51,13 @@ from datetime import datetime, timezone
 import gzip
 import hashlib
 import http.client
+import io
 import json
 import math
 import os
 from pathlib import Path
 import re
+import socket
 import sqlite3
 import ssl
 import struct
@@ -33,6 +71,7 @@ import uuid
 
 
 VERSION = 1
+MAX_BACKUP_SECONDS = 1080
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_ASSET_BYTES = 1900 * 1024 * 1024
@@ -47,6 +86,8 @@ SAFE_FAILURE_MESSAGES = frozenset({
     "database snapshot request failed; incomplete backup discarded",
     "database response exceeds the bounded size limit",
     "invalid JSON database response",
+    "unsupported database transfer encoding",
+    "invalid compressed database response",
     "invalid database pipeline response",
     "database returned a SQL/protocol failure",
     "database snapshot baton missing or invalid",
@@ -54,6 +95,7 @@ SAFE_FAILURE_MESSAGES = frozenset({
     "database authentication rejected",
     "database rate limit reached",
     "database HTTP request failed",
+    "database request timed out; read snapshot discarded",
     "read snapshot was lost; restart the entire backup",
     "read transaction was not established",
     "read transaction expired; incomplete backup discarded",
@@ -88,9 +130,9 @@ class BackupTLSCertificateError(BackupError):
 
 
 class Deadline:
-    def __init__(self, seconds=540, clock=time.monotonic):
-        if not 1 <= seconds <= 540:
-            raise BackupError("backup deadline must be between 1 and 540 seconds")
+    def __init__(self, seconds=1000, clock=time.monotonic):
+        if type(seconds) not in (int, float) or not math.isfinite(seconds) or not 1 <= seconds <= MAX_BACKUP_SECONDS:
+            raise BackupError("backup deadline must be between 1 and 1080 seconds")
         self.clock = clock
         self.end = clock() + seconds
 
@@ -241,14 +283,25 @@ class ReadSnapshot:
         if len(payload) > MAX_REQUEST_BYTES:
             raise BackupError("database request limit exceeded")
         request = urllib.request.Request(self.url, payload, {"Authorization":"Bearer " + self._token,
-            "Content-Type":"application/json", "Accept":"application/json"})
+            "Content-Type":"application/json", "Accept":"application/json", "Accept-Encoding":"gzip"})
         try:
             self.request_count += 1
             with self.opener.open(request, timeout=self.deadline.timeout()) as response:
                 body = response.read(MAX_RESPONSE_BYTES + 1)
+                encoding = getattr(response, "headers", {}).get("Content-Encoding", "identity").strip().lower()
             self.response_bytes += len(body)
             if len(body) > MAX_RESPONSE_BYTES:
                 raise BackupError("database response exceeds the bounded size limit")
+            if encoding == "gzip":
+                try:
+                    with gzip.GzipFile(fileobj=io.BytesIO(body)) as compressed:
+                        body = compressed.read(MAX_RESPONSE_BYTES + 1)
+                except (OSError, EOFError, ValueError):
+                    raise BackupError("invalid compressed database response") from None
+                if len(body) > MAX_RESPONSE_BYTES:
+                    raise BackupError("database response exceeds the bounded size limit")
+            elif encoding != "identity":
+                raise BackupError("unsupported database transfer encoding")
             try:
                 parsed = json.loads(body)
             except ValueError:
@@ -288,6 +341,8 @@ class ReadSnapshot:
             self.broken = True
             if isinstance(error.reason, ssl.SSLCertVerificationError):
                 raise BackupTLSCertificateError() from None
+            if isinstance(error.reason, (TimeoutError, socket.timeout)):
+                raise BackupError("database request timed out; read snapshot discarded") from None
             raise BackupError("database snapshot request failed; incomplete backup discarded") from None
         except ssl.SSLCertVerificationError:
             self.broken = True
@@ -295,6 +350,9 @@ class ReadSnapshot:
         except BackupError:
             self.broken = True
             raise
+        except (TimeoutError, socket.timeout):
+            self.broken = True
+            raise BackupError("database request timed out; read snapshot discarded") from None
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             self.broken = True
             raise BackupError("database snapshot request failed; incomplete backup discarded") from None
@@ -572,12 +630,14 @@ def build_snapshot(client, destination, page_size=1000, progress=None):
             client.deadline.check()
             if plan.name.startswith("sqlite_"):
                 local.execute("DELETE FROM " + quote(plan.name))
-            _, metrics = client.query("SELECT COUNT(*),COALESCE(MAX(" + plan.wire_bytes_sql() + "),0) FROM " + quote(plan.name))
-            if len(metrics) != 1 or len(metrics[0]) != 2 or any(type(value) is not int or value < 0 for value in metrics[0]):
+            # COUNT uses the table/index structure; do not scan/format every
+            # payload for a global MAX. Even byte-only MAX timed out on a
+            # production table, while bounded upcoming-key windows succeeded.
+            _, metrics = client.query("SELECT COUNT(*) FROM " + quote(plan.name))
+            if len(metrics) != 1 or len(metrics[0]) != 1 or type(metrics[0][0]) is not int or metrics[0][0] < 0:
                 raise BackupError("invalid database table metrics")
-            source_count, max_bytes = metrics[0]
-            pages = (plan.pages(client, page_size, client.deadline) if max_bytes * page_size <= MAX_PAGE_BYTES
-                     else plan.bounded_pages(client, page_size, client.deadline))
+            source_count = metrics[0][0]
+            pages = plan.bounded_pages(client, page_size, client.deadline) if source_count else ()
             digest, count = hashlib.sha256(), 0
             insert = "INSERT INTO " + quote(plan.name) + "(" + ",".join(quote(name) for name in plan.insert_names)
             insert += ") VALUES(" + ",".join("?" for _ in plan.insert_names) + ")"
@@ -851,7 +911,7 @@ def main(argv=None):
     backup.add_argument("--publish", action="store_true")
     backup.add_argument("--output")
     backup.add_argument("--keep", type=int, default=7, choices=range(1, 8))
-    backup.add_argument("--max-seconds", type=int, default=540)
+    backup.add_argument("--max-seconds", type=int, default=1000)
     verify = commands.add_parser("verify")
     verify.add_argument("archive")
     verify.add_argument("manifest")

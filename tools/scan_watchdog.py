@@ -1,6 +1,7 @@
 """Independent, bounded GitHub scheduler guard; no RPC calls or scan state writes."""
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
@@ -8,28 +9,47 @@ from urllib.request import Request, urlopen
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scan_scheduling import scan_freshness_reference
 
+DEEP_SOURCES = frozenset({"manual", "manual-http", "cloudflare-deep_scan", "cloudflare-watchdog"})
+DEEP_PROFILES = frozenset({"deep", "deep_scan"})
+RUN_TITLE = re.compile(r"Scan and deploy dashboard \[source=([a-z][a-z0-9_-]{0,63})\]")
+
 
 def parse_time(value):
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
     except (ValueError, TypeError):
         return None
 
 
+def deep_run(run):
+    # GitHub's run-list response does not expose dispatch inputs. Never infer a
+    # deep attempt from the generic workflow name or an untyped legacy status.
+    title = run.get("display_title")
+    marker = RUN_TITLE.fullmatch(title) if isinstance(title, str) else None
+    return bool(marker and marker.group(1) in DEEP_SOURCES)
+
+
 def watchdog_decision(snapshots, runs, now):
-    if not isinstance(runs, list):
+    if not isinstance(runs, list) or any(not isinstance(run, dict) for run in runs):
         return False, "github_status_unavailable"
     active = [run for run in runs if run.get("event") == "workflow_dispatch"
               and run.get("status") != "completed"]
     if active:
         return False, "scan_already_queued_or_running"
-    catches = [parse_time(scan_freshness_reference(item.get("report") or {}, False))
-               for item in snapshots if isinstance(item, dict)]
+    snapshots = [item for item in snapshots if isinstance(item, dict)]
+    catches = [parse_time(scan_freshness_reference(
+        item["report"] if isinstance(item.get("report"), dict) else {}, False)) for item in snapshots]
     catches = [value for value in catches if value and value <= now]
     if catches and (now - max(catches)).total_seconds() < 90 * 60:
         return False, "deep_scan_fresh"
     recent = [parse_time(run.get("created_at")) for run in runs
-              if run.get("event") == "workflow_dispatch"]
+              if run.get("event") == "workflow_dispatch" and deep_run(run)]
+    for item in snapshots:
+        status = item.get("scan_status")
+        profile = status.get("scan_profile") if isinstance(status, dict) else None
+        if isinstance(profile, str) and profile in DEEP_PROFILES:
+            recent.append(parse_time(status.get("last_attempt_at")))
     recent = [value for value in recent if value and value <= now]
     if recent and (now - max(recent)).total_seconds() < 50 * 60:
         return False, "dispatch_cooldown"

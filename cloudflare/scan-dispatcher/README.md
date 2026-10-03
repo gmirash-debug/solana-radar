@@ -72,6 +72,9 @@ while the state-writer workflow is queued or in progress.
 
 ## Storage Safety
 
+- During cutover, `STORAGE_WRITES_FROZEN=true` stops all cron tasks and HTTP
+  mutations, including manual dispatch. Reads remain available. Use it only after
+  ongoing GitHub state-writer runs finish, and remove it after verified reconciliation.
 - R2 writes are acknowledged only after confirming native checksums and metadata.
 - Queue envelopes keep immutable archive references; SQL delivery reads and verifies
   the complete original event before advancing the resumable cursor.

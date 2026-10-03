@@ -1159,6 +1159,7 @@ async function runArchiveRetention(env) {
 export default {
   async scheduled(_event, env, ctx) {
     env = resolveStorageEnv(env);
+    if (env.STORAGE_WRITES_FROZEN === "true") return;
     const mode = schedulerMode(env);
     const turso = env.STORAGE_SQL_BACKEND === "turso";
     const historyTask = env.HISTORY_QUEUE && hasHistoryDb(env) && _event?.cron === DISCOVERY_CRON
@@ -1195,6 +1196,13 @@ export default {
       });
     }
 
+    if (env.STORAGE_WRITES_FROZEN === "true"
+        && !["GET", "HEAD"].includes(request.method)
+        && !(request.method === "POST" && url.pathname === "/api/storage/archive/read")) {
+      return json({ok:false, error:"storage_cutover_writes_frozen"}, 503,
+        {...corsHeaders(request, env), "retry-after":"120"});
+    }
+
     if (url.pathname === "/health") {
       let d1Healthy = false;
       let d1Error = null;
@@ -1222,6 +1230,7 @@ export default {
         d1_healthy: env.STORAGE_SQL_BACKEND !== "turso" && d1Healthy,
         d1_error: env.STORAGE_SQL_BACKEND !== "turso" ? d1Error : null,
         sql_backend: env.STORAGE_SQL_BACKEND || "d1",
+        storage_writes_frozen: env.STORAGE_WRITES_FROZEN === "true",
         sql_healthy: d1Healthy,
         sql_error: d1Error,
         archive_configured: Boolean(env.RADAR_ARCHIVE),

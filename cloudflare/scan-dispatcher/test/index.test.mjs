@@ -2,6 +2,32 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import worker from "../src/index.js";
 
+test("cutover freeze stops all cron work and mutations but keeps reads available", async () => {
+  const tasks=[];
+  const env={STORAGE_WRITES_FROZEN:"true",SCHEDULER_ENABLED:"auto",RADAR_INGEST_SECRET:"secret"};
+  for (const cron of ["*/5 * * * *", "7 * * * *", "37 * * * *", "22,37,52 * * * *"]) {
+    await worker.scheduled({cron},env,{waitUntil:task=>tasks.push(task)});
+  }
+  assert.equal(tasks.length,0);
+  for (const path of ["/dispatch", "/deleted-token", "/api/ingest", "/api/runtime/history/flush", "/api/storage/maintenance"]) {
+    const response=await worker.fetch(new Request(`https://worker.example${path}`,{method:"POST"}),env,{});
+    assert.equal(response.status,503);
+    assert.equal(response.headers.get("retry-after"),"120");
+    assert.equal((await response.json()).error,"storage_cutover_writes_frozen");
+  }
+  const response=await worker.fetch(new Request("https://worker.example/health"),env,{});
+  assert.equal(response.status,200);
+  assert.equal((await response.json()).storage_writes_frozen,true);
+  const checkpoint=await worker.fetch(new Request("https://worker.example/api/runtime/checkpoint?kind=invalid",{
+    headers:{"x-radar-ingest-secret":"secret"},
+  }),env,{});
+  assert.equal(checkpoint.status,400);
+  const read=await worker.fetch(new Request("https://worker.example/api/storage/archive/read",{
+    method:"POST",headers:{"x-radar-ingest-secret":"secret"},body:"{}",
+  }),env,{});
+  assert.notEqual((await read.json()).error,"storage_cutover_writes_frozen");
+});
+
 test("archive cron is isolated from frequent discovery and deep scans", async () => {
   assert.equal(shouldFlushScheduledHistory({cron:"*/5 * * * *"}, {}), false);
   assert.equal(shouldFlushScheduledHistory({cron:"7 * * * *"}, {}), false);

@@ -1,6 +1,7 @@
 """Credential-free, stdlib contract tests for the private database backup."""
 from contextlib import redirect_stderr, redirect_stdout
 import hashlib
+import gzip
 import importlib.util
 import io
 import json
@@ -216,16 +217,21 @@ class SnapshotTests(unittest.TestCase):
         self.assertGreater(max(backup.decode(stmt["args"][-1]) for stmt in payloads), 400)
         self.assertTrue(all('OFFSET' not in stmt['sql'] for stmt in requests))
         self.assertEqual(expected["tables"]["mixed_records"]["row_count"], 601)
+        metrics = [stmt for stmt in requests if stmt["sql"].startswith("SELECT COUNT(*)")]
+        self.assertFalse(any("json_quote" in stmt["sql"] or "MAX(" in stmt["sql"] for stmt in metrics))
 
-    def test_narrow_table_keeps_single_fetch_per_thousand_rows(self):
+    def test_narrow_table_keeps_thousand_row_payloads_with_bounded_metadata(self):
         self.source.execute("CREATE TABLE narrow(value TEXT)")
         self.source.executemany("INSERT INTO narrow VALUES(?)", [("small",)] * 2500)
         self.source.commit()
         backup.build_snapshot(self.client(), self.path / "copy.sqlite")
         statements = [action["stmt"] for _, payload, _ in self.server.calls for action in payload["requests"] if action["type"] == "execute"]
         pages = [stmt for stmt in statements if 'FROM "narrow"' in stmt["sql"] and "LIMIT ?" in stmt["sql"]]
-        self.assertEqual(len(pages), 4)
-        self.assertFalse(any("__backup_wire_bytes" in stmt["sql"] for stmt in pages))
+        payloads = [stmt for stmt in pages if "__backup_wire_bytes" not in stmt["sql"]]
+        metadata = [stmt for stmt in pages if "__backup_wire_bytes" in stmt["sql"]]
+        self.assertEqual(len(payloads), 3)
+        self.assertEqual(len(metadata), 4)
+        self.assertEqual(backup.decode(payloads[0]["args"][-1]), 1000)
 
     def test_metadata_payload_keys_must_match(self):
         self.source.execute("CREATE TABLE mixed_records(raw TEXT)")
@@ -407,6 +413,49 @@ class ProtocolTests(unittest.TestCase):
             client.begin()
         self.assertEqual(opener.calls, 1)
 
+    def test_gzip_transport_preserves_complete_snapshot_and_counts_wire_bytes(self):
+        db = sqlite3.connect(":memory:")
+        self.addCleanup(db.close)
+        db.execute("CREATE TABLE compressed_rows(value TEXT)")
+        db.execute("INSERT INTO compressed_rows VALUES(?)", ("a" * 5000,))
+        db.commit()
+        server = FakeHrana(db)
+        original = server.open
+        wire = []
+        def compressed_response(request, timeout):
+            self.assertEqual(request.get_header("Accept-encoding"), "gzip")
+            response = original(request, timeout)
+            response.data = gzip.compress(response.data, mtime=0)
+            response.headers = {"Content-Encoding": "gzip"}
+            wire.append(len(response.data))
+            return response
+        server.open = compressed_response
+        client = backup.ReadSnapshot(URL, TOKEN, opener=server)
+        client.begin()
+        self.assertEqual(client.query("SELECT value FROM compressed_rows")[1], [("a" * 5000,)])
+        client.close()
+        self.assertEqual(client.response_bytes, sum(wire))
+
+    def test_compressed_bomb_corruption_and_unknown_encoding_are_refused(self):
+        for encoding, body, bound in [("gzip", gzip.compress(b"x" * 10000), 100),
+                                     ("gzip", gzip.compress(b"private " + TOKEN.encode())[:-4], 1000),
+                                     ("br", b"{}", 100)]:
+            with self.subTest(encoding=encoding, bound=bound):
+                class Opener:
+                    calls = 0
+                    def open(self, request, timeout):
+                        self.calls += 1
+                        response = Response(body)
+                        response.headers = {"Content-Encoding": encoding}
+                        return response
+                opener = Opener()
+                client = backup.ReadSnapshot(URL, TOKEN, opener=opener)
+                with patch.object(backup, "MAX_RESPONSE_BYTES", bound), self.assertRaises(backup.BackupError) as error:
+                    client.begin()
+                self.assertNotIn(TOKEN, str(error.exception))
+                self.assertTrue(client.broken)
+                self.assertEqual(opener.calls, 1)
+
     def test_tls_error_has_fixed_safe_guidance_and_never_retries(self):
         failure = urllib.error.URLError(ssl.SSLCertVerificationError(TOKEN))
         client, opener = self.client(failure)
@@ -422,6 +471,14 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("never disable TLS verification", err.getvalue())
         self.assertNotIn(TOKEN, err.getvalue())
+
+    def test_timeout_reason_is_safe_specific_and_never_retried(self):
+        for failure in (TimeoutError(TOKEN), urllib.error.URLError(TimeoutError(TOKEN))):
+            client, opener = self.client(failure)
+            with self.assertRaisesRegex(backup.BackupError, "request timed out") as error:
+                client.begin()
+            self.assertNotIn(TOKEN, str(error.exception))
+            self.assertEqual(opener.calls, 1)
 
     def test_row_digest_is_lossless_framed_and_streamed(self):
         rows = [(None, 1, 1.25, "text", b"\xff"), ((1<<63)-1,)]
@@ -445,6 +502,15 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertNotIn(TOKEN, err.getvalue())
         self.assertEqual(out.getvalue(), "")
+
+    def test_extended_deadline_is_bounded_and_request_timeout_stays_twenty_seconds(self):
+        deadline = backup.Deadline(1080, clock=lambda:10)
+        self.assertEqual(deadline.end, 1090)
+        self.assertEqual(deadline.timeout(), 20)
+        self.assertEqual(backup.Deadline(clock=lambda:10).end, 1010)
+        for invalid in (0,1081,True,float('inf'),float('nan'),None):
+            with self.assertRaises(backup.BackupError):
+                backup.Deadline(invalid)
 
     def test_cli_failure_reason_is_allowlisted_not_remote_text(self):
         for message, visible in (("invalid typed database response", True), (TOKEN, False)):
