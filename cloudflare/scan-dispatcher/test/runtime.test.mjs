@@ -110,6 +110,34 @@ test("blob cleanup retains published and recently staged evidence", async () => 
   assert.ok(state.map.has(`checkpoint:deep:blob:${parts[2].sha256}:meta`));
 });
 
+test("I03: manifest supersession protects old in-flight restore parts for a fresh grace period", async () => {
+  const {collectOldBlobs}=await import("../src/runtime-documents.js");
+  const state=storage(),object=new RuntimeSnapshots({storage:state});
+  const [a,b]=await Promise.all([blob("AAAA"),blob("BBBB")]);
+  const post=(name,value)=>object.fetch(new Request(`https://runtime/${name}`,{method:"POST",
+    body:JSON.stringify({value,updated_at:AT})}));
+  for (const part of [a,b]) {
+    assert.equal((await post(`checkpoint:deep:blob:${part.sha256}`,part)).status,200);
+    state.map.get(`checkpoint:deep:blob-index:${part.sha256}`).staged_at=1;
+  }
+  const manifest=part=>({schema_version:2,encoding:"gzip+base64+parts",sha256:"f".repeat(64),decoded_bytes:4,
+    encoded_bytes:4,parts:[{id:part.sha256,bytes:4}]});
+  assert.equal((await post("checkpoint:deep",manifest(a))).status,200);
+  // Simulate a client which fetched A before writer publishes B.
+  const root=await (await object.fetch(new Request("https://runtime/checkpoint:deep"))).json();
+  assert.equal(root.document.value.parts[0].id,a.sha256);
+  // B was initially unreferenced; restage it after the first publication GC.
+  assert.equal((await post(`checkpoint:deep:blob:${b.sha256}`,b)).status,200);
+  assert.equal((await post("checkpoint:deep",manifest(b))).status,200);
+  const resumed=await (await object.fetch(new Request(`https://runtime/checkpoint:deep:blob:${a.sha256}`))).json();
+  assert.equal(resumed.document.value.data,"AAAA");
+  const superseded=state.map.get(`checkpoint:deep:blob-index:${a.sha256}`).superseded_at;
+  await state.transaction(tx=>collectOldBlobs(tx,"checkpoint:deep",new Set([b.sha256]),superseded+3599999));
+  assert.ok(state.map.has(`checkpoint:deep:blob:${a.sha256}:meta`));
+  await state.transaction(tx=>collectOldBlobs(tx,"checkpoint:deep",new Set([b.sha256]),superseded+3600001));
+  assert.ok(!state.map.has(`checkpoint:deep:blob:${a.sha256}:meta`));
+});
+
 test("checkpoints require authentication and do not leak through public routes", async () => {
   const env = {RUNTIME_SNAPSHOTS:namespace(), RADAR_INGEST_SECRET:"secret"};
   const body = {checkpoint:{private:"cursor"},updated_at:AT,revision:1};

@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { historyEventId, ingestHistoryBatch } from "../src/history.js";
+import { historyEventId, ingestHistoryBatch, historyWallets, historyWalletDetail,
+  historyEpisodeDetail, historyClusters, normalizedWallet, normalizedOutcome } from "../src/history.js";
+import {existingPriorScores,historyOverview,hash,flushHistoryOutbox} from "../src/history.js";
 import worker from "../src/index.js";
 import {
   HistoryQueue, HISTORY_QUEUE_LIMITS, durableHistoryStatus,
@@ -26,7 +28,7 @@ function event(id, { episode = id, at = NOW - 3600_000, type = "snapshot", walle
 
 function outcome(id, options = {}) {
   const row = event(id, { ...options, type: "outcome_1h" });
-  row.outcome = { horizons: { "1h": {
+  row.outcome = { entry_evidence_version:2,caught_at:row.episode.caught_at,caught_mcap_usd:80000,horizons: { "1h": {
     at: iso(NOW - 3 * 3600_000), target_at: iso(NOW - 3 * 3600_000),
     return_pct: 100, max_return_pct: 100, liquidity_usd: 20000, quality_status: "complete",
   } } };
@@ -46,7 +48,13 @@ function storage(t) {
     }
     result.writes += 1;
     const changes = Number(statement.run(...values).changes);
-    return { toArray: () => [], rowsWritten: changes };
+    // Model DO SQLite's index-inclusive rowsWritten, not SQLite changes(),
+    // which reports only base rows. Due-index replacements cost two rows.
+    let multiplier=1;
+    if (/INSERT INTO history_queue_events|DELETE FROM history_queue_events/.test(sql)) multiplier=4;
+    else if (/UPDATE history_queue_events SET status='delivered'/.test(sql)) multiplier=7;
+    else if (/UPDATE history_queue_events SET lease_token/.test(sql)) multiplier=3;
+    return { toArray: () => [], rowsWritten: changes*multiplier };
   } };
   result.transactionSync = callback => {
     db.exec("BEGIN");
@@ -63,12 +71,13 @@ function storage(t) {
 function historyDb(t) {
   const db = new DatabaseSync(":memory:");
   t.after(() => db.close());
-  for (const filename of ["0001_wallet_edge_history.sql", "0002_cluster_edge_evidence.sql"]) {
+  for (const filename of ["0001_wallet_edge_history.sql", "0002_cluster_edge_evidence.sql", "0003_resumable_history.sql"]) {
     db.exec(readFileSync(new URL(`../migrations-history/${filename}`, import.meta.url), "utf8"));
   }
   const api = { db, before: null, calls: [] };
   async function execute(sql, values, method) {
     api.calls.push({ sql, values, method });
+    assert.ok(values.length <= 100, `D1 bind limit: ${values.length}`);
     const override = await api.before?.({ sql, values, method });
     if (override !== undefined) return override;
     const statement = db.prepare(sql);
@@ -276,10 +285,10 @@ test("source-time ordering overrides IDs and enqueue order", async t => {
   await enqueueDurableHistory(f.env, ledger([
     event("a-new", { at: NOW - 1000 }), event("z-old", { at: NOW - 3000 }), event("m-middle", { at: NOW - 2000 }),
   ]));
-  assert.equal((await flushDurableHistory(f.env)).delivered, 2);
+  assert.equal((await flushDurableHistory(f.env)).delivered, 3);
   const ids = f.db.calls.filter(call => /INSERT OR IGNORE INTO signal_episode_events/.test(call.sql)).map(call => call.values[0]);
-  assert.deepEqual(ids, ["z-old", "m-middle"]);
-  assert.equal(f.rows().find(row => row.event_id === "a-new").status, "pending");
+  assert.deepEqual(ids, ["z-old", "m-middle", "a-new"]);
+  assert.equal(f.rows().find(row => row.event_id === "a-new").status, "delivered");
 });
 
 test("poison backoff does not block newer episodes but preserves same-episode order", async t => {
@@ -306,32 +315,32 @@ test("poison backoff does not block newer episodes but preserves same-episode or
   assert.equal((await flushDurableHistory(f.env)).delivered, 1);
 });
 
-test("derived read failure acknowledges none even after successful historical writes", async t => {
+test("derived read failure keeps its event pending without blocking an independent completed event", async t => {
   const f = fixture(t);
   const rows = [outcome("result"), event("companion")];
   await enqueueDurableHistory(f.env, ledger(rows));
   f.db.before = ({ sql }) => { if (/GROUP BY e.mcap_band/.test(sql)) throw new Error("baseline refresh failed"); };
   const failed = await flushDurableHistory(f.env);
-  assert.equal(failed.delivered, 0);
-  assert.equal(failed.failed, 2);
+  assert.equal(failed.delivered, 1);
+  assert.equal(failed.failed, 1);
   assert.match(failed.error, /baseline refresh failed/);
   assert.equal(f.db.db.prepare("SELECT COUNT(*) AS n FROM signal_episode_events").get().n, 2);
-  assert.ok(f.rows().every(row => row.status === "pending" && row.payload_json));
+  assert.ok(f.rows().find(row => row.event_id === "result").payload_json);
   f.db.before = null;
   f.advance(120001);
-  assert.equal((await flushDurableHistory(f.env)).delivered, 2);
+  assert.equal((await flushDurableHistory(f.env)).delivered, 1);
   assert.equal(f.db.db.prepare("SELECT COUNT(*) AS n FROM signal_episode_events").get().n, 2);
 });
 
-test("derived write failure also prevents all delivery acknowledgements", async t => {
+test("derived write failure prevents acknowledgement of the affected event", async t => {
   const f = fixture(t);
   await enqueueDurableHistory(f.env, ledger([outcome("result"), event("other")]));
   f.db.before = ({ sql }) => {
     if (/INSERT INTO market_baselines/.test(sql)) return { success: false, error: "derived write rejected" };
   };
   const result = await flushDurableHistory(f.env);
-  assert.equal(result.delivered, 0);
-  assert.equal(result.pending, 2);
+  assert.equal(result.delivered, 1);
+  assert.equal(result.pending, 1);
   assert.match(result.error, /derived write rejected/);
 });
 
@@ -434,7 +443,8 @@ test("daily history writes stop at the reserved budget and reset at UTC midnight
   await enqueueDurableHistory(f.env, ledger([event("first"), event("second")]));
   const result = await flushDurableHistory(f.env);
   assert.equal(result.delivered, 1);
-  assert.equal(result.failed, 1);
+  assert.equal(result.failed, 0);
+  assert.equal(result.continued, 1);
   assert.equal(f.meta().hist_writes, 16);
   f.advance(120001);
   await assert.rejects(flushDurableHistory(f.env), /history_daily_write_budget/);
@@ -443,14 +453,16 @@ test("daily history writes stop at the reserved budget and reset at UTC midnight
   assert.equal(f.meta().hist_writes, 16);
 });
 
-test("batch write budget is reserved before D1 batch writes and keeps poison payload", async t => {
+test("bounded write budget saves the next phase without poison backoff or payload loss", async t => {
   const f = fixture(t, { HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS: 16 });
   const row = event("signal", { type: "signal" });
   await enqueueDurableHistory(f.env, ledger([row]));
   const result = await flushDurableHistory(f.env);
   assert.equal(result.delivered, 0);
   assert.equal(result.history_write_units, 16);
-  assert.match(f.rows()[0].last_error, /history_flush_write_budget/);
+  assert.equal(f.rows()[0].last_error, null);
+  assert.equal(result.continued,1);
+  assert.equal(JSON.parse(f.rows()[0].progress_json).phase,"outcomes");
   assert.equal(f.db.db.prepare("SELECT COUNT(*) AS n FROM signal_outcomes").get().n, 0);
   assert.deepEqual(JSON.parse(f.rows()[0].payload_json), row);
 });
@@ -502,4 +514,365 @@ test("same source timestamp is deterministically ordered and pre-catch values ar
   assert.equal(validateHistoryEvents([row], NOW).length, 1);
   row.event.observed_at = iso(NOW - 4 * 3600_000 - 1);
   assert.throws(() => validateHistoryEvents([row], NOW), /history_source_identity_or_time_invalid/);
+});
+
+async function drain(f, maximum = 300) {
+  const totals={flushes:0,days:0,units:0};
+  while (f.meta().pending_rows && totals.flushes<maximum) {
+    try {
+      const result=await flushDurableHistory(f.env);
+      assert.equal(result.failed,0,result.error);
+      assert.ok(result.history_queries<=HISTORY_QUEUE_LIMITS.flushQueries);
+      assert.ok(result.history_write_units<=HISTORY_QUEUE_LIMITS.flushHistoryWriteUnits);
+      totals.units+=result.history_write_units;
+      totals.flushes++;
+    } catch (error) {
+      if (!/history_daily_write_budget/.test(error.message)) throw error;
+      f.advance(86400_000); totals.days++;
+    }
+    f.advance(1001);
+    f.restart();
+  }
+  assert.equal(f.meta().pending_rows,0,JSON.stringify(f.rows().map(row=>({id:row.event_id,progress:row.progress_json,error:row.last_error}))));
+  return totals;
+}
+
+test("I01: accepted 60-wallet work progresses across restarts without replaying catch writes", async t => {
+  const f=fixture(t);
+  const wallets=Array.from({length:60},(_,i)=>({wallet_address:`wallet-${String(i).padStart(3,"0")}`,
+    common_funder:"private-funder",bought_tokens:100,current_token_balance:100}));
+  const raw=event("large",{type:"signal",wallets});
+  await enqueueDurableHistory(f.env,ledger([raw]));
+  const first=await flushDurableHistory(f.env);
+  assert.equal(first.delivered,0);
+  assert.equal(first.failed,0);
+  assert.deepEqual(JSON.parse(f.rows()[0].payload_json),raw);
+  const phase=JSON.parse(f.rows()[0].progress_json).phase;
+  assert.equal(phase,"edges");
+  const catchWrites=f.db.calls.filter(call=>/INSERT INTO signal_wallets/.test(call.sql)).length;
+  const evidenceBefore=f.db.db.prepare("SELECT COUNT(*) n FROM wallet_cluster_edge_evidence").get().n;
+  f.advance(1001); f.restart();
+  const totals=await drain(f);
+  assert.ok(totals.flushes>1 && totals.flushes<60);
+  assert.ok(evidenceBefore>0);
+  assert.equal(f.db.calls.filter(call=>/INSERT INTO signal_wallets/.test(call.sql)).length,catchWrites);
+  assert.equal(f.db.calls.filter(call=>/INSERT OR IGNORE INTO signal_episode_events/.test(call.sql)).length,1);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM wallet_cluster_edge_evidence").get().n,1770);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM wallet_cluster_edges WHERE evidence_count<>1").get().n,0);
+  assert.deepEqual((await historyClusters(f.env)).rows.map(row=>row.wallet_count),[60]);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM history_cluster_work").get().n,0);
+  assert.equal(f.db.db.prepare("SELECT job_id FROM history_cluster_lock").get().job_id,null);
+  t.diagnostic(`60 wallets: ${totals.flushes+1} bounded flushes, ${totals.units+first.history_write_units} units, ${totals.days} UTC resets`);
+});
+
+test("I01: 25 lightweight events can finish in one bounded flush; retention is packed without graph rewrites", async t => {
+  const f=fixture(t);
+  await enqueueDurableHistory(f.env,ledger(Array.from({length:25},(_,i)=>event(`light-${i}`))));
+  const result=await flushDurableHistory(f.env);
+  assert.equal(result.delivered,20);
+  assert.equal(result.continued,0);
+  assert.equal(result.pending,5);
+  assert.equal(result.history_queries,40);
+  f.advance(1001); await drain(f);
+  const wallets=Array.from({length:40},(_,i)=>({wallet_address:`held-${i}`,bought_tokens:100,current_token_balance:100,common_funder:"same"}));
+  await enqueueDurableHistory(f.env,ledger([event("capture",{episode:"held",type:"signal",wallets})]));
+  await drain(f);
+  const before=f.db.calls.length;
+  const checked=wallets.map(wallet=>({...wallet,current_token_balance:null,balance_retained_pct:null}));
+  await enqueueDurableHistory(f.env,ledger([event("retention",{episode:"held",type:"retention_check",at:NOW, wallets:checked})]));
+  const retained=await flushDurableHistory(f.env);
+  assert.equal(retained.delivered,1);
+  assert.equal(retained.history_write_units,24);
+  assert.equal(f.db.calls.slice(before).filter(call=>/INSERT INTO signal_wallets|wallet_cluster_edge|wallet_clusters/.test(call.sql)).length,0);
+  const detail=await historyEpisodeDetail(f.env,"held");
+  const latest=detail.observations.filter(row=>row.observed_at===iso(NOW));
+  assert.equal(latest.length,40);
+  assert.ok(latest.every(row=>row.current_token_balance===null && row.balance_retained_pct===null));
+  const wallet=await historyWalletDetail(f.env,"held-0");
+  assert.equal(wallet.observations[0].current_token_balance,null);
+});
+
+test("I01/I07/I08: a 100-member component completes within unchanged quotas and D1's 100 binds", async t => {
+  const f=fixture(t);
+  const wallets=Array.from({length:100},(_,i)=>({wallet_address:`w${i}`,common_funder:"f"}));
+  await existingPriorScores(f.db,wallets,iso(NOW));
+  assert.deepEqual(f.db.calls.slice(-2).map(call=>call.values.length),[100,2]);
+  await enqueueDurableHistory(f.env,ledger([event("hundred",{type:"signal",wallets})]));
+  const totals=await drain(f);
+  assert.equal((await historyClusters(f.env)).rows[0].wallet_count,100);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM wallet_cluster_edges").get().n,4950);
+  t.diagnostic(`100 wallets: ${totals.flushes} flushes, ${totals.units} units, ${totals.days} UTC resets`);
+});
+
+test("I07: AB, BC, CD become one component; old identities are retired, not deleted", async t => {
+  const f=fixture(t);
+  for (const [id,a,b] of [["ab","a","b"],["bc","b","c"],["cd","c","d"]]) {
+    await enqueueDurableHistory(f.env,ledger([event(id,{type:"signal",wallets:[a,b].map(wallet_address=>({wallet_address,common_funder:id}))})]));
+    await drain(f);
+  }
+  assert.deepEqual((await historyClusters(f.env)).rows.map(row=>row.wallet_count),[4]);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM wallet_clusters WHERE active=0 AND retired_at IS NOT NULL").get().n,2);
+  const members=f.db.db.prepare(`SELECT m.wallet_address FROM wallet_cluster_members m JOIN wallet_clusters c USING(cluster_id)
+    WHERE c.active=1 ORDER BY m.wallet_address`).all();
+  assert.deepEqual(members.map(row=>row.wallet_address),["a","b","c","d"]);
+});
+
+test("I07: known public infrastructure never creates edges or active ownership components", async t => {
+  const f=fixture(t,{HISTORY_INFRASTRUCTURE_ADDRESSES:JSON.stringify(["public-router"])});
+  const wallets=["a","b"].map(wallet_address=>({wallet_address,common_funder:"public-router",
+    common_executor:"So11111111111111111111111111111111111111112"}));
+  await enqueueDurableHistory(f.env,ledger([event("infra",{type:"signal",wallets})]));
+  await drain(f);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM wallet_cluster_edges").get().n,0);
+  assert.deepEqual((await historyClusters(f.env)).rows,[]);
+});
+
+test("I07: fragment retirement and scratch cleanup remain row-bounded at the minimum edge budget", async t => {
+  const f=fixture(t,{HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:24});
+  const insert=f.db.db.prepare(`INSERT INTO wallet_clusters
+    (cluster_id,wallet_count,computed_through,updated_at,numeric_contract_version) VALUES (?,2,?,?,2)`);
+  for (let i=0;i<30;i++) {
+    const cluster=`obsolete-${i}`;
+    insert.run(cluster,iso(NOW),iso(NOW));
+    for (const wallet of ["a","b"]) f.db.db.prepare(`INSERT INTO wallet_cluster_members
+      (cluster_id,wallet_address,first_seen_at,last_seen_at) VALUES (?,?,?,?)`).run(cluster,wallet,iso(NOW),iso(NOW));
+  }
+  await enqueueDurableHistory(f.env,ledger([event("retire-many",{type:"signal",
+    wallets:["a","b"].map(wallet_address=>({wallet_address,common_funder:"private"}))})]));
+  await drain(f,200);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM wallet_clusters WHERE active=1").get().n,1);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM wallet_clusters WHERE retired_at IS NOT NULL").get().n,30);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM history_cluster_work").get().n,0);
+  assert.equal(f.db.db.prepare("SELECT job_id FROM history_cluster_lock").get().job_id,null);
+  const retireWrites=f.db.calls.filter(call=>/SET active=0,retired_at=/.test(call.sql));
+  assert.equal(retireWrites.length,30);
+  assert.ok(retireWrites.every(call=>/WHERE cluster_id=\?1 AND active=1/.test(call.sql)));
+  const deletes=f.db.calls.filter(call=>/DELETE FROM history_cluster_work/.test(call.sql));
+  assert.ok(deletes.length>=2);
+  assert.ok(deletes.every(call=>/wallet_address=\?2/.test(call.sql)));
+});
+
+test("I05: unknown balances, retention, threshold times and drawdown remain null; real zeros survive", () => {
+  const wallet=normalizedWallet({wallet_address:"unknown",bought_tokens:100,current_token_balance:null,
+    balance_retained_pct:null,retained_pct_at_catch:null});
+  assert.equal(wallet.observation.current_token_balance,null);
+  assert.equal(wallet.observation.balance_retained_pct,null);
+  assert.equal(wallet.observation.behavior_status,"unknown");
+  assert.equal(wallet.retained_pct_at_catch,null);
+  const exited=normalizedWallet({wallet_address:"exited",bought_tokens:100,current_token_balance:0,balance_retained_pct:0});
+  assert.equal(exited.observation.current_token_balance,0);
+  assert.equal(exited.observation.balance_retained_pct,0);
+  const rows=normalizedOutcome({horizons:{"1h":{at:iso(NOW),max_return_pct:100,time_to_2x_minutes:null,
+    time_to_5x_minutes:null,max_drawdown_pct:null}}},{caught_at:iso(NOW-3600_000)},iso(NOW));
+  assert.equal(rows[0].time_to_2x_minutes,null);
+  assert.equal(rows[0].time_to_5x_minutes,null);
+  assert.equal(rows[0].max_drawdown_pct,null);
+});
+
+test("I05: legacy numeric results remain preserved but quarantined from trusted learning", async t => {
+  const f=fixture(t);
+  await enqueueDurableHistory(f.env,ledger([outcome("legacy")])); await drain(f);
+  f.db.db.exec(`DELETE FROM signal_outcomes WHERE horizon_minutes=4320;
+    UPDATE signal_outcomes SET horizon_minutes=4320,status='complete',max_return_pct=100,
+    tradable_2x=1,numeric_contract_version=1,entry_verified=0 WHERE horizon_minutes=60;
+    DELETE FROM signal_outcomes WHERE horizon_minutes<>4320;`);
+  const overview=await historyOverview(f.env,"all");
+  assert.equal(overview.resolved_72h,0);
+  assert.equal(overview.legacy_unverified_72h,1);
+  const detail=await historyEpisodeDetail(f.env,"legacy");
+  assert.equal(detail.outcomes[0].max_return_pct,100);
+  assert.equal(detail.outcomes[0].trusted,false);
+  const projected=await historyWallets(f.env);
+  assert.deepEqual(projected.rows,[]);
+});
+
+test("forward cluster repair retires legacy infrastructure fragments without deleting evidence", async t => {
+  const f=fixture(t,{HISTORY_INFRASTRUCTURE_ADDRESSES:["router"]});
+  const raw=event("old",{type:"signal",wallets:["a","b"].map(wallet_address=>({wallet_address}))});
+  await enqueueDurableHistory(f.env,ledger([raw])); await drain(f);
+  f.db.db.prepare(`INSERT INTO wallet_cluster_edges (edge_id,wallet_a,wallet_b,relation_type,first_seen_at,last_seen_at,
+    weight,evidence_json,created_at,updated_at) VALUES ('legacy-edge','a','b','common_funder',?,?,1,?,?,?)`)
+    .run(iso(NOW),iso(NOW),JSON.stringify({value:"router"}),iso(NOW),iso(NOW));
+  f.db.db.prepare(`INSERT INTO wallet_clusters (cluster_id,computed_through,updated_at,wallet_count)
+    VALUES ('legacy-cluster',?,?,2)`).run(iso(NOW),iso(NOW));
+  for (const wallet of ["a","b"]) f.db.db.prepare(`INSERT INTO wallet_cluster_members
+    (cluster_id,wallet_address,first_seen_at,last_seen_at) VALUES ('legacy-cluster',?,?,?)`).run(wallet,iso(NOW),iso(NOW));
+  await enqueueDurableHistory(f.env,ledger([event("repair",{episode:"old",type:"cluster_repair",at:NOW})]));
+  await drain(f);
+  assert.equal(f.db.db.prepare("SELECT active FROM wallet_clusters WHERE cluster_id='legacy-cluster'").get().active,0);
+  assert.equal(f.db.db.prepare("SELECT is_infrastructure FROM wallet_cluster_edges WHERE edge_id='legacy-edge'").get().is_infrastructure,1);
+  assert.deepEqual((await historyClusters(f.env)).rows,[]);
+  assert.equal(f.db.db.prepare("SELECT job_id FROM history_cluster_lock").get().job_id,null);
+});
+
+test("I06: full-tuple pagination returns every tied and nullable-lift wallet exactly once", async t => {
+  const f=fixture(t);
+  const rows=[["z",3,2],["a",2,3],["m",2,1],["n",null,4],["b",null,1]];
+  for (const [address,lift,sample] of rows) f.db.db.prepare(`INSERT INTO wallet_scores
+    (wallet_address,edge_score,lift_2x,eligible_episodes,computed_through,updated_at,numeric_contract_version)
+    VALUES (?,50,?,?,?, ?,2)`).run(address,lift,sample,iso(NOW),iso(NOW));
+  const found=[]; let cursor;
+  do {
+    const result=await historyWallets(f.env,{limit:1,cursor});
+    found.push(...result.rows.map(row=>row.wallet_address)); cursor=result.next_cursor;
+  } while (cursor);
+  assert.deepEqual(found,["z","a","m","n","b"]);
+  await assert.rejects(historyWallets(f.env,{cursor:btoa(JSON.stringify({score:50,wallet:"z"}))}),/obsolete/);
+});
+
+test("I02: daily-cap rejection is persisted in queue health without losing payload or progress", async t => {
+  const f=fixture(t,{HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:16});
+  await enqueueDurableHistory(f.env,ledger([event("one"),event("two")]));
+  await flushDurableHistory(f.env); f.advance(1001);
+  await assert.rejects(flushDurableHistory(f.env),/history_daily_write_budget/);
+  const health=await durableHistoryStatus(f.env);
+  assert.equal(health.history_budget_exhausted,true);
+  assert.match(health.last_flush_error,/history_daily_write_budget/);
+  assert.ok(health.oldest_pending_age_seconds>0);
+  assert.ok(f.rows().find(row=>row.status==="pending").payload_json);
+});
+
+test("I01/I07: a crash before DO progress commit recovers the same graph lock after lease expiry", async t => {
+  const f=fixture(t);
+  const wallets=Array.from({length:60},(_,i)=>({wallet_address:`w${i}`,common_funder:"f"}));
+  await enqueueDurableHistory(f.env,ledger([event("crashed",{type:"signal",wallets})]));
+  f.store.before=sql=>{
+    if (/UPDATE history_queue_events SET progress_json|SET lease_token=NULL/.test(sql)) throw new Error("simulated process loss");
+  };
+  await assert.rejects(flushDurableHistory(f.env),/simulated process loss/);
+  const job=`history:${hash("crashed")}`;
+  assert.equal(f.db.db.prepare("SELECT job_id FROM history_cluster_lock").get().job_id,job);
+  assert.equal(f.rows()[0].progress_json,null);
+  assert.ok(f.rows()[0].payload_json);
+  f.store.before=null; f.restart(); f.advance(HISTORY_QUEUE_LIMITS.leaseMs+1);
+  await drain(f);
+  assert.equal(f.db.db.prepare("SELECT job_id FROM history_cluster_lock").get().job_id,null);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM wallet_cluster_edges WHERE evidence_count<>1").get().n,0);
+});
+
+test("I07: a waiting job cannot clear a pending owner's graph lock", async t => {
+  const f=fixture(t);
+  const wallets=Array.from({length:60},(_,i)=>({wallet_address:`w${i}`,common_funder:"f"}));
+  await enqueueDurableHistory(f.env,ledger([event("owner",{type:"signal",wallets})]));
+  await flushDurableHistory(f.env);
+  const job=f.db.db.prepare("SELECT job_id FROM history_cluster_lock").get().job_id;
+  f.store.db.prepare("UPDATE history_queue_events SET next_attempt_at=? WHERE event_id='owner'").run(NOW+1000000);
+  await enqueueDurableHistory(f.env,ledger([event("waiting",{at:NOW,type:"signal",
+    wallets:["x","y"].map(wallet_address=>({wallet_address,common_funder:"g"}))})]));
+  const wait=await flushDurableHistory(f.env);
+  assert.equal(wait.delivered,0);
+  assert.equal(wait.failed,0);
+  assert.equal(f.db.db.prepare("SELECT job_id FROM history_cluster_lock").get().job_id,job);
+  f.advance(1000001); await drain(f);
+  assert.equal(f.db.db.prepare("SELECT job_id FROM history_cluster_lock").get().job_id,null);
+});
+
+test("I01: minimally admitted budgets progress, including quarantined outcomes; impossible work is rejected before enqueue", async t => {
+  const f=fixture(t,{HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:16});
+  const signal=event("tiny",{type:"signal",wallets:[{wallet_address:"single"}]});
+  await enqueueDurableHistory(f.env,ledger([signal]));
+  const totals=await drain(f,100);
+  assert.ok(totals.days>0);
+  const unverified=outcome("quarantined"); delete unverified.outcome.entry_evidence_version;
+  await enqueueDurableHistory(f.env,ledger([unverified])); await drain(f,100);
+  assert.equal(f.db.db.prepare("SELECT job_id FROM history_cluster_lock").get().job_id,null);
+  await assert.rejects(enqueueDurableHistory(f.env,ledger([event("impossible",{type:"signal",
+    wallets:["a","b"].map(wallet_address=>({wallet_address,common_funder:"f"}))})])),/atomic_daily_allowance/);
+  assert.equal(f.rows().some(row=>row.event_id==="impossible"),false);
+});
+
+test("legacy outbox handoff preserves pending payload until actual durable delivery receipt", async t => {
+  const f=fixture(t);
+  const raw=event("legacy-handoff");
+  let delivered=0;
+  const db={prepare(sql){let values=[];return {bind(...v){values=v;return this;},async all(){return {results:delivered?[]:[{
+    event_id:raw.event_id,payload_json:JSON.stringify(raw),attempts:0}]};},async run(){assert.match(sql,/status='delivered'/);
+    assert.equal(values[0],raw.event_id);delivered++;return {success:true};}};},async batch(statements){return Promise.all(statements.map(row=>row.run()));}};
+  const env={RADAR_DB:db,RADAR_HISTORY_DB:f.db,HISTORY_QUEUE:f.env.HISTORY_QUEUE};
+  const accepted=await flushHistoryOutbox(env);
+  assert.equal(accepted.delivered,0);
+  assert.equal(delivered,0);
+  assert.deepEqual(JSON.parse(f.rows()[0].payload_json),raw);
+  await drain(f);
+  assert.equal((await flushHistoryOutbox(env)).delivered,1);
+  assert.equal(delivered,1);
+});
+
+test("I01 steady state: two days of 100 forty-wallet cohorts/hour, outcomes and receipt expiry fit unchanged daily budgets", async t => {
+  const f=fixture(t,{SCHEDULER_ENABLED:"disabled"});
+  const start=NOW-12*3600_000;
+  const caught=iso(start-3*86400_000);
+  f.advance(-12*3600_000);
+  // Exercise the mature receipt store, not just the empty first UTC day.
+  // These are metadata-only delivered receipts; no pending payload is evicted.
+  const seededReceipts=HISTORY_QUEUE_LIMITS.receiptRows-HISTORY_QUEUE_LIMITS.pendingRows;
+  const expiredAt=start-HISTORY_QUEUE_LIMITS.receiptRetentionMs-1;
+  f.store.db.exec("BEGIN");
+  const receiptInsert=f.store.db.prepare(`INSERT INTO history_queue_events
+    (event_id,episode_id,source_at,payload_bytes,status,next_attempt_at,delivered_at)
+    VALUES (?,? ,?,0,'delivered',?,?)`);
+  for (let i=0;i<seededReceipts-1;i++) receiptInsert.run(`expired-${i}`,`expired-${i}`,expiredAt,expiredAt,expiredAt);
+  receiptInsert.run("protected-receipt","protected-receipt",start-3600_000,start,start);
+  f.store.db.prepare("UPDATE history_queue_meta SET delivered_rows=?").run(seededReceipts);
+  f.store.db.exec("COMMIT");
+  assert.ok(HISTORY_QUEUE_LIMITS.receiptRows>=31*5000+2*HISTORY_QUEUE_LIMITS.pendingRows);
+  const episodeInsert=f.db.db.prepare(`INSERT INTO signal_episodes (episode_id,token_address,lane,signal_family,
+    caught_at,last_signal_at,mcap_band,liquidity_band,age_band,data_quality_status,created_at,updated_at)
+    VALUES (?,?,'reactivation','reactivation_wave',?,?,'50k_100k','15k_50k','30d_90d','complete',?,?)`);
+  const walletInsert=f.db.db.prepare(`INSERT INTO signal_wallets (episode_id,wallet_address,cohort_role,bought_tokens,
+    evidence_status,created_at,updated_at,numeric_contract_version) VALUES (?,?,'at_catch',100,'complete',?,?,2)`);
+  const cohorts=Array.from({length:100},(_,i)=>Array.from({length:40},(_,j)=>({wallet_address:`cohort-${i}-wallet-${j}`,
+    bought_tokens:100,current_token_balance:100,balance_retained_pct:100,common_funder:j<2?`funder-${i}`:null})));
+  for (let i=0;i<100;i++) {
+    episodeInsert.run(`cohort-${i}`,`token:cohort-${i}`,caught,caught,caught,caught);
+    for (const wallet of cohorts[i]) walletInsert.run(`cohort-${i}`,wallet.wallet_address,caught,caught);
+    f.db.db.prepare(`INSERT INTO wallet_clusters (cluster_id,wallet_count,computed_through,updated_at,numeric_contract_version)
+      VALUES (?,2,?,?,2)`).run(`warm-${i}`,caught,caught);
+    for (const wallet of cohorts[i].slice(0,2)) f.db.db.prepare(`INSERT INTO wallet_cluster_members
+      (cluster_id,wallet_address,first_seen_at,last_seen_at) VALUES (?,?,?,?)`).run(`warm-${i}`,wallet.wallet_address,caught,caught);
+  }
+  const checked=(id,i,at)=>{
+    const raw=event(id,{episode:`cohort-${i}`,type:"retention_check",at,wallets:cohorts[i]});
+    raw.episode.caught_at=caught;
+    return raw;
+  };
+  const enqueue=async rows=>{for(let i=0;i<rows.length;i+=25) await enqueueDurableHistory(f.env,ledger(rows.slice(i,i+25)));};
+  await enqueue(Array.from({length:96},(_,i)=>checked(`backlog-${i}`,i,start-3600_000)));
+  let peak=96;
+  for (let minute=0;minute<2880;minute+=5) {
+    if (minute) f.advance(300000);
+    if (minute%60===0) {
+      const hour=minute/60;
+      await enqueue(cohorts.map((_,i)=>checked(`hour-${hour}-${i}`,i,start+minute*60000)));
+      const result=event(`outcome-${hour}`,{episode:`cohort-${hour%100}`,type:"outcome_72h",at:start+minute*60000});
+      result.episode.caught_at=caught;
+      result.outcome={entry_evidence_version:2,caught_at:caught,caught_mcap_usd:80000,horizons:{"72h":{
+        at:iso(start),target_at:iso(start),return_pct:100,max_return_pct:100,liquidity_usd:20000,quality_status:"complete"}}};
+      await enqueue([result]);
+      if (hour%6===0) {
+        const signal=event(`new-${hour}`,{type:"signal",at:start+minute*60000,
+          wallets:Array.from({length:40},(_,i)=>({wallet_address:`new-${hour}-wallet-${i}`,bought_tokens:100}))});
+        signal.episode.caught_at=iso(start+minute*60000); await enqueue([signal]);
+      }
+      peak=Math.max(peak,f.meta().pending_rows);
+      f.restart();
+    }
+    const tasks=[];
+    await worker.scheduled({cron:"*/5 * * * *"},f.env,{waitUntil:promise=>tasks.push(promise)});
+    await Promise.all(tasks);
+    assert.ok(f.meta().hist_writes<=80000);
+    assert.ok(f.meta().do_writes<=50000);
+    if (minute%1440===1435) {
+      const pending=f.store.db.prepare("SELECT event_id,last_error,progress_json FROM history_queue_events WHERE status='pending'").all();
+      assert.deepEqual(pending,[]);
+      assert.equal((await enqueueDurableHistory(f.env,ledger([event("protected-receipt")]))).duplicates,1);
+      t.diagnostic(`UTC day ${Math.floor(minute/1440)+1}: delivered workload=${96+Math.floor((minute+5)/1440)*2428}, pending=0, peak=${peak}, history units=${f.meta().hist_writes}, DO units=${f.meta().do_writes}, receipts=${f.meta().delivered_rows}`);
+    }
+  }
+  assert.equal(f.meta().pending_rows,0);
+  assert.equal(f.meta().delivered_rows,HISTORY_QUEUE_LIMITS.receiptRows);
+  assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM wallet_observation_bundles").get().n,4896);
+  assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM history_queue_events WHERE event_id LIKE 'expired-%'").get().n,
+    HISTORY_QUEUE_LIMITS.receiptRows-4952-1);
+  assert.ok(f.requests.filter(request=>new URL(request.url).pathname==="/flush").length<=1152);
 });

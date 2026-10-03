@@ -93,6 +93,10 @@ jobs:
           python -m pip install -r requirements.txt
           npm install -g gmgn-cli@1.6.1
 
+      - name: Record pre-pulse runtime revisions
+        if: steps.freshness.outputs.should_run == 'true'
+        run: python tools/runtime_cache.py capture "$RUNNER_TEMP/radar-runtime-baseline.json"
+
       - name: Refresh discovery baselines
         id: discovery_pulse
         if: steps.freshness.outputs.should_run == 'true'
@@ -111,8 +115,13 @@ jobs:
           fi
           exit 0
 
+      - name: Validate failure-safe runtime cache
+        id: runtime_cache
+        if: always() && steps.freshness.outputs.should_run == 'true'
+        run: python tools/runtime_cache.py validate "$RUNNER_TEMP/radar-runtime-baseline.json" >> "$GITHUB_OUTPUT"
+
       - name: Save shared scanner state
-        if: steps.freshness.outputs.should_run == 'true' && steps.discovery_pulse.outputs.exit_code == '0'
+        if: always() && steps.runtime_cache.outputs.valid == 'true'
         uses: actions/cache/save@v4
         with:
           path: |

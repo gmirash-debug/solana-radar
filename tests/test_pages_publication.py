@@ -1,5 +1,6 @@
 import unittest
 import json
+import hashlib
 import tempfile
 from unittest import mock
 from pathlib import Path
@@ -79,8 +80,10 @@ class PagesPublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             manifest = publish_token_details(snapshot, {}, Path(directory))
             preserved = preserve_published_details(snapshot, manifest, Path(directory), fetcher=fetcher)
-            self.assertEqual(preserved["files"]["mint/unsafe"], path)
-            saved = json.loads((Path(directory) / Path(path).name).read_text())
+            encoded = json.dumps(detail, separators=(",", ":"), sort_keys=True)
+            immutable = "data/token-details/" + hashlib.sha256(encoded.encode()).hexdigest() + ".json"
+            self.assertEqual(preserved["files"]["mint/unsafe"], immutable)
+            saved = json.loads((Path(directory) / Path(immutable).name).read_text())
             self.assertEqual(saved["thesis"]["cohort_wallets"][0]["current_balance"], 0)
 
     def test_existing_runtime_wallet_details_do_not_need_public_downloads(self):

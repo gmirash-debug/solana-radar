@@ -1,0 +1,47 @@
+name: Validate scanner contracts
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "**.py"
+      - "dashboard/**"
+      - "cloudflare/**"
+      - "tests/**"
+      - ".github/workflows/**"
+      - "config.example.json"
+      - "package*.json"
+      - "requirements.txt"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scanner-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install test dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          npm ci
+      - name: Validate source and contracts without live provider calls
+        run: |
+          python -m unittest discover -s tests -v
+          node --test cloudflare/scan-dispatcher/test/*.test.mjs dashboard/test/*.test.mjs
+          python tools/replay_reactivation.py
+          python -m json.tool config.example.json > /dev/null
+          node --check dashboard/app.js

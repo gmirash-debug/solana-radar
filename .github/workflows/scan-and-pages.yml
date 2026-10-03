@@ -31,6 +31,7 @@ on:
       - "rpc_budget.py"
       - "rpc_routing.py"
       - "scan_scheduling.py"
+      - "scan_failure.py"
       - "launch_history.py"
       - "position_history_rpc.py"
       - "prospective_evidence.py"
@@ -43,6 +44,7 @@ on:
       - "requirements.txt"
       - "tests/**"
       - "tools/build_pages.py"
+      - "tools/runtime_cache.py"
       - "dashboard/**"
       - "cloudflare/**"
       - "NARRATIVE_PROTOCOL.md"
@@ -104,6 +106,7 @@ jobs:
           from datetime import datetime, timezone
           from urllib.request import urlopen
           from scan_scheduling import scan_freshness_reference
+          from scan_failure import scanner_failure_class
 
           event_name = os.environ.get("GITHUB_EVENT_NAME", "")
           event = {}
@@ -155,32 +158,19 @@ jobs:
                   str(scanner_status.get("last_attempt_at", "")).replace("Z", "+00:00")
               )
               failed_age_seconds = (datetime.now(timezone.utc) - last_attempt).total_seconds()
-              error_categories = (
-                  scanner_status.get("scan_health", {}).get("scan_error_categories", {})
-              )
-              status_error = str(scanner_status.get("error") or "").lower()
-              provider_blocked = any(
-                  error_categories.get(key)
-                  for key in ("rpc_all_unavailable",)
-              ) or any(
-                  marker in status_error
-                  for marker in (
-                      "all rpc provider",
-                      "max usage",
-                      "rate_limit",
-                      "rate limit",
-                      "quota",
-                      "credit",
-                      "http 401",
-                      "http 403",
-                      "unauthorized",
-                      "forbidden",
-                      "invalid api key",
-                      "api_key is missing",
-                      "api key is missing",
-                      "missing api key",
-                      "auth:",
+              categories = {
+                  str(name) for name, count in
+                  ((scanner_status.get("scan_health") or {}).get("scan_error_categories", {}) or {}).items()
+                  if count
+              }
+              def persistent(category):
+                  return category in {"rate_limit", "quota", "auth", "circuit_open"} or str(category).endswith(
+                      ("_rate_limit", "_quota", "_auth", "_circuit_open")
                   )
+              underlying = categories - {"rpc_all_unavailable"}
+              provider_blocked = scanner_failure_class(scanner_status, 1) == "soft_provider_failure" and (
+                  persistent(scanner_status.get("error_category"))
+                  or (bool(underlying) and all(persistent(category) for category in underlying))
               )
           except Exception:
               failed_age_seconds = None
@@ -251,6 +241,10 @@ jobs:
           node --test cloudflare/scan-dispatcher/test/*.test.mjs dashboard/test/*.test.mjs
           node --check dashboard/app.js
 
+      - name: Record pre-scan runtime revisions
+        if: steps.freshness.outputs.should_scan == 'true'
+        run: python tools/runtime_cache.py capture "$RUNNER_TEMP/radar-runtime-baseline.json"
+
       - name: Run scanner
         id: run_scanner
         if: steps.freshness.outputs.should_scan == 'true'
@@ -309,13 +303,13 @@ jobs:
           import json
           import os
           from pathlib import Path
-          import scanner
+          from scan_failure import scanner_failure_class
 
           try:
               status = json.loads(Path("data/scanner_status.json").read_text())
           except Exception:
               status = {}
-          classification = scanner.scanner_failure_class(
+          classification = scanner_failure_class(
               status,
               int(os.environ.get("SCAN_EXIT_CODE") or 1),
           )
@@ -329,8 +323,13 @@ jobs:
           path: data/remote_outbox
           key: ${{ runner.os }}-solana-radar-outbox-v1-${{ github.run_id }}
 
+      - name: Validate failure-safe runtime cache
+        id: runtime_cache
+        if: always() && steps.freshness.outputs.should_scan == 'true'
+        run: python tools/runtime_cache.py validate "$RUNNER_TEMP/radar-runtime-baseline.json" >> "$GITHUB_OUTPUT"
+
       - name: Save scanner runtime state
-        if: steps.freshness.outputs.should_scan == 'true' && steps.run_scanner.outputs.exit_code == '0'
+        if: always() && steps.runtime_cache.outputs.valid == 'true'
         uses: actions/cache/save@v4
         with:
           path: |

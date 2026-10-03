@@ -14,7 +14,7 @@ import {
   historyWallets,
 } from "./history.js";
 import {runtimeDocument, runtimeDashboardResponse, runtimeCheckpointResponse, runtimeMetadata} from "./runtime.js";
-import {durableHistoryIngestResponse, flushDurableHistory, durableHistoryStatus} from "./runtime-history.js";
+import {durableHistoryIngestResponse, flushDurableHistory, durableHistoryStatus, HISTORY_QUEUE_LIMITS} from "./runtime-history.js";
 export {RuntimeSnapshots} from "./runtime.js";
 export {HistoryQueue} from "./runtime-history.js";
 
@@ -735,7 +735,7 @@ async function dashboardTokenDetail(env, requestedTokenKey) {
   if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
   const [reportDoc, thesisDoc, alertsResult] = await Promise.all([
     env.RADAR_DB.prepare("SELECT payload_json, source_updated_at, updated_at FROM state_docs WHERE key = 'latest_report'").first(),
-    env.RADAR_DB.prepare("SELECT payload_json FROM state_docs WHERE key = ?1").bind(`signal_thesis:${tokenKey}`).first(),
+    env.RADAR_DB.prepare("SELECT payload_json, source_updated_at FROM state_docs WHERE key = ?1").bind(`signal_thesis:${tokenKey}`).first(),
     env.RADAR_DB.prepare(`
       SELECT alert_key, payload_json
       FROM alerts
@@ -746,7 +746,13 @@ async function dashboardTokenDetail(env, requestedTokenKey) {
   ]);
   const report = parsePayload(reportDoc?.payload_json, {});
   const reportThesis = (report.signal_theses || []).find((item) => dashboardRecordMatchesToken(item, tokenKey)) || null;
-  const thesis = parsePayload(thesisDoc?.payload_json, reportThesis || null);
+  const detailThesis = parsePayload(thesisDoc?.payload_json, null);
+  const generation = reportDoc?.source_updated_at || report.generated_at;
+  const detailMatches = detailThesis && thesisDoc?.source_updated_at === generation
+    && dashboardRecordMatchesToken(detailThesis, tokenKey)
+    && reportThesis?.cohort_id && ["cohort_id", "signal_at", "signal_window_start", "signal_window_end", "last_checked_at", "updated_at"].every(
+      field => detailThesis[field] === reportThesis[field]);
+  const thesis = detailMatches ? detailThesis : reportThesis;
   const currentAlertKeys = new Set(
     (report.alerts || [])
       .filter((alert) => dashboardRecordMatchesToken(alert, tokenKey))
@@ -771,6 +777,7 @@ async function dashboardTokenDetail(env, requestedTokenKey) {
     history: alerts,
     market: marketRow?.market || null,
     wallet_edge: walletEdge,
+    detail_status: detailMatches ? "ready" : "pending",
     report_source_updated_at: reportDoc?.source_updated_at || reportDoc?.updated_at || null,
   };
 }
@@ -802,17 +809,26 @@ function applyDeletedTokenUpdate(source, payload, now) {
   if (action === "restore") {
     if (tokenAddress) tokens.delete(tokenAddress);
     if (poolAddress) pools.delete(poolAddress);
+    const restoredTokens = new Set();
+    const restoredPools = new Set();
     Object.entries(data.entries).forEach(([key, entry]) => {
       if (
         key === entryKey
-        || key === tokenAddress
-        || key === poolAddress
-        || entry?.token_address === tokenAddress
-        || entry?.pool_address === poolAddress
+        || (tokenAddress && (key === tokenAddress || entry?.token_address === tokenAddress))
+        || (poolAddress && (key === poolAddress || entry?.pool_address === poolAddress))
       ) {
+        if (entry?.token_address) restoredTokens.add(entry.token_address);
+        if (entry?.pool_address) restoredPools.add(entry.pool_address);
         delete data.entries[key];
       }
     });
+    // A shared pool/token can still belong to a separate explicit deletion.
+    for (const token of restoredTokens) {
+      if (!Object.values(data.entries).some(entry => entry?.token_address === token)) tokens.delete(token);
+    }
+    for (const pool of restoredPools) {
+      if (!Object.values(data.entries).some(entry => entry?.pool_address === pool)) pools.delete(pool);
+    }
   } else if (action === "delete") {
     if (tokenAddress) tokens.add(tokenAddress);
     if (poolAddress) pools.add(poolAddress);
@@ -1051,15 +1067,37 @@ async function discoveryDispatchGuard(env) {
   }
 }
 
+async function flushAndPublishHistoryHealth(env, maximum = 1) {
+  let result = {};
+  let error = null;
+  try {
+    for (let index=0;index<maximum;index++) {
+      const next=await flushDurableHistory(env);
+      result={...next,delivered:(result.delivered || 0)+(next.delivered || 0),failed:(result.failed || 0)+(next.failed || 0),
+        continued:(result.continued || 0)+(next.continued || 0),history_write_units:(result.history_write_units || 0)+(next.history_write_units || 0),
+        history_queries:(result.history_queries || 0)+(next.history_queries || 0),error:result.error || next.error || null};
+      if (!next.pending || next.error) break;
+    }
+  }
+  catch (caught) { error = String(caught?.message || caught); }
+  let status = {};
+  try { status = await durableHistoryStatus(env); }
+  catch (caught) { error ||= String(caught?.message || caught); }
+  error ||= result.error || status.pending_last_error || (status.history_budget_exhausted ? "history_daily_write_budget" : null);
+  const checkedAt = isoNow();
+  await runtimeDocument(env, "history_status", {...result, ...status,
+    error: error || null, healthy: !error,
+    last_flush_at: checkedAt, last_flush_error: error || null,
+    pending_outbox: status.pending ?? result.pending ?? null,
+    checked_at: checkedAt, storage_source: "durable_history_queue"}, checkedAt);
+  return {result,status,error,checked_at:checkedAt};
+}
+
 export default {
   async scheduled(_event, env, ctx) {
     const mode = schedulerMode(env);
     const historyTask = env.HISTORY_QUEUE && hasHistoryDb(env) && _event?.cron === DISCOVERY_CRON
-      ? flushDurableHistory(env).then(async result => {
-        const status = await durableHistoryStatus(env);
-        return runtimeDocument(env, "history_status", {...result, ...status, pending_outbox:status.pending,
-          checked_at:isoNow(), storage_source:"durable_history_queue"}, isoNow());
-      }).catch(() => null)
+      ? flushAndPublishHistoryHealth(env,HISTORY_QUEUE_LIMITS.scheduledFlushes)
       : shouldFlushScheduledHistory(_event, env) && hasHistoryDb(env)
         ? flushHistoryOutbox(env).catch(() => null) : Promise.resolve(null);
     if (mode === "disabled" || shouldFlushScheduledHistory(_event, env)) {
@@ -1185,7 +1223,7 @@ export default {
         return json({ ok: false, error: "intelligence_endpoint_not_found" }, 404, corsHeaders(request, env));
       } catch (error) {
         const message = error.message || "history_unavailable";
-        const status = ["wallet_required", "cluster_required", "episode_required"].includes(message) ? 400
+        const status = ["wallet_required", "cluster_required", "episode_required", "wallet_cursor_invalid_or_obsolete"].includes(message) ? 400
           : ["wallet_not_found", "cluster_not_found", "episode_not_found"].includes(message) ? 404
             : 503;
         return json({ ok: false, error: message }, status, corsHeaders(request, env));
@@ -1211,6 +1249,17 @@ export default {
         if (url.pathname === "/api/runtime/history") {
           if (request.method !== "POST") return json({ok:false, error:"POST required"}, 405);
           return await durableHistoryIngestResponse(env, request);
+        }
+        if (url.pathname === "/api/runtime/history/flush") {
+          if (request.method !== "POST") return json({ok:false,error:"POST required"},405);
+          const health=await flushAndPublishHistoryHealth(env);
+          return json({...health.result,...health.status,ok:!health.error,error:health.error,checked_at:health.checked_at},
+            health.error ? health.error.includes("budget") ? 429 : 503 : 200,corsHeaders(request,env));
+        }
+        if (url.pathname === "/api/runtime/history/migrate-outbox") {
+          if (request.method !== "POST") return json({ok:false,error:"POST required"},405);
+          if (!env.HISTORY_QUEUE) return json({ok:false,error:"history_queue_not_configured"},503);
+          return json({ok:true,...await flushHistoryOutbox(env,{limit:25})},200,corsHeaders(request,env));
         }
         if (url.pathname === "/api/ingest/snapshot") {
           if (request.method !== "POST") return json({ ok: false, error: "POST required" }, 405, corsHeaders(request, env));

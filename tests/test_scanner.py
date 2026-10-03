@@ -859,6 +859,32 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertAlmostEqual(top3, 0.9)
 
     def test_post_window_sales_reduce_attributed_retention(self):
+        accounts = [
+            ("buyer-token", "buyer", "mint", 100, 20, 0),
+            ("pool-token", "pool", "mint", 1000, 1080, 0),
+            ("pool-sol", "pool", scanner.SOL_MINT, 10_000_000_000, 2_000_000_000, 9),
+            ("buyer-sol", "buyer", scanner.SOL_MINT, 0, 8_000_000_000, 9),
+        ]
+        tx = {
+            "blockTime": 500,
+            "transaction": {"signatures": ["post-window-sale"], "message": {"accountKeys":
+                [{"pubkey": "buyer", "signer": True}] +
+                [{"pubkey": address, "signer": False} for address, *_ in accounts]}},
+            "meta": {"err": None, "innerInstructions": [{"instructions": [
+                {"program": "spl-token", "parsed": {"type": "transfer", "info": {
+                    "source": "buyer-token", "destination": "pool-token", "amount": "80", "authority": "buyer"}}},
+                {"program": "spl-token", "parsed": {"type": "transfer", "info": {
+                    "source": "pool-sol", "destination": "buyer-sol", "amount": "8000000000", "authority": "pool"}}},
+            ]}]},
+        }
+        for key, offset in (("preTokenBalances", 0), ("postTokenBalances", 1)):
+            tx["meta"][key] = [{"accountIndex": i + 1, "owner": owner, "mint": mint,
+                "uiTokenAmount": {"amount": str(values[offset]), "decimals": values[2]}}
+                for i, (_address, owner, mint, *values) in enumerate(accounts)]
+        sale = scanner.parse_pool_swap(tx, scanner.Pool("pool", token_address="mint"))
+        self.assertEqual((sale["kind"], sale["coordination_sale_owner"], sale["coordination_sale_amount"]),
+                         ("sell", "buyer", 80))
+        self.assertEqual(sale["sol_amount"], 8)
         activity = scanner.owner_activity_since(
             [
                 {
@@ -868,13 +894,7 @@ class ScannerCoreTests(unittest.TestCase):
                     "sol_amount": 10,
                     "block_time": 100,
                 },
-                {
-                    "kind": "sell",
-                    "token_sender": "buyer",
-                    "token_amount": 80,
-                    "sol_amount": 8,
-                    "block_time": 500,
-                },
+                sale,
             ],
             100,
             {"buyer"},
@@ -908,14 +928,38 @@ class ScannerCoreTests(unittest.TestCase):
             "recipient_share": 0.50,
             "owner_resolution": "unresolved",
         }
-        routed_sell = {
-            "kind": "sell",
-            "signer": "seller",
-            "token_sender": "pool-vault",
+        accounts = [
+            ("seller-token", "seller", "mint", 100, 50, 0),
+            ("pool-token", "pool", "mint", 1000, 1050, 0),
+            ("pool-sol", "pool", scanner.SOL_MINT, 10_000_000_000, 9_000_000_000, 9),
+            ("seller-sol", "seller", scanner.SOL_MINT, 0, 1_000_000_000, 9),
+        ]
+        tx = {
+            "blockTime": 500,
+            "transaction": {"signatures": ["routed-sale"], "message": {"accountKeys":
+                [{"pubkey": "router", "signer": True}] +
+                [{"pubkey": address, "signer": False} for address, *_ in accounts]}},
+            "meta": {"err": None, "innerInstructions": [{"instructions": [
+                {"program": "spl-token", "parsed": {"type": "transfer", "info": {
+                    "source": "seller-token", "destination": "pool-token", "amount": "50", "authority": "router"}}},
+                {"program": "spl-token", "parsed": {"type": "transfer", "info": {
+                    "source": "pool-sol", "destination": "seller-sol", "amount": "1000000000", "authority": "pool"}}},
+            ]}]},
         }
+        for key, offset in (("preTokenBalances", 0), ("postTokenBalances", 1)):
+            tx["meta"][key] = [{"accountIndex": i + 1, "owner": owner, "mint": mint,
+                "uiTokenAmount": {"amount": str(values[offset]), "decimals": values[2]}}
+                for i, (_address, owner, mint, *values) in enumerate(accounts)]
+        pool = scanner.Pool("pool", token_address="mint")
+        routed_sell = scanner.parse_pool_swap(tx, pool)
+        self.assertEqual(routed_sell["signer"], "router")
+        self.assertEqual((routed_sell["coordination_sale_owner"], routed_sell["coordination_sale_amount"]), ("seller", 50))
         self.assertEqual(scanner.wave_buy_owner(routed_buy), "buyer")
         self.assertEqual(scanner.wave_buy_owner(unresolved_routed_buy), "")
         self.assertEqual(scanner.wave_sell_owner(routed_sell), "seller")
+        self.assertEqual(scanner.wave_sell_owner(routed_sell, {"router"}), "")
+        tx["meta"]["innerInstructions"] = []
+        self.assertEqual(scanner.wave_sell_owner(scanner.parse_pool_swap(tx, pool)), "")
 
     def test_resolved_routed_buy_contributes_to_reactivation_wave(self):
         metrics = scanner.reactivation_wave_window_metrics(
@@ -948,12 +992,37 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(metrics["owner_resolution_coverage_pct"], 100)
 
     def test_delegated_sell_is_attributed_to_token_sender(self):
-        delegated_sell = {
-            "kind": "sell",
-            "signer": "delegate",
-            "token_sender": "buyer",
+        accounts = [
+            ("buyer-token", "buyer", "mint", 100, 50, 0),
+            ("pool-token", "pool", "mint", 1000, 1050, 0),
+            ("pool-sol", "pool", scanner.SOL_MINT, 10_000_000_000, 9_000_000_000, 9),
+            ("buyer-sol", "buyer", scanner.SOL_MINT, 0, 1_000_000_000, 9),
+        ]
+        tx = {
+            "blockTime": 500,
+            "transaction": {"signatures": ["delegated-sale"], "message": {"accountKeys":
+                [{"pubkey": "delegate", "signer": True}] +
+                [{"pubkey": address, "signer": False} for address, *_ in accounts]}},
+            "meta": {"err": None, "innerInstructions": [{"instructions": [
+                {"program": "spl-token", "parsed": {"type": "transferChecked", "info": {
+                    "source": "buyer-token", "destination": "pool-token", "mint": "mint",
+                    "tokenAmount": {"amount": "50", "decimals": 0}, "authority": "delegate"}}},
+                {"program": "spl-token", "parsed": {"type": "transfer", "info": {
+                    "source": "pool-sol", "destination": "buyer-sol", "amount": "1000000000", "authority": "pool"}}},
+            ]}]},
         }
+        for key, offset in (("preTokenBalances", 0), ("postTokenBalances", 1)):
+            tx["meta"][key] = [{"accountIndex": i + 1, "owner": owner, "mint": mint,
+                "uiTokenAmount": {"amount": str(values[offset]), "decimals": values[2]}}
+                for i, (_address, owner, mint, *values) in enumerate(accounts)]
+        pool = scanner.Pool("pool", token_address="mint")
+        delegated_sell = scanner.parse_pool_swap(tx, pool)
+        self.assertEqual(delegated_sell["signer"], "delegate")
+        self.assertEqual((delegated_sell["coordination_sale_owner"], delegated_sell["coordination_sale_amount"]), ("buyer", 50))
         self.assertEqual(scanner.wave_sell_owner(delegated_sell, {"buyer"}), "buyer")
+        self.assertEqual(scanner.wave_sell_owner(delegated_sell, {"delegate"}), "")
+        tx["meta"]["innerInstructions"] = []
+        self.assertEqual(scanner.wave_sell_owner(scanner.parse_pool_swap(tx, pool), {"buyer"}), "")
 
     def test_pool_swap_preserves_priority_fee_fingerprint(self):
         tx = {

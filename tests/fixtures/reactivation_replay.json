@@ -1,8 +1,8 @@
 {
-  "fixture_set": "reactivation_regression_envelopes_v1",
+  "fixture_set": "reactivation_regression_envelopes_v2",
   "cases": [
     {
-      "id": "early_low_cap_distributed_wave",
+      "id": "early_unseasoned_wave_needs_baseline_and_hold",
       "detected_at": "2026-07-29T12:00:00Z",
       "pump_started_at": "2026-07-29T12:35:00Z",
       "estimated_rpc_credits": 84,
@@ -28,6 +28,53 @@
           "top3_buyer_share": 0.305,
           "balance_coverage_pct": 100,
           "hold_age_minutes": 0,
+          "min_hold_minutes": 45
+        }
+      },
+      "evidence": {
+        "hard_wallets": 0,
+        "support_wallets": 0,
+        "hard_sol": 0,
+        "hard_classes": {},
+        "support_only": false
+      },
+      "expected": {
+        "tier": "watch",
+        "outcome_24h_pct": 120.0
+      }
+    },
+    {
+      "id": "seasoned_low_cap_distributed_reactivation",
+      "detected_at": "2026-07-29T12:00:00Z",
+      "pump_started_at": "2026-07-29T12:35:00Z",
+      "estimated_rpc_credits": 84,
+      "pool": {
+        "pool_address": "fixture-seasoned-pool",
+        "token_address": "fixture-seasoned-token",
+        "mcap_usd": 133042,
+        "liquidity_usd": 43548,
+        "volume_1h_usd": 34586
+      },
+      "alert": {
+        "score": 90,
+        "signal_family": "reactivation_wave",
+        "suspicious_sol": 82.6,
+        "reactivation_baseline": {
+          "version": 2,
+          "status": "ready",
+          "reactivation_confirmed": true
+        },
+        "wave": {
+          "net_buy_sol": 82.6,
+          "unique_buyers": 142,
+          "sticky_wallets": 36,
+          "sticky_supply_pct": 14.13,
+          "sticky_bought_pct": 43.68,
+          "net_token_retention_pct": 55.42,
+          "top_buyer_share": 0.227,
+          "top3_buyer_share": 0.305,
+          "balance_coverage_pct": 100,
+          "hold_age_minutes": 60,
           "min_hold_minutes": 45
         }
       },

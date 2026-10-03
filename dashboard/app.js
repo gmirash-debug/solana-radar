@@ -1,26 +1,28 @@
-import { chooseDashboardPayload } from "./data-source.js?v=20261003-age-30m-9";
-import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261003-age-30m-9";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-age-30m-9";
-import { installTerminology } from "./terminology.js?v=20261003-age-30m-9";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric } from "./decision-view.js?v=20261003-age-30m-9";
-import { loadTokenDetail } from "./static-detail.js?v=20261003-age-30m-9";
+import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261003-audit-remediation-10";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261003-audit-remediation-10";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-audit-remediation-10";
+import { installTerminology } from "./terminology.js?v=20261003-audit-remediation-10";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261003-audit-remediation-10";
+import { loadTokenDetail } from "./static-detail.js?v=20261003-audit-remediation-10";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
   isTrackedAlertTier,
   matchesWorkflowFilter,
+  marketQuoteSnapshot,
   resolveAthContext,
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261003-age-30m-9";
+} from "./token-state.js?v=20261003-audit-remediation-10";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261003-age-30m-9";
+} from "./filter-scope.js?v=20261003-audit-remediation-10";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
+const PENDING_TOKEN_ACTIONS_KEY = "solana-radar:pending-token-actions:v1";
 const DELETE_SYNC_ENDPOINT = "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/deleted-token";
 const terminology = installTerminology(document);
 
@@ -38,6 +40,20 @@ function saveHiddenTokenKeys(keys) {
   } catch {
     // Local delete state is an optional browser preference.
   }
+}
+
+function loadPendingTokenActions() {
+  try {
+    const rows = JSON.parse(localStorage.getItem(PENDING_TOKEN_ACTIONS_KEY) || "[]");
+    return new Map(rows.filter((row) => row?.token?.key && typeof row.hidden === "boolean")
+      .map((row) => [row.token.key, row]));
+  } catch { return new Map(); }
+}
+
+function savePendingTokenActions() {
+  try {
+    localStorage.setItem(PENDING_TOKEN_ACTIONS_KEY, JSON.stringify([...state.pendingTokenActions.values()]));
+  } catch { /* Pending actions can still be retried during this session. */ }
 }
 
 function normalizeDeletedId(value) {
@@ -112,12 +128,17 @@ const state = {
   hiddenTokenKeys: loadHiddenTokenKeys(),
   serverDeletedTokenKeys: new Set(),
   serverDeletedPoolKeys: new Set(),
+  pendingTokenActions: loadPendingTokenActions(),
+  tokenActionLoadingKeys: new Set(),
   publishedDashboard: false,
   dataSource: "none",
   storageSource: null,
   fallbackReason: null,
   remoteRetryAt: 0,
   remoteFailureCount: 0,
+  dashboardRequestId: 0,
+  localCsrfToken: null,
+  localSessionPromise: null,
   tokenDetailLoadedKeys: new Set(),
   tokenDetailLoadingKeys: new Set(),
   tokenDetailRetryAt: new Map(),
@@ -518,42 +539,71 @@ function setTokenHidden(key, hidden) {
 
 async function persistTokenDeletion(token, hidden) {
   if (!token) return;
-  let endpoint = "/api/deleted-token";
-  const headers = { "content-type": "application/json" };
-  if (state.publishedDashboard) {
-    endpoint = DELETE_SYNC_ENDPOINT;
-  }
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    credentials: "include",
-    body: JSON.stringify({
+  const body = {
       action: hidden ? "delete" : "restore",
       token_address: token.token_address || "",
       pool_address: token.pool_address || token.latestPool?.pool_address || "",
       symbol: token.symbol || "",
       name: token.name || "",
-    }),
-  });
+  };
+  const response = state.publishedDashboard
+    ? await fetchWithTimeout(DELETE_SYNC_ENDPOINT, {
+      method:"POST", headers:{"content-type":"application/json"}, credentials:"include", body:JSON.stringify(body),
+    })
+    : await localMutation("/api/deleted-token", body);
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || "delete_failed");
   applyDeletedTokenList(payload.deleted_tokens || {});
 }
 
 async function syncLocalDeletedTokens() {
-  if (!state.publishedDashboard || !state.hiddenTokenKeys.size) return;
-  const tokens = buildTokenSignals().filter((token) => state.hiddenTokenKeys.has(token.key) && !isTokenServerDeleted(token));
-  for (const token of tokens) {
-    await persistTokenDeletion(token, true);
+  if (state.publishedDashboard) {
+    const tokens = buildTokenSignals().filter((token) => state.hiddenTokenKeys.has(token.key)
+      && !isTokenServerDeleted(token) && !state.pendingTokenActions.has(token.key));
+    tokens.forEach((token) => queueTokenAction(token, true));
+  }
+  for (const key of [...state.pendingTokenActions.keys()]) {
+    await syncTokenAction(key);
   }
   render();
 }
 
+function queueTokenAction(token, hidden) {
+  if (!token?.key) return;
+  state.pendingTokenActions.set(token.key, {
+    token:{key:token.key, token_address:token.token_address, pool_address:token.pool_address || token.latestPool?.pool_address,
+      symbol:token.symbol, name:token.name},
+    hidden,
+  });
+  savePendingTokenActions();
+}
+
+async function syncTokenAction(key) {
+  if (state.tokenActionLoadingKeys.has(key)) return;
+  const action = state.pendingTokenActions.get(key);
+  if (!action) return;
+  state.tokenActionLoadingKeys.add(key);
+  render();
+  try {
+    await persistTokenDeletion(action.token, action.hidden);
+    if (state.pendingTokenActions.get(key) === action) {
+      state.pendingTokenActions.delete(key);
+      savePendingTokenActions();
+    }
+    showNotice(action.hidden ? "Token deleted and excluded from future scans." : "Token restored.");
+  } catch (error) {
+    showNotice(`${action.hidden ? "Delete" : "Restore"} sync failed: ${error.message}. The pending change can be retried in Diagnostics.`);
+    throw error;
+  } finally {
+    state.tokenActionLoadingKeys.delete(key);
+    render();
+  }
+}
+
 function renderHiddenAction(token, compact = false) {
   const hidden = isTokenHidden(token);
-  const serverDeleted = isTokenServerDeleted(token);
-  const disabled = false;
-  const label = hidden ? (disabled ? "Deleted" : "Restore") : "Delete";
+  const disabled = state.tokenActionLoadingKeys.has(token.key);
+  const label = hidden ? "Restore" : "Delete";
   return `
     <button
       class="${compact ? "chip-action" : "secondary-action"} token-hide-toggle"
@@ -561,7 +611,7 @@ function renderHiddenAction(token, compact = false) {
       data-token-key="${esc(token.key)}"
       ${disabled ? "disabled" : ""}
       data-hidden="${hidden ? "true" : "false"}"
-      title="${hidden ? (disabled ? "Deleted in scanner blacklist" : "Restore token to scanner lists") : "Delete this false catch from dashboard lists"}"
+      title="${disabled ? "Change is being saved" : hidden ? "Restore token to scanner lists" : "Delete this false catch from dashboard lists"}"
     >${label}</button>
   `;
 }
@@ -737,6 +787,8 @@ function currentPoolsByToken() {
     ) {
       map.set(key, {
         ...pool,
+        // Capture the quote's own clock before older cache metadata is merged.
+        _quote_snapshot: marketQuoteSnapshot(pool, observedAt),
         _observed_rank: currentRank,
         _observed_at: observedAt || null,
         _snapshot_source: snapshotSource || pool.source || null,
@@ -1095,14 +1147,8 @@ function buildTokenSignals() {
       : null;
     const uniqueEvents = uniqueAlertEvents(token.alerts);
     const rawEvents = rawEventCount(token.alerts);
-    const nativeRatios = [];
-    uniqueEvents.forEach((event) => {
-      const poolPrice = Number(event._alert?.pool?.price_usd || 0);
-      const native = Number(event.price_native || 0);
-      if (poolPrice && native) nativeRatios.push(poolPrice / native);
-    });
-    const solUsd = median(nativeRatios);
-    const currentNative = currentMarket.isFresh && solUsd && currentPriceUsd ? currentPriceUsd / solUsd : null;
+    // Buy-event FX is historical. No verified current native quote is published.
+    const currentNative = null;
     const walletMap = new Map();
     const thesis = token.signalThesis;
     // Historical and later buy windows cannot supply counts or costs for this cohort.
@@ -1494,12 +1540,13 @@ function buildTokenSignals() {
       : thesisCheckDue
         ? "check_needed"
         : "current";
+    const originalHistoryUnknown = originalSaleHistoryUnknown(token.signalThesis);
     token.workflowStatus = resolveWorkflowStatus({
       lifecycle: token.lifecycleStatus,
       dataStatus: token.dataStatus,
       currentTier: token.currentSignalTier,
-      currentConfirmed: token.currentSignalAlerts.some((alert) => alert.signal_confirmation?.status === "confirmed"),
-      thesisConfirmed: token.signalThesis?.signal_confirmation?.status === "confirmed",
+      currentConfirmed: !originalHistoryUnknown && token.currentSignalAlerts.some((alert) => alert.signal_confirmation?.status === "confirmed"),
+      thesisConfirmed: !originalHistoryUnknown && token.signalThesis?.signal_confirmation?.status === "confirmed",
     });
     token.signalLifecycle = {
       scannerOperational,
@@ -1588,21 +1635,62 @@ function emptyMessage(text) {
 
 async function fetchWithTimeout(path, options = {}, timeoutMs = 12_000) {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  let timeout;
+  const deadline = new Promise((_, reject) => {
+    timeout = window.setTimeout(() => {
+      controller.abort();
+      reject(new Error(`Request timed out: ${path}`));
+    }, timeoutMs);
+  });
   try {
-    return await fetch(path, { ...options, signal: controller.signal });
+    return await Promise.race([deadline, (async () => {
+      const response = await fetch(path, { ...options, signal: controller.signal });
+      const body = await response.json();
+      return {ok:response.ok, status:response.status, json:async () => body};
+    })()]);
   } finally {
     window.clearTimeout(timeout);
   }
 }
 
 async function fetchJson(path, optional = false) {
-  const response = await fetchWithTimeout(path, { cache: "no-store" });
-  if (!response.ok) {
+  try {
+    const response = await fetchWithTimeout(path, { cache: "no-store" });
+    if (!response.ok) throw new Error(`${path} ${response.status}`);
+    return await response.json();
+  } catch (error) {
     if (optional) return null;
-    throw new Error(`${path} ${response.status}`);
+    throw error;
   }
-  return response.json();
+}
+
+async function localSessionToken() {
+  if (state.localCsrfToken) return state.localCsrfToken;
+  if (!state.localSessionPromise) {
+    state.localSessionPromise = (async () => {
+      const response = await fetchWithTimeout("/api/session", {cache:"no-store", credentials:"same-origin"});
+      const session = await response.json();
+      if (!response.ok || typeof session?.csrf_token !== "string" || !session.csrf_token) {
+        throw new Error(session?.error || "Local mutation session is unavailable");
+      }
+      state.localCsrfToken = session.csrf_token;
+      return session.csrf_token;
+    })();
+  }
+  const request = state.localSessionPromise;
+  try { return await request; }
+  finally { if (state.localSessionPromise === request) state.localSessionPromise = null; }
+}
+
+async function localMutation(path, body) {
+  if (state.publishedDashboard) throw new Error("Local mutations are unavailable on published Pages");
+  const token = await localSessionToken();
+  const response = await fetchWithTimeout(path, {
+    method:"POST", credentials:"same-origin",
+    headers:{"content-type":"application/json", "X-Radar-CSRF":token}, body:JSON.stringify(body),
+  });
+  if (response.status === 403) state.localCsrfToken = null;
+  return response;
 }
 
 function remoteDataUrl() {
@@ -1693,6 +1781,7 @@ async function loadStaticData() {
   ]);
   return {
     report,
+    deleted_tokens: deletedTokens,
     history: [],
     market: {},
     scan_status: {
@@ -1707,13 +1796,17 @@ async function loadStaticData() {
   };
 }
 
-function applyDashboardPayload(payload, source, fallbackReason = null) {
+function applyDashboardPayload(payload, source, fallbackReason = null, requestId = null) {
+  if (requestId !== null && requestId !== state.dashboardRequestId) return false;
+  const nextTime = payloadTimestamp(payload), currentTime = payloadTimestamp({report:state.report});
+  if (!nextTime || nextTime < currentTime) return false;
+  if (nextTime === currentTime && source === "static" && ["remote", "local_api"].includes(state.dataSource)) return false;
   const nextReport = payload?.report || {};
   const previousGeneratedAt = state.report?.generated_at || "";
   const nextGeneratedAt = nextReport.generated_at || "";
   const snapshotChanged = Boolean(nextGeneratedAt && nextGeneratedAt !== previousGeneratedAt);
   state.report = nextReport;
-  applyDeletedTokenList(payload?.deleted_tokens || {});
+  if (payload?.deleted_tokens && typeof payload.deleted_tokens === "object" && !Array.isArray(payload.deleted_tokens)) applyDeletedTokenList(payload.deleted_tokens);
   state.history = payload?.history || [];
   state.market = payload?.market || {};
   state.scanStatus = payload?.scan_status || {};
@@ -1746,21 +1839,28 @@ function applyDashboardPayload(payload, source, fallbackReason = null) {
     state.selectedTokenKey = visibleTokens[0]?.key || null;
   }
   render();
+  return true;
 }
 
 async function loadData() {
+  const requestId = ++state.dashboardRequestId;
+  const currentRequest = () => requestId === state.dashboardRequestId;
   state.publishedDashboard = isPublishedDashboard();
   if (state.publishedDashboard) {
     const remoteTask = remoteDataUrl() && Date.now() >= state.remoteRetryAt
       ? fetchRemoteDashboard()
         .then((value) => {
-          state.remoteFailureCount = 0;
-          state.remoteRetryAt = 0;
+          if (currentRequest()) {
+            state.remoteFailureCount = 0;
+            state.remoteRetryAt = 0;
+          }
           return value;
         })
         .catch((error) => {
-          state.remoteFailureCount += 1;
-          state.remoteRetryAt = Date.now() + remoteRetryDelayMs(state.remoteFailureCount);
+          if (currentRequest()) {
+            state.remoteFailureCount += 1;
+            state.remoteRetryAt = Date.now() + remoteRetryDelayMs(state.remoteFailureCount);
+          }
           console.warn("D1 dashboard load failed", error);
           return null;
         })
@@ -1769,22 +1869,17 @@ async function loadData() {
     let staticPayload = null;
     try {
       staticPayload = await loadStaticData();
-      applyDashboardPayload(staticPayload, "static", null);
+      if (currentRequest() && !state.report?.generated_at) applyDashboardPayload(staticPayload, "static", null, requestId);
     } catch (error) {
       console.warn("Static snapshot load failed", error);
     }
 
     const remotePayload = await remoteTask;
+    if (!currentRequest()) return;
     const selected = chooseDashboardPayload({ staticPayload, remotePayload });
-    if (!selected.payload) throw new Error("No dashboard snapshot is available");
-    if (
-      !state.report?.generated_at
-      || selected.source !== state.dataSource
-      || selected.payload.report?.generated_at !== state.report.generated_at
-    ) {
-      applyDashboardPayload(selected.payload, selected.source, selected.fallbackReason);
-    } else {
-      state.fallbackReason = selected.fallbackReason;
+    if (!selected.payload && !state.report?.generated_at) throw new Error("No dashboard snapshot is available");
+    if (!applyDashboardPayload(selected.payload, selected.source, selected.fallbackReason, requestId)) {
+      state.fallbackReason = selected.fallbackReason || "older_snapshot_ignored";
       renderStatus();
     }
     return;
@@ -1796,11 +1891,17 @@ async function loadData() {
   try {
     payload = await fetchJson("/api/report");
   } catch {
-    payload = await loadStaticData();
+    if (!currentRequest()) return;
+    try { payload = await loadStaticData(); }
+    catch (error) { if (!currentRequest()) return; throw error; }
     source = "static";
     fallbackReason = "local_api_unavailable";
   }
-  applyDashboardPayload(payload, source, fallbackReason);
+  if (!currentRequest()) return;
+  if (!applyDashboardPayload(payload, source, fallbackReason, requestId)) {
+    state.fallbackReason = fallbackReason || "older_snapshot_ignored";
+    renderStatus();
+  }
 }
 
 function detailRecordMatchesToken(record, tokenKey) {
@@ -1901,7 +2002,10 @@ async function ensureTokenDetail(tokenKey) {
 
 function detailLoadMessage(key) {
   if (state.tokenDetailLoadingKeys.has(key)) return `<span class="loading-dot"></span> Loading wallet details...`;
-  if (state.tokenDetailErrors.has(key)) return `Wallet details unavailable. Showing the scan summary. <button type="button" data-retry-detail="${esc(key)}">Retry</button>`;
+  if (state.tokenDetailErrors.has(key)) {
+    const pending = state.tokenDetailErrors.get(key).startsWith("Wallet evidence is pending");
+    return `${pending ? "Wallet evidence is pending for this snapshot." : "Wallet details unavailable."} Showing the scan summary. <button type="button" data-retry-detail="${esc(key)}">Retry</button>`;
+  }
   const detail = state.tokenDetailCache.get(key);
   if (detail?.source === "published_scan") {
     const thesis = state.report?.signal_theses?.find((item) => detailRecordMatchesToken(item, key));
@@ -2005,12 +2109,14 @@ function renderStatus() {
     `<span class="status-pill">lane ${esc(laneText)}</span>`,
     state.dataSource === "remote" ? `<span class="status-pill">${state.storageSource === "durable_snapshot" ? "durable snapshot" : "live D1"}</span>` : "",
     state.dataSource === "static" ? `<span class="status-pill freshness-warn" title="${esc(state.fallbackReason || "remote unavailable")}">fallback snapshot</span>` : "",
-    state.publishedDashboard && state.hiddenTokenKeys.size ? `<button class="status-action" id="syncDeleted" type="button">Sync deleted</button>` : "",
+    state.dataSource !== "static" && state.fallbackReason ? `<span class="status-pill freshness-warn" title="${esc(state.fallbackReason)}">Refresh unavailable / previous snapshot retained</span>` : "",
+    state.pendingTokenActions.size || (state.publishedDashboard && state.hiddenTokenKeys.size)
+      ? `<button class="status-action" id="syncDeleted" type="button" ${state.tokenActionLoadingKeys.size ? "disabled" : ""}>${state.pendingTokenActions.size ? "Retry pending changes" : "Sync deleted"}</button>` : "",
     status.next_scan_at ? `<span class="status-pill">next auto ${esc(dateLabel(status.next_scan_at))}</span>` : "",
   ].filter(Boolean).join("");
   document.querySelector("#syncDeleted")?.addEventListener("click", () => {
     syncLocalDeletedTokens().catch((error) => {
-      els.statusRow.innerHTML += `<span class="status-pill freshness-bad">delete sync failed: ${esc(error.message)}</span>`;
+      els.statusRow.innerHTML += `<span class="status-pill freshness-bad">change sync failed: ${esc(error.message)}</span>`;
     });
   });
 }
@@ -2159,16 +2265,13 @@ function bindTokenHideActions() {
       event.preventDefault();
       event.stopPropagation();
       const key = button.dataset.tokenKey;
+      if (state.tokenActionLoadingKeys.has(key)) return;
       const hidden = button.dataset.hidden !== "true";
       const token = buildTokenSignals().find((item) => item.key === key);
       if (hidden && !window.confirm(`Delete ${token?.symbol || "this token"} and exclude it from future scans?`)) return;
       setTokenHidden(key, hidden);
-      persistTokenDeletion(token, hidden)
-        .then(() => { render(); showNotice(hidden ? "Token deleted and excluded from future scans." : "Token restored."); })
-        .catch((error) => {
-          showNotice(`Hidden in this browser only. Delete sync failed: ${error.message}. Retry Sync deleted in Diagnostics.`);
-        });
-      render();
+      queueTokenAction(token, hidden);
+      void syncTokenAction(key).catch(() => {});
     });
   });
 }
@@ -2747,7 +2850,8 @@ function renderDetailSection(title, summary, body, open = false) {
 }
 
 function tokenAthRatio(token) {
-  return Number.isFinite(Number(token.athCurrentRatio)) ? Number(token.athCurrentRatio) : null;
+  const ratio = numeric(token.athCurrentRatio);
+  return ratio !== null && ratio >= 0 ? ratio : null;
 }
 
 function marketPhase(token) {
@@ -2836,6 +2940,8 @@ function renderOverviewTab(token) {
   const holdings = retentionBound(view.retained);
   const known = [
     ["Signal confirmation", view.confirmation],
+    ["Original sale history", view.saleHistoryUnknown ? "Unknown; checked balances are only a cap"
+      : thesis.original_sale_history_status === "tracked_from_capture" ? "Tracked from capture" : "Not specified"],
     ["Wallets still holding", observedCount(thesis.holders_remaining) !== null
       && observedCount(thesis.original_wallets) !== null && thesis.holders_remaining <= thesis.original_wallets
       ? `${thesis.holders_remaining} of ${thesis.original_wallets} stored wallets at last check` : "Not verified"],
@@ -3300,7 +3406,7 @@ function renderNarrativeTokenRows(group) {
         <small>${esc([token.name || token.narrative.primary, token.hidden ? "deleted" : ""].filter(Boolean).join(" / "))}</small>
       </span>
       <span class="${pClass(token.profitPct)}">${pct(token.profitPct)}</span>
-      <span>${money(token.currentMcap)}</span>
+      <span>${token.currentMarket?.isFresh ? moneyMaybe(token.currentMcap) : "Unverified"}</span>
       <span>${sol(token.totalSuspiciousSol)}</span>
     </button>
   `).join("");
@@ -3358,19 +3464,19 @@ function renderNarratives() {
     <div class="grid narrative-layout">
       <div class="narrative-grid">
         ${groups.map((item) => `
-        <article class="narrative-card${item.name === group.name ? " is-selected" : ""}" data-narrative="${esc(item.name)}">
-          <div class="symbol-line">
+        <button type="button" class="narrative-card${item.name === group.name ? " is-selected" : ""}" data-narrative="${esc(item.name)}" aria-pressed="${item.name === group.name}">
+          <span class="symbol-line">
             <span class="symbol">${esc(item.name)}</span>
             <span class="muted">${item.tokens.length} tokens</span>
-          </div>
-          <div class="meta">
+          </span>
+          <span class="meta">
             <span>${esc(item.alerts)} signals</span>
             <span>${sol(item.totalSol)}</span>
             <span class="${pClass(item.bestPnl)}">best ${pct(item.bestPnl)}</span>
-          </div>
-          <p class="narrative-context">${esc(item.context?.headline || "")}</p>
-          <div class="chips">${item.tokens.slice(0, 12).map((token) => chip(`${token.symbol} ${pct(token.profitPct)}`)).join("")}</div>
-        </article>
+          </span>
+          <span class="narrative-context">${esc(item.context?.headline || "")}</span>
+          <span class="chips">${item.tokens.slice(0, 12).map((token) => chip(`${token.symbol} ${pct(token.profitPct)}`)).join("")}</span>
+        </button>
       `).join("")}
       </div>
       ${renderNarrativeDetail(group)}
@@ -3380,16 +3486,38 @@ function renderNarratives() {
     card.addEventListener("click", () => {
       state.selectedNarrative = card.dataset.narrative;
       render();
+      [...document.querySelectorAll(".narrative-card")]
+        .find((item) => item.dataset.narrative === state.selectedNarrative)?.focus({preventScroll:true});
     });
   });
   document.querySelectorAll(".narrative-token-row").forEach((row) => {
     row.addEventListener("click", () => {
-      state.selectedTokenKey = row.dataset.tokenKey;
-      state.detailTab = "overview";
-      state.tab = "tokens";
-      render();
+      openRadarToken(row.dataset.tokenKey);
     });
   });
+}
+
+function openRadarToken(key, detailTab = "overview") {
+  const token = buildTokenSignals().find((item) => item.key === key && tokenMatchesBaseFilters(item));
+  if (!token) {
+    showNotice(`Current Radar details are unavailable for ${short(key)}. The token is outside the current scope or filters.`);
+    return false;
+  }
+  state.reviewScrollY = window.scrollY;
+  state.selectedTokenKey = key;
+  state.detailTab = detailTab;
+  if (token.decision.queue === "inactive") state.reviewQueue = "inactive";
+  else if (state.tab !== "filters" || !matchesReviewQueue(token.decision, state.reviewQueue)) state.reviewQueue = "overview";
+  state.tab = "filters";
+  state.expandedQueues.add(token.decision.queue);
+  state.mobileDetailOpen = true;
+  render();
+  document.querySelector(".token-detail")?.scrollTo?.(0, 0);
+  if (matchMedia("(max-width: 1000px)").matches) {
+    document.querySelector(".detail-back")?.focus({preventScroll:true});
+    document.querySelector(".review-workspace")?.scrollIntoView?.({block:"start"});
+  }
+  return true;
 }
 
 
@@ -3456,17 +3584,7 @@ function renderFilters() {
     document.querySelector(`[data-expand-queue="${queue}"]`)?.focus({ preventScroll: true });
   }));
   document.querySelectorAll(".review-row").forEach((row) => row.addEventListener("click", () => {
-    state.reviewScrollY = window.scrollY;
-    const changed = state.selectedTokenKey !== row.dataset.tokenKey;
-    state.selectedTokenKey = row.dataset.tokenKey;
-    state.detailTab = "overview";
-    state.mobileDetailOpen = true;
-    render();
-    if (changed) document.querySelector(".token-detail")?.scrollTo(0, 0);
-    if (matchMedia("(max-width: 1000px)").matches) {
-      document.querySelector(".detail-back")?.focus({ preventScroll: true });
-      document.querySelector(".review-workspace")?.scrollIntoView({ block: "start" });
-    }
+    openRadarToken(row.dataset.tokenKey);
   }));
   document.querySelector("#reviewSort")?.addEventListener("change", (event) => {
     state.reviewSort = event.target.value;
@@ -3485,7 +3603,7 @@ function renderFilters() {
 function alertMatches(alert) {
   const pool = alert.pool || {};
   const key = tokenKeyFromPool(pool);
-  if (!state.showHidden && isTokenHidden(key)) return false;
+  if (!state.showHidden && isTokenHidden(pool)) return false;
   const token = buildTokenSignals().find((item) => item.key === key);
   const effectiveTier = alertTier(alert);
   if (token && !workflowMatches(token, true)) return false;
@@ -3617,6 +3735,7 @@ function renderIntelligence() {
   const ready = intelligence.status === "ready";
   const unavailable = intelligence.status === "error";
   const history = state.historyStatus || {};
+  const sectionState = (name) => `<div class="empty compact">${esc(name)} ${unavailable ? "unavailable" : intelligence.status === "loading" ? "loading" : "not loaded"}.</div>`;
   const statusText = intelligence.status === "loading"
     ? "Loading the historical ledger..."
     : unavailable
@@ -3639,21 +3758,21 @@ function renderIntelligence() {
       ${renderEvaluationSummary(state.report?.signal_evaluation)}
       <section class="intelligence-kpis">
         ${detailMetric("Signal episodes", ready ? compact(overview.episodes || 0) : "-", ready ? `${compact(overview.resolved_72h || 0)} resolved at 72h` : "history unavailable")}
-        ${detailMetric("Observed 2x", ratePct(overview.precision_2x_72h), "saved prices, not executed trades")}
-        ${detailMetric("Wallet edge", ratePct(overview.edge_precision_2x_72h), overview.edge_lift ? `${Number(overview.edge_lift).toFixed(2)}x scanner baseline` : "needs more validated samples")}
+        ${detailMetric("Observed 2x", ready ? ratePct(overview.precision_2x_72h) : "-", "saved prices, not executed trades")}
+        ${detailMetric("Wallet edge", ready ? ratePct(overview.edge_precision_2x_72h) : "-", ready && overview.edge_lift ? `${Number(overview.edge_lift).toFixed(2)}x scanner baseline` : "needs more validated samples")}
         ${detailMetric("Wallets with edge", ready ? compact(overview.emerging_or_validated_wallets || 0) : "-", ready ? `${compact(overview.emerging_or_validated_clusters || 0)} evidence-based clusters` : "history unavailable")}
       </section>
       <section class="intelligence-section">
         <div class="section-title-row"><div><h2>Ranked wallets</h2><p>Scores are frozen at signal time to avoid future information leaking into earlier catches.</p></div>${history.pending_outbox ? chip(`${history.pending_outbox} history events pending`, "warn") : ""}</div>
-        ${renderIntelligenceWallets(intelligence.wallets || [])}
+        ${ready ? renderIntelligenceWallets(intelligence.wallets || []) : sectionState("Wallet rankings")}
       </section>
       <section class="intelligence-section">
         <div class="section-title-row"><div><h2>Evidence-based clusters</h2><p>Only common-funder or common-executor evidence creates a wallet link.</p></div></div>
-        ${renderIntelligenceClusters(intelligence.clusters || [])}
+        ${ready ? renderIntelligenceClusters(intelligence.clusters || []) : sectionState("Wallet links")}
       </section>
       <section class="intelligence-section">
         <div class="section-title-row"><div><h2>Recent signal outcomes</h2><p>Outcome cells remain pending until the associated time horizon has passed.</p></div></div>
-        ${renderIntelligenceEpisodes(intelligence.episodes || [])}
+        ${ready ? renderIntelligenceEpisodes(intelligence.episodes || []) : sectionState("Signal outcomes")}
       </section>
     </div>
   `;
@@ -3662,10 +3781,7 @@ function renderIntelligence() {
   });
   document.querySelectorAll(".inline-token-action").forEach((button) => {
     button.addEventListener("click", () => {
-      state.selectedTokenKey = button.dataset.tokenKey;
-      state.detailTab = "wallets";
-      state.tab = "filters";
-      render();
+      openRadarToken(button.dataset.tokenKey, "wallets");
     });
   });
   if (intelligence.status === "idle") void ensureIntelligence();
@@ -3719,8 +3835,11 @@ async function runScan() {
   if (state.publishedDashboard) return;
   els.runScan.disabled = true;
   try {
-    const response = await fetch("/api/scan?lane=reactivation", { method: "POST" });
-    if (!response.ok) throw new Error(`scan request failed: ${response.status}`);
+    const response = await localMutation("/api/scan?lane=reactivation", {});
+    if (!response.ok) {
+      const payload = await response.json();
+      throw new Error(payload?.error || `scan request failed: ${response.status}`);
+    }
     await loadData();
   } catch (error) {
     els.statusRow.innerHTML += `<span class="status-pill freshness-bad">run scan failed: ${esc(error.message)}</span>`;

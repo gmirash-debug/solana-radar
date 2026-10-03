@@ -1,9 +1,9 @@
 import {validSnapshot, isFresh, selectTokens, formatSupplyPercent, walletFresh, supplyRange,
-  REVIEW_GROUPS, reviewGroup, positionBounds, marketFresh, comparePositions, ageFilterLabel, relaySignalLabel} from "./robinhood-state.js?v=20261003-age-30m-9";
-import {renderAccumulationEvidence, accumulationSummary} from "./accumulation-evidence.js?v=20261003-age-30m-9";
-import {renderCoordinatedActivity} from "./coordinated-activity.js?v=20261003-age-30m-9";
-import {installTerminology} from "./terminology.js?v=20261003-age-30m-9";
-import {gmgnUrl, renderGmgnMarket, renderGmgnHolders, renderGmgnSecurity} from "./gmgn-context.js?v=20261003-age-30m-9";
+  REVIEW_GROUPS, reviewGroup, positionBounds, marketFresh, comparePositions, ageFilterLabel, relaySignalLabel} from "./robinhood-state.js?v=20261003-audit-remediation-10";
+import {renderAccumulationEvidence, accumulationSummary} from "./accumulation-evidence.js?v=20261003-audit-remediation-10";
+import {renderCoordinatedActivity} from "./coordinated-activity.js?v=20261003-audit-remediation-10";
+import {installTerminology} from "./terminology.js?v=20261003-audit-remediation-10";
+import {gmgnUrl, renderGmgnMarket, renderGmgnHolders, renderGmgnSecurity} from "./gmgn-context.js?v=20261003-audit-remediation-10";
 
 const $ = selector => document.querySelector(selector);
 const terminology = installTerminology(document);
@@ -11,7 +11,7 @@ const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;",
 const money = value => value == null || !Number.isFinite(Number(value)) ? "Unknown" : new Intl.NumberFormat("en", {style:"currency", currency:"USD", notation:"compact", maximumFractionDigits:1}).format(value);
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString(undefined, {day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit"}) : "Not checked";
 const labels = {buy_wave:"New buy wave", retained:"Holding confirmed", reduced:"Cohort reduced", risk:"Contract risk", observed:"Activity only", queued:"Waiting for check", check_failed:"Check unavailable", needs_data:"Check needed"};
-const state = {payload:null, query:"", group:"overview", sort:"caught", protocol:"all", tab:"filters", detailTab:"overview", selected:null, mobile:false, scrollY:0, error:"", expanded:new Set(REVIEW_GROUPS.map(g => g.id))};
+const state = {payload:null, query:"", group:"overview", sort:"caught", protocol:"all", tab:"filters", detailTab:"overview", selected:null, mobile:false, scrollY:0, error:"", freshness:"", expanded:new Set(REVIEW_GROUPS.map(g => g.id))};
 const avatar = (token, compact = false) => `<span class="token-avatar${compact ? " is-compact" : ""}" aria-hidden="true">${esc([...String(token.symbol || "?")].slice(0, 2).join(""))}</span>`;
 const fact = (name, value) => `<div><span>${esc(name)}</span><strong>${esc(value)}</strong></div>`;
 const metric = (name, value, note) => `<div class="detail-metric"><span>${esc(name)}</span><strong>${esc(value)}</strong><small class="muted">${esc(note)}</small></div>`;
@@ -92,6 +92,7 @@ function detail(t) {
 function render({resetList = false} = {}) {
   terminology.dismiss();
   if (!state.payload) return;
+  state.freshness = freshnessSignature();
   const listScroll = resetList ? 0 : $(".review-list")?.scrollTop || 0;
   const detailScroll = $(".token-detail")?.scrollTop || 0;
   const previousKey = $(".review-row.is-selected")?.dataset.tokenKey;
@@ -166,12 +167,13 @@ async function load() {
     if (!response.ok) throw new Error(`Robinhood data unavailable (${response.status})`);
     const next = await response.json();
     if (!validSnapshot(next)) throw new Error("Invalid Robinhood dataset; networks were not mixed");
+    if (next.status === "unavailable") throw new Error((next.errors || []).join(" | ") || "No published Robinhood observations are available");
     if (state.payload && Date.parse(next.generated_at) < Date.parse(state.payload.generated_at)) throw new Error("Older snapshot received; previous results retained");
     state.payload = next; state.error = ""; render();
   } catch (error) {
     state.error = error.message;
     if (state.payload) { render(); notice(`${error.message}. Previous results retained.`); }
-    else { $("#subtitle").textContent = "Robinhood data unavailable"; $("#scannerSummary").textContent = error.message; $("#content").innerHTML = '<div class="review-empty"><img src="icons/scan-search.svg" alt=""><h3>Observations unavailable</h3><p>The dataset could not be loaded.</p><button id="retryData">Retry</button></div>'; $("#retryData").onclick = load; }
+    else { $("#subtitle").textContent = "Robinhood data unavailable"; $("#scannerSummary").textContent = error.message; $("#metrics").innerHTML = ""; $("#statusRow").textContent = "No published Robinhood observations are available."; $("#content").innerHTML = '<div class="review-empty"><img src="icons/scan-search.svg" alt=""><h3>Observations unavailable</h3><p>The dataset could not be loaded.</p><button id="retryData">Retry</button></div>'; $("#retryData").onclick = load; }
   } finally { $("#refresh").disabled = false; }
 }
 
@@ -194,3 +196,21 @@ document.querySelectorAll(".tab:not(:disabled)").forEach(b => {
 });
 setTab("filters");
 load();
+
+let freshnessTimer = null;
+function freshnessSignature() {
+  return JSON.stringify([isFresh(state.payload), ...(state.payload?.tokens || []).map(t => [walletFresh(t), marketFresh(t)])]);
+}
+function refreshFreshness() {
+  if (state.payload && state.freshness !== freshnessSignature()) render();
+}
+function startFreshnessClock() {
+  if (freshnessTimer !== null) return;
+  freshnessTimer = window.setInterval(() => {
+    if (!document.hidden) refreshFreshness();
+  }, 60_000);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshFreshness(); });
+window.addEventListener("pageshow", () => { startFreshnessClock(); refreshFreshness(); });
+window.addEventListener("pagehide", () => { window.clearInterval(freshnessTimer); freshnessTimer = null; });
+startFreshnessClock();

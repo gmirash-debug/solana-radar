@@ -70,7 +70,7 @@ export async function collectOldBlobs(tx, root, protectedIds, now = Date.now()) 
   let last = null;
   for (const [key, index] of entries) {
     last = key;
-    if (protectedIds.has(index.id) || now - index.staged_at < 3600000) continue;
+    if (protectedIds.has(index.id) || now - Math.max(index.staged_at, index.superseded_at || 0) < 3600000) continue;
     const name = `${root}:blob:${index.id}`;
     const meta = await tx.get(`${name}:meta`);
     const keys = [key, `${name}:meta`, ...Array.from({length:meta?.chunks || 0}, (_, i) => `${name}:part:${i}`)];
@@ -78,4 +78,16 @@ export async function collectOldBlobs(tx, root, protectedIds, now = Date.now()) 
     if (++removed >= 16) break;
   }
   await tx.put({[cursorKey]:entries.size === 512 || removed >= 16 ? last : null});
+}
+
+export async function protectSupersededBlobs(tx, root, previousRefs, currentRefs, now = Date.now()) {
+  const current = new Set(currentRefs.map(ref => ref.id));
+  const retired = previousRefs.filter(ref => !current.has(ref.id));
+  for (let start = 0; start < retired.length; start += 128) {
+    const keys = retired.slice(start, start + 128).map(ref => `${root}:blob-index:${ref.id}`);
+    const indexes = await tx.get(keys);
+    const values = {};
+    for (const [key, index] of indexes) values[key] = {...index, superseded_at: now};
+    if (Object.keys(values).length) await tx.put(values);
+  }
 }

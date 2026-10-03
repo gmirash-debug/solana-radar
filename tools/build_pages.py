@@ -1,4 +1,5 @@
 """Keep UI-only publications from replacing a fresh scan with old Git data."""
+import copy
 import json
 import hashlib
 import re
@@ -42,6 +43,12 @@ def publish_robinhood():
         published = None
     selected = choose_robinhood(local, published)
     if selected:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from robinhood import guard_legacy_ordinary_row
+
+        selected = copy.deepcopy(selected)
+        for row in selected["tokens"]:
+            guard_legacy_ordinary_row(row)
         Path(".pages/data/robinhood.json").write_text(json.dumps(selected, separators=(",", ":")))
     else:
         # Absence must not be rendered as a successful empty scan.
@@ -93,20 +100,21 @@ def publish_token_details(snapshot, runtime_state, destination):
         # Cached state can belong to a different scan or a replacement cohort.
         if not raw or not summary.get("cohort_id") or any(
             raw.get(field) != summary.get(field)
-            for field in ("cohort_id", "signal_at", "last_checked_at", "updated_at")
+            for field in ("cohort_id", "signal_at", "signal_window_start", "signal_window_end", "last_checked_at", "updated_at")
         ):
             continue
         public = public_signal_thesis(raw)
         if not public.get("cohort_wallets"):
             continue
         thesis = {**summary, **public}
-        filename = hashlib.sha256(key.encode()).hexdigest() + ".json"
         detail = {
             "ok": True, "token_key": key, "thesis": thesis,
             "current_alerts": [], "history": [], "market": None,
             "report_source_updated_at": generation, "source": "published_scan",
         }
-        (destination / filename).write_text(json.dumps(detail, separators=(",", ":")))
+        encoded = json.dumps(detail, separators=(",", ":"), sort_keys=True)
+        filename = hashlib.sha256(encoded.encode()).hexdigest() + ".json"
+        (destination / filename).write_text(encoded)
         files[key] = f"data/token-details/{filename}"
     return {"generation": generation, "files": files}
 
@@ -137,19 +145,28 @@ def preserve_published_details(snapshot, manifest, destination, fetcher=requests
             if not allow_partial: raise
             manifest["preservation_status"] = "partial_provider_unavailable"
             continue
-        detail = response.json()
-        summary, thesis = summaries[key], detail.get("thesis") or {}
-        if (detail.get("ok") is not True or detail.get("token_key") != key
-            or detail.get("report_source_updated_at") != manifest["generation"]
-            or not thesis.get("cohort_wallets") or not summary.get("cohort_id")
-            or any(thesis.get(field) != summary.get(field)
-                   for field in ("cohort_id", "signal_at", "last_checked_at", "updated_at"))):
-            raise ValueError("Published wallet detail does not match the selected cohort")
-        encoded = json.dumps(detail, separators=(",", ":"))
-        if len(encoded.encode()) > 2 * 1024 * 1024:
-            raise ValueError("Published wallet detail exceeds the size limit")
-        (destination / Path(path).name).write_text(encoded)
-        manifest["files"][key] = path
+        try:
+            detail = response.json()
+            summary = summaries[key]
+            thesis = detail.get("thesis") if isinstance(detail, dict) else None
+            if (not isinstance(thesis, dict) or detail.get("ok") is not True or detail.get("token_key") != key
+                or detail.get("report_source_updated_at") != manifest["generation"]
+                or not thesis.get("cohort_wallets") or not summary.get("cohort_id")
+                or any(thesis.get(field) != summary.get(field)
+                       for field in ("cohort_id", "signal_at", "signal_window_start", "signal_window_end", "last_checked_at", "updated_at"))):
+                raise ValueError("Published wallet detail does not match the selected cohort")
+            encoded = json.dumps(detail, separators=(",", ":"), sort_keys=True)
+            if len(encoded.encode()) > 2 * 1024 * 1024:
+                raise ValueError("Published wallet detail exceeds the size limit")
+        except ValueError:
+            if not allow_partial:
+                raise
+            manifest["preservation_status"] = "partial_detail_mismatch"
+            continue
+        # Also migrate legacy mint-only filenames without rewriting their URL.
+        filename = hashlib.sha256(encoded.encode()).hexdigest() + ".json"
+        (destination / filename).write_text(encoded)
+        manifest["files"][key] = f"data/token-details/{filename}"
     return manifest
 
 

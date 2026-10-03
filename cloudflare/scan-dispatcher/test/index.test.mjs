@@ -15,6 +15,7 @@ test("archive cron is isolated from frequent discovery and deep scans", async ()
 
 import {
   applyDeletedTokenUpdate,
+  dashboardTokenDetail,
   claimDispatchBucket,
   corsHeaders,
   compactDashboardReport,
@@ -128,6 +129,72 @@ test("deleted-token mutation keeps both token and pool blacklist entries", () =>
   assert.deepEqual(result.data.tokens, ["other-token", "token-a"]);
   assert.deepEqual(result.data.pools, ["pool-a"]);
   assert.equal(result.data.entries["token-a"].deleted_at, "2026-07-30T12:00:00Z");
+});
+
+test("I09: mint restore removes associated old pools, without restoring unrelated identities", () => {
+  const source={tokens:["mint","other"],pools:["old","shared","other-pool"],entries:{
+    mint:{token_address:"mint",pool_address:"old"},
+    another:{token_address:"other",pool_address:"other-pool"},
+    poolOnly:{token_address:null,pool_address:"shared"},
+  }};
+  for (const payload of [{token_address:"mint"},{token_address:"mint",pool_address:"new"}]) {
+    const result=applyDeletedTokenUpdate(source,{...payload,action:"restore"},"2026-10-03T12:00:00Z");
+    assert.deepEqual(result.data.tokens,["other"]);
+    assert.deepEqual(result.data.pools,["other-pool","shared"]);
+    assert.ok(result.data.entries.another);
+    assert.ok(result.data.entries.poolOnly);
+  }
+});
+
+test("I04: D1 details require both generation and frozen signal-window identity", async () => {
+  const generation="2026-10-03T12:00:00Z";
+  const summary={token_address:"mint",cohort_id:"cohort",signal_at:"2026-10-02T12:00:00Z",
+    signal_window_start:"2026-10-02T11:00:00Z",signal_window_end:"2026-10-02T12:00:00Z",
+    last_checked_at:generation,updated_at:generation};
+  let detail={...summary,cohort_wallets:[{owner:"wallet"}]};
+  let source="2026-10-02T12:00:00Z";
+  const db={prepare(sql) {return {bind(){return this;},async all(){return {results:[]};},async first(){
+    if (sql.includes("'latest_report'")) return {payload_json:JSON.stringify({generated_at:generation,signal_theses:[summary]}),source_updated_at:generation};
+    if (sql.includes("state_docs")) return {payload_json:JSON.stringify(detail),source_updated_at:source};
+    return null;
+  }};}};
+  const old=await dashboardTokenDetail({RADAR_DB:db},"mint");
+  assert.equal(old.detail_status,"pending");
+  assert.equal(old.thesis.cohort_wallets,undefined);
+  source=generation; detail={...detail,signal_window_end:"different"};
+  assert.equal((await dashboardTokenDetail({RADAR_DB:db},"mint")).detail_status,"pending");
+  detail={...detail,signal_window_end:summary.signal_window_end};
+  const matched=await dashboardTokenDetail({RADAR_DB:db},"mint");
+  assert.equal(matched.detail_status,"ready");
+  assert.equal(matched.thesis.cohort_wallets[0].owner,"wallet");
+});
+
+test("I02: scheduler publishes fresh queue failure, counters and backlog age after a rejected flush", async () => {
+  const writes=[];
+  const env={SCHEDULER_ENABLED:"disabled",RADAR_HISTORY_DB:{prepare(){}},
+    HISTORY_QUEUE:{idFromName:name=>name,get(){return {async fetch(request){
+      if (new URL(request.url).pathname==="/flush") return Response.json({ok:false,error:"history_daily_write_budget"},{status:429});
+      return Response.json({ok:true,pending:1146,pending_bytes:13584725,oldest_pending_age_seconds:86400,history_write_units:80000});
+    }};}},
+    RUNTIME_SNAPSHOTS:{idFromName:name=>name,get(){return {async fetch(request){writes.push(await request.json());return Response.json({ok:true});}};}},
+  };
+  const tasks=[];
+  await worker.scheduled({cron:"*/5 * * * *"},env,{waitUntil:promise=>tasks.push(promise)});
+  await Promise.all(tasks);
+  assert.equal(writes.length,1);
+  const status=writes[0].value;
+  assert.equal(status.pending,1146);
+  assert.equal(status.oldest_pending_age_seconds,86400);
+  assert.equal(status.healthy,false);
+  assert.equal(status.last_flush_error,"history_daily_write_budget");
+  assert.ok(Date.parse(status.checked_at));
+});
+
+test("manual drain endpoint keeps ingest authentication and method boundaries", async () => {
+  const env={RADAR_INGEST_SECRET:"secret"};
+  const path="https://worker/api/runtime/history/flush";
+  assert.equal((await worker.fetch(new Request(path,{method:"POST"}),env,{})).status,401);
+  assert.equal((await worker.fetch(new Request(path,{headers:{"x-radar-ingest-secret":"secret"}}),env,{})).status,405);
 });
 
 test("deleted-token write retries a SHA conflict without losing concurrent deletion", async () => {

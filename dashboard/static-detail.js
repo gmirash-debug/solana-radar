@@ -15,6 +15,9 @@ export async function loadTokenDetail({manifest, key, generation, baseUrl, fetch
       const response = await fetcher(url, {cache:"no-store", headers:{accept:"application/json"}});
       const detail = await response.json();
       if (!response.ok || !detail?.ok) throw new Error(detail?.error || `token detail ${response.status}`);
+      if (detail.detail_status != null && detail.detail_status !== "ready") {
+        throw new Error("Wallet evidence is pending for this snapshot. Retry after the next check.");
+      }
       if (!accepts(detail)) throw new Error("Details do not match this snapshot or cohort. The scan summary is retained.");
       return detail;
     } catch (error) { lastError = error; }

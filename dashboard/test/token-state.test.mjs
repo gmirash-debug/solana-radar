@@ -138,6 +138,7 @@ test("fresh direct report market supersedes an older market cache", () => {
     pool: {
       _snapshot_source: "universe",
       _observed_at: "2026-07-31T00:00:00Z",
+      _quote_snapshot: {at:"2026-07-31T00:00:00Z", stale:false, source:"dexscreener"},
       mcap_usd: 36_700,
       price_usd: 0.0000367,
       liquidity_usd: 18_800,

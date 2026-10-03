@@ -1,14 +1,18 @@
-import { historyEventId, ingestHistoryBatch } from "./history.js";
+import { historyEventId, checkedHistoryDb } from "./history.js";
+import { resumeHistoryEvent, HistoryYield, minimumHistoryWork, minimumProgressWork, estimatedHistoryQueries, historyInfrastructure } from "./history-progress.js";
 
 // Parent integration (no public DO route): export {HistoryQueue} from index.js;
 // bind HISTORY_QUEUE to HistoryQueue and append a new_sqlite_classes migration.
 // Await enqueueDurableHistory before acknowledging an authenticated ingest.
 // Invoke flushDurableHistory from the existing bounded background scheduler.
 export const HISTORY_QUEUE_LIMITS = Object.freeze({
-  enqueueEvents: 25, flushEvents: 2, eventBytes: 128 * 1024, requestBytes: 1024 * 1024,
-  pendingRows: 2048, pendingBytes: 16 * 1024 * 1024, receiptRows: 20000,
+  enqueueEvents: 25, flushEvents: 25, flushQueries: 40, eventBytes: 128 * 1024, requestBytes: 1024 * 1024,
+  // Metadata only: retain 30 days even at 5,000 minimum-cost events/day,
+  // including UTC-boundary bursts and pending work. Payload caps stay unchanged.
+  pendingRows: 2048, pendingBytes: 16 * 1024 * 1024, receiptRows: 160000,
   receiptRetentionMs: 30 * 86400_000, leaseMs: 10 * 60_000,
   dailyDoWriteUnits: 50000, dailyHistoryWriteUnits: 80000, flushHistoryWriteUnits: 40000,
+  scheduledFlushes: 2,
 });
 const ENCODER = new TextEncoder();
 const QUEUE_NAME = "history-events-v1";
@@ -99,6 +103,7 @@ export class HistoryQueue {
     this.eventBytes = lowered(env, "HISTORY_QUEUE_MAX_EVENT_BYTES", HISTORY_QUEUE_LIMITS.eventBytes);
     this.doBudget = lowered(env, "HISTORY_QUEUE_DAILY_WRITE_UNITS", HISTORY_QUEUE_LIMITS.dailyDoWriteUnits);
     this.historyBudget = lowered(env, "HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS", HISTORY_QUEUE_LIMITS.dailyHistoryWriteUnits);
+    this.infra = historyInfrastructure(env);
     ctx.storage.transactionSync(() => {
       this.sql.exec(`CREATE TABLE IF NOT EXISTS history_queue_events (
         event_id TEXT PRIMARY KEY, episode_id TEXT NOT NULL, source_at INTEGER NOT NULL,
@@ -118,6 +123,13 @@ export class HistoryQueue {
         do_day TEXT NOT NULL DEFAULT '', do_writes INTEGER NOT NULL DEFAULT 0,
         hist_day TEXT NOT NULL DEFAULT '', hist_writes INTEGER NOT NULL DEFAULT 0)`);
       this.sql.exec("INSERT OR IGNORE INTO history_queue_meta(id) VALUES (1)");
+      const eventColumns = new Set(this.rows("PRAGMA table_info(history_queue_events)").map(row => row.name));
+      if (!eventColumns.has("progress_json")) this.sql.exec("ALTER TABLE history_queue_events ADD COLUMN progress_json TEXT");
+      const metaColumns = new Set(this.rows("PRAGMA table_info(history_queue_meta)").map(row => row.name));
+      for (const [name, type] of [["last_flush_at", "TEXT"], ["last_flush_error", "TEXT"],
+        ["last_flush_delivered", "INTEGER NOT NULL DEFAULT 0"]]) {
+        if (!metaColumns.has(name)) this.sql.exec(`ALTER TABLE history_queue_meta ADD COLUMN ${name} ${type}`);
+      }
     });
   }
 
@@ -133,9 +145,10 @@ export class HistoryQueue {
 
   saveMeta(meta) {
     this.sql.exec(`UPDATE history_queue_meta SET pending_rows=?, pending_bytes=?, delivered_rows=?,
-      do_day=?, do_writes=?, hist_day=?, hist_writes=? WHERE id=1`,
+      do_day=?, do_writes=?, hist_day=?, hist_writes=?,last_flush_at=?,last_flush_error=?,last_flush_delivered=? WHERE id=1`,
     meta.pending_rows, meta.pending_bytes, meta.delivered_rows,
-    meta.do_day, meta.do_writes, meta.hist_day, meta.hist_writes);
+    meta.do_day, meta.do_writes, meta.hist_day, meta.hist_writes,
+    meta.last_flush_at, meta.last_flush_error, meta.last_flush_delivered);
   }
 
   reserveDo(meta, units) {
@@ -143,8 +156,17 @@ export class HistoryQueue {
     meta.do_writes += units;
   }
 
+  written(cursor, fallback) {
+    // SQLite DO reports index writes too. Retain conservative reservations on
+    // runtimes which do not expose the counter, rather than guessing billable rows.
+    return Number.isInteger(cursor?.rowsWritten) && cursor.rowsWritten >= 0 ? cursor.rowsWritten : fallback;
+  }
+
   enqueue(events, now = Date.now()) {
     const validated = validateHistoryEvents(events, now, this.eventBytes);
+    if (events.some(event => minimumHistoryWork(event,this.infra) > this.historyBudget)) {
+      throw new QueueError("history_event_exceeds_atomic_daily_allowance");
+    }
     return this.ctx.storage.transactionSync(() => {
       const meta = this.meta(now);
       const unique = new Map();
@@ -164,16 +186,19 @@ export class HistoryQueue {
       now - HISTORY_QUEUE_LIMITS.receiptRetentionMs, needed) : [];
       if (expired.length < needed) throw new QueueError("history_queue_receipt_capacity", 507);
       if (unique.size || expired.length) {
-        this.reserveDo(meta, (unique.size + expired.length) * 8 + 2);
-        for (const row of expired) this.sql.exec("DELETE FROM history_queue_events WHERE event_id=?", row.event_id);
+        const reserved=(unique.size+expired.length)*8+2;
+        this.reserveDo(meta,reserved);
+        let actual=0;
+        for (const row of expired) actual+=this.written(this.sql.exec("DELETE FROM history_queue_events WHERE event_id=?", row.event_id),8);
         meta.delivered_rows -= expired.length;
         for (const event of unique.values()) {
-          this.sql.exec(`INSERT INTO history_queue_events
+          actual+=this.written(this.sql.exec(`INSERT INTO history_queue_events
             (event_id,episode_id,source_at,payload_json,payload_bytes,status,next_attempt_at)
-            VALUES (?,?,?,?,?,'pending',?)`, event.id, event.episodeId, event.sourceAt, event.json, event.bytes, now);
+            VALUES (?,?,?,?,?,'pending',?)`, event.id, event.episodeId, event.sourceAt, event.json, event.bytes, now),8);
         }
         meta.pending_rows += unique.size;
         meta.pending_bytes += addedBytes;
+        meta.do_writes-=Math.max(0,reserved-actual-2);
         this.saveMeta(meta);
       }
       return { enabled: true, queued: unique.size, duplicates, pending: meta.pending_rows,
@@ -185,24 +210,37 @@ export class HistoryQueue {
     return this.ctx.storage.transactionSync(() => {
       const meta = this.meta(now);
       // A poisoned episode waits, but unrelated newer episodes remain eligible.
-      const rows = this.rows(`SELECT q.* FROM history_queue_events q
+      const candidates = this.rows(`SELECT q.* FROM history_queue_events q
         WHERE q.status='pending' AND q.next_attempt_at <= ? AND q.source_at <= ?
           AND NOT EXISTS (SELECT 1 FROM history_queue_events older
             WHERE older.status='pending' AND older.episode_id=q.episode_id
               AND (older.source_at < q.source_at OR (older.source_at=q.source_at AND older.event_id < q.event_id)))
         ORDER BY q.source_at,q.event_id LIMIT ?`, now, now, HISTORY_QUEUE_LIMITS.flushEvents);
-      if (!rows.length) return { rows, budget: 0, day: meta.hist_day };
-      if (meta.hist_writes >= this.historyBudget) throw new QueueError("history_daily_write_budget", 429);
+      if (!candidates.length) return { rows:[], budget: 0, day: meta.hist_day };
+      const eligible=candidates.filter(row=>minimumProgressWork(JSON.parse(row.payload_json),JSON.parse(row.progress_json || "{}"),this.infra)
+        <= this.historyBudget-meta.hist_writes);
+      if (!eligible.length) throw new QueueError("history_daily_write_budget", 429);
+      const rows=[];
+      let queries=0;
+      for (const row of eligible) {
+        const cost=estimatedHistoryQueries(JSON.parse(row.payload_json),JSON.parse(row.progress_json || "{}"));
+        if (rows.length && queries+cost>HISTORY_QUEUE_LIMITS.flushQueries) break;
+        if ((rows.length+1)*16+4>this.doBudget-meta.do_writes) break;
+        queries+=cost; rows.push(row);
+      }
+      if (!rows.length) throw new QueueError("history_queue_daily_write_budget",429);
       const budget = Math.min(HISTORY_QUEUE_LIMITS.flushHistoryWriteUnits, this.historyBudget - meta.hist_writes);
-      this.reserveDo(meta, rows.length * 16 + 4); // Reserves claim AND finish, even after a restart.
+      this.reserveDo(meta, rows.length * 16 + 4); // Claim AND finish, even after restart.
       meta.hist_writes += budget; // A crash loses unused reservation until UTC reset, never overspends it.
       const lease = crypto.randomUUID();
+      let actual=0;
       for (const row of rows) {
         row.lease_token = lease;
         row.attempts += 1;
-        this.sql.exec(`UPDATE history_queue_events SET lease_token=?, attempts=?, next_attempt_at=? WHERE event_id=?`,
-        lease, row.attempts, now + HISTORY_QUEUE_LIMITS.leaseMs, row.event_id);
+        actual+=this.written(this.sql.exec(`UPDATE history_queue_events SET lease_token=?, attempts=?, next_attempt_at=? WHERE event_id=?`,
+        lease, row.attempts, now + HISTORY_QUEUE_LIMITS.leaseMs, row.event_id),8);
       }
+      meta.do_writes-=Math.max(0,rows.length*8-actual); // Keep the entire finish reservation.
       this.saveMeta(meta);
       return { rows, budget, day: meta.hist_day };
     });
@@ -211,33 +249,46 @@ export class HistoryQueue {
   finish(claim, result, used, error, now = Date.now()) {
     return this.ctx.storage.transactionSync(() => {
       const meta = this.meta(now);
-      const successful = new Set(error ? [] : result.ingested.map(event => event.event_id));
+      if (meta.do_day!==claim.day) this.reserveDo(meta,claim.rows.length*8+2);
+      const successful = new Set(result.ingested.map(event => event.event_id));
       const failures = new Map((result?.failed || []).map(event => [event.event_id, event.error]));
+      const deferred = new Set(result.deferred || []);
+      const progress = result.progress || new Map();
       let delivered = 0;
       let failed = 0;
+      let continued = 0;
       let leaseLost = 0;
+      let actual=0;
       for (const row of claim.rows) {
         const current = this.rows("SELECT status,lease_token FROM history_queue_events WHERE event_id=?", row.event_id)[0];
         if (current?.status !== "pending" || current.lease_token !== row.lease_token) { leaseLost += 1; continue; }
         if (successful.has(row.event_id)) {
-          this.sql.exec(`UPDATE history_queue_events SET status='delivered', payload_json=NULL, payload_bytes=0,
-            delivered_at=?, lease_token=NULL, last_error=NULL WHERE event_id=?`, now, row.event_id);
+          actual+=this.written(this.sql.exec(`UPDATE history_queue_events SET status='delivered', payload_json=NULL, payload_bytes=0,
+            progress_json=NULL,delivered_at=?, lease_token=NULL, last_error=NULL WHERE event_id=?`, now, row.event_id),8);
           meta.pending_rows -= 1;
           meta.pending_bytes -= row.payload_bytes;
           meta.delivered_rows += 1;
           delivered += 1;
         } else {
           const delay = Math.min(6 * 3600_000, 60_000 * 2 ** Math.min(12, row.attempts));
-          this.sql.exec(`UPDATE history_queue_events SET lease_token=NULL,next_attempt_at=?,last_error=? WHERE event_id=?`,
-          now + delay, String(error?.message || failures.get(row.event_id) || "history_not_completed").slice(0, 500), row.event_id);
-          failed += 1;
+          const continuing = deferred.has(row.event_id);
+          actual+=this.written(this.sql.exec(`UPDATE history_queue_events SET lease_token=NULL,next_attempt_at=?,last_error=?,progress_json=?,
+            attempts=? WHERE event_id=?`, now + (continuing ? 1000 : delay),
+          continuing ? null : String(failures.get(row.event_id) || error?.message || "history_not_completed").slice(0,500),
+          JSON.stringify(progress.get(row.event_id) || JSON.parse(row.progress_json || "{}")),
+          continuing ? 0 : row.attempts,row.event_id),8);
+          if (continuing) continued += 1; else failed += 1;
         }
       }
       if (meta.hist_day === claim.day) meta.hist_writes -= Math.max(0, claim.budget - used);
+      meta.do_writes-=Math.max(0,claim.rows.length*8-actual);
+      meta.last_flush_at = new Date(now).toISOString();
+      meta.last_flush_error = error ? String(error.message || error).slice(0,500) : failures.values().next().value || null;
+      meta.last_flush_delivered = delivered;
       this.saveMeta(meta);
-      return { enabled: true, delivered, failed, lease_lost: leaseLost, pending: meta.pending_rows,
+      return { enabled: true, delivered, failed, continued, lease_lost: leaseLost, pending: meta.pending_rows,
         pending_bytes: meta.pending_bytes, history_write_units: used,
-        error: error ? String(error.message || error) : null };
+        error: meta.last_flush_error };
     });
   }
 
@@ -249,25 +300,64 @@ export class HistoryQueue {
     const claim = this.claim(now);
     if (!claim.rows.length) return { enabled: true, delivered: 0, failed: 0, pending: this.meta(now).pending_rows };
     let used = 0;
-    let result = null;
+    let queries = 0;
+    const result = {ingested:[],failed:[],deferred:[],progress:new Map()};
     let error = null;
     try {
-      result = await ingestHistoryBatch({ RADAR_HISTORY_DB: this.env.RADAR_HISTORY_DB },
-        claim.rows.map(row => JSON.parse(row.payload_json)), {
-          now: new Date(now).toISOString(),
-          onWrite: statements => {
+      const db = checkedHistoryDb(this.env.RADAR_HISTORY_DB, statements => {
             if (new Date(Date.now()).toISOString().slice(0, 10) !== claim.day) throw new Error("history_write_day_changed");
             const units = statements * WRITE_UNITS_PER_STATEMENT;
-            if (used + units > claim.budget) throw new Error("history_flush_write_budget");
+            if (used + units > claim.budget) throw new HistoryYield("history_flush_write_budget");
             used += units;
-          },
-        });
+          }, () => {
+            if (queries >= HISTORY_QUEUE_LIMITS.flushQueries) throw new HistoryYield("history_flush_query_budget");
+            queries++;
+          });
+      for (const row of claim.rows) {
+        const state = JSON.parse(row.progress_json || "{}");
+        result.progress.set(row.event_id,state);
+        try {
+          result.ingested.push(await resumeHistoryEvent(db,JSON.parse(row.payload_json),state,{
+            now:new Date(now).toISOString(),remaining:()=>Math.floor((claim.budget-used)/WRITE_UNITS_PER_STATEMENT),infra:this.infra,
+          }));
+        } catch (caught) {
+          if (caught.deferred) result.deferred.push(row.event_id);
+          else result.failed.push({event_id:row.event_id,error:String(caught.message || caught).slice(0,500)});
+        }
+        // Separate from acknowledgement: if finish fails or the process dies
+        // after this commit, the next lease resumes rather than replaying phases.
+        if (row.progress_json || (state.phase !== "episode" && state.phase !== "done")) {
+          this.ctx.storage.transactionSync(() => {
+            const meta=this.meta(Date.now());
+            // Unindexed progress plus its metadata write. When the DO cap is
+            // exhausted, the already-reserved finish still saves this cursor.
+            if (meta.do_writes+4>this.doBudget) return;
+            this.reserveDo(meta,4);
+            const actual=this.written(this.sql.exec(`UPDATE history_queue_events SET progress_json=? WHERE event_id=? AND lease_token=?`,
+              JSON.stringify(state),row.event_id,row.lease_token),2);
+            meta.do_writes-=Math.max(0,2-actual);
+            this.saveMeta(meta);
+          });
+        }
+      }
     } catch (caught) { error = caught; }
-    return this.finish(claim, result, used, error);
+    return {...this.finish(claim, result, used, error),history_queries:queries};
   }
 
   flush() {
-    if (!this.inFlight) this.inFlight = this.runFlush().finally(() => { this.inFlight = null; });
+    if (!this.inFlight) this.inFlight = this.runFlush().catch(error => {
+      // A failed claim has no finish path. Record it without changing payloads
+      // or counters; status also derives exhausted budgets from current meta.
+      this.ctx.storage.transactionSync(() => {
+        const meta=this.meta(Date.now());
+        this.reserveDo(meta,2);
+        meta.last_flush_at=new Date().toISOString();
+        meta.last_flush_error=String(error.message || error).slice(0,500);
+        meta.last_flush_delivered=0;
+        this.saveMeta(meta);
+      });
+      throw error;
+    }).finally(() => { this.inFlight = null; });
     return this.inFlight;
   }
 
@@ -277,8 +367,17 @@ export class HistoryQueue {
       WHERE status='pending' ORDER BY source_at,event_id LIMIT 1`)[0];
     const due = this.rows(`SELECT next_attempt_at FROM history_queue_events
       WHERE status='pending' ORDER BY next_attempt_at,source_at,event_id LIMIT 1`)[0];
+    const failure = this.rows(`SELECT last_error FROM history_queue_events
+      WHERE status='pending' AND last_error IS NOT NULL ORDER BY source_at,event_id LIMIT 1`)[0];
     return { enabled: true, pending: meta.pending_rows, pending_bytes: meta.pending_bytes,
       delivered_receipts: meta.delivered_rows,
+      last_flush_at: meta.last_flush_at, last_flush_error: meta.last_flush_error,
+      last_flush_delivered: meta.last_flush_delivered,
+      pending_last_error: failure?.last_error || null,
+      oldest_pending_age_seconds: oldest ? Math.max(0,Math.floor((now-oldest.source_at)/1000)) : null,
+      history_budget_exhausted: meta.hist_writes >= this.historyBudget
+        || (meta.last_flush_error === "history_daily_write_budget" && meta.last_flush_at?.slice(0,10) === new Date(now).toISOString().slice(0,10)),
+      do_budget_exhausted: meta.do_writes >= this.doBudget,
       oldest_pending_at: oldest ? new Date(oldest.source_at).toISOString() : null,
       next_attempt_at: due ? new Date(due.next_attempt_at).toISOString() : null,
       write_budget_day: meta.hist_day, do_write_units: meta.do_writes, history_write_units: meta.hist_writes,
@@ -293,6 +392,14 @@ export class HistoryQueue {
       if (request.method === "GET" && path === "/status") return Response.json({ ok: true, ...this.status() });
       if (request.method !== "POST") throw new QueueError("history_queue_post_required", 405);
       if (path === "/enqueue") return Response.json({ ok: true, ...this.enqueue((await readRequest(request)).events) });
+      if (path === "/receipts") {
+        const ids=(await readRequest(request)).ids;
+        if (!Array.isArray(ids) || ids.length>25 || ids.some(id=>typeof id!=="string" || id.length>240)) {
+          throw new QueueError("history_receipt_ids_invalid");
+        }
+        return Response.json({ok:true,receipts:ids.map(event_id=>({event_id,
+          status:this.rows("SELECT status FROM history_queue_events WHERE event_id=?",event_id)[0]?.status || "unknown"}))});
+      }
       if (path === "/ingest") return Response.json({ ok: true, ...this.enqueue(historyLedgerEvents(await readRequest(request))) });
       if (path === "/flush") return Response.json({ ok: true, ...await this.flush() });
       throw new QueueError("history_queue_route_not_found", 404);
@@ -339,6 +446,10 @@ export function durableHistoryIngestResponse(env, request) {
 
 export async function flushDurableHistory(env) {
   return queueRequest(env, "flush");
+}
+
+export async function durableHistoryReceipts(env, ids) {
+  return queueRequest(env,"receipts",{ids});
 }
 
 export async function durableHistoryStatus(env) {

@@ -32,6 +32,7 @@ from history_contract import history_event_error, source_time
 from rpc_budget import configure_monthly_budgets, request_reservation
 from rpc_routing import STANDARD_ORDER, HISTORY_ORDER, BALANCE_ORDER, METHOD_ORDERS, validate_result
 from scan_scheduling import targeted_profile, fast_candidate_pools
+from scan_failure import failure_metadata, scanner_failure_class, PROGRAMMING_ERRORS, SOFT_CATEGORIES
 from launch_history import advance_launch_history
 from prospective_evidence import capture_evaluation_rows
 from signal_evaluation import evaluate_signals, EvaluationOptions
@@ -53,6 +54,7 @@ REMOTE_OUTBOX_DIR = DATA_DIR / "remote_outbox"
 CONFIG_PATH = ROOT / "config.json"
 DEFAULT_CONFIG_PATH = ROOT / "config.example.json"
 STATE_SCHEMA_VERSION = 1
+RETENTION_EVIDENCE_VERSION = 3
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
 SOLANA_INCINERATOR = "1nc1nerator11111111111111111111111111111111"
@@ -382,6 +384,10 @@ def migrate_scanner_state(state):
             thesis["original_attributed_tokens"] = original
             thesis.setdefault("source_attributed_tokens", original)
             thesis["version"] = 2
+    for pool_state in (state.get("pools") or {}).values():
+        if isinstance(pool_state, dict):
+            for key in ("signal_thesis", "pending_signal_thesis"):
+                prepare_thesis_retention_evidence(pool_state.get(key))
     return state
 
 
@@ -436,7 +442,19 @@ def merge_discovery_state(state, discovery_state):
         if parse_timestamp(incoming.get("latest_seen_at")) > parse_timestamp(
             existing.get("latest_seen_at")
         ):
-            market[token] = copy.deepcopy(incoming)
+            current_fields = {
+                "token_address", "pool_address", "symbol", "name", "dex", "url",
+                "pair_created_at", "pair_created_at_iso", "market_source", "current_market_verified_at",
+            }
+            discovery_fields = {key: copy.deepcopy(value) for key, value in incoming.items()
+                                if key in current_fields or key.startswith(("latest_", "market_snapshot_", "scan_"))}
+            if incoming.get("pool_address") and existing.get("pool_address") != incoming.get("pool_address"):
+                existing.pop("pair_created_at", None)
+                existing.pop("pair_created_at_iso", None)
+            market[token] = {**existing, **discovery_fields}
+            for key, value in incoming.items():
+                if key.startswith("first_obs_"):
+                    market[token].setdefault(key, copy.deepcopy(value))
             merged_market += 1
     for token, incoming in (discovery_state.get("activity_baselines") or {}).items():
         if not isinstance(incoming, dict):
@@ -495,6 +513,7 @@ def write_scanner_status(status, error=None, scan_health=None, persistence=None)
         "last_attempt_at": now,
         "last_success_at": previous.get("last_success_at"),
         "error": str(error or "")[:500] or None,
+        **failure_metadata(error),
         "scan_health": scan_health or {},
         "persistence": persistence or {},
     }
@@ -502,44 +521,6 @@ def write_scanner_status(status, error=None, scan_health=None, persistence=None)
         payload["last_success_at"] = now
     save_json(SCANNER_STATUS_PATH, payload)
     return payload
-
-
-def scanner_failure_class(status_payload, exit_code):
-    """Classify a failed run without hiding programming or invariant failures."""
-    if int(exit_code or 0) == 0:
-        return "success"
-    payload = status_payload if isinstance(status_payload, dict) else {}
-    health = payload.get("scan_health") or {}
-    categories = {
-        str(name)
-        for name, count in (health.get("scan_error_categories") or {}).items()
-        if count
-    }
-    soft_categories = {"rpc_all_unavailable"}
-    soft_suffixes = ("_rate_limit", "_quota", "_auth", "_circuit_open")
-    if categories and all(
-        category in soft_categories or category.endswith(soft_suffixes)
-        for category in categories
-    ):
-        return "soft_provider_failure"
-    error = str(payload.get("error") or "").lower()
-    soft_markers = (
-        "all rpc provider",
-        "rate limit",
-        "rate_limit",
-        "quota",
-        "credit",
-        "timed out",
-        "timeout",
-        "http 429",
-        "http 401",
-        "http 403",
-        "unauthorized",
-        "forbidden",
-    )
-    if any(marker in error for marker in soft_markers):
-        return "soft_provider_failure"
-    return "hard_failure"
 
 
 def effective_config_version(config):
@@ -649,7 +630,8 @@ def compact_signal_thesis_for_dashboard(thesis):
     compact = {
         key: value
         for key, value in thesis.items()
-        if key not in {"cohort", "cohort_wallets", "supply_integrity_history", "coordination_inputs"}
+        if key not in {"cohort", "cohort_wallets", "supply_integrity_history", "coordination_inputs",
+                       "cohort_sale_events", "proven_sales"}
     }
     integrity = thesis.get("supply_integrity")
     if isinstance(integrity, dict):
@@ -923,13 +905,11 @@ def history_ledger_wallets(thesis, market_entry, at_catch=False):
     cohort = thesis.get("cohort") or []
     supply = max(0.0, to_float(thesis.get("supply")))
     entry_price = to_float(thesis.get("signal_price_usd"))
-    current_price = to_float(
-        (market_entry or {}).get("latest_price_usd")
-        or (market_entry or {}).get("scan_price_usd")
-    )
+    snapshot = outcome_market_snapshot(market_entry, thesis.get("last_checked_at")) if not at_catch else None
+    current_price = snapshot.get("price_usd") if snapshot else None
     estimated_pnl_pct = (
         (current_price / entry_price - 1) * 100
-        if current_price > 0 and entry_price > 0 and not at_catch
+        if current_price is not None and entry_price > 0 and not at_catch
         else 0.0 if at_catch and entry_price > 0 else None
     )
     coverage = float(thesis.get("balance_coverage_pct") or 0)
@@ -964,7 +944,7 @@ def history_ledger_wallets(thesis, market_entry, at_catch=False):
         if at_catch:
             behavior_status = "holding"
             coverage_status = "complete"
-        elif current_balance is None or coverage < 80:
+        elif current_balance is None or coverage < 80 or thesis.get("original_sale_history_status") == "unknown":
             behavior_status = "unknown"
             coverage_status = "partial"
         elif retained_pct is not None and retained_pct >= 99:
@@ -995,11 +975,12 @@ def history_ledger_wallets(thesis, market_entry, at_catch=False):
                 "retained_pct_at_catch": 100.0 if bought_tokens else None,
                 "common_funder": row.get("common_funder"),
                 "common_executor": row.get("common_executor"),
-                "evidence_status": "complete" if at_catch or coverage >= 80 else "partial",
+                "evidence_status": "complete" if at_catch or (coverage >= 80 and thesis.get("original_sale_history_status") != "unknown") else "partial",
                 "current_token_balance": current_balance,
                 "balance_retained_pct": retained_pct,
                 "behavior_status": behavior_status,
                 "estimated_pnl_pct": estimated_pnl_pct,
+                "market_observed_at": snapshot.get("at") if snapshot else None,
                 # A net balance cannot prove a sale. Transaction-level work is
                 # intentionally required before either field is populated.
                 "additional_buy_tokens": None,
@@ -1118,6 +1099,7 @@ def build_history_ledger(report_payload, state, config, generated_at):
 
         checked_at = thesis.get("last_checked_at")
         if parse_timestamp(checked_at) > parse_timestamp(caught_at):
+            checked_market = outcome_market_snapshot(market_entry, checked_at) or {}
             events.append(
                 {
                     "event_id": history_ledger_event_id(
@@ -1129,13 +1111,15 @@ def build_history_ledger(report_payload, state, config, generated_at):
                         "observed_at": checked_at,
                         "tier": thesis.get("source_tier"),
                         "score": thesis.get("source_score"),
-                        "price_usd": market_entry.get("latest_price_usd"),
-                        "mcap_usd": market_entry.get("latest_mcap_usd"),
-                        "liquidity_usd": market_entry.get("latest_liquidity_usd"),
+                        "price_usd": checked_market.get("price_usd"),
+                        "mcap_usd": checked_market.get("mcap_usd"),
+                        "liquidity_usd": checked_market.get("liquidity_usd"),
+                        "market_observed_at": checked_market.get("at"),
                         "retained_supply_pct": thesis.get("current_retained_supply_pct"),
                         "cohort_retained_pct": thesis.get("token_retention_pct"),
                         "thesis_status": thesis.get("status"),
-                        "data_quality_status": quality,
+                        "original_sale_history_status": thesis.get("original_sale_history_status"),
+                        "data_quality_status": "partial" if thesis.get("original_sale_history_status") == "unknown" else quality,
                     },
                     "wallets": history_ledger_wallets(
                         thesis, market_entry, at_catch=False
@@ -1149,10 +1133,13 @@ def build_history_ledger(report_payload, state, config, generated_at):
         if horizons and (source_time(caught_at) is None or source_time(outcome.get("caught_at")) != source_time(caught_at)):
             horizons = {}
             foreign_outcome_episodes += 1
+        if not outcome_entry_verified(outcome):
+            horizons = {}
         for horizon in HISTORY_LEDGER_HORIZONS:
             checkpoint = horizons.get(horizon) if isinstance(horizons, dict) else None
             checkpoint_at = checkpoint.get("at") if isinstance(checkpoint, dict) else None
-            if not checkpoint_at or source_time(checkpoint_at) is None or source_time(checkpoint_at) < source_time(caught_at):
+            if (not checkpoint_at or source_time(checkpoint_at) is None or source_time(checkpoint_at) < source_time(caught_at)
+                or source_time(generated_at) is None or source_time(checkpoint_at) > source_time(generated_at)):
                 continue
             events.append(
                 {
@@ -2291,7 +2278,8 @@ class SolanaRpcProvider:
         cache_key = (mint, limit)
         if cache_key in self.largest_token_accounts_cache:
             return self.largest_token_accounts_cache[cache_key]
-        result = self.call("getTokenLargestAccounts", [mint]) or {}
+        result = self.call("getTokenLargestAccounts", [mint])
+        validate_result("getTokenLargestAccounts", [mint], result)
         rows = []
         for item in (result.get("value") or [])[:limit]:
             address = str(item.get("address") or "").strip()
@@ -4991,22 +4979,31 @@ def fetch_gmgn_raw_token_info(config, token_address):
         return {}
     cache = config.setdefault("_gmgn_token_info_cache", {})
     if token_address in cache:
-        return cache[token_address]
+        cached = cache[token_address]
+        if isinstance(cached, dict) and cached.get("address") == token_address:
+            (config.get("_gmgn_profile_errors") or {}).pop(token_address, None)
+            return cached
+        cache.pop(token_address, None)
     data = run_gmgn_cli(
         config,
         ["token", "info", "--chain", "sol", "--address", token_address],
         f"gmgn token info {token_address}",
     )
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or data.get("address") != token_address:
+        config.setdefault("_gmgn_profile_errors", {})[token_address] = "missing or mismatched token identity"
         return {}
     cache[token_address] = data
+    (config.get("_gmgn_profile_errors") or {}).pop(token_address, None)
     return data
 
 
 def fetch_gmgn_token_info(config, token_address):
     cache = config.setdefault("_gmgn_profile_cache", {})
     if token_address in cache:
-        return cache[token_address]
+        cached = cache[token_address]
+        if isinstance(cached, dict) and cached.get("identity_version") == 2 and cached.get("token_address") == token_address:
+            return cached
+        cache.pop(token_address, None)
     data = fetch_gmgn_raw_token_info(config, token_address)
     if not data:
         return {}
@@ -5028,6 +5025,8 @@ def fetch_gmgn_token_info(config, token_address):
     ]
     profile = {
         "source": "gmgn",
+        "token_address": token_address,
+        "identity_version": 2,
         "name": clean_social_text(data.get("name")),
         "symbol": clean_social_text(data.get("symbol")),
         "description": clean_social_text(link.get("description")),
@@ -5084,6 +5083,13 @@ def fetch_dex_token_info(http, token_address):
 
 
 def request_project_context(http, pool, config, token):
+    try:
+        return _request_project_context(http, pool, config, token)
+    except Exception as exc:
+        return [{"error": str(exc), "source": "bright_data"}]
+
+
+def _request_project_context(http, pool, config, token):
     if not config.get("token_intel_project_context_enabled", True) or not token:
         return []
     query = f'"{pool.name or pool.symbol}" {pool.symbol} Solana token project x.com website'
@@ -5107,6 +5113,8 @@ def request_project_context(http, pool, config, token):
         payload = http.post_json(url, body, headers=headers, timeout=int(config.get("social_timeout_seconds", 45)))
     except Exception as exc:
         return [{"error": str(exc), "source": "bright_data"}]
+    if not isinstance(payload, dict):
+        raise ValueError("invalid Bright Data context payload")
     if not isinstance(payload.get("results"), list):
         task_id = payload.get("task_id")
         if task_id:
@@ -5115,12 +5123,18 @@ def request_project_context(http, pool, config, token):
             while time.time() < deadline:
                 time.sleep(poll_interval)
                 payload = http.get_json(f"{url}?task_id={task_id}", headers=headers, timeout=20)
+                if not isinstance(payload, dict):
+                    raise ValueError("invalid Bright Data context poll payload")
                 if payload.get("status") == "done":
                     break
                 if payload.get("status") == "failed":
                     return [{"error": payload.get("error") or "Bright Data context task failed", "source": "bright_data"}]
+        if not isinstance(payload.get("results"), list):
+            raise ValueError("Bright Data context task incomplete or timed out")
     results = []
     for item in payload.get("results", []) or []:
+        if not isinstance(item, dict):
+            continue
         link = item.get("url") or item.get("link")
         if not link:
             continue
@@ -5154,6 +5168,38 @@ def official_x_links(profile, dex_info):
     return list(by_author.values())
 
 
+def bound_x_profile(text, author):
+    """Only use profile fields from the JSON object identifying the requested user."""
+    decoder = json.JSONDecoder()
+    text = text[:2_000_000]
+    end = 0
+    matches = []
+    for index, match in enumerate(re.finditer(r"\{", text)):
+        if index >= 4000:
+            break
+        if match.start() < end:
+            continue
+        try:
+            value, end = decoder.raw_decode(text, match.start())
+        except ValueError:
+            continue
+        pending = [value]
+        visited = 0
+        while pending and visited < 20_000:
+            node = pending.pop()
+            visited += 1
+            if isinstance(node, dict):
+                if str(node.get("screen_name") or "").lower() == author.lower():
+                    matches.append(node)
+                pending.extend(node.values())
+            elif isinstance(node, list):
+                pending.extend(node)
+    descriptions = {clean_social_text(row.get("description")) for row in matches if isinstance(row.get("description"), str) and row.get("description")}
+    if len(descriptions) != 1:
+        return None
+    return next(row for row in matches if clean_social_text(row.get("description")) in descriptions)
+
+
 def fetch_official_x_profiles(http, profile, dex_info, config):
     if not config.get("token_intel_official_x_profile_enabled", True):
         return []
@@ -5171,19 +5217,12 @@ def fetch_official_x_profiles(http, profile, dex_info, config):
             response.raise_for_status()
         except Exception:
             continue
-        marker = f'"screen_name":"{re.escape(author)}"'
-        match = re.search(marker, response.text, re.I)
-        if not match:
+        bound = bound_x_profile(response.text, author)
+        if not bound:
             continue
-        window = response.text[max(0, match.start() - 3500) : match.end() + 1800]
-        desc_match = re.search(r'"description":"((?:\\.|[^"\\])*)"', window)
-        if not desc_match:
-            continue
-        description = clean_social_text(decode_json_string(desc_match.group(1)))
+        description = clean_social_text(bound.get("description"))
         if not description:
             continue
-        followers_match = re.search(r'"followers_count":(\d+)', window)
-        name_match = re.search(r'"name":"((?:\\.|[^"\\])*)"', window)
         profiles.append(
             {
                 "url": url,
@@ -5192,8 +5231,8 @@ def fetch_official_x_profiles(http, profile, dex_info, config):
                 "relevance_score": 0.95,
                 "source": "official_x_profile",
                 "author": author,
-                "name": clean_social_text(decode_json_string(name_match.group(1))) if name_match else author,
-                "followers": to_int(followers_match.group(1)) if followers_match else None,
+                "name": clean_social_text(bound.get("name")) or author,
+                "followers": to_int(bound["followers_count"]) if bound.get("followers_count") is not None else None,
             }
         )
     return profiles
@@ -5552,7 +5591,10 @@ def build_token_intel(http, pool, config, state, social=None):
     now = int(time.time())
     ttl = int(config.get("token_intel_cache_ttl_minutes", 360)) * 60
     cached = cache.get(token_key)
-    if cached and now - int(cached.get("cached_at", 0)) < ttl:
+    cached_profile = ((cached or {}).get("intel") or {}).get("profile") or {}
+    cached_profile_valid = (cached_profile.get("source") != "gmgn" or
+                            (cached_profile.get("identity_version") == 2 and cached_profile.get("token_address") == token_key))
+    if cached and cached_profile_valid and cached.get("evidence_version") == 2 and now - int(cached.get("cached_at", 0)) < ttl:
         intel = dict(cached.get("intel") or {})
         intel["cache"] = "hit"
         return intel
@@ -5563,6 +5605,8 @@ def build_token_intel(http, pool, config, state, social=None):
     failures = []
     try:
         profile = fetch_gmgn_token_info(config, token_key)
+        if (config.get("_gmgn_profile_errors") or {}).get(token_key):
+            failures.append("gmgn_profile: missing or mismatched token identity")
     except Exception as exc:
         failures.append(f"gmgn_profile: {exc}")
     try:
@@ -5576,7 +5620,12 @@ def build_token_intel(http, pool, config, state, social=None):
         failures.append(f"official_x_profile: {exc}")
     bd_token = bright_data_token()
     if bd_token:
-        context = request_project_context(http, pool, config, bd_token)
+        try:
+            context = request_project_context(http, pool, config, bd_token)
+        except Exception as exc:
+            failures.append(f"project_context: {exc}")
+        failures.extend(f"project_context: {item['error']}" for item in context if item.get("error"))
+        context = [item for item in context if not item.get("error")]
     context = dedupe_links([*official_profiles, *context])
     narrative = classify_token_narrative(pool, profile, dex_info, context, social)
     intel = {
@@ -5590,7 +5639,7 @@ def build_token_intel(http, pool, config, state, social=None):
         "narrative": narrative,
         "failures": failures[:5],
     }
-    cache[token_key] = {"cached_at": now, "intel": intel}
+    cache[token_key] = {"cached_at": now, "intel": intel, "evidence_version": 2}
     return intel
 
 
@@ -5606,7 +5655,7 @@ def fetch_social_snapshot(http, pool, config, state):
     now = int(time.time())
     ttl = int(config.get("social_cache_ttl_minutes", 120)) * 60
     cached = cache.get(cache_key)
-    if cached and now - int(cached.get("cached_at", 0)) < ttl:
+    if cached and cached.get("evidence_version") == 2 and now - int(cached.get("cached_at", 0)) < ttl:
         snapshot = dict(cached.get("snapshot") or {})
         snapshot["cache"] = "hit"
         return snapshot
@@ -5624,11 +5673,13 @@ def fetch_social_snapshot(http, pool, config, state):
         for item in payload.get("results", []) or []:
             url = item.get("url") or item.get("link") or ""
             author = x_author_from_url(url)
-            if not author:
+            status_id = x_status_id_from_url(url)
+            if not author or not status_id:
                 continue
             normalized = {
-                "url": url,
-                "author": author,
+                "url": f"https://x.com/{author.lower()}/status/{status_id}",
+                "status_id": status_id,
+                "author": author.lower(),
                 "title": clean_social_text(item.get("title") or url),
                 "description": clean_social_text(item.get("description") or item.get("content")),
                 "relevance_score": to_float(item.get("relevance_score")),
@@ -5639,7 +5690,10 @@ def fetch_social_snapshot(http, pool, config, state):
 
     by_url = {}
     for item in results:
-        by_url.setdefault(item["url"], item)
+        key = item["status_id"]
+        previous = by_url.get(key)
+        if not previous or (item["relevance_score"], len(item["description"])) > (previous["relevance_score"], len(previous["description"])):
+            by_url[key] = item
     results = sorted(
         by_url.values(),
         key=lambda item: (item.get("relevance_score") or 0.0, item.get("url") or ""),
@@ -5697,7 +5751,7 @@ def fetch_social_snapshot(http, pool, config, state):
         "results": results[: int(config.get("social_report_results", 5))],
         "failures": failures[:3],
     }
-    cache[cache_key] = {"cached_at": now, "snapshot": snapshot}
+    cache[cache_key] = {"cached_at": now, "snapshot": snapshot, "evidence_version": 2}
     return snapshot
 
 
@@ -5860,14 +5914,6 @@ def parse_pool_swap(tx, pool):
         kind = "sell"
         sol_amount = -pool_sol_delta
         token_amount_value = pool_token_delta
-    elif signer_token_delta > 1e-8:
-        kind = "buy"
-        token_amount_value = signer_token_delta
-        sol_amount = max(0.0, -signer_lamport_delta)
-    elif signer_token_delta < -1e-8:
-        kind = "sell"
-        token_amount_value = -signer_token_delta
-        sol_amount = max(0.0, signer_lamport_delta)
 
     if not kind:
         return None
@@ -6627,15 +6673,11 @@ def wave_buy_owner(swap):
 
 
 def wave_sell_owner(swap, known_owners=None):
-    signer = swap.get("signer") or ""
-    token_sender = swap.get("token_sender") or ""
-    if known_owners:
-        known_owners = set(known_owners)
-        if token_sender in known_owners:
-            return token_sender
-        if signer in known_owners:
-            return signer
-    return signer or token_sender
+    owner = swap.get("coordination_sale_owner") or ""
+    amount = to_float(swap.get("coordination_sale_amount"))
+    if not owner or not math.isfinite(amount) or amount <= 0:
+        return ""
+    return owner if not known_owners or owner in known_owners else ""
 
 
 def attributed_wave_retention(balance, bought_tokens, sold_tokens, min_retention_pct=0.0):
@@ -7004,6 +7046,8 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
         coordination["profiles"] = {owner: profile for owner, profile in coordination["profiles"].items() if owner in original_owners}
     return {
         "version": 2,
+        "retention_evidence_version": RETENTION_EVIDENCE_VERSION,
+        "original_sale_history_status": "tracked_from_capture",
         "cohort_id": "|".join(
             str(value or "")
             for value in (
@@ -7112,6 +7156,39 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
     }
 
 
+def mark_thesis_sale_history_unknown(thesis, issue):
+    thesis["original_sale_history_status"] = "unknown"
+    issues = thesis.setdefault("original_sale_history_issues", [])
+    if issue not in issues:
+        issues.append(issue)
+    confirmation = thesis.get("signal_confirmation") or {}
+    if confirmation.get("status") == "confirmed":
+        thesis.setdefault("legacy_signal_confirmation", copy.deepcopy(confirmation))
+        thesis["signal_confirmation"] = {**confirmation, "status": "candidate",
+            "reasons": ["original sale history incomplete"]}
+    if thesis.get("status") == "intact":
+        thesis["status"] = "unknown"
+        thesis["reason"] = "current balances do not establish complete original-sale history"
+
+
+def prepare_thesis_retention_evidence(thesis):
+    if not isinstance(thesis, dict) or thesis.get("retention_evidence_version") == RETENTION_EVIDENCE_VERSION:
+        return
+    thesis["retention_evidence_version"] = RETENTION_EVIDENCE_VERSION
+    mark_thesis_sale_history_unknown(thesis, "legacy_original_sale_history_not_reconstructed")
+    thesis.pop("check_cycle_started_at", None)
+    thesis.pop("check_cycle_verified_owners", None)
+
+
+def archive_signal_thesis(pool_state, thesis):
+    if not isinstance(thesis, dict):
+        return
+    history = pool_state.setdefault("signal_thesis_history", [])
+    identity = (thesis.get("cohort_id"), thesis.get("signal_at"))
+    if not any((row.get("cohort_id"), row.get("signal_at")) == identity for row in history):
+        history.append(copy.deepcopy(thesis))
+
+
 def capture_signal_thesis(
     pool_state,
     alerts,
@@ -7119,6 +7196,8 @@ def capture_signal_thesis(
     captured_at=None,
 ):
     existing = pool_state.get("signal_thesis")
+    if isinstance(existing, dict) and existing.get("version") == 2:
+        prepare_thesis_retention_evidence(existing)
     pending = pool_state.get("pending_signal_thesis")
     promoted = False
     if (
@@ -7128,6 +7207,7 @@ def capture_signal_thesis(
         and parse_timestamp(pending.get("signal_at"))
         > parse_timestamp(existing.get("signal_at"))
     ):
+        archive_signal_thesis(pool_state, existing)
         pool_state["signal_thesis"] = pending
         pool_state.pop("pending_signal_thesis", None)
         existing = pending
@@ -7144,6 +7224,9 @@ def capture_signal_thesis(
             candidates.append((alert_history_timestamp(alert), incoming))
     if not candidates:
         return existing, promoted
+    for _timestamp, candidate in candidates:
+        if (parse_timestamp(candidate.get("captured_at")) - parse_timestamp(candidate.get("signal_at"))) > 300:
+            mark_thesis_sale_history_unknown(candidate, "historical_capture_sale_history_not_reconstructed")
     verified_candidates = [item for item in candidates if (item[1].get("signal_confirmation") or {}).get("status") == "confirmed"]
     wave_candidates = [item for item in candidates if item[1].get("signal_family") == "reactivation_wave"]
     preferred = verified_candidates or wave_candidates or candidates
@@ -7159,12 +7242,13 @@ def capture_signal_thesis(
             and parse_timestamp(incoming.get("signal_at"))
             > parse_timestamp(existing.get("signal_at"))
         )
-        if (existing.get("signal_confirmation") or {}).get("status") != "confirmed":
+        if (existing.get("signal_confirmation") or {}).get("status") != "confirmed" and existing.get("original_sale_history_status") != "unknown":
             replace = replace or bool(
                 (incoming.get("signal_confirmation") or {}).get("status") == "confirmed"
                 or (existing.get("signal_family") != "reactivation_wave" and incoming.get("signal_family") == "reactivation_wave")
             )
     if replace:
+        archive_signal_thesis(pool_state, existing)
         pool_state["signal_thesis"] = incoming
         pool_state.pop("pending_signal_thesis", None)
         if not isinstance(existing, dict):
@@ -7206,6 +7290,12 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
         return thesis
 
     checked_at = checked_at or utc_now().isoformat().replace("+00:00", "Z")
+    if thesis.get("version") == 2:
+        prepare_thesis_retention_evidence(thesis)
+    if thesis.get("check_cycle_evidence_version") != RETENTION_EVIDENCE_VERSION:
+        thesis.pop("check_cycle_started_at", None)
+        thesis.pop("check_cycle_verified_owners", None)
+        thesis["check_cycle_evidence_version"] = RETENTION_EVIDENCE_VERSION
     checked = []
     errors = 0
     wallet_limit = max(0, int(config.get("_cohort_check_wallet_limit", len(cohort))))
@@ -7217,6 +7307,11 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
         thesis["check_cycle_started_at"] = cycle_at
         thesis["check_cycle_verified_owners"] = []
     verified_owners = set(thesis.get("check_cycle_verified_owners") or [])
+    confirmation = thesis.get("signal_confirmation") or {}
+    eligible_at = parse_timestamp(confirmation.get("retention_check_after"))
+    if confirmation.get("status") == "candidate" and eligible_at and parse_timestamp(checked_at) >= eligible_at:
+        verified_owners &= {row["owner"] for row in cohort
+                            if parse_timestamp(row.get("checked_at")) >= eligible_at}
     pending = [row for row in cohort if row["owner"] not in verified_owners]
     to_check = pending[:wallet_limit]
     for row in cohort:
@@ -7240,7 +7335,8 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
             errors += 1
             continue
         inputs = thesis.get("coordination_inputs") or {}
-        proven_sold = float((inputs.get("proven_sales") or {}).get(row["owner"], 0))
+        proven_sold = max(float((inputs.get("proven_sales") or {}).get(row["owner"], 0)),
+                          float((thesis.get("proven_sales") or {}).get(row["owner"], 0)))
         frozen_cap = (inputs.get("retention_caps") or {}).get(row["owner"], attributed)
         previous_cap = row.get("retention_cap_tokens")
         if previous_cap is None:
@@ -7422,6 +7518,9 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
             f"retained tokens and {cohort_wallet_coverage:.0f}% of signal wallets; "
             "the thesis cannot be invalidated safely"
         )
+    if status == "intact" and thesis.get("original_sale_history_status") == "unknown":
+        status = "unknown"
+        reason = "current balances were checked; incomplete original-sale history remains unknown"
 
     thesis.update(
         {
@@ -7449,6 +7548,7 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
         and status == "intact" and balance_coverage_pct == 100
         and token_balance_coverage_pct >= 99.99 and can_invalidate
         and retention_pct >= 80 and holder_retention_pct >= 65
+        and all(parse_timestamp(row.get("checked_at")) >= eligible_at for row in cohort)
     ):
         thesis["signal_confirmation"] = {
             **confirmation, "status": "confirmed", "reasons": [],
@@ -7467,6 +7567,10 @@ def public_signal_thesis(thesis):
         return None
     public_fields = {
         "version",
+        "retention_evidence_version",
+        "check_cycle_evidence_version",
+        "original_sale_history_status",
+        "original_sale_history_issues",
         "cohort_id",
         "pool_address",
         "token_address",
@@ -7581,6 +7685,51 @@ def signal_thesis_recheck_interval_minutes(thesis, config):
     )
 
 
+def record_thesis_sales(thesis, pool, swaps, checked_at):
+    """Persist resolved post-signal exits; repeated buffers cannot double count."""
+    if not isinstance(thesis, dict):
+        return False
+    signal_at = parse_timestamp(thesis.get("signal_at"))
+    checked = parse_timestamp(checked_at)
+    owners = {row["owner"]: row for row in thesis.get("cohort") or [] if row.get("owner")}
+    inputs = thesis.get("coordination_inputs") or {}
+    sales = thesis.setdefault("proven_sales", dict(inputs.get("proven_sales") or {}))
+    observed = thesis.setdefault("cohort_sale_events", {})
+    changed = False
+    for swap in swaps or []:
+        owner = swap.get("coordination_sale_owner")
+        signature = swap.get("signature")
+        at = parse_timestamp(swap.get("block_time") or swap.get("time"))
+        amount = to_float(swap.get("coordination_sale_amount"))
+        token_amount_value = to_float(swap.get("token_amount"))
+        if (swap.get("kind") != "sell" or owner not in owners or not signature
+            or not signal_at or not signal_at < at <= checked
+            or not math.isfinite(amount) or not 0 < amount <= token_amount_value
+            or swap.get("pool_address", pool.pool_address) != pool.pool_address
+            or swap.get("token_address", pool.token_address) != pool.token_address):
+            continue
+        attributed = max(0.0, float(owners[owner].get("attributed_tokens") or 0))
+        previous = observed.get(signature) or {}
+        if previous and previous.get("owner") != owner:
+            continue
+        increment = max(0.0, amount - float(previous.get("amount") or 0))
+        if not increment or sales.get(owner, 0) >= attributed:
+            continue
+        observed[signature] = {"owner": owner, "amount": amount, "at": at}
+        sales[owner] = min(attributed, float(sales.get(owner, 0)) + increment)
+        if inputs:
+            inputs.setdefault("proven_sales", {})[owner] = sales[owner]
+        cap = max(0.0, attributed - sales[owner])
+        row = owners[owner]
+        row["retention_cap_tokens"] = min(float(row.get("retention_cap_tokens", attributed)), cap)
+        row["current_retained_tokens"] = min(float(row.get("current_retained_tokens", attributed)), cap)
+        changed = True
+    if changed:
+        thesis.pop("check_cycle_started_at", None)
+        thesis.pop("check_cycle_verified_owners", None)
+    return changed
+
+
 def refresh_signal_thesis(
     rpc,
     pool,
@@ -7590,6 +7739,7 @@ def refresh_signal_thesis(
     checked_at=None,
     observed_transactions=None,
     observed_swaps=None,
+    observed_coverage=None,
 ):
     if not config.get("signal_thesis_tracking_enabled", True):
         return None
@@ -7600,11 +7750,20 @@ def refresh_signal_thesis(
         config,
         captured_at=checked_at,
     )
+    if isinstance(thesis, dict) and isinstance(observed_coverage, dict):
+        coverage_issues = [name for name in ("live_truncated", "rolling_gap_pending", "transaction_errors", "parse_errors")
+                           if observed_coverage.get(name)]
+        if int(observed_coverage.get("history_gap_seconds") or 0) > 60:
+            coverage_issues.append("history_gap")
+        for issue in coverage_issues:
+            mark_thesis_sale_history_unknown(thesis, issue)
+    sales_changed = record_thesis_sales(thesis, pool, observed_swaps, checked_at)
     due_at = parse_timestamp(pool_state.get("signal_recheck_due_at"))
     should_recheck = bool(
         isinstance(thesis, dict)
         and (
             captured
+            or sales_changed
             or bool(alerts)
             or not thesis.get("last_checked_at")
             or (due_at and due_at <= int(time.time()))
@@ -7627,6 +7786,7 @@ def refresh_signal_thesis(
             )
             if replacement_captured:
                 captured = True
+                record_thesis_sales(thesis, pool, observed_swaps, checked_at)
                 thesis = recheck_signal_thesis(
                     rpc,
                     pool,
@@ -7896,7 +8056,8 @@ def owner_activity_since(swaps, start_time, owners):
             row["last_buy_time"] = max(row["last_buy_time"], block_time)
         elif kind == "sell":
             row["sell_sol"] += float(swap.get("sol_amount") or 0)
-            row["token_sold"] += float(swap.get("token_amount") or swap.get("token_sender_amount") or 0)
+            row["token_sold"] += min(float(swap.get("token_amount") or 0),
+                                     float(swap.get("coordination_sale_amount") or 0))
             row["last_sell_time"] = max(row["last_sell_time"], block_time)
     return activity
 
@@ -7964,7 +8125,7 @@ def reactivation_wave_window_metrics(window_swaps, config, relaxed=False):
             continue
         row = buyer_rows[owner]
         row["sell_sol"] += float(swap.get("sol_amount") or 0)
-        row["token_sold"] += float(swap.get("token_amount") or swap.get("token_sender_amount") or 0)
+        row["token_sold"] += min(float(swap.get("token_amount") or 0), float(swap.get("coordination_sale_amount") or 0))
         row["sell_count"] += 1
 
     buyers = [row for row in buyer_rows.values() if row["buy_sol"] > 0]
@@ -9237,7 +9398,7 @@ def sticky_accumulation_window_metrics(window_swaps, config, relaxed=False):
             continue
         row = buyer_rows[owner]
         row["sell_sol"] += float(swap.get("sol_amount") or 0)
-        row["token_sold"] += float(swap.get("token_amount") or swap.get("token_sender_amount") or 0)
+        row["token_sold"] += min(float(swap.get("token_amount") or 0), float(swap.get("coordination_sale_amount") or 0))
         row["sell_count"] += 1
 
     buyers = [row for row in buyer_rows.values() if row["buy_sol"] > 0]
@@ -10572,7 +10733,8 @@ def apply_signal_confirmation(alert, config):
     }
     if reasons == ["retention not seasoned"] and wave.get("min_hold_minutes") and parse_timestamp(alert.get("created_at")):
         alert["signal_confirmation"]["retention_check_after"] = iso(
-            parse_timestamp(alert["created_at"]) + float(wave["min_hold_minutes"]) * 60
+            parse_timestamp(alert["created_at"]) + max(0.0,
+                float(wave["min_hold_minutes"]) - float(wave.get("hold_age_minutes") or 0)) * 60
         )
     if reasons and alert.get("action_tier") not in ("noise", "late_chase"):
         alert["action_tier"] = "candidate"
@@ -10810,7 +10972,7 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
             txs, fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="deep")
     except Exception as exc:
         if not config.get("helius_transactions_fallback_signatures", True):
-            return [], {"pool": pool.as_dict(), "error": str(exc), "trade_source": "enhanced_transactions"}
+            return [], {"pool": pool.as_dict(), "error": str(exc), **failure_metadata(exc), "trade_source": "enhanced_transactions"}
         return scan_pool_signatures(rpc, pool, config, state, classification_budget, fallback_error=str(exc))
 
     if not preclassified:
@@ -10875,6 +11037,7 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
         config,
         observed_transactions=txs,
         observed_swaps=swaps,
+        observed_coverage={**fetch_stats, "parse_errors": parse_errors},
     )
     return alerts, {
         "pool": pool.as_dict(),
@@ -11099,6 +11262,7 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
         config,
         observed_transactions=fetched_transactions,
         observed_swaps=swaps,
+        observed_coverage=fetch_stats,
     )
 
     summary = {
@@ -11474,14 +11638,33 @@ def fetch_gmgn_ath_timestamp(config, token_address, creation_timestamp=0, expect
     return parse_timestamp((five_minute or hour).get("time"))
 
 
+def claim_ath_budget(config, token_address):
+    budget = config.setdefault("_ath_budget", {"remaining": max(0, int(config.get("ath_max_tokens_per_scan", 25))),
+                                              "tokens": []})
+    if token_address in budget["tokens"] or token_address in (config.get("_gmgn_ath_result_cache") or {}):
+        return True
+    if budget["remaining"] <= 0:
+        return False
+    budget["remaining"] -= 1
+    budget["tokens"].append(token_address)
+    return True
+
+
 def fetch_gmgn_ath(config, token_address, include_timestamp=True):
     result_cache = config.setdefault("_gmgn_ath_result_cache", {})
     cached = result_cache.get(token_address)
     if cached and (not include_timestamp or cached.get("timestamp_requested")):
         return dict(cached)
-    data = fetch_gmgn_raw_token_info(config, token_address)
+    if not claim_ath_budget(config, token_address):
+        return {"error": "ath_budget_deferred"}
+    try:
+        data = fetch_gmgn_raw_token_info(config, token_address)
+    except Exception as exc:
+        result_cache[token_address] = {"error": str(exc), "timestamp_requested": True}
+        raise
     if not data:
-        return None
+        result_cache[token_address] = {"error": "empty_ath_response", "timestamp_requested": True}
+        return dict(result_cache[token_address])
     ath = token_ath(data, token_address, "sol")
     supply = to_float(
         data.get("circulating_supply")
@@ -11489,7 +11672,8 @@ def fetch_gmgn_ath(config, token_address, include_timestamp=True):
         or data.get("max_supply")
     )
     if not ath["highest_market_cap"] and not ath["highest_price"]:
-        return None
+        result_cache[token_address] = {"error": "missing_ath_evidence", "timestamp_requested": True}
+        return dict(result_cache[token_address])
     ath.update(supply=supply, pool_id=data.get("biggest_pool_address") or data.get("migrated_pool"))
     if include_timestamp and ath["highest_price"]:
         ath["timestamp_requested"] = True
@@ -11672,6 +11856,8 @@ def filter_reactivation_by_ath(http, state, pools, config, observed_at):
                 and api_key
                 and fetched < preload_limit
                 and isinstance(market, dict)
+                and (config.get("_scan_profile") != "targeted" or pool.pool_address in config.get("_ath_fetch_pool_addresses", [pool.pool_address]))
+                and claim_ath_budget(config, token)
             ):
                 entry = market.setdefault(token, {"token_address": token})
                 try:
@@ -11740,7 +11926,9 @@ def filter_reactivation_by_ath(http, state, pools, config, observed_at):
                 and entry.get("ath_error_checked_at")
                 and now - int(entry.get("ath_error_checked_at", 0)) < error_ttl
             )
-            if not recent_error and fetched < fetch_limit:
+            if (not recent_error and fetched < fetch_limit
+                and (config.get("_scan_profile") != "targeted" or pool.pool_address in config.get("_ath_fetch_pool_addresses", [pool.pool_address]))
+                and claim_ath_budget(config, token)):
                 try:
                     ath = fetch_gmgn_ath(config, token, include_timestamp=False)
                     fetched += 1
@@ -11834,6 +12022,11 @@ def enrich_market_ath(http, state, pools, alerts, config, observed_at):
         int(config.get("ath_recent_alert_limit", 100)),
         lanes=active_lanes,
     )
+    if config.get("_scan_profile") == "targeted":
+        recent_tokens = []
+        targets = (config.get("_ath_budget") or {}).get("target_tokens")
+        if targets is not None:
+            pool_tokens = [token for token in pool_tokens if token in targets]
     priority_tokens = []
     for token in alert_tokens:
         if token and token not in priority_tokens:
@@ -11883,7 +12076,7 @@ def enrich_market_ath(http, state, pools, alerts, config, observed_at):
         ):
             continue
         is_priority = token in priority_set
-        if not is_priority and broad_fetched >= max_tokens:
+        if (not is_priority and broad_fetched >= max_tokens) or not claim_ath_budget(config, token):
             continue
         try:
             ath = fetch_gmgn_ath(config, token, include_timestamp=True)
@@ -11954,6 +12147,7 @@ def record_market_observations(state, pools, observed_at):
         if not key:
             continue
         entry = market.setdefault(key, {})
+        previous_pool = entry.get("pool_address")
         snapshot_at = int(pool.market_snapshot_at or 0)
         snapshot_stale = bool(pool.market_snapshot_stale or not snapshot_at
             or snapshot_at > parse_timestamp(observed_at) + 300)
@@ -11990,9 +12184,10 @@ def record_market_observations(state, pools, observed_at):
             }
         )
         entry.pop("market_snapshot_error", None)
-        if pool.pair_created_at and (
-            not entry.get("pair_created_at") or pool.pair_created_at < int(entry.get("pair_created_at", 0))
-        ):
+        if previous_pool != pool.pool_address:
+            entry.pop("pair_created_at", None)
+            entry.pop("pair_created_at_iso", None)
+        if pool.pair_created_at:
             entry["pair_created_at"] = pool.pair_created_at
             entry["pair_created_at_iso"] = iso(pool.pair_created_at)
 
@@ -12125,7 +12320,10 @@ def outcome_market_snapshot(entry, observed_at):
     mcap = nullable_market_number(entry.get("latest_mcap_usd"))
     price = nullable_market_number(entry.get("latest_price_usd"))
     liquidity = nullable_market_number(entry.get("latest_liquidity_usd"))
-    if not at or (price is None and not mcap):
+    endpoint_at = source_time(at)
+    evaluation_at = source_time(observed_at)
+    if (endpoint_at is None or evaluation_at is None or endpoint_at > evaluation_at
+        or (price is None and mcap is None)):
         return None
     return {
         "at": at,
@@ -12136,14 +12334,17 @@ def outcome_market_snapshot(entry, observed_at):
 
 
 def outcome_return_pct(outcome, snapshot):
-    caught_price = to_float(outcome.get("caught_price_usd"))
-    current_price = to_float(snapshot.get("price_usd"))
-    if caught_price > 0 and current_price > 0:
+    caught_price = nullable_market_number(outcome.get("caught_price_usd"))
+    current_price = nullable_market_number(snapshot.get("price_usd"))
+    if caught_price is not None and caught_price > 0 and current_price is not None:
+        snapshot["return_basis"] = "price"
         return (current_price / caught_price - 1) * 100
-    caught_mcap = to_float(outcome.get("caught_mcap_usd"))
-    current_mcap = to_float(snapshot.get("mcap_usd"))
-    if caught_mcap > 0 and current_mcap > 0:
+    caught_mcap = nullable_market_number(outcome.get("caught_mcap_usd"))
+    current_mcap = nullable_market_number(snapshot.get("mcap_usd"))
+    if caught_mcap is not None and caught_mcap > 0 and current_mcap is not None:
+        snapshot["return_basis"] = "mcap_proxy"
         return (current_mcap / caught_mcap - 1) * 100
+    snapshot["return_basis"] = None
     return None
 
 
@@ -12154,8 +12355,16 @@ def outcome_checkpoint_eligible(checkpoint):
     return 0 <= delay <= 3600 and checkpoint.get("quality_status") not in ("partial", "delayed")
 
 
+def outcome_entry_verified(outcome):
+    if not isinstance(outcome, dict) or outcome.get("entry_evidence_version") != 2:
+        return False
+    return any((nullable_market_number(outcome.get(key)) or 0) > 0
+               for key in ("caught_price_usd", "caught_mcap_usd"))
+
+
 def summarize_signal_outcomes(outcomes):
-    rows = list((outcomes or {}).values())
+    raw_rows = list((outcomes or {}).values())
+    rows = [row for row in raw_rows if outcome_entry_verified(row)]
 
     def metrics(group):
         returns_24h = [
@@ -12203,7 +12412,10 @@ def summarize_signal_outcomes(outcomes):
         }
 
     summary = {
-        "tracked": len(rows),
+        "tracked": len(raw_rows),
+        "entry_verified": len(rows),
+        "legacy_unverified": sum(row.get("entry_evidence_version") != 2 for row in raw_rows),
+        "unknown_entry": sum(row.get("entry_evidence_version") == 2 and not outcome_entry_verified(row) for row in raw_rows),
         "with_1h": 0,
         "with_6h": 0,
         "with_24h": 0,
@@ -12267,22 +12479,28 @@ def update_signal_outcomes(state, alerts, observed_at, config):
         )
         caught_ts = parse_timestamp(caught_at)
         existing = outcomes.get(token)
-        if existing and parse_timestamp(existing.get("caught_at")) <= caught_ts:
+        if existing and (existing.get("entry_evidence_version") != 2 or parse_timestamp(existing.get("caught_at")) <= caught_ts):
             continue
+        pool_quote_at = source_time(pool.get("market_snapshot_at"))
+        raw_quote_at = pool.get("market_snapshot_at")
+        if isinstance(raw_quote_at, (int, float)) and not isinstance(raw_quote_at, bool) and math.isfinite(raw_quote_at) and raw_quote_at > 0:
+            pool_quote_at = source_time(iso(raw_quote_at))
+        caught_source_at = source_time(caught_at)
+        verified_pool_entry = (pool_quote_at is not None and pool_quote_at == caught_source_at
+                               and not pool.get("market_snapshot_stale"))
+        def caught_value(alert_key, pool_key):
+            if alert_key in alert:
+                return nullable_market_number(alert.get(alert_key))
+            return nullable_market_number(pool.get(pool_key)) if verified_pool_entry else None
         outcomes[token] = {
             "token_address": pool.get("token_address"),
             "pool_address": pool.get("pool_address"),
             "symbol": pool.get("symbol"),
             "caught_at": caught_at,
-            "caught_mcap_usd": to_float(
-                alert.get("obs_mcap_usd") or pool.get("mcap_usd")
-            ),
-            "caught_price_usd": to_float(
-                alert.get("obs_price_usd") or pool.get("price_usd")
-            ),
-            "caught_liquidity_usd": to_float(
-                alert.get("obs_liquidity_usd") or pool.get("liquidity_usd")
-            ),
+            "caught_mcap_usd": caught_value("obs_mcap_usd", "mcap_usd"),
+            "caught_price_usd": caught_value("obs_price_usd", "price_usd"),
+            "caught_liquidity_usd": caught_value("obs_liquidity_usd", "liquidity_usd"),
+            "entry_evidence_version": 2,
             "caught_tier": alert.get("action_tier"),
             "caught_stage": alert.get("reactivation_stage"),
             "caught_score": int(alert.get("score") or 0),
@@ -12291,8 +12509,12 @@ def update_signal_outcomes(state, alerts, observed_at, config):
             "signal_family": alert.get("signal_family"),
             "horizons": {},
         }
+        outcomes[token]["entry_quality_status"] = "complete" if outcome_entry_verified(outcomes[token]) else "unknown"
 
     for token, outcome in list(outcomes.items()):
+        if outcome.get("entry_evidence_version") != 2:
+            outcome["entry_quality_status"] = "legacy_unverified"
+            continue
         entry = market.get(token) or {}
         snapshot = outcome_market_snapshot(entry, observed_at)
         if not snapshot:
@@ -12359,7 +12581,10 @@ def update_signal_outcomes(state, alerts, observed_at, config):
     )
     if max_tokens:
         ordered = ordered[:max_tokens]
-    state["signal_outcomes"] = dict(ordered)
+    # Quarantined legacy rows remain available for an evidence-based repair;
+    # neither later quotes nor retention pruning can silently rewrite them.
+    state["signal_outcomes"] = {token: row for token, row in outcomes.items() if row.get("entry_evidence_version") != 2}
+    state["signal_outcomes"].update(dict(ordered))
     stats = summarize_signal_outcomes(state["signal_outcomes"])
     stats["updated_at"] = observed_at
     state.setdefault("maintenance", {})["signal_outcomes"] = stats
@@ -12976,31 +13201,12 @@ def build_scan_health(summaries, lane_stats, config):
         error = str(item.get("error") or "")
         if not error:
             continue
-        lower_error = error.lower()
-        provider = next(
-            (
-                name
-                for name in (
-                    "chainstack",
-                    "drpc",
-                    "publicnode",
-                    "alchemy",
-                    "helius",
-                )
-                if f"{name}:" in lower_error
-            ),
-            "rpc",
-        )
-        if "all rpc providers" in lower_error:
+        if item.get("error_type") in PROGRAMMING_ERRORS or item.get("error_kind") == "programming":
+            scan_errors["other"] += 1
+        elif item.get("error_category") in SOFT_CATEGORIES:
+            scan_errors[item["error_category"]] += 1
+        elif item.get("error_type") == "RpcProvidersUnavailable":
             scan_errors["rpc_all_unavailable"] += 1
-        elif "rate_limit" in lower_error or "http 429" in lower_error:
-            scan_errors[f"{provider}_rate_limit"] += 1
-        elif "quota" in lower_error or "credit" in lower_error or "http 402" in lower_error:
-            scan_errors[f"{provider}_quota"] += 1
-        elif "auth" in lower_error or "http 401" in lower_error or "http 403" in lower_error:
-            scan_errors[f"{provider}_auth"] += 1
-        elif "circuit open" in lower_error:
-            scan_errors[f"{provider}_circuit_open"] += 1
         else:
             scan_errors["other"] += 1
     zero_parse_pools = sum(
@@ -13014,9 +13220,8 @@ def build_scan_health(summaries, lane_stats, config):
     failed_ratio = failed / scanned if scanned else 0.0
     truncated_ratio = truncated / scanned if scanned else 0.0
     live_fetch_count = len(live_fetches)
-    enhanced_fetch_count = len(live_fetch_items)
     live_truncated_ratio = live_truncated / live_fetch_count if live_fetch_count else 0.0
-    history_gap_ratio = history_gap / enhanced_fetch_count if enhanced_fetch_count else 0.0
+    history_gap_ratio = history_gap / live_fetch_count if live_fetch_count else 0.0
     active_live_fetch_count = len(active_live_fetches)
     stale_live_ratio = stale_live / active_live_fetch_count if active_live_fetch_count else 0.0
     zero_parse_ratio = zero_parse_pools / scanned if scanned else 0.0
@@ -13097,6 +13302,12 @@ def build_scan_health(summaries, lane_stats, config):
         "rolling_gap_pending_pools": rolling_gap_pending,
         "history_gap_pools": history_gap,
         "history_gap_ratio": history_gap_ratio,
+        "coverage_by_source": {
+            source: {"fetches": len(group),
+                     "history_gaps": sum(int(fetch.get("history_gap_seconds") or 0) > 60 for fetch in group)}
+            for source in ("enhanced_transactions", "helius_transactions", "pool_signatures")
+            for group in [[fetch for fetch in live_fetches if fetch.get("source") == source]]
+        },
         "stale_market_snapshot_pools": stale_market_snapshots,
         "enhanced_head_fallback_pools": enhanced_head_fallbacks,
         "stale_live_pools": stale_live,
@@ -13416,6 +13627,8 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
     deleted_tokens = load_deleted_tokens()
     observed_at = utc_now().isoformat().replace("+00:00", "Z")
     before_ath_filter = len(universe)
+    if config.get("_scan_profile") == "targeted":
+        config["_ath_fetch_pool_addresses"] = [pool.pool_address for pool in fast_candidate_pools(universe, state, int(time.time()))]
     universe = filter_reactivation_by_ath(http, state, universe, config, observed_at)
     ath_filter_stats = config.get("_ath_filter_stats") or {}
     if ath_filter_stats:
@@ -13461,6 +13674,11 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
     cohort_monitor = monitor_due_cohorts(rpc, universe, state, config, observed_at)
     candidates = fast_candidate_pools(universe, state, int(time.time())) if config.get("_scan_profile") == "targeted" else universe
     scan_targets, selection_stats = select_scan_targets(candidates, state, config)
+    if config.get("_scan_profile") == "targeted" and "_ath_budget" in config:
+        targets = config["_ath_budget"].setdefault("target_tokens", [])
+        for pool in scan_targets:
+            if pool.token_address not in targets:
+                targets.append(pool.token_address)
     selection_stats["cohort_monitor"] = cohort_monitor
     selection_stats["thesis_monitor_universe"] = len(thesis_monitor_pools)
     config["_selection_stats"] = selection_stats
@@ -13540,6 +13758,7 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
                 "trade_source": "scan_pool",
                 "scan_failed": True,
                 "error": str(exc),
+                **failure_metadata(exc),
                 "new_signatures": 0,
                 "classified_buys": 0,
                 "classes": {},
@@ -13673,6 +13892,9 @@ def run_once(config, lane_name=None):
     config["_gmgn_token_info_cache"] = {}
     config["_gmgn_profile_cache"] = {}
     config["_gmgn_ath_result_cache"] = {}
+    config["_ath_budget"] = {"remaining": max(0, int(config.get("ath_max_tokens_per_scan", 25))), "tokens": []}
+    if config.get("_scan_profile") == "targeted":
+        config["_ath_budget"]["target_tokens"] = []
     http = Http()
     rpc = build_rpc_router(config)
     configure_monthly_budgets(rpc, state, config)

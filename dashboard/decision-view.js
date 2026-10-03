@@ -1,7 +1,7 @@
 // Presentation only: never upgrades the scanner's confirmation or lifecycle.
 export const REVIEW_QUEUES = [
   { id: "review", label: "Ready to review", note: "Current confirmed signals with fresh cohort and market checks.", tone: "positive" },
-  { id: "holding", label: "Holding", note: "The original cohort still retains its position. Not a new entry signal.", tone: "neutral" },
+  { id: "holding", label: "Holding", note: "Checked balance bounds for the original cohort. Not proof of unsold holdings or a new entry signal.", tone: "neutral" },
   { id: "early", label: "Early observations", note: "New activity, not confirmed accumulation.", tone: "info" },
   { id: "reducing", label: "Reduced positions", note: "Tokens left original wallets. Balances alone cannot distinguish sales from transfers.", tone: "negative" },
   { id: "verification", label: "Needs data", note: "Insufficient evidence for a current conclusion.", tone: "muted" },
@@ -12,6 +12,12 @@ export function numeric(value) {
   if (!["number", "string"].includes(typeof value) || (typeof value === "string" && !value.trim())) return null;
   const result = Number(value);
   return Number.isFinite(result) ? result : null;
+}
+
+export function originalSaleHistoryUnknown(thesis) {
+  if (!thesis || typeof thesis !== "object" || Array.isArray(thesis) || !Object.keys(thesis).length) return false;
+  const version = numeric(thesis.retention_evidence_version);
+  return version === null || version < 3 || thesis.original_sale_history_status !== "tracked_from_capture";
 }
 
 function percent(value) {
@@ -64,7 +70,8 @@ export function decisionView(token, config = {}, now = Date.now()) {
     && cohortTokenCoverage >= (numeric(config.signal_thesis_min_cohort_token_coverage_pct) ?? 70);
   const complete = balanceComplete && cohortComplete && retained !== null;
   const currentConfirmed = token.signalLifecycle?.currentConfirmed === true;
-  const thesisConfirmed = thesis.signal_confirmation?.status === "confirmed";
+  const saleHistoryUnknown = originalSaleHistoryUnknown(token.signalThesis);
+  const thesisConfirmed = !saleHistoryUnknown && thesis.signal_confirmation?.status === "confirmed";
   const blockers = [];
   if (!Number.isFinite(checked)) blockers.push("Original wallet balances have not been checked.");
   else if (!fresh) blockers.push("Wallet check is overdue; holdings below are the last observation.");
@@ -72,6 +79,7 @@ export function decisionView(token, config = {}, now = Date.now()) {
   if (!cohortComplete) blockers.push(`The stored cohort covers ${cohortCoverage === null ? "an unknown share" : `${Math.round(cohortCoverage)}%`} of original signal wallets. Rechecking the same subset will not fill this gap.`);
   if (retained === null) blockers.push("Retained position cannot be verified from this snapshot.");
   if (!currentConfirmed && !thesisConfirmed) blockers.push("The original accumulation has no confirmed signal record.");
+  if (saleHistoryUnknown) blockers.push("Original sale history is unknown. Checked balances are an upper bound, not proof that the original buys remain unsold.");
   if (!token.currentMarket?.isFresh) blockers.push("Current market data is missing or stale.");
   if (token.dataStatus === "scanner_stale") blockers.push("The latest scan is stale or failed.");
   if (!integrity.status || integrity.status === "unverified" || integrity.data_quality_status !== "complete") {
@@ -93,8 +101,9 @@ export function decisionView(token, config = {}, now = Date.now()) {
   } else if (thesis.status === "weakening" || token.lifecycleStatus === "weakening") {
     queue = "reducing"; label = "Position reduced";
   } else if (thesis.status === "intact" && retained > 0 && complete) {
-    queue = "holding"; label = fresh ? "Holding" : "Held at last check";
-    if (currentConfirmed && fresh && token.dataStatus === "current" && token.currentMarket?.isFresh
+    queue = "holding";
+    label = saleHistoryUnknown ? (fresh ? "Balance cap checked" : "Balance cap at last check") : fresh ? "Holding" : "Held at last check";
+    if (!saleHistoryUnknown && currentConfirmed && fresh && token.dataStatus === "current" && token.currentMarket?.isFresh
       && integrity.data_quality_status === "complete" && integrity.status === "distributed"
       && integrityFresh && linkPolicyCurrent && !rotation
       && ["watch", "actionable", "hot_reactivation"].includes(token.currentSignalTier)) {
@@ -107,7 +116,7 @@ export function decisionView(token, config = {}, now = Date.now()) {
   }
   const meta = REVIEW_QUEUES.find((item) => item.id === queue);
   const reason = queue === "review" ? "Confirmed buying + retained balances"
-    : queue === "holding" ? `${retentionBound(retained).replace("\u2264", "Up to ")} of original position remains${fresh ? "" : "; check overdue"}`
+    : queue === "holding" ? `${retentionBound(retained).replace("\u2264", "Up to ")} of original position remains${fresh ? "" : "; check overdue"}${saleHistoryUnknown ? "; original sale history unknown" : ""}`
       : queue === "reducing" ? (retained === null ? "Original cohort balances declined" : `${retentionBound(retained).replace("\u2264", "Up to ")} of original position remains`)
         : queue === "early" ? "Buying observed; confirmation missing"
           : queue === "inactive" ? "Original accumulation invalidated"
@@ -116,8 +125,8 @@ export function decisionView(token, config = {}, now = Date.now()) {
   return { queue, label, tone: meta.tone, reason, retained, supply, fresh, complete, balanceComplete,
     cohortComplete, walletCoverage, tokenCoverage, cohortCoverage, cohortTokenCoverage,
     checkedAt: Number.isFinite(checked) ? thesis.last_checked_at : null, blockers,
-    integrityFresh, linkPolicyCurrent, rotation,
-    confirmation: currentConfirmed ? "Confirmed this scan" : thesisConfirmed ? "Previously confirmed" : "Not confirmed" };
+    integrityFresh, linkPolicyCurrent, rotation, saleHistoryUnknown,
+    confirmation: saleHistoryUnknown ? "Original sale history unknown" : currentConfirmed ? "Confirmed this scan" : thesisConfirmed ? "Previously confirmed" : "Not confirmed" };
 }
 
 export function matchesReviewQueue(view, queue) {
@@ -136,6 +145,7 @@ export function compareReviewTokens(a, b, sort = "caught") {
 
 // Never let slow detail requests replace a newer summary or another snapshot.
 export function sameDetailCohort(detail, tokenKey, thesis, generation) {
+  if (detail?.detail_status != null && detail.detail_status !== "ready") return false;
   const source = time(detail?.report_source_updated_at), current = time(generation);
   return detail?.token_key === tokenKey && Boolean(thesis?.cohort_id)
     && Number.isFinite(source) && Number.isFinite(current) && source <= current
@@ -145,6 +155,7 @@ export function sameDetailCohort(detail, tokenKey, thesis, generation) {
 }
 
 export function canApplyDetail(detail, tokenKey, requestedGeneration, currentGeneration, thesis) {
+  if (detail?.detail_status != null && detail.detail_status !== "ready") return false;
   if (detail?.token_key !== tokenKey || requestedGeneration !== currentGeneration) return false;
   const source = time(detail.report_source_updated_at);
   const generation = time(currentGeneration);

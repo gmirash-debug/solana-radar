@@ -42,6 +42,18 @@ def validate_result(method, params, result):
                 if info.get("mint") and mint and info["mint"] != mint:
                     raise ValueError("token balance mint mismatch")
                 validate_amount(info["tokenAmount"])
+        elif method == "getTokenLargestAccounts":
+            seen = set()
+            for row in result["value"]:
+                if not isinstance(row, dict):
+                    raise ValueError("invalid largest token account")
+                address = row.get("address")
+                if not isinstance(address, str) or not address.strip() or address != address.strip():
+                    raise ValueError("missing largest token account address")
+                if address in seen:
+                    raise ValueError("duplicate largest token account")
+                seen.add(address)
+                validate_amount(row)
     elif method == "getTokenSupply":
         if not isinstance(result, dict) or not isinstance(result.get("value"), dict):
             raise ValueError("missing token supply")
@@ -51,7 +63,8 @@ def validate_result(method, params, result):
 def validate_amount(value):
     raw = value.get("amount")
     if raw is not None:
-        if not str(raw).isdigit() or type(value.get("decimals")) is not int or not 0 <= value["decimals"] <= 255:
+        if (not str(raw).isascii() or not str(raw).isdigit()
+                or type(value.get("decimals")) is not int or not 0 <= value["decimals"] <= 255):
             raise ValueError("invalid raw token amount")
         return
     amount = value.get("uiAmountString", value.get("uiAmount"))
