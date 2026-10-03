@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric } from "../decision-view.js";
+import { decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "../decision-view.js";
 
 test("all position and supply labels preserve bounds, tiny holdings and unknown values", () => {
   assert.equal(retentionBound(85), "\u226485%");
@@ -35,27 +35,35 @@ function token(overrides = {}) {
 }
 const view = (t) => decisionView(t, {}, now);
 
-test("ready-to-review requires current confirmation and fresh evidence", () => {
-  assert.equal(view(token()).queue, "review");
-  assert.equal(view(token({ signalLifecycle: { currentConfirmed: false } })).queue, "holding");
-  assert.equal(view(token({ currentMarket: { isFresh: false } })).queue, "holding");
-  assert.equal(view(token({ dataStatus: "scanner_stale" })).queue, "holding");
-  assert.equal(view(token({ supplyIntegrity: { status: "watch", data_quality_status: "complete" } })).queue, "holding");
+// A separate synthetic v3 fixture; legacy token() records deliberately lack sale-history proof.
+function newV3Token(overrides = {}) {
+  const t = token(overrides);
+  if (t.signalThesis) t.signalThesis = {...t.signalThesis, retention_evidence_version:3,
+    original_sale_history_status:"tracked_from_capture"};
+  return t;
+}
+
+test("new v3 ready-to-review requires current confirmation and fresh evidence", () => {
+  assert.equal(view(newV3Token()).queue, "review");
+  assert.equal(view(newV3Token({ signalLifecycle: { currentConfirmed: false } })).queue, "holding");
+  assert.equal(view(newV3Token({ currentMarket: { isFresh: false } })).queue, "holding");
+  assert.equal(view(newV3Token({ dataStatus: "scanner_stale" })).queue, "holding");
+  assert.equal(view(newV3Token({ supplyIntegrity: { status: "watch", data_quality_status: "complete" } })).queue, "holding");
 });
 test("old holder snapshots and legacy link proof cannot make a ready signal", () => {
   for (const patch of [{checked_at:"2026-09-04T18:00:00Z"}, {evidence_version:1}, {checked_at:null}]) {
-    const t = token(); Object.assign(t.supplyIntegrity, patch);
+    const t = newV3Token(); Object.assign(t.supplyIntegrity, patch);
     assert.equal(view(t).queue, "holding");
     assert.ok(view(t).blockers.length);
   }
 });
 test("holder freshness uses its own configured refresh interval", () => {
-  const t = token(); t.supplyIntegrity.checked_at = "2026-09-04T19:30:00Z";
+  const t = newV3Token(); t.supplyIntegrity.checked_at = "2026-09-04T19:30:00Z";
   assert.equal(view(t).queue, "review");
   assert.equal(decisionView(t, {supply_integrity_refresh_minutes:60}, now).queue, "holding");
 });
 test("market rotation stays a risk warning rather than accumulation readiness", () => {
-  const t = token(); t.signalThesis.coordinated_activity = {metrics:{market_rotation_observations:1}};
+  const t = newV3Token(); t.signalThesis.coordinated_activity = {metrics:{market_rotation_observations:1}};
   assert.equal(view(t).queue, "holding");
   assert.equal(view(t).rotation, true);
   assert.ok(view(t).blockers.some(reason => reason.includes("rotation")));
@@ -71,13 +79,45 @@ test("weakening is never concealed behind missing confirmation or overdue checks
 test("legacy holding is not promoted into a confirmed entry", () => {
   const result = view(token({ signalLifecycle: { currentConfirmed: false } }));
   assert.equal(result.queue, "holding");
-  assert.equal(result.confirmation, "Not confirmed");
+  assert.equal(result.confirmation, "Original sale history unknown");
   assert.ok(result.blockers.some((reason) => reason.includes("no confirmed")));
+});
+
+test("legacy migration: unknown original-sale history blocks Ready despite a newly confirmed alert", () => {
+  const t = token();
+  t.signalThesis.original_sale_history_status = "unknown";
+  t.signalThesis.signal_confirmation = {status:"candidate", reasons:["legacy original-sale history incomplete"]};
+  const result = view(t);
+  assert.equal(result.queue, "holding");
+  assert.equal(result.label, "Balance cap checked");
+  assert.equal(result.confirmation, "Original sale history unknown");
+  assert.match(result.reason, /^Up to 80%/);
+  assert.match(result.reason, /history unknown/);
+  assert.ok(result.blockers.some(reason => reason.includes("upper bound, not proof")));
+});
+
+test("legacy migration: an inconsistent confirmed thesis cannot override unknown original-sale history", () => {
+  const t = token();
+  t.signalThesis.original_sale_history_status = "unknown";
+  t.signalThesis.signal_confirmation = {status:"confirmed"};
+  assert.notEqual(view(t).queue, "review");
+  t.signalThesis.status = "unknown";
+  assert.equal(view(t).queue, "verification");
+  assert.equal(view(t).confirmation, "Original sale history unknown");
+});
+
+test("new v3 tracked-from-capture histories retain normal readiness while unknown historical balances stay dated", () => {
+  const t = newV3Token();
+  assert.equal(view(t).queue, "review");
+  t.signalThesis.original_sale_history_status = "unknown";
+  t.signalThesis.last_checked_at = "2026-09-04T19:00:00Z";
+  assert.equal(view(t).label, "Balance cap at last check");
+  assert.match(view(t).reason, /check overdue/);
 });
 test("stale holding remains a dated observation", () => {
   const t = token();
   t.signalThesis.last_checked_at = "2026-09-04T19:00:00Z";
-  assert.equal(view(t).label, "Held at last check");
+  assert.equal(view(t).label, "Balance cap at last check");
   assert.equal(view(t).queue, "holding");
 });
 test("unknown cohort with complete subset still needs original coverage", () => {
@@ -111,10 +151,39 @@ test("an intact status with measured zero cannot show holding or readiness", () 
 test("new observations stay unconfirmed and closed positions stay out of overview", () => {
   const early = view(token({ signalThesis: null, lifecycleStatus: "pending", signalLifecycle: { currentConfirmed: false } }));
   assert.equal(early.queue, "early");
+  assert.equal(early.saleHistoryUnknown, false);
   const closed = view(token({ lifecycleStatus: "closed" }));
   assert.equal(closed.queue, "inactive");
   assert.equal(matchesReviewQueue(closed, "overview"), false);
   assert.equal(matchesReviewQueue(closed, "inactive"), true);
+});
+
+test("release transition: absent metadata and legacy retention versions cannot become Ready from a fresh confirmed alert", () => {
+  for (const patch of [{}, {retention_evidence_version:2},
+    {retention_evidence_version:2, original_sale_history_status:"tracked_from_capture"},
+    {retention_evidence_version:3}, {original_sale_history_status:"tracked_from_capture"},
+    {retention_evidence_version:null, original_sale_history_status:"tracked_from_capture"},
+    {retention_evidence_version:false, original_sale_history_status:"tracked_from_capture"},
+    {retention_evidence_version:3, original_sale_history_status:"unknown"}]) {
+    const t = token(); Object.assign(t.signalThesis, patch);
+    t.signalThesis.signal_confirmation = {status:"confirmed"};
+    const result = view(t);
+    assert.equal(result.saleHistoryUnknown, true, JSON.stringify(patch));
+    assert.equal(result.queue, "holding");
+    assert.equal(result.label, "Balance cap checked");
+    assert.equal(result.confirmation, "Original sale history unknown");
+    assert.ok(result.blockers.some(reason => reason.includes("upper bound, not proof")));
+  }
+});
+
+test("release transition: absent cohorts do not create unknown-sale claims; only explicit v3 tracking establishes history", () => {
+  for (const absent of [null, undefined, {}, []]) assert.equal(originalSaleHistoryUnknown(absent), false);
+  assert.equal(originalSaleHistoryUnknown({retention_evidence_version:3, original_sale_history_status:"tracked_from_capture"}), false);
+  assert.equal(originalSaleHistoryUnknown({status:"intact"}), true);
+  assert.equal(view(newV3Token()).saleHistoryUnknown, false);
+  const legacy = token();
+  assert.equal(Object.hasOwn(legacy.signalThesis, "retention_evidence_version"), false);
+  assert.equal(Object.hasOwn(legacy.signalThesis, "original_sale_history_status"), false);
 });
 test("coverage thresholds follow the scanner configuration", () => {
   const t = token(); t.signalThesis.cohort_wallet_coverage_pct = 75;

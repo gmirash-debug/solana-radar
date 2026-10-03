@@ -62,6 +62,7 @@ def replay(fixtures):
     return {
         "fixture_set": fixtures.get("fixture_set", "reactivation_replay"),
         "offline": True,
+        "metrics_scope": "synthetic_contract_cases_not_empirical_strategy_accuracy",
         "cases": cases,
         "summary": {
             "cases": len(cases),

@@ -85,6 +85,70 @@ class RpcRoutingTests(unittest.TestCase):
         self.assertEqual(rpc.token_balance_cache[("owner", "mint")], 123)
         self.assertEqual(rpc.last_provider_by_method["getTokenAccountsByOwner"], "alchemy")
 
+    def test_invalid_largest_holder_rows_fall_back_without_false_zero_cache(self):
+        rpc = self.router()
+        rpc.providers["alchemy"].session.post.return_value = response({"value": [
+            {"address": "reserve", "amount": "300", "decimals": 0},
+            {"address": "holder", "uiAmountString": "not-a-number"},
+        ]})
+        rpc.providers["helius"].session.post.return_value = response({"value": [
+            {"address": "reserve", "amount": "300", "decimals": 0},
+            {"address": "holder", "amount": "100", "decimals": 0},
+        ]})
+        self.assertEqual(rpc.largest_token_accounts("mint"), [
+            {"address": "reserve", "amount": 300},
+            {"address": "holder", "amount": 100},
+        ])
+        self.assertEqual(rpc.last_provider_by_method["getTokenLargestAccounts"], "helius")
+
+    def test_all_invalid_largest_holders_remain_unknown_and_uncached(self):
+        rpc = self.router()
+        for provider in rpc.providers.values():
+            provider.session.post.return_value = response({"value": [{"address": "holder"}]})
+        with self.assertRaises(s.RpcProvidersUnavailable):
+            rpc.largest_token_accounts("mint")
+        self.assertNotIn(("mint", 20), rpc.largest_token_accounts_cache)
+
+    def test_non_ascii_raw_digits_cannot_bypass_validation_or_fallback(self):
+        for amount in ("\u00b2", "\u0661", "\uff11"):
+            with self.subTest(amount=amount), self.assertRaises(ValueError):
+                validate_result("getTokenLargestAccounts", ["mint"], {"value": [
+                    {"address": "holder", "amount": amount, "decimals": 0},
+                ]})
+        rpc = self.router()
+        rpc.providers["alchemy"].session.post.return_value = response({"value": [
+            {"address": "holder", "amount": "\u00b2", "decimals": 0},
+        ]})
+        rpc.providers["helius"].session.post.return_value = response({"value": [
+            {"address": "holder", "amount": "2", "decimals": 0},
+        ]})
+        self.assertEqual(rpc.largest_token_accounts("mint"), [{"address": "holder", "amount": 2}])
+        self.assertEqual(rpc.last_provider_by_method["getTokenLargestAccounts"], "helius")
+
+    def test_standalone_provider_does_not_cache_invalid_largest_holders(self):
+        provider = s.HeliusRpc("secret", max_retries=0)
+        provider.call = Mock(return_value={"value": [{"address": "holder"}]})
+        with self.assertRaises(ValueError):
+            provider.largest_token_accounts("mint")
+        self.assertNotIn(("mint", 20), provider.largest_token_accounts_cache)
+
+    def test_largest_holder_result_rejects_missing_invalid_and_duplicate_rows(self):
+        bad_rows = [None, {}, {"address": "holder"},
+                    {"address": "holder", "amount": "x", "decimals": 0},
+                    {"address": "holder", "amount": "1", "decimals": False},
+                    {"address": "holder", "uiAmount": float("nan")},
+                    {"address": "holder", "uiAmount": -1},
+                    {"address": "holder", "uiAmount": False},
+                    {"address": " holder ", "uiAmount": 1}]
+        for row in bad_rows:
+            with self.subTest(row=row), self.assertRaises(ValueError):
+                validate_result("getTokenLargestAccounts", ["mint"], {"value": [row]})
+        zero = {"address": "holder", "amount": "0", "decimals": 0}
+        validate_result("getTokenLargestAccounts", ["mint"], {"value": [zero]})
+        validate_result("getTokenLargestAccounts", ["mint"], {"value": []})
+        with self.assertRaises(ValueError):
+            validate_result("getTokenLargestAccounts", ["mint"], {"value": [zero, zero]})
+
     def test_all_bad_balances_remain_unavailable(self):
         rpc = self.router()
         for provider in rpc.providers.values():

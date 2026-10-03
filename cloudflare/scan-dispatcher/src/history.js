@@ -1,5 +1,6 @@
 // History processing is independent of dashboard publication; keep expensive
 // derived wallet writes bounded within each background invocation.
+import {stepClusterJob} from "./history-clusters.js";
 const OUTBOX_BATCH_SIZE = 2;
 const D1_IN_PARAMETER_LIMIT = 100;
 const HISTORY_SCHEMA_VERSION = 1;
@@ -19,6 +20,9 @@ function text(value) {
 }
 
 function number(value, fallback = null) {
+  if (value === null) return null;
+  if (value === undefined || typeof value === "boolean"
+      || (typeof value === "string" && !value.trim())) return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
@@ -27,6 +31,8 @@ function positive(value, fallback = null) {
   const parsed = number(value, null);
   return parsed !== null && parsed > 0 ? parsed : fallback;
 }
+
+const firstDefined = (...values) => values.find(value => value !== undefined);
 
 function iso(value, fallback = null) {
   const raw = text(value);
@@ -112,6 +118,7 @@ export function historyEventEffects(eventType) {
   const type = text(eventType) || "snapshot";
   const isSignalEvent = type === "signal";
   const isOutcomeEvent = type.startsWith("outcome_");
+  const isClusterRepair = type === "cluster_repair";
   return {
     type,
     isSignalEvent,
@@ -120,7 +127,7 @@ export function historyEventEffects(eventType) {
     updatesOutcomes: isSignalEvent || isOutcomeEvent,
     recordsClusterEdge: isSignalEvent,
     refreshesScores: isOutcomeEvent,
-    refreshesClusters: isSignalEvent || isOutcomeEvent,
+    refreshesClusters: isSignalEvent || isOutcomeEvent || isClusterRepair,
   };
 }
 
@@ -185,9 +192,10 @@ function normalizedEpisode(raw = {}, fallbackNow = nowIso()) {
 function normalizedWallet(raw = {}, episode = {}) {
   const wallet = text(raw.wallet_address) || text(raw.owner);
   if (!wallet) return null;
-  const bought = positive(raw.bought_tokens ?? raw.attributed_tokens ?? raw.token_bought, 0);
-  const balance = positive(raw.current_token_balance ?? raw.current_balance, 0);
-  const retainedPct = number(raw.balance_retained_pct ?? raw.retention_pct, bought > 0 ? clamp(balance / bought * 100, 0, 100) : null);
+  const bought = number(firstDefined(raw.bought_tokens, raw.attributed_tokens, raw.token_bought));
+  const balance = number(firstDefined(raw.current_token_balance, raw.current_balance));
+  const retainedPct = number(firstDefined(raw.balance_retained_pct, raw.retention_pct),
+    bought > 0 && balance !== null ? clamp(balance / bought * 100, 0, 100) : null);
   const rawBehavior = text(raw.behavior_status);
   const behavior = rawBehavior || (
     retainedPct === null ? "unknown" : retainedPct >= 99 ? "holding" : retainedPct > 0 ? "reduced_unverified" : "reduced_unverified"
@@ -204,21 +212,25 @@ function normalizedWallet(raw = {}, episode = {}) {
     average_entry_price: positive(raw.average_entry_price),
     entry_mcap_usd: positive(raw.entry_mcap_usd, episode.caught_mcap_usd),
     supply_pct_bought: number(raw.supply_pct_bought ?? raw.held_supply_pct_at_catch, null),
-    held_tokens_at_catch: positive(raw.held_tokens_at_catch ?? raw.initial_balance ?? raw.current_balance, 0),
+    held_tokens_at_catch: number(firstDefined(raw.held_tokens_at_catch, raw.initial_balance, raw.current_balance)),
     held_supply_pct_at_catch: number(raw.held_supply_pct_at_catch, null),
     // Retention is a live observation. It must never overwrite the at-catch
     // fact or turn a balance decrease into a claimed sale.
     retained_pct_at_catch: number(raw.retained_pct_at_catch, bought > 0 ? 100 : null),
     common_funder: text(raw.common_funder),
     common_executor: text(raw.common_executor),
+    common_funder_kind: text(raw.common_funder_kind),
+    common_executor_kind: text(raw.common_executor_kind),
+    source_kind: text(raw.source_kind),
+    supporting_only: raw.supporting_only === true,
     cluster_id_at_catch: text(raw.cluster_id_at_catch),
     evidence_status: text(raw.evidence_status) || "partial",
     raw_object_key: text(raw.raw_object_key),
     observation: {
       current_token_balance: balance,
       balance_retained_pct: retainedPct,
-      additional_buy_tokens: positive(raw.additional_buy_tokens, 0),
-      outbound_transfer_tokens: positive(raw.outbound_transfer_tokens, 0),
+      additional_buy_tokens: number(raw.additional_buy_tokens),
+      outbound_transfer_tokens: number(raw.outbound_transfer_tokens),
       behavior_status: behavior,
       estimated_pnl_pct: number(raw.estimated_pnl_pct ?? raw.pnl_pct),
       estimated_pnl_sol: number(raw.estimated_pnl_sol ?? raw.pnl_sol),
@@ -269,6 +281,8 @@ function normalizedOutcome(raw = {}, episode = {}, now = nowIso()) {
       source: text(raw.source) || "scanner_market_snapshot",
       error: hasCheckpoint && !timely ? "horizon observation missing or more than 1h late" : text(raw.error),
       updated_at: now,
+      entry_verified: raw.entry_evidence_version === 2 && iso(raw.caught_at) === episode.caught_at
+        && Boolean(positive(raw.caught_price_usd) || positive(raw.caught_mcap_usd)) ? 1 : 0,
     });
   }
   return rows;
@@ -297,13 +311,14 @@ async function existingPriorScores(db, wallets, observedAt) {
   const scores = new Map();
   const cutoff = iso(observedAt, null);
   if (!cutoff) return scores;
-  for (let index = 0; index < addresses.length; index += D1_IN_PARAMETER_LIMIT) {
-    const chunk = addresses.slice(index, index + D1_IN_PARAMETER_LIMIT);
+  for (let index = 0; index < addresses.length; index += D1_IN_PARAMETER_LIMIT - 1) {
+    const chunk = addresses.slice(index, index + D1_IN_PARAMETER_LIMIT - 1);
     const placeholders = chunk.map((_, item) => `?${item + 1}`).join(", ");
     const result = await db.prepare(`
       SELECT wallet_address, edge_score, confidence, eligible_episodes, computed_through
       FROM wallet_scores
       WHERE wallet_address IN (${placeholders})
+        AND numeric_contract_version >= 2
         AND computed_through IS NOT NULL
         AND computed_through <= ?${chunk.length + 1}
     `).bind(...chunk, cutoff).all();
@@ -368,8 +383,8 @@ async function upsertWallets(db, episode, wallets, observedAt, priorScores, now)
         buy_count, buy_sol, bought_tokens, average_entry_price, entry_mcap_usd, supply_pct_bought,
         held_tokens_at_catch, held_supply_pct_at_catch, retained_pct_at_catch, common_funder,
         common_executor, cluster_id_at_catch, prior_edge_score, prior_edge_confidence,
-        prior_episode_count, prior_score_computed_through, evidence_status, raw_object_key, created_at, updated_at
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
+        prior_episode_count, prior_score_computed_through, evidence_status, raw_object_key, created_at, updated_at,numeric_contract_version
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,2)
       ON CONFLICT(episode_id, wallet_address, cohort_role) DO UPDATE SET
         common_funder = COALESCE(excluded.common_funder, signal_wallets.common_funder),
         common_executor = COALESCE(excluded.common_executor, signal_wallets.common_executor),
@@ -389,8 +404,8 @@ async function upsertWallets(db, episode, wallets, observedAt, priorScores, now)
       INSERT OR IGNORE INTO wallet_observations (
         episode_id, wallet_address, observed_at, current_token_balance, balance_retained_pct,
         additional_buy_tokens, outbound_transfer_tokens, behavior_status, estimated_pnl_pct,
-        estimated_pnl_sol, coverage_status, raw_object_key
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        estimated_pnl_sol, coverage_status, raw_object_key,numeric_contract_version
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,2)
     `).bind(
       episode.episode_id, wallet.wallet_address, observedAt, wallet.observation.current_token_balance,
       wallet.observation.balance_retained_pct, wallet.observation.additional_buy_tokens,
@@ -402,50 +417,52 @@ async function upsertWallets(db, episode, wallets, observedAt, priorScores, now)
   await runBatch(db, statements);
 }
 
-async function upsertOutcomes(db, episode, outcome, now) {
-  const statements = normalizedOutcome(outcome, episode, now).map((row) => db.prepare(`
+async function upsertOutcomes(db, episode, outcome, now, horizon = null) {
+  const statements = normalizedOutcome(outcome, episode, now).filter(row => horizon === null || row.horizon_minutes === horizon).map((row) => db.prepare(`
     INSERT INTO signal_outcomes (
       episode_id, horizon_minutes, due_at, evaluated_at, endpoint_price_usd, endpoint_mcap_usd,
       endpoint_liquidity_usd, return_pct, max_return_pct, max_drawdown_pct, time_to_1_5x_minutes,
       time_to_2x_minutes, time_to_5x_minutes, hit_1_5x, hit_2x, hit_5x, tradable_2x,
-      market_data_coverage_pct, largest_gap_minutes, status, source, error, updated_at
-    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+      market_data_coverage_pct, largest_gap_minutes, status, source, error, updated_at,numeric_contract_version,entry_verified
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,2,?24)
     ON CONFLICT(episode_id, horizon_minutes) DO UPDATE SET
       evaluated_at = COALESCE(excluded.evaluated_at, signal_outcomes.evaluated_at),
       endpoint_price_usd = COALESCE(excluded.endpoint_price_usd, signal_outcomes.endpoint_price_usd),
       endpoint_mcap_usd = COALESCE(excluded.endpoint_mcap_usd, signal_outcomes.endpoint_mcap_usd),
       endpoint_liquidity_usd = COALESCE(excluded.endpoint_liquidity_usd, signal_outcomes.endpoint_liquidity_usd),
-      return_pct = COALESCE(excluded.return_pct, signal_outcomes.return_pct),
-      max_return_pct = CASE WHEN excluded.max_return_pct IS NOT NULL AND (signal_outcomes.max_return_pct IS NULL OR excluded.max_return_pct > signal_outcomes.max_return_pct) THEN excluded.max_return_pct ELSE signal_outcomes.max_return_pct END,
-      max_drawdown_pct = CASE WHEN excluded.max_drawdown_pct IS NOT NULL AND (signal_outcomes.max_drawdown_pct IS NULL OR excluded.max_drawdown_pct < signal_outcomes.max_drawdown_pct) THEN excluded.max_drawdown_pct ELSE signal_outcomes.max_drawdown_pct END,
-      time_to_1_5x_minutes = COALESCE(signal_outcomes.time_to_1_5x_minutes, excluded.time_to_1_5x_minutes),
-      time_to_2x_minutes = COALESCE(signal_outcomes.time_to_2x_minutes, excluded.time_to_2x_minutes),
-      time_to_5x_minutes = COALESCE(signal_outcomes.time_to_5x_minutes, excluded.time_to_5x_minutes),
-      hit_1_5x = COALESCE(excluded.hit_1_5x, signal_outcomes.hit_1_5x),
-      hit_2x = COALESCE(excluded.hit_2x, signal_outcomes.hit_2x),
-      hit_5x = COALESCE(excluded.hit_5x, signal_outcomes.hit_5x),
-      tradable_2x = COALESCE(excluded.tradable_2x, signal_outcomes.tradable_2x),
-      market_data_coverage_pct = COALESCE(excluded.market_data_coverage_pct, signal_outcomes.market_data_coverage_pct),
-      largest_gap_minutes = COALESCE(excluded.largest_gap_minutes, signal_outcomes.largest_gap_minutes),
+      return_pct = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.return_pct ELSE signal_outcomes.return_pct END,
+      max_return_pct = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.max_return_pct ELSE signal_outcomes.max_return_pct END,
+      max_drawdown_pct = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.max_drawdown_pct ELSE signal_outcomes.max_drawdown_pct END,
+      time_to_1_5x_minutes = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.time_to_1_5x_minutes ELSE signal_outcomes.time_to_1_5x_minutes END,
+      time_to_2x_minutes = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.time_to_2x_minutes ELSE signal_outcomes.time_to_2x_minutes END,
+      time_to_5x_minutes = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.time_to_5x_minutes ELSE signal_outcomes.time_to_5x_minutes END,
+      hit_1_5x = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.hit_1_5x ELSE signal_outcomes.hit_1_5x END,
+      hit_2x = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.hit_2x ELSE signal_outcomes.hit_2x END,
+      hit_5x = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.hit_5x ELSE signal_outcomes.hit_5x END,
+      tradable_2x = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.tradable_2x ELSE signal_outcomes.tradable_2x END,
+      market_data_coverage_pct = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.market_data_coverage_pct ELSE signal_outcomes.market_data_coverage_pct END,
+      largest_gap_minutes = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.largest_gap_minutes ELSE signal_outcomes.largest_gap_minutes END,
       status = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.status ELSE signal_outcomes.status END,
       source = COALESCE(excluded.source, signal_outcomes.source),
-      error = COALESCE(excluded.error, signal_outcomes.error),
+      error = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.error ELSE signal_outcomes.error END,
+      numeric_contract_version = CASE WHEN excluded.evaluated_at IS NOT NULL THEN 2 ELSE signal_outcomes.numeric_contract_version END,
+      entry_verified = CASE WHEN excluded.evaluated_at IS NOT NULL THEN excluded.entry_verified ELSE signal_outcomes.entry_verified END,
       updated_at = excluded.updated_at
   `).bind(
     episode.episode_id, row.horizon_minutes, row.due_at, row.evaluated_at, row.endpoint_price_usd,
     row.endpoint_mcap_usd, row.endpoint_liquidity_usd, row.return_pct, row.max_return_pct,
     row.max_drawdown_pct, row.time_to_1_5x_minutes, row.time_to_2x_minutes, row.time_to_5x_minutes,
     row.hit_1_5x, row.hit_2x, row.hit_5x, row.tradable_2x, row.market_data_coverage_pct,
-    row.largest_gap_minutes, row.status, row.source, row.error, row.updated_at,
+    row.largest_gap_minutes, row.status, row.source, row.error, row.updated_at,row.entry_verified,
   ));
   await runBatch(db, statements);
 }
 
-async function upsertClusterEdges(db, episode, wallets, observedAt, now) {
+async function upsertClusterEdges(db, episode, wallets, observedAt, now, selectedPairs = null) {
   const groups = new Map();
   for (const wallet of wallets) {
     for (const [type, value] of [["common_funder", wallet.common_funder], ["common_executor", wallet.common_executor]]) {
-      if (!value) continue;
+      if (!value || infrastructureSource(value, wallet, episode)) continue;
       const key = `${type}:${value}`;
       const group = groups.get(key) || { type, value, wallets: [] };
       group.wallets.push(wallet.wallet_address);
@@ -454,11 +471,16 @@ async function upsertClusterEdges(db, episode, wallets, observedAt, now) {
   }
   const statements = [];
   const edgeIds = [];
-  for (const group of groups.values()) {
-    const members = [...new Set(group.wallets)].sort();
-    for (let left = 0; left < members.length; left += 1) {
-      for (let right = left + 1; right < members.length; right += 1) {
-        const edgeId = `edge:${hash(`${members[left]}|${members[right]}|${group.type}|${group.value}`)}`;
+  function* pairs() {
+    for (const group of groups.values()) {
+      const members = [...new Set(group.wallets)].sort();
+      for (let left = 0; left < members.length; left++) {
+        for (let right = left + 1; right < members.length; right++) yield {...group, a:members[left], b:members[right]};
+      }
+    }
+  }
+  for (const group of selectedPairs || pairs()) {
+        const edgeId = `edge:${hash(`${group.a}|${group.b}|${group.type}|${group.value}`)}`;
         edgeIds.push(edgeId);
         statements.push(db.prepare(`
           INSERT INTO wallet_cluster_edges (
@@ -468,7 +490,7 @@ async function upsertClusterEdges(db, episode, wallets, observedAt, now) {
           ON CONFLICT(edge_id) DO UPDATE SET
             last_seen_at = CASE WHEN excluded.last_seen_at > wallet_cluster_edges.last_seen_at THEN excluded.last_seen_at ELSE wallet_cluster_edges.last_seen_at END,
             updated_at = excluded.updated_at
-        `).bind(edgeId, members[left], members[right], group.type, observedAt, serialize({ value: group.value, episode_id: episode.episode_id }), now));
+        `).bind(edgeId, group.a, group.b, group.type, observedAt, serialize({ value: group.value, episode_id: episode.episode_id }), now));
         // A retried outbox event represents the same episode, not fresh
         // independent evidence. This table makes edge strength idempotent.
         statements.push(db.prepare(`
@@ -476,8 +498,6 @@ async function upsertClusterEdges(db, episode, wallets, observedAt, now) {
             edge_id, episode_id, observed_at, evidence_json, created_at
           ) VALUES (?1, ?2, ?3, ?4, ?5)
         `).bind(edgeId, episode.episode_id, observedAt, serialize({ value: group.value, relation_type: group.type }), now));
-      }
-    }
   }
   await runBatch(db, statements);
   const uniqueEdges = [...new Set(edgeIds)];
@@ -495,7 +515,7 @@ async function upsertClusterEdges(db, episode, wallets, observedAt, now) {
   `).bind(edgeId)));
 }
 
-async function refreshMarketBaselines(db, now) {
+async function refreshMarketBaselines(db, now, episode = null, horizon = null) {
   const result = await db.prepare(`
     SELECT e.mcap_band, e.liquidity_band, e.age_band, e.signal_family, o.horizon_minutes,
       COUNT(*) AS eligible_episodes,
@@ -505,23 +525,31 @@ async function refreshMarketBaselines(db, now) {
     FROM signal_episodes e
     JOIN signal_outcomes o ON o.episode_id = e.episode_id
     WHERE o.status = 'complete'
+      AND o.numeric_contract_version >= 2 AND o.entry_verified=1
       AND (julianday(o.evaluated_at) - julianday(o.due_at)) * 86400 BETWEEN 0 AND 3600.01
+      ${episode ? "AND e.mcap_band=?1 AND e.liquidity_band=?2 AND e.age_band=?3 AND e.signal_family=?4 AND o.horizon_minutes=?5" : ""}
     GROUP BY e.mcap_band, e.liquidity_band, e.age_band, e.signal_family, o.horizon_minutes
-  `).all();
+  `).bind(...(episode ? [episode.mcap_band, episode.liquidity_band, episode.age_band, episode.signal_family, horizon] : [])).all();
+  if (episode && !result.results?.length) {
+    await db.prepare(`UPDATE market_baselines SET numeric_contract_version=1 WHERE mcap_band=?1
+      AND liquidity_band=?2 AND age_band=?3 AND signal_family=?4 AND horizon_minutes=?5`)
+      .bind(episode.mcap_band,episode.liquidity_band,episode.age_band,episode.signal_family,horizon).run();
+  }
   const statements = (result.results || []).map((row) => {
     const key = [row.mcap_band, row.liquidity_band, row.age_band, row.signal_family, row.horizon_minutes].join("|");
     return db.prepare(`
       INSERT INTO market_baselines (
         baseline_key, mcap_band, liquidity_band, age_band, signal_family, horizon_minutes,
         eligible_episodes, hit_1_5x_rate, hit_2x_rate, hit_5x_rate,
-        median_max_return_pct, median_drawdown_pct, computed_through, updated_at
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, NULL, ?11, ?11)
+        median_max_return_pct, median_drawdown_pct, computed_through, updated_at,numeric_contract_version
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, NULL, ?11, ?11,2)
       ON CONFLICT(baseline_key) DO UPDATE SET
         eligible_episodes = excluded.eligible_episodes,
         hit_1_5x_rate = excluded.hit_1_5x_rate,
         hit_2x_rate = excluded.hit_2x_rate,
         hit_5x_rate = excluded.hit_5x_rate,
         computed_through = excluded.computed_through,
+        numeric_contract_version = 2,
         updated_at = excluded.updated_at
     `).bind(key, row.mcap_band, row.liquidity_band, row.age_band, row.signal_family, row.horizon_minutes,
       Number(row.eligible_episodes) || 0, number(row.hit_1_5x_rate, 0), number(row.hit_2x_rate, 0), number(row.hit_5x_rate, 0), now);
@@ -533,7 +561,7 @@ async function baselineRates(db) {
   const result = await db.prepare(`
     SELECT mcap_band, liquidity_band, age_band, signal_family, horizon_minutes, hit_2x_rate
     FROM market_baselines
-    WHERE horizon_minutes = 4320
+    WHERE horizon_minutes = 4320 AND numeric_contract_version >= 2
   `).all();
   const rows = new Map();
   for (const row of result.results || []) {
@@ -572,10 +600,14 @@ async function refreshWalletScores(db, walletAddresses, now) {
         AND w.cohort_role = 'at_catch'
         AND o.horizon_minutes = 4320
         AND o.status = 'complete'
+        AND o.numeric_contract_version >= 2 AND o.entry_verified=1
         AND (julianday(o.evaluated_at) - julianday(o.due_at)) * 86400 BETWEEN 0 AND 3600.01
     `).bind(wallet).all();
     const rows = result.results || [];
-    if (!rows.length) continue;
+    if (!rows.length) {
+      await db.prepare("UPDATE wallet_scores SET numeric_contract_version=1 WHERE wallet_address=?1").bind(wallet).run();
+      continue;
+    }
     const episodes = rows.length;
     const tokens = new Set(rows.map((row) => row.token_address)).size;
     const wins = rows.filter((row) => number(row.max_return_pct, -Infinity) >= 100).length;
@@ -598,8 +630,8 @@ async function refreshWalletScores(db, walletAddresses, now) {
         wins_5x_7d, raw_hit_rate_2x, baseline_hit_rate_2x, bayesian_hit_rate_2x,
         lift_2x, median_lead_minutes, median_retained_24h, median_max_return_72h,
         median_drawdown_72h, edge_score, confidence, first_seen_at, last_seen_at,
-        computed_through, score_version, updated_at
-      ) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?9, ?10, NULL, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?17)
+        computed_through, score_version, updated_at,numeric_contract_version
+      ) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?9, ?10, NULL, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?17,2)
       ON CONFLICT(wallet_address) DO UPDATE SET
         eligible_episodes = excluded.eligible_episodes,
         distinct_tokens = excluded.distinct_tokens,
@@ -618,6 +650,7 @@ async function refreshWalletScores(db, walletAddresses, now) {
         last_seen_at = excluded.last_seen_at,
         computed_through = excluded.computed_through,
         score_version = excluded.score_version,
+        numeric_contract_version = 2,
         updated_at = excluded.updated_at
     `).bind(
       wallet, episodes, tokens, wins15, wins, rawRate, baselineRate, bayesianRate, lift,
@@ -631,84 +664,11 @@ async function refreshWalletScores(db, walletAddresses, now) {
 
 async function refreshClusters(db, walletAddresses, now) {
   const wallets = [...new Set(walletAddresses.filter(Boolean))];
-  if (wallets.length < 2) return 0;
-  const placeholders = wallets.map((_, index) => `?${index + 1}`).join(", ");
-  // Numbered parameters are intentionally reused for wallet_a and wallet_b;
-  // D1 expects one bound value per distinct placeholder.
-  const result = await db.prepare(`
-    SELECT wallet_a, wallet_b, relation_type, weight, first_seen_at, last_seen_at
-    FROM wallet_cluster_edges
-    WHERE wallet_a IN (${placeholders}) OR wallet_b IN (${placeholders})
-  `).bind(...wallets).all();
-  const parent = new Map();
-  const find = (value) => {
-    if (!parent.has(value)) parent.set(value, value);
-    if (parent.get(value) !== value) parent.set(value, find(parent.get(value)));
-    return parent.get(value);
-  };
-  const join = (left, right) => {
-    const a = find(left);
-    const b = find(right);
-    if (a !== b) parent.set(b, a);
-  };
-  for (const edge of result.results || []) {
-    if (number(edge.weight, 0) >= 1) join(edge.wallet_a, edge.wallet_b);
-  }
-  const components = new Map();
-  for (const wallet of parent.keys()) {
-    const root = find(wallet);
-    const rows = components.get(root) || [];
-    rows.push(wallet);
-    components.set(root, rows);
-  }
-  let count = 0;
-  for (const members of components.values()) {
-    if (members.length < 2) continue;
-    const sorted = members.sort();
-    const clusterId = `cluster:${hash(sorted.join("|"))}`;
-    const memberPlaceholders = sorted.map((_, index) => `?${index + 1}`).join(", ");
-    const scoreRows = await db.prepare(`
-      SELECT edge_score, lift_2x, eligible_episodes, wins_2x_72h, confidence, first_seen_at, last_seen_at
-      FROM wallet_scores WHERE wallet_address IN (${memberPlaceholders})
-    `).bind(...sorted).all();
-    const scores = scoreRows.results || [];
-    const edgeScore = median(scores.map((row) => number(row.edge_score, 0))) || 0;
-    const lift = median(scores.map((row) => number(row.lift_2x)).filter((value) => value !== null));
-    const episodes = scores.reduce((sum, row) => sum + (Number(row.eligible_episodes) || 0), 0);
-    const wins = scores.reduce((sum, row) => sum + (Number(row.wins_2x_72h) || 0), 0);
-    const confidence = scores.some((row) => row.confidence === "validated") ? "validated" : scores.some((row) => row.confidence === "emerging") ? "emerging" : "unproven";
-    const linked = (result.results || []).filter((edge) => sorted.includes(edge.wallet_a) && sorted.includes(edge.wallet_b));
-    const relations = [...new Set(linked.map((edge) => edge.relation_type))];
-    const firstSeen = linked.map((edge) => edge.first_seen_at).sort()[0] || now;
-    const lastSeen = linked.map((edge) => edge.last_seen_at).sort().at(-1) || now;
-    await db.prepare(`
-      INSERT INTO wallet_clusters (
-        cluster_id, confidence, wallet_count, eligible_episodes, wins_2x_72h, lift_2x,
-        edge_score, relation_types_json, first_seen_at, last_seen_at, computed_through, updated_at
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
-      ON CONFLICT(cluster_id) DO UPDATE SET
-        confidence = excluded.confidence,
-        wallet_count = excluded.wallet_count,
-        eligible_episodes = excluded.eligible_episodes,
-        wins_2x_72h = excluded.wins_2x_72h,
-        lift_2x = excluded.lift_2x,
-        edge_score = excluded.edge_score,
-        relation_types_json = excluded.relation_types_json,
-        last_seen_at = excluded.last_seen_at,
-        computed_through = excluded.computed_through,
-        updated_at = excluded.updated_at
-    `).bind(clusterId, confidence, sorted.length, episodes, wins, lift, edgeScore, serialize(relations), firstSeen, lastSeen, now).run();
-    const statements = sorted.map((wallet) => db.prepare(`
-      INSERT INTO wallet_cluster_members (cluster_id, wallet_address, first_seen_at, last_seen_at, membership_weight)
-      VALUES (?1, ?2, ?3, ?4, 1)
-      ON CONFLICT(cluster_id, wallet_address) DO UPDATE SET
-        last_seen_at = excluded.last_seen_at,
-        membership_weight = excluded.membership_weight
-    `).bind(clusterId, wallet, firstSeen, lastSeen));
-    await runBatch(db, statements);
-    count += 1;
-  }
-  return count;
+  if (!wallets.length) return 0;
+  const state = {};
+  const job = `legacy:${hash(wallets.sort().join("|") + now)}`;
+  while (!await stepClusterJob(db, job, state, wallets, now)) { /* Direct ingestion has no durable queue cursor. */ }
+  return 1;
 }
 
 async function ingestHistoryEvent(env, rawEvent, now = nowIso(), derived = null) {
@@ -784,7 +744,7 @@ export async function refreshHistoryDerivedBatch(env, derived, now = nowIso()) {
 
 // The optional write hook reserves quota before each single-row upsert/batch.
 // This adapter deliberately has no operational RADAR_DB or archive dependency.
-function checkedHistoryDb(db, onWrite) {
+function checkedHistoryDb(db, onWrite, onQuery = () => {}) {
   const check = result => {
     if (result?.success === false) throw new Error(result.error || "history_d1_write_failed");
     return result;
@@ -792,13 +752,14 @@ function checkedHistoryDb(db, onWrite) {
   const wrap = statement => ({
     statement,
     bind(...values) { return wrap(statement.bind(...values)); },
-    async run() { onWrite(1); return check(await statement.run()); },
-    async all() { return check(await statement.all()); },
-    async first(...args) { return statement.first(...args); },
+    async run() { onQuery(); onWrite(1); return check(await statement.run()); },
+    async all() { onQuery(); return check(await statement.all()); },
+    async first(...args) { onQuery(); return statement.first(...args); },
   });
   return {
     prepare(sql) { return wrap(db.prepare(sql)); },
     async batch(statements) {
+      onQuery();
       onWrite(statements.length);
       const results = await db.batch(statements.map(item => item.statement));
       if (!Array.isArray(results) || results.length !== statements.length) throw new Error("history_d1_batch_incomplete");
@@ -876,6 +837,21 @@ export async function flushHistoryOutbox(env, { limit = OUTBOX_BATCH_SIZE } = {}
     ORDER BY next_attempt_at ASC, created_at ASC
     LIMIT ?2
   `).bind(now, Math.max(1, Math.min(50, Number(limit) || OUTBOX_BATCH_SIZE))).all();
+  if (env.HISTORY_QUEUE) {
+    // Forward legacy payloads intact. A durable enqueue is NOT an archive
+    // acknowledgement: retain the old pending row until its receipt is delivered.
+    const {enqueueDurableHistory,durableHistoryReceipts}=await import("./runtime-history.js");
+    const rows=(page.results || []).slice(0,25);
+    if (rows.length) {
+      await enqueueDurableHistory(env,{history_ledger:{events:rows.map(row=>parsePayload(row.payload_json))}});
+    }
+    const {receipts}=await durableHistoryReceipts(env,rows.map(row=>row.event_id));
+    const delivered=receipts.filter(row=>row.status==="delivered");
+    await runBatch(env.RADAR_DB,delivered.map(row=>env.RADAR_DB.prepare(`UPDATE history_outbox
+      SET status='delivered',delivered_at=?2,updated_at=?2,last_error=NULL WHERE event_id=?1`).bind(row.event_id,now)));
+    return {enabled:true,forwarded:rows.length,delivered:delivered.length,pending:rows.length-delivered.length,
+      storage_source:"durable_history_queue",pending_capped:rows.length>0};
+  }
   let delivered = 0;
   let failed = 0;
   const derived = { refreshBaseline: false, scoreWallets: new Set(), clusterWallets: new Set() };
@@ -939,6 +915,16 @@ function qualityCounts(rows) {
   return counts;
 }
 
+function publicOutcomeRow(row, fields, statusField) {
+  const trusted=row.outcome_numeric_version>=2 && row.outcome_entry_verified===1;
+  const projected={...row,outcome_trusted:trusted};
+  if (!trusted) {
+    for (const field of fields) projected[field]=null;
+    if (projected[statusField]==="complete") projected[statusField]="legacy_unverified";
+  }
+  return projected;
+}
+
 export async function historyOverview(env, windowValue = "90d") {
   if (!hasHistoryDb(env)) throw new Error("history_db_not_configured");
   const window = validWindow(windowValue);
@@ -950,21 +936,21 @@ export async function historyOverview(env, windowValue = "90d") {
     env.RADAR_HISTORY_DB.prepare(`
       SELECT
         o.episode_id,
-        o.status,
+        CASE WHEN o.numeric_contract_version<2 OR o.entry_verified<>1 THEN 'legacy_unverified' ELSE o.status END status,
         o.max_return_pct,
         o.tradable_2x,
-        MAX(CASE WHEN w.prior_edge_confidence = 'validated' THEN 1 ELSE 0 END) AS has_validated_edge
+        MAX(CASE WHEN w.prior_edge_confidence = 'validated' AND w.numeric_contract_version>=2 THEN 1 ELSE 0 END) AS has_validated_edge
       FROM signal_outcomes o
       JOIN signal_episodes e ON e.episode_id = o.episode_id
       LEFT JOIN signal_wallets w ON w.episode_id = e.episode_id AND w.cohort_role = 'at_catch'
       WHERE o.horizon_minutes = 4320 ${since ? "AND e.caught_at >= ?1" : ""}
       GROUP BY o.episode_id
     `).bind(...binds).all(),
-    env.RADAR_HISTORY_DB.prepare(`SELECT COUNT(*) AS count FROM wallet_scores WHERE confidence != 'unproven'`).first(),
-    env.RADAR_HISTORY_DB.prepare(`SELECT COUNT(*) AS count FROM wallet_clusters WHERE confidence != 'unproven'`).first(),
+    env.RADAR_HISTORY_DB.prepare(`SELECT COUNT(*) AS count FROM wallet_scores WHERE confidence != 'unproven' AND numeric_contract_version>=2`).first(),
+    env.RADAR_HISTORY_DB.prepare(`SELECT COUNT(*) AS count FROM wallet_clusters WHERE confidence != 'unproven' AND active=1 AND numeric_contract_version>=2`).first(),
   ]);
   const rows = outcomes.results || [];
-  const complete = rows.filter((row) => row.status === "complete");
+  const complete = rows.filter((row) => row.status === "complete" && row.max_return_pct !== null);
   const winners = complete.filter((row) => Number(row.max_return_pct) >= 100 && Number(row.tradable_2x) === 1);
   const confirmed = complete.filter((row) => Number(row.has_validated_edge) === 1);
   const confirmedWinners = confirmed.filter((row) => Number(row.max_return_pct) >= 100 && Number(row.tradable_2x) === 1);
@@ -984,6 +970,8 @@ export async function historyOverview(env, windowValue = "90d") {
     emerging_or_validated_wallets: Number(wallets?.count) || 0,
     emerging_or_validated_clusters: Number(clusters?.count) || 0,
     outcome_quality: quality,
+    numeric_contract_version: 2,
+    legacy_unverified_72h: quality.legacy_unverified || 0,
     history_fresh_at: nowIso(),
     shadow_mode: true,
   };
@@ -1014,20 +1002,29 @@ export async function historyWallets(env, query = {}) {
   const minLift = Math.max(0, Number(query.min_lift) || 0);
   const minSample = Math.max(0, Number(query.min_sample) || 0);
   const cursor = decodeCursor(query.cursor);
-  const where = ["edge_score >= ?1", "eligible_episodes >= ?2"];
+  if (query.cursor && !cursor) throw new Error("wallet_cursor_invalid_or_obsolete");
+  const where = ["numeric_contract_version>=2", "edge_score >= ?1", "eligible_episodes >= ?2"];
   const binds = [0, minSample];
   if (confidence) { where.push(`confidence = ?${binds.length + 1}`); binds.push(confidence); }
   if (minLift) { where.push(`lift_2x >= ?${binds.length + 1}`); binds.push(minLift); }
-  if (cursor?.score !== undefined && cursor?.wallet) {
-    where.push(`(edge_score < ?${binds.length + 1} OR (edge_score = ?${binds.length + 1} AND wallet_address > ?${binds.length + 2}))`);
-    binds.push(cursor.score, cursor.wallet);
+  if (cursor) {
+    if (cursor.v !== 2 || !Number.isFinite(cursor.score) || !Number.isFinite(cursor.sample)
+        || (cursor.lift !== null && !Number.isFinite(cursor.lift)) || typeof cursor.wallet !== "string") {
+      throw new Error("wallet_cursor_invalid_or_obsolete");
+    }
+    const [s, l, n, w] = [1, 2, 3, 4].map(offset => `?${binds.length + offset}`);
+    const lowerLift = cursor.lift === null ? "0" : `(lift_2x < ${l} OR lift_2x IS NULL)`;
+    where.push(`(edge_score < ${s} OR (edge_score = ${s} AND (${lowerLift}
+      OR (lift_2x IS ${l} AND (eligible_episodes < ${n}
+        OR (eligible_episodes = ${n} AND wallet_address > ${w}))))))`);
+    binds.push(cursor.score, cursor.lift, cursor.sample, cursor.wallet);
   }
   binds.push(limit + 1);
   const result = await env.RADAR_HISTORY_DB.prepare(`
     SELECT wallet_address, eligible_episodes, distinct_tokens, wins_1_5x_72h, wins_2x_72h,
       raw_hit_rate_2x, baseline_hit_rate_2x, bayesian_hit_rate_2x, lift_2x,
       median_lead_minutes, median_retained_24h, median_max_return_72h,
-      median_drawdown_72h, edge_score, confidence, first_seen_at, last_seen_at, computed_through
+      median_drawdown_72h, edge_score, confidence, first_seen_at, last_seen_at, computed_through,numeric_contract_version
     FROM wallet_scores
     WHERE ${where.join(" AND ")}
     ORDER BY edge_score DESC, lift_2x DESC, eligible_episodes DESC, wallet_address ASC
@@ -1036,7 +1033,8 @@ export async function historyWallets(env, query = {}) {
   const rows = (result.results || []).slice(0, limit);
   const hasMore = (result.results || []).length > limit;
   const last = rows.at(-1);
-  return { ok: true, rows, next_cursor: hasMore && last ? encodeCursor({ score: last.edge_score, wallet: last.wallet_address }) : null };
+  return { ok: true, rows, next_cursor: hasMore && last ? encodeCursor({ v: 2, score: last.edge_score,
+    lift: last.lift_2x, sample: last.eligible_episodes, wallet: last.wallet_address }) : null };
 }
 
 export async function historyWalletDetail(env, wallet) {
@@ -1047,8 +1045,10 @@ export async function historyWalletDetail(env, wallet) {
     env.RADAR_HISTORY_DB.prepare("SELECT * FROM wallet_scores WHERE wallet_address = ?1").bind(address).first(),
     env.RADAR_HISTORY_DB.prepare(`
       SELECT e.episode_id, e.token_address, e.symbol, e.caught_at, e.caught_mcap_usd, e.caught_tier,
-        e.signal_family, w.buy_sol, w.bought_tokens, w.prior_edge_confidence,
-        o.max_return_pct, o.max_drawdown_pct, o.return_pct, o.status
+        e.signal_family, w.buy_sol, w.bought_tokens,
+        CASE WHEN w.numeric_contract_version>=2 THEN w.prior_edge_confidence END prior_edge_confidence,
+        o.max_return_pct, o.max_drawdown_pct, o.return_pct, o.status,
+        o.numeric_contract_version outcome_numeric_version,o.entry_verified outcome_entry_verified
       FROM signal_wallets w
       JOIN signal_episodes e ON e.episode_id = w.episode_id
       LEFT JOIN signal_outcomes o ON o.episode_id = e.episode_id AND o.horizon_minutes = 4320
@@ -1056,17 +1056,30 @@ export async function historyWalletDetail(env, wallet) {
       ORDER BY e.caught_at DESC LIMIT 100
     `).bind(address).all(),
     env.RADAR_HISTORY_DB.prepare(`
-      SELECT episode_id, observed_at, current_token_balance, balance_retained_pct, behavior_status, coverage_status
-      FROM wallet_observations WHERE wallet_address = ?1 ORDER BY observed_at DESC LIMIT 100
+      SELECT episode_id, observed_at, current_token_balance, balance_retained_pct, behavior_status, coverage_status,numeric_contract_version
+      FROM wallet_observations legacy WHERE wallet_address = ?1 AND (numeric_contract_version>=2 OR NOT EXISTS (
+        SELECT 1 FROM wallet_observation_bundles b,json_each(b.observations_json) j WHERE b.episode_id=legacy.episode_id
+          AND b.observed_at=legacy.observed_at AND json_extract(j.value,'$.wallet_address')=legacy.wallet_address))
+      UNION ALL
+      SELECT b.episode_id,b.observed_at,json_extract(j.value,'$.current_token_balance'),
+        json_extract(j.value,'$.balance_retained_pct'),json_extract(j.value,'$.behavior_status'),json_extract(j.value,'$.coverage_status'),b.numeric_contract_version
+      FROM wallet_observation_bundles b,json_each(b.observations_json) j
+      WHERE json_extract(j.value,'$.wallet_address')=?1 AND NOT EXISTS (
+        SELECT 1 FROM wallet_observations legacy WHERE legacy.episode_id=b.episode_id
+          AND legacy.observed_at=b.observed_at AND legacy.wallet_address=?1 AND legacy.numeric_contract_version>=2)
+      ORDER BY observed_at DESC LIMIT 100
     `).bind(address).all(),
     env.RADAR_HISTORY_DB.prepare(`
       SELECT c.cluster_id, c.confidence, c.wallet_count, c.lift_2x, c.edge_score, c.relation_types_json
       FROM wallet_cluster_members m JOIN wallet_clusters c ON c.cluster_id = m.cluster_id
-      WHERE m.wallet_address = ?1 ORDER BY c.edge_score DESC
+      WHERE m.wallet_address = ?1 AND c.active=1 AND c.numeric_contract_version>=2 ORDER BY c.edge_score DESC
     `).bind(address).all(),
   ]);
   if (!score && !(episodes.results || []).length) throw new Error("wallet_not_found");
-  return { ok: true, wallet: address, score: score || null, episodes: episodes.results || [], observations: observations.results || [], clusters: (clusters.results || []).map((row) => ({ ...row, relation_types: parsePayload(row.relation_types_json, []) })) };
+  return { ok: true, wallet: address, score: score ? {...score,trusted:score.numeric_contract_version>=2} : null,
+    episodes: (episodes.results || []).map(row=>publicOutcomeRow(row,["max_return_pct","max_drawdown_pct","return_pct"],"status")),
+    observations: (observations.results || []).map(row=>({...row,trusted:row.numeric_contract_version>=2})),
+    clusters: (clusters.results || []).map((row) => ({ ...row, relation_types: parsePayload(row.relation_types_json, []) })) };
 }
 
 export async function historyClusters(env, query = {}) {
@@ -1074,8 +1087,8 @@ export async function historyClusters(env, query = {}) {
   const limit = Math.max(1, Math.min(100, Number(query.limit) || 50));
   const result = await env.RADAR_HISTORY_DB.prepare(`
     SELECT cluster_id, confidence, wallet_count, eligible_episodes, wins_2x_72h, lift_2x,
-      edge_score, relation_types_json, first_seen_at, last_seen_at, computed_through
-    FROM wallet_clusters ORDER BY edge_score DESC, lift_2x DESC, wallet_count DESC LIMIT ?1
+      edge_score, relation_types_json, first_seen_at, last_seen_at, computed_through,numeric_contract_version
+    FROM wallet_clusters WHERE active=1 AND numeric_contract_version>=2 ORDER BY edge_score DESC, lift_2x DESC, wallet_count DESC LIMIT ?1
   `).bind(limit).all();
   return { ok: true, rows: (result.results || []).map((row) => ({ ...row, relation_types: parsePayload(row.relation_types_json, []) })) };
 }
@@ -1093,13 +1106,13 @@ export async function historyClusterDetail(env, clusterId) {
     `).bind(id).all(),
     env.RADAR_HISTORY_DB.prepare(`
       SELECT e.* FROM wallet_cluster_edges e
-      WHERE e.wallet_a IN (SELECT wallet_address FROM wallet_cluster_members WHERE cluster_id = ?1)
+      WHERE e.is_infrastructure=0 AND e.wallet_a IN (SELECT wallet_address FROM wallet_cluster_members WHERE cluster_id = ?1)
         AND e.wallet_b IN (SELECT wallet_address FROM wallet_cluster_members WHERE cluster_id = ?1)
       ORDER BY e.weight DESC LIMIT 100
     `).bind(id).all(),
   ]);
   if (!cluster) throw new Error("cluster_not_found");
-  return { ok: true, cluster: { ...cluster, relation_types: parsePayload(cluster.relation_types_json, []) }, members: members.results || [], edges: (edges.results || []).map((row) => ({ ...row, evidence: parsePayload(row.evidence_json, {}) })) };
+  return { ok: true, cluster: { ...cluster,trusted:cluster.numeric_contract_version>=2, relation_types: parsePayload(cluster.relation_types_json, []) }, members: members.results || [], edges: (edges.results || []).map((row) => ({ ...row, evidence: parsePayload(row.evidence_json, {}) })) };
 }
 
 export async function historyEpisodes(env, query = {}) {
@@ -1112,8 +1125,9 @@ export async function historyEpisodes(env, query = {}) {
       e.caught_mcap_usd, e.caught_tier, e.signal_family, e.data_quality_status,
       o.return_pct AS return_72h, o.max_return_pct AS max_return_72h,
       o.max_drawdown_pct AS max_drawdown_72h, o.status AS outcome_status,
-      MAX(CASE WHEN w.prior_edge_confidence = 'validated' THEN 1 ELSE 0 END) AS has_validated_edge,
-      MAX(CASE WHEN w.prior_edge_confidence = 'emerging' THEN 1 ELSE 0 END) AS has_emerging_edge
+      o.numeric_contract_version outcome_numeric_version,o.entry_verified outcome_entry_verified,
+      MAX(CASE WHEN w.prior_edge_confidence = 'validated' AND w.numeric_contract_version>=2 THEN 1 ELSE 0 END) AS has_validated_edge,
+      MAX(CASE WHEN w.prior_edge_confidence = 'emerging' AND w.numeric_contract_version>=2 THEN 1 ELSE 0 END) AS has_emerging_edge
     FROM signal_episodes e
     LEFT JOIN signal_outcomes o ON o.episode_id = e.episode_id AND o.horizon_minutes = 4320
     LEFT JOIN signal_wallets w ON w.episode_id = e.episode_id AND w.cohort_role = 'at_catch'
@@ -1122,7 +1136,7 @@ export async function historyEpisodes(env, query = {}) {
     ORDER BY e.caught_at DESC
     LIMIT ?${since ? 2 : 1}
   `).bind(...(since ? [since, limit] : [limit])).all();
-  return { ok: true, window, rows: result.results || [] };
+  return { ok: true, window, rows: (result.results || []).map(row=>publicOutcomeRow(row,["return_72h","max_return_72h","max_drawdown_72h"],"outcome_status")) };
 }
 
 export async function historyEpisodeDetail(env, episodeIdValue) {
@@ -1137,11 +1151,25 @@ export async function historyEpisodeDetail(env, episodeIdValue) {
       FROM signal_wallets w LEFT JOIN wallet_scores s ON s.wallet_address = w.wallet_address
       WHERE w.episode_id = ?1 ORDER BY w.buy_sol DESC LIMIT 100
     `).bind(id).all(),
-    env.RADAR_HISTORY_DB.prepare("SELECT * FROM wallet_observations WHERE episode_id = ?1 ORDER BY observed_at DESC LIMIT 250").bind(id).all(),
+    env.RADAR_HISTORY_DB.prepare(`SELECT * FROM wallet_observations legacy WHERE episode_id=?1
+      AND (numeric_contract_version>=2 OR NOT EXISTS (SELECT 1 FROM wallet_observation_bundles b,json_each(b.observations_json) j
+        WHERE b.episode_id=legacy.episode_id AND b.observed_at=legacy.observed_at
+          AND json_extract(j.value,'$.wallet_address')=legacy.wallet_address))
+      UNION ALL SELECT b.episode_id,json_extract(j.value,'$.wallet_address'),b.observed_at,
+        json_extract(j.value,'$.current_token_balance'),json_extract(j.value,'$.balance_retained_pct'),
+        json_extract(j.value,'$.additional_buy_tokens'),json_extract(j.value,'$.outbound_transfer_tokens'),
+        json_extract(j.value,'$.behavior_status'),json_extract(j.value,'$.estimated_pnl_pct'),
+        json_extract(j.value,'$.estimated_pnl_sol'),json_extract(j.value,'$.coverage_status'),json_extract(j.value,'$.raw_object_key'),b.numeric_contract_version
+      FROM wallet_observation_bundles b,json_each(b.observations_json) j WHERE b.episode_id=?1 AND NOT EXISTS (
+        SELECT 1 FROM wallet_observations legacy WHERE legacy.episode_id=b.episode_id AND legacy.observed_at=b.observed_at
+          AND legacy.wallet_address=json_extract(j.value,'$.wallet_address') AND legacy.numeric_contract_version>=2)
+      ORDER BY observed_at DESC LIMIT 250`).bind(id).all(),
     env.RADAR_HISTORY_DB.prepare("SELECT * FROM signal_outcomes WHERE episode_id = ?1 ORDER BY horizon_minutes ASC").bind(id).all(),
   ]);
   if (!episode) throw new Error("episode_not_found");
-  return { ok: true, episode, events: (events.results || []).map((row) => ({ ...row, payload: parsePayload(row.payload_json, {}) })), wallets: wallets.results || [], observations: observations.results || [], outcomes: outcomes.results || [] };
+  return { ok: true, episode, events: (events.results || []).map((row) => ({ ...row, payload: parsePayload(row.payload_json, {}) })), wallets: wallets.results || [],
+    observations: (observations.results || []).map(row=>({...row,trusted:row.numeric_contract_version>=2})),
+    outcomes: (outcomes.results || []).map(row=>({...row,trusted:row.numeric_contract_version>=2 && row.entry_verified===1})) };
 }
 
 export async function historyTokenDetail(env, tokenKey) {
@@ -1151,11 +1179,11 @@ export async function historyTokenDetail(env, tokenKey) {
   const result = await env.RADAR_HISTORY_DB.prepare(`
     SELECT e.episode_id, e.caught_at, e.caught_mcap_usd, e.caught_tier,
       e.signal_family, e.data_quality_status, o.max_return_pct, o.return_pct,
-      o.status AS outcome_status,
-      COUNT(DISTINCT CASE WHEN w.prior_edge_confidence = 'validated' THEN w.wallet_address END) AS validated_wallets,
-      COUNT(DISTINCT CASE WHEN w.prior_edge_confidence = 'emerging' THEN w.wallet_address END) AS emerging_wallets,
-      MAX(w.prior_edge_score) AS edge_at_catch_score,
-      MAX(s.edge_score) AS edge_now_score
+      o.status AS outcome_status,o.numeric_contract_version outcome_numeric_version,o.entry_verified outcome_entry_verified,
+      COUNT(DISTINCT CASE WHEN w.prior_edge_confidence = 'validated' AND w.numeric_contract_version>=2 THEN w.wallet_address END) AS validated_wallets,
+      COUNT(DISTINCT CASE WHEN w.prior_edge_confidence = 'emerging' AND w.numeric_contract_version>=2 THEN w.wallet_address END) AS emerging_wallets,
+      MAX(CASE WHEN w.numeric_contract_version>=2 THEN w.prior_edge_score END) AS edge_at_catch_score,
+      MAX(CASE WHEN s.numeric_contract_version>=2 THEN s.edge_score END) AS edge_now_score
     FROM signal_episodes e
     LEFT JOIN signal_outcomes o ON o.episode_id = e.episode_id AND o.horizon_minutes = 4320
     LEFT JOIN signal_wallets w ON w.episode_id = e.episode_id AND w.cohort_role = 'at_catch'
@@ -1164,7 +1192,7 @@ export async function historyTokenDetail(env, tokenKey) {
     GROUP BY e.episode_id
     ORDER BY e.caught_at DESC LIMIT 12
   `).bind(token).all();
-  const episodes = result.results || [];
+  const episodes = (result.results || []).map(row=>publicOutcomeRow(row,["max_return_pct","return_pct"],"outcome_status"));
   if (!episodes.length) return null;
   return { token_key: token, episodes, latest: episodes[0] };
 }
@@ -1186,4 +1214,20 @@ export async function historyStatus(env) {
   };
 }
 
-export { OUTCOME_HORIZONS, normalizedEpisode, normalizedOutcome, historyEventId };
+const SERVICE_KINDS = new Set(["service", "cex", "exchange", "bridge", "router", "relay", "lifi",
+  "terminal", "executor", "pool", "burn", "program"]);
+const BUILTIN_INFRA = new Set(["So11111111111111111111111111111111111111112",
+  "1nc1nerator11111111111111111111111111111111111", "11111111111111111111111111111111"]);
+
+export function infrastructureSource(value, row = {}, episode = {}, extra = []) {
+  const kinds = [row.source_kind,
+    ...(row.common_funder === value ? [row.common_funder_kind] : []),
+    ...(row.common_executor === value ? [row.common_executor_kind] : [])];
+  return BUILTIN_INFRA.has(value) || extra.includes(value)
+    || [episode.pool_address, episode.token_address].includes(value)
+    || kinds.some(kind=>SERVICE_KINDS.has(String(kind || "").toLowerCase())) || row.supporting_only === true;
+}
+
+export { OUTCOME_HORIZONS, normalizedEpisode, normalizedWallet, normalizedOutcome, historyEventId,
+  hash, serialize, number, runBatch, checkedHistoryDb, existingPriorScores, upsertEpisode, upsertEpisodeEvent,
+  upsertWallets, upsertOutcomes, upsertClusterEdges, refreshMarketBaselines, refreshWalletScores };

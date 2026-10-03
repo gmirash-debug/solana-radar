@@ -1,6 +1,6 @@
 // Operational documents are independent of the analytics database's quota.
 import {compactDashboardReport, compactDashboardAlert, dashboardRecordMatchesToken} from "./dashboard-shaping.js";
-import {isContentId, validateBlob, documentReferences, validateReferences, collectOldBlobs} from "./runtime-documents.js";
+import {isContentId, validateBlob, documentReferences, validateReferences, collectOldBlobs, protectSupersededBlobs} from "./runtime-documents.js";
 const MAX_BYTES = 8 * 1024 * 1024;
 const CHUNK_CHARS = 32000;
 
@@ -98,6 +98,10 @@ export class RuntimeSnapshots {
           return {accepted:false, ignored:"stale_checkpoint", updated_at:previous.updated_at};
         }
         await validateReferences(tx, name, refs);
+        if (!blob && previous && (name === "dashboard" || name.startsWith("checkpoint:"))) {
+          const old = await readDocument(tx, name);
+          await protectSupersededBlobs(tx, name, documentReferences(old.value, name), refs);
+        }
         const chunkChars = /^[\x00-\x7f]*$/.test(serialized) ? 64000 : CHUNK_CHARS;
         const chunks = Math.ceil(serialized.length / chunkChars);
         const values = {};
@@ -115,7 +119,9 @@ export class RuntimeSnapshots {
           const removed = Array.from({length:previous.chunks - chunks}, (_, i) => `${name}:part:${chunks + i}`);
           for (let i = 0; i < removed.length; i += 128) await tx.delete(removed.slice(i, i + 128));
         }
-        if (!blob && refs.length) await collectOldBlobs(tx, name, new Set(refs.map(ref => ref.id)));
+        if (!blob && (name === "dashboard" || name.startsWith("checkpoint:"))) {
+          await collectOldBlobs(tx, name, new Set(refs.map(ref => ref.id)));
+        }
         return {accepted:true, ...meta};
       });
       return Response.json({ok:true, ...result});

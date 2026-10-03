@@ -33,8 +33,24 @@ function positiveNumber(...values) {
 }
 
 export function timestampMs(value) {
-  const parsed = new Date(value || 0).getTime();
+  const numericTime = typeof value === "number" ? value
+    : typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value) ? Number(value) : null;
+  const parsed = numericTime !== null
+    ? numericTime * (numericTime < 100_000_000_000 ? 1000 : 1)
+    : typeof value === "string" && value.trim() ? Date.parse(value) : 0;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+export function marketQuoteSnapshot(pool = {}, fallbackAt = null) {
+  const source = pool.source || pool.market_source || null;
+  return {
+    at: pool.market_snapshot_at_iso || pool.market_snapshot_at
+      || pool.current_market_verified_at || pool.latest_seen_at || pool.scan_mcap_at
+      || (source === "registry" ? null : fallbackAt),
+    stale: pool.market_snapshot_stale === true,
+    error: pool.market_snapshot_error || null,
+    source,
+  };
 }
 
 export function compareTokensByCatchNewest(a = {}, b = {}) {
@@ -102,23 +118,19 @@ export function resolveSignalEpisodes({ alerts = [], market = {}, thesis = null 
 
 export function resolveCurrentMarket({ pool = {}, latestObservation = null, now = Date.now(), maxAgeMs = MARKET_SNAPSHOT_MAX_AGE_MS } = {}) {
   const directReportSnapshot = ["universe", "active", "summary"].includes(pool._snapshot_source);
-  const observedAt = directReportSnapshot
-    ? pool._observed_at || null
-    : pool.current_market_verified_at
-      || pool.latest_seen_at
-      || pool.market_snapshot_at
-      || pool.scan_mcap_at
-      || latestObservation?.at
-      || null;
-  const observedMs = timestampMs(observedAt);
-  const explicitlyStale = !directReportSnapshot && pool.market_snapshot_stale === true;
+  const quote = pool._quote_snapshot || marketQuoteSnapshot(pool,
+    directReportSnapshot ? pool._observed_at : latestObservation?.at);
+  const observedMs = timestampMs(quote.at);
+  const observedAt = observedMs ? new Date(observedMs).toISOString() : null;
+  const explicitlyStale = quote.stale === true;
   const hasValue = Boolean(directReportSnapshot
     ? positiveNumber(pool.mcap_usd)
     : positiveNumber(pool.latest_mcap_usd, pool.mcap_usd, pool.scan_mcap_usd, latestObservation?.mcap_usd));
-  const staleByAge = !observedMs || Math.max(0, Number(now) - observedMs) > maxAgeMs;
+  const staleByAge = !observedMs || observedMs - Number(now) > 5 * 60_000
+    || Number(now) - observedMs > maxAgeMs;
   const stale = explicitlyStale || staleByAge || !hasValue;
   const staleReason = explicitlyStale
-    ? pool.market_snapshot_error || "refresh failed"
+    ? quote.error || "refresh failed"
     : !hasValue
       ? "market value missing"
       : staleByAge
@@ -130,7 +142,7 @@ export function resolveCurrentMarket({ pool = {}, latestObservation = null, now 
     observedAt,
     observedMs,
     staleReason,
-    source: pool._snapshot_source || pool.market_source || pool.scan_source || latestObservation?.source || null,
+    source: quote.source || pool._snapshot_source || pool.scan_source || latestObservation?.source || null,
     mcapUsd: stale ? null : directReportSnapshot
       ? positiveNumber(pool.mcap_usd)
       : positiveNumber(pool.latest_mcap_usd, pool.mcap_usd, pool.scan_mcap_usd, latestObservation?.mcap_usd),

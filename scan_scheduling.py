@@ -46,6 +46,9 @@ def targeted_profile(config):
         "chainstack_rpc_credit_budget_per_scan": 2500,
         "helius_rpc_credit_budget_per_scan": 1000,
         "gmgn_ath_max_tokens_per_scan": 2,
+        "ath_max_tokens_per_scan": 2,
+        "reactivation_ath_preload_max_tokens_per_scan": 2,
+        "ath_filter_max_tokens_per_scan": 2,
     }
     result.update(overrides)
     result["lanes"] = {key: {**value, **overrides} for key, value in (config.get("lanes") or {}).items()}

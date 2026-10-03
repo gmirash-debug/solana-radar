@@ -234,7 +234,7 @@ class CoordinationPipelineTests(unittest.TestCase):
                  for at in (NOW - 1, NOW, NOW + 1)]
         self.assertEqual(s.resolved_cohort_sales(swaps + swaps, "buyer", s.iso(NOW), s.iso(NOW)), 10)
 
-    def test_post_window_sales_cap_overlay_through_actual_alert_builder(self):
+    def test_complete_post_window_sales_suppress_original_alert_despite_replacement_balances(self):
         item = alert()
         window = item["events"]
         for event in window:
@@ -254,13 +254,22 @@ class CoordinationPipelineTests(unittest.TestCase):
         with patch.object(s, "reactivation_wave_window_candidates", return_value=[candidate]), \
              patch.object(s, "analyze_wave_wallet_graph", return_value=item["wallet_graph"]), \
              patch.object(s, "utc_now", return_value=s.datetime.fromtimestamp(NOW, s.timezone.utc)), \
-             patch.object(s, "classify_alert_tier", return_value=("candidate", [], [], {})):
-            result = s.build_reactivation_wave_alerts(s.Pool("pool", token_address="token"), window + sales + sales, config, rpc)[0]
-        self.assertEqual(len(result["coordination_events"]), 3)
-        self.assertTrue(all(row["coordination_sold_tokens"] == 50 for row in result["wave"]["top_buyers"]))
-        s.attach_coordinated_activity(result, {})
-        self.assertEqual(result["coordinated_activity"]["metrics"]["held_supply_pct"], 0)
-        self.assertFalse(result["coordinated_activity"]["metrics"]["material_pattern"])
+             patch.object(s, "classify_alert_tier", return_value=("candidate", [], [], {})) as classify:
+            result = s.build_reactivation_wave_alerts(s.Pool("pool", token_address="token"), window + sales + sales, config, rpc)
+        self.assertEqual(result, [])
+        classify.assert_not_called()
+
+        item["created_at"] = s.iso(NOW - 20)
+        item["signal_confirmation"] = {"status": "confirmed", "reasons": []}
+        s.attach_coordinated_activity(item, {})
+        thesis = s.signal_thesis_from_alert(item, config)
+        s.refresh_signal_thesis(rpc, s.Pool("pool", token_address="token"),
+            {"signal_thesis": thesis}, [], config, s.iso(NOW), observed_swaps=sales + sales)
+        self.assertEqual(thesis["current_retained_tokens"], 0)
+        self.assertNotEqual(thesis["status"], "intact")
+        self.assertEqual(len(thesis["cohort_sale_events"]), 3)
+        self.assertEqual(thesis["coordinated_activity"]["metrics"]["held_supply_pct"], 0)
+        self.assertFalse(thesis["coordinated_activity"]["metrics"]["material_pattern"])
 
     def test_churn_inventory_is_not_inferred_from_the_sale_cap(self):
         trades = [{"owner":"buyer", "transaction":"buy-" + str(i), "timestamp":NOW - 100 + i,

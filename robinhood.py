@@ -22,6 +22,8 @@ from lifi_context import LifiClient
 from coordinated_activity import analyze_coordinated_activity
 
 CHAIN_ID = 4663
+ORDINARY_ATTRIBUTION_VERSION = 2
+LEGACY_ATTRIBUTION_WARNING = "Legacy ordinary-route buyers are unverified; original buy receipts need revalidation."
 FACTORY = "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
 PUBLIC_RPC = "https://rpc.mainnet.chain.robinhood.com"
 PUBLIC_NODE = "https://robinhood-rpc.publicnode.com"
@@ -334,11 +336,51 @@ def pool_log(log, pool):
     return log["address"].lower() == pool["pool"] and len(topics) == 3 and topics[0] == SWAP
 
 
+def unambiguous_pool_swaps(receipt, pool):
+    logs = receipt.get("logs", [])
+    # V4 settles all pools through one manager; its net cannot identify a pool
+    # output when more than one manager swap participates in the receipt.
+    if pool.get("protocol") == "v4" and sum(
+            log["address"].lower() == POOL_MANAGER and log.get("topics", [])[:1] == [SWAP_V4]
+            for log in logs) != 1:
+        return []
+    return [log for log in logs if pool_log(log, pool)]
+
+
+def pool_output_reaches(receipt, token, custody, wallet, bought):
+    """Prove a full, ordered transfer path without pre-funded intermediaries."""
+    balances, output = {}, 0
+    for log in receipt.get("logs", []):
+        topics = log.get("topics", [])
+        if log["address"].lower() != token or len(topics) != 3 or topics[0].lower() != TRANSFER:
+            continue
+        try:
+            amount = decode(["uint256"], bytes.fromhex(log["data"][2:]))[0]
+        except (DecodingError, ValueError):
+            raise RpcError("Invalid transfer data") from None
+        sender, recipient = [address("0x" + topic[-40:]) for topic in topics[1:]]
+        if not amount:
+            continue
+        if sender == custody:
+            output += amount
+            if output > bought:
+                return False
+        elif balances.get(sender, 0) < amount:
+            return False
+        else:
+            balances[sender] -= amount
+        if recipient == custody:
+            return False
+        balances[recipient] = balances.get(recipient, 0) + amount
+    return output == bought and balances.get(wallet) == bought and all(
+        amount == 0 for recipient, amount in balances.items() if recipient != wallet)
+
+
 def routed_buy(receipt, pool, base_index):
     """Attribute the transaction sender only when pool output reaches them in full."""
     if int(receipt.get("status", "0x0"), 16) != 1:
         return None
-    swaps = [x for x in receipt.get("logs", []) if pool_log(x, pool)]
+    swaps = unambiguous_pool_swaps(receipt, pool)
     if len(swaps) != 1:
         return None
     amounts = swap_amounts(swaps[0])
@@ -348,6 +390,8 @@ def routed_buy(receipt, pool, base_index):
     if bought <= 0 or paid <= 0 or wallet in (custody, pool["token"], ZERO):
         return None
     if transfer_net(receipt, pool["token"], wallet) != bought or transfer_net(receipt, pool["token"], custody) != -bought:
+        return None
+    if not pool_output_reaches(receipt, pool["token"], custody, wallet, bought):
         return None
     return wallet, bought
 
@@ -368,7 +412,7 @@ def relay_buy(receipt, pool, base_index, relay, allow_lookup=False):
 def verified_route_buy(receipt, pool, base_index, match):
     if not match or int(receipt.get("status", "0x0"), 16) != 1:
         return None
-    swaps = [x for x in receipt.get("logs", []) if pool_log(x, pool)]
+    swaps = unambiguous_pool_swaps(receipt, pool)
     if len(swaps) != 1:
         return None
     amounts = swap_amounts(swaps[0])
@@ -396,7 +440,7 @@ def beneficiary_buy(receipt, pool, base_index, rpc):
     """Unknown route: prove the sole EOA beneficiary, not its source chain."""
     if int(receipt.get("status", "0x0"), 16) != 1:
         return None
-    swaps = [x for x in receipt.get("logs", []) if pool_log(x, pool)]
+    swaps = unambiguous_pool_swaps(receipt, pool)
     if len(swaps) != 1:
         return None
     amounts = swap_amounts(swaps[0])
@@ -413,6 +457,8 @@ def beneficiary_buy(receipt, pool, base_index, rpc):
         return None
     wallet = recipients[0]
     if wallet in (ZERO, SOLVER, pool["token"], custody) or net[wallet] != bought:
+        return None
+    if not pool_output_reaches(receipt, pool["token"], custody, wallet, bought):
         return None
     if rpc.call("eth_getCode", [wallet, receipt["blockNumber"]]) != "0x":
         return None
@@ -707,6 +753,64 @@ def attach_coordination_evidence(row, events, store, config, balance_checked_at=
         "EVM preparation groups remain separate: per-wallet funding times and source identity are not available here.")
 
 
+def legacy_ordinary_cohort(cohort):
+    reason = cohort.get("cohort_reason") or cohort.get("reason")
+    routed = reason in {"Relay buy wave", "Cross-chain buy wave"} and bool(
+        cohort.get("relay_wave") or (cohort.get("relay") or {}).get("signal_wave"))
+    return bool(cohort.get("cohort_created_at") or cohort.get("created_at") or reason == "Distributed net buy wave") \
+        and not routed and cohort.get("ordinary_attribution_version") != ORDINARY_ATTRIBUTION_VERSION
+
+
+def original_buys_revalidated(frozen, buy_events):
+    expected = frozen.get("evidence_buys") or []
+    if not expected:
+        return False
+    try:
+        def identity(event):
+            return (event["transaction"], event["block"], event["block_hash"],
+                    event["recipient"], int(event["bought_raw"]))
+        if len({event["transaction"] for event in expected}) != len(expected):
+            return False
+        observed = {identity(event) for event in buy_events}
+        if any(identity(event) not in observed for event in expected):
+            return False
+        totals = Counter()
+        for event in expected:
+            totals[event["recipient"]] += int(event["bought_raw"])
+        wallets = {wallet["address"]: int(wallet["bought_raw"]) for wallet in frozen["wallets"]}
+        return len(wallets) == len(frozen["wallets"]) and totals == wallets
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def guard_legacy_ordinary_row(row, frozen=None):
+    if not legacy_ordinary_cohort(row):
+        return row
+    # Keep raw historical evidence, but do not publish its amounts as verified
+    # retention or rebuild position/preparation claims from an unproven buyer.
+    row.setdefault("legacy_ordinary_attribution", {
+        key: copy.deepcopy(row.get(key)) for key in ("wallets", "status", "position_flow", "preparation",
+            "coordinated_activity", "retained_supply_lower_bound_pct", "retained_supply_upper_bound_pct")})
+    if frozen is not None:
+        row["legacy_ordinary_attribution"] = copy.deepcopy(row["legacy_ordinary_attribution"])
+        row["legacy_ordinary_attribution"].setdefault("evidence_buys", copy.deepcopy(frozen.get("evidence_buys", [])))
+    row.update(cohort_attribution_status="legacy_unverified", attribution_complete=False,
+               retained_supply_lower_bound_pct=None, retained_supply_upper_bound_pct=None)
+    if row.get("status") not in {"risk", "queued", "check_failed"}:
+        row["status"] = "needs_data"
+    error = row.get("error") or ""
+    if LEGACY_ATTRIBUTION_WARNING not in error:
+        row["error"] = (error + "; " if error else "") + LEGACY_ATTRIBUTION_WARNING
+    row["wallets"] = [dict(wallet, retained_lower_bound_raw=None, retained_upper_bound_raw=None,
+                            retention_upper_bound_pct=None, supply_upper_bound_pct=None)
+                      for wallet in row.get("wallets", [])]
+    row["relay"] = dict(row.get("relay") or {}, coverage="partial")
+    for key in ("position_flow", "preparation", "coordinated_activity"):
+        row[key] = {"status": "pending" if key != "coordinated_activity" else "partial",
+                    "reason": LEGACY_ATTRIBUTION_WARNING}
+    return row
+
+
 def inspect_incremental(rpc, pool, start, head, config, store, session, now, relay=None, lifi=None):
     identity = store.get("pool:" + pool["pool"])
     if identity:
@@ -792,6 +896,9 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
         indexed_through_block=end, history_from_block=cursor["from_block"] if cursor else start,
         backlog_blocks=max(0, head - end), balance_block=head, retained_supply_upper_bound_pct=None)
     frozen = store.get("cohort:" + pool["key"])
+    if frozen and legacy_ordinary_cohort(frozen) and row["attribution_complete"] and row["history_complete"] \
+            and original_buys_revalidated(frozen, buy_events):
+        frozen["ordinary_attribution_version"] = ORDINARY_ATTRIBUTION_VERSION
     wave = buy_wave(relay_events, supply, config)
     if wave:
         wave["services"] = sorted({e.get("service", "Relay") for e in wave["events"]})
@@ -841,6 +948,8 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
                 "initial_supply_raw": str(supply), "initial_retained_raw": str(sum(int(w["retained_lower_bound_raw"]) for w in row["wallets"]))}
             if relay_enough:
                 frozen["relay_wave"] = copy.deepcopy(wave)
+            else:
+                frozen["ordinary_attribution_version"] = ORDINARY_ATTRIBUTION_VERSION
             frozen["evidence_buys"] = [e for e in buy_events if e["recipient"] in cohort]
             frozen["evidence_from_block"] = start
             frozen["evidence_to_block"] = head
@@ -851,7 +960,12 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
         row["cross_chain_at_catch"] = frozen.get("cross_chain_at_catch")
         store.put("cohort:" + pool["key"], frozen)
         row.update(wallets=frozen["wallets"], cohort_created_at=frozen["created_at"], cohort_checks=frozen["checks"],
-            cohort_reason=frozen["reason"], status="buy_wave" if frozen["checks"] < 2 else "retained")
+            cohort_reason=frozen["reason"], ordinary_attribution_version=frozen.get("ordinary_attribution_version"),
+            status="buy_wave" if frozen["checks"] < 2 else "retained")
+        if not legacy_ordinary_cohort(frozen):
+            row["cohort_attribution_status"] = "verified"
+            if LEGACY_ATTRIBUTION_WARNING in (row.get("error") or ""):
+                row["error"] = row["error"].replace(LEGACY_ATTRIBUTION_WARNING, "").strip("; ") or None
         if frozen.get("relay_wave"):
             row["relay"]["signal_wave"] = frozen["relay_wave"]
         lower = sum(int(w["retained_lower_bound_raw"]) for w in frozen["wallets"])
@@ -865,7 +979,7 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
         row["retained_supply_upper_bound_pct"] = 100 * sum(int(w["retained_upper_bound_raw"]) for w in row["wallets"]) / supply
     if risk["status"] == "risk":
         row["status"] = "risk"
-    if frozen:
+    if frozen and not legacy_ordinary_cohort(frozen):
         try:
             row["position_flow"] = position_check(rpc, pool, frozen, head, supply, store, index)
         except (RpcError, ValueError, KeyError, TypeError):
@@ -896,8 +1010,11 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
             except (RpcError, ValueError, KeyError, TypeError):
                 prep = {"status": "pending", "reason": "Preparation check incomplete", "source_chain_funding": "not_checked"}
         row["preparation"] = prep
-    attach_coordination_evidence(row, (frozen or {}).get("evidence_buys", buy_events), store, config,
-                                 balance_checked_at=(frozen or {}).get("checked_at"))
+    if legacy_ordinary_cohort(row):
+        guard_legacy_ordinary_row(row, frozen)
+    else:
+        attach_coordination_evidence(row, (frozen or {}).get("evidence_buys", buy_events), store, config,
+                                     balance_checked_at=(frozen or {}).get("checked_at"))
     store.summarize(pool["pool"], row)
     # Retention evidence is independent of an investment recommendation or contract safety.
     return row
@@ -1002,6 +1119,8 @@ def scan(previous=None, config=None, rpc=None, session=None, store=None):
     except (RpcError, ValueError, KeyError) as exc:
         output.update(status="unavailable", errors=[str(exc)])
         store.finish(False)
+    for row in output["tokens"]:
+        guard_legacy_ordinary_row(row)
     output["rpc_calls"] = rpc.calls
     if isinstance(rpc, Rpc):
         output["provider_requests"] = dict(rpc.stats)

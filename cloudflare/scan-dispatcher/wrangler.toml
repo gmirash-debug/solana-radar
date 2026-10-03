@@ -38,6 +38,8 @@ GITHUB_REF = "main"
 ALLOWED_ORIGIN = "https://gmirash-debug.github.io"
 SCHEDULER_ENABLED = "auto"
 HISTORY_FLUSH_CRON = "37 * * * *"
+# Release-specific deferred migration. Other versions are deliberately rejected.
+HISTORY_SCHEMA_AUTO_UPGRADE = "0003_resumable_history.sql"
 
 # Create the database before the first production deploy, then replace this id.
 [[d1_databases]]
