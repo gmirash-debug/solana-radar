@@ -1,9 +1,9 @@
-import { chooseDashboardPayload } from "./data-source.js?v=20261003-runtime-7";
-import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261003-runtime-7";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-runtime-7";
-import { installTerminology } from "./terminology.js?v=20261003-runtime-7";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric } from "./decision-view.js?v=20261003-runtime-7";
-import { loadTokenDetail } from "./static-detail.js?v=20261003-runtime-7";
+import { chooseDashboardPayload } from "./data-source.js?v=20261003-runtime-8";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261003-runtime-8";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-runtime-8";
+import { installTerminology } from "./terminology.js?v=20261003-runtime-8";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric } from "./decision-view.js?v=20261003-runtime-8";
+import { loadTokenDetail } from "./static-detail.js?v=20261003-runtime-8";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -13,12 +13,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261003-runtime-7";
+} from "./token-state.js?v=20261003-runtime-8";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261003-runtime-7";
+} from "./filter-scope.js?v=20261003-runtime-8";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const DELETE_SYNC_ENDPOINT = "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/deleted-token";
@@ -1961,6 +1961,14 @@ function renderStatus() {
     : null;
   const discoveryFailed = discoveryStatus.status === "failed";
   const persistence = status.persistence || report.stats?.persistence || {};
+  const dashboardSaved = persistence.current_synced === true && persistence.durable_dashboard_synced === true;
+  const checkpointPending = persistence.checkpoint?.ok === false;
+  const persistenceBadge = checkpointPending
+    ? `<span class="status-pill freshness-warn" title="${esc(persistence.checkpoint.error || "The previous complete checkpoint is retained; retry is needed")}">State save pending</span>`
+    : persistence.status !== "pending" ? ""
+      : dashboardSaved
+        ? `<span class="status-pill" title="${esc(persistence.deferred_reason || persistence.error || "Current dashboard is saved; older history is waiting for background delivery")}">Archive pending: ${esc(persistence.pending)}</span>`
+        : `<span class="status-pill freshness-warn" title="${esc(persistence.error || persistence.durable_dashboard_error || "Current cloud snapshot is not confirmed; retry queued")}">Cloud save pending: ${esc(persistence.pending)}</span>`;
   const targeted = report.scan_profile === "targeted";
   const deepAt = report.last_deep_scan_at || (targeted ? null : report.generated_at);
   const deepFreshness = deepAt ? reportFreshness(deepAt) : null;
@@ -1985,7 +1993,7 @@ function renderStatus() {
     targeted ? `<span class="status-pill">targeted check: ${esc(report.stats?.scanned_pools ?? "-")} pools</span>` : "",
     targeted ? `<span class="status-pill freshness-${deepFreshness?.tone || "warn"}">deep scan ${deepAt ? esc(dateLabel(deepAt)) : "not recorded yet"}</span>` : "",
     `<span class="status-pill freshness-${healthTone}" title="${esc(healthReason)}"><span class="dot ${healthTone === "good" ? "" : healthTone}"></span>scan ${esc(healthStatus)}</span>`,
-    persistence.status === "pending" ? `<span class="status-pill freshness-warn" title="${esc(persistence.error || "Cloud storage unavailable; retry queued")}">Cloud save pending: ${esc(persistence.pending)}</span>` : "",
+    persistenceBadge,
     discoveryFailed
       ? `<span class="status-pill freshness-bad" title="${esc(discoveryStatus.error || "Discovery pulse failed")}"><span class="dot bad"></span>discovery failed</span>`
       : discoveryFreshness
