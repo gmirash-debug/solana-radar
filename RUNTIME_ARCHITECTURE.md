@@ -69,7 +69,10 @@ invalid legacy event identities/times are kept in the cached outbox's quarantine
 with their original payload, not submitted to analytics or silently erased.
 Valid events in the same old snapshot can proceed. Price horizons are attributed
 only to their original catch; a renewed thesis cannot inherit old outcomes.
-it is not claimed to have been fully migrated. D1's free daily quotas are
+Cold backlog enqueue yields at 128 pending durable events, using actual enqueue
+responses, to retain headroom for current passes. A deferred old batch is not
+acknowledged, removed or classified as a scanner failure. The legacy archive
+is not claimed to have been fully migrated. D1's free daily quotas are
 account-wide: another D1 database does not create a new independent quota.
 The Durable Object queue itself also uses bounded, estimated free-tier writes.
 

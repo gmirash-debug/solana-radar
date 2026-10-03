@@ -13,6 +13,19 @@ from runtime_dashboard import dashboard_documents
 
 
 class RuntimePartitioningTests(unittest.TestCase):
+    def test_cold_backlog_yields_to_current_history_without_false_ack(self):
+        body = {"report": {"generated_at": "2026-10-03T00:00:00Z"}, "history_ledger": {"events": [
+            {"event_id": "valid", "episode": {"episode_id": "episode", "token_address": "mint", "caught_at": "2026-09-01T00:00:00Z"},
+             "event": {"event_type": "signal", "observed_at": "2026-09-01T00:00:00Z"}}]}}
+        config = {"_history_queue_pending": 1000}
+        with patch.object(s, "remote_api_call", return_value={"ok": True, "pending": 1001}) as remote:
+            self.assertFalse(s.send_remote_snapshot(body, config, legacy=True))
+            remote.assert_not_called()
+            self.assertNotIn("durable_history_ledger", body["_sync_progress"])
+            self.assertTrue(s.send_remote_snapshot(body, config))
+            self.assertEqual(body["_sync_progress"]["durable_history_ledger"], 1)
+            self.assertEqual(config["_history_queue_pending"], 1001)
+
     def test_balance_only_report_publishes_without_inventing_a_new_signal_or_deep_scan(self):
         state = {"last_deep_scan_at": "2026-10-03T00:00:00Z"}
         rpc = Mock(calls={})

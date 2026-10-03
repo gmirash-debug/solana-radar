@@ -1370,6 +1370,7 @@ def sync_remote_snapshot(report_payload, state, config):
     # A poison historical item must never block today's operational dashboard.
     selected = list(dict.fromkeys([current, *paths[:2]]))
     error = None
+    deferred_reason = None
     current_synced = durable_synced
     deadline = time.monotonic() + max(30, int(config.get("remote_sync_run_budget_seconds", 240)))
     for path in selected:
@@ -1378,7 +1379,13 @@ def sync_remote_snapshot(report_payload, state, config):
             if not remote_ingest_secret():
                 raise RuntimeError("Remote sync pending: RADAR_INGEST_SECRET is missing")
             pending_body = json.loads(gzip.decompress(path.read_bytes()))
-            send_remote_snapshot(pending_body, config, deadline=deadline)
+            complete = send_remote_snapshot(pending_body, config, deadline=deadline, legacy=path != current)
+            if not complete:
+                temp = path.with_suffix(".tmp")
+                temp.write_bytes(gzip.compress(json.dumps(pending_body, separators=(",", ":")).encode()))
+                temp.replace(path)
+                deferred_reason = "legacy archive waits for durable queue headroom"
+                continue
             if pending_body.get("_sync_rejected_history"):
                 quarantine = REMOTE_OUTBOX_DIR / "quarantine"
                 quarantine.mkdir(exist_ok=True)
@@ -1407,10 +1414,10 @@ def sync_remote_snapshot(report_payload, state, config):
             "durable_dashboard_synced": durable_synced, "durable_dashboard_error": durable_error,
             "checkpoint": config.get("_runtime_deep_saved", {}),
             "pending": pending, "quarantined": len(list((REMOTE_OUTBOX_DIR / "quarantine").glob("*.json.gz"))),
-            "error": error, "checked_at": utc_now().isoformat()}
+            "error": error, "deferred_reason": deferred_reason, "checked_at": utc_now().isoformat()}
 
 
-def send_remote_snapshot(payload, config, deadline=None):
+def send_remote_snapshot(payload, config, deadline=None, legacy=False):
     """Publish the list first, then idempotent bounded evidence/history batches."""
     detail_fields = {"detail_signal_theses", "detail_current_alerts", "detail_history", "history_ledger", "market", "_sync_progress", "_sync_rejected_history"}
     summary = {key: value for key, value in payload.items() if key not in detail_fields}
@@ -1422,7 +1429,9 @@ def send_remote_snapshot(payload, config, deadline=None):
             return
         if deadline is not None and time.monotonic() >= deadline:
             raise RuntimeError("remote sync time budget deferred remaining evidence batches")
-        remote_api_call("POST", path, config, body)
+        result = remote_api_call("POST", path, config, body)
+        if path == "/api/runtime/history" and isinstance(result.get("pending"), int):
+            config["_history_queue_pending"] = result["pending"]
         progress[part] = end
     generated_at = (payload.get("report") or {}).get("generated_at") or payload.get("generated_at")
     events = (payload.get("history_ledger") or {}).get("events") or []
@@ -1437,6 +1446,8 @@ def send_remote_snapshot(payload, config, deadline=None):
     # Archive events before any operational D1 write: its daily quota can be exhausted.
     start = int(progress.get("durable_history_ledger") or 0)
     while start < len(events):
+        if legacy and int(config.get("_history_queue_pending") or 0) >= int(config.get("legacy_history_queue_soft_limit", 128)):
+            return False
         batch = events[start:start + 25]
         while len(batch) > 1 and len(json.dumps(batch, separators=(",", ":")).encode()) > 900_000:
             batch = batch[:max(1, len(batch) // 2)]
@@ -1458,6 +1469,7 @@ def send_remote_snapshot(payload, config, deadline=None):
     # The durable queue owns historical delivery; do not write the same new events
     # into the legacy D1 outbox as well. Its pre-existing backlog still drains separately.
     progress["history_ledger"] = int(progress.get("durable_history_ledger") or 0)
+    return True
 
 
 def sync_remote_discovery_status(status, config):
