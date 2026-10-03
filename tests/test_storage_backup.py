@@ -2,6 +2,7 @@
 from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import gzip
+import http.client
 import importlib.util
 import io
 import json
@@ -14,6 +15,7 @@ import unittest
 from unittest.mock import patch
 import urllib.error
 import urllib.parse
+import zlib
 
 
 spec = importlib.util.spec_from_file_location("storage_backup", Path(__file__).resolve().parents[1] / "tools/storage_backup.py")
@@ -455,6 +457,28 @@ class ProtocolTests(unittest.TestCase):
                 self.assertNotIn(TOKEN, str(error.exception))
                 self.assertTrue(client.broken)
                 self.assertEqual(opener.calls, 1)
+
+    def test_deflate_and_incomplete_http_failures_break_snapshot_without_private_errors(self):
+        class Opener:
+            calls = 0
+            def open(self, request, timeout):
+                self.calls += 1
+                response = Response(b"compressed")
+                response.headers = {"Content-Encoding":"gzip"}
+                return response
+        opener = Opener()
+        client = backup.ReadSnapshot(URL, TOKEN, opener=opener)
+        with patch.object(backup.gzip, "GzipFile", side_effect=zlib.error(TOKEN)), self.assertRaisesRegex(backup.BackupError, "invalid compressed") as error:
+            client.begin()
+        self.assertNotIn(TOKEN, str(error.exception))
+        self.assertTrue(client.broken)
+        self.assertEqual(opener.calls, 1)
+        client, opener = self.client(http.client.IncompleteRead(TOKEN.encode(), 100))
+        with self.assertRaises(backup.BackupError) as error:
+            client.begin()
+        self.assertNotIn(TOKEN, str(error.exception))
+        self.assertTrue(client.broken)
+        self.assertEqual(opener.calls, 1)
 
     def test_tls_error_has_fixed_safe_guidance_and_never_retries(self):
         failure = urllib.error.URLError(ssl.SSLCertVerificationError(TOKEN))

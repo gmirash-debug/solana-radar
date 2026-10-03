@@ -5,8 +5,8 @@ Coverage is the complete Turso SQL schema and table contents, including stored
 references to external objects. Referenced R2 evidence/blob contents are NOT
 copied; this is a SQL recovery point, not a backup of all external archives.
 An interrupted read transaction is discarded, never resumed against a new
-snapshot. Turso's generation export can omit its newer WAL/log, so this uses a
-single Hrana v3 read transaction with autocommit guards for every page instead.
+snapshot. Native exports are not assumed complete, so this uses a single Hrana
+v3 read transaction with autocommit guards for every page instead.
 
 Private-repository installation (no scanner checkout or dependencies required):
   tools/storage_backup.py
@@ -68,6 +68,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zlib
 
 
 VERSION = 1
@@ -296,7 +297,7 @@ class ReadSnapshot:
                 try:
                     with gzip.GzipFile(fileobj=io.BytesIO(body)) as compressed:
                         body = compressed.read(MAX_RESPONSE_BYTES + 1)
-                except (OSError, EOFError, ValueError):
+                except (OSError, EOFError, ValueError, zlib.error):
                     raise BackupError("invalid compressed database response") from None
                 if len(body) > MAX_RESPONSE_BYTES:
                     raise BackupError("database response exceeds the bounded size limit")
@@ -353,7 +354,7 @@ class ReadSnapshot:
         except (TimeoutError, socket.timeout):
             self.broken = True
             raise BackupError("database request timed out; read snapshot discarded") from None
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, http.client.HTTPException):
             self.broken = True
             raise BackupError("database snapshot request failed; incomplete backup discarded") from None
 
