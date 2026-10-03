@@ -1,4 +1,4 @@
-import {numeric} from "./decision-view.js?v=20261003-evidence-6";
+import {numeric} from "./decision-view.js?v=20261003-runtime-7";
 
 export const CHAIN_ID = 4663;
 export function ageFilterLabel(config) {

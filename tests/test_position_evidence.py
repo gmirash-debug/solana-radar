@@ -4,7 +4,8 @@ from unittest.mock import Mock, patch
 
 import robinhood as rh
 from position_evidence import (seed_position, replay_position, position_summary, cross_chain_summary,
-                               preparation_summary, annotate_solana_pool_position_activity)
+                               preparation_summary, annotate_solana_pool_position_activity,
+                               resolve_solana_position_history, freeze_receipt_seeds)
 from robinhood_store import Store
 from tests.test_robinhood import TOKEN, QUOTE, POOL, WALLET, ROUTER, fixture, topic
 
@@ -21,6 +22,14 @@ def event(sender=WALLET, recipient=B, amount=40, index=0):
 
 
 class PositionTests(unittest.TestCase):
+    def test_bounded_solana_history_resolver_is_a_reusable_integration_boundary(self):
+        from solana_position_lineage import resolve_position_history
+        self.assertIs(resolve_solana_position_history, resolve_position_history)
+
+    def test_receipt_seed_capture_is_exported_without_changing_evm_position_api(self):
+        from solana_position_lineage import freeze_receipt_seeds as capture
+        self.assertIs(freeze_receipt_seeds, capture)
+
     def test_solana_annotation_is_a_partial_non_invalidating_integration_boundary(self):
         out = annotate_solana_pool_position_activity("mint", [], [], ["owner"], signal_timestamp=100)
         self.assertEqual(out["status"], "partial")

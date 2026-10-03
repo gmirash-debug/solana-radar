@@ -1,8 +1,9 @@
-import { chooseDashboardPayload } from "./data-source.js?v=20261003-evidence-6";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-evidence-6";
-import { installTerminology } from "./terminology.js?v=20261003-evidence-6";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric } from "./decision-view.js?v=20261003-evidence-6";
-import { loadTokenDetail } from "./static-detail.js?v=20261003-evidence-6";
+import { chooseDashboardPayload } from "./data-source.js?v=20261003-runtime-7";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261003-runtime-7";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-runtime-7";
+import { installTerminology } from "./terminology.js?v=20261003-runtime-7";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric } from "./decision-view.js?v=20261003-runtime-7";
+import { loadTokenDetail } from "./static-detail.js?v=20261003-runtime-7";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -12,12 +13,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261003-evidence-6";
+} from "./token-state.js?v=20261003-runtime-7";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261003-evidence-6";
+} from "./filter-scope.js?v=20261003-runtime-7";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const DELETE_SYNC_ENDPOINT = "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/deleted-token";
@@ -113,6 +114,7 @@ const state = {
   serverDeletedPoolKeys: new Set(),
   publishedDashboard: false,
   dataSource: "none",
+  storageSource: null,
   fallbackReason: null,
   remoteRetryAt: 0,
   remoteFailureCount: 0,
@@ -1721,6 +1723,7 @@ function applyDashboardPayload(payload, source, fallbackReason = null) {
     ? payload.token_details
     : state.tokenDetailManifest?.generation === nextGeneratedAt ? state.tokenDetailManifest : null;
   state.dataSource = source;
+  state.storageSource = payload?.storage_source || null;
   state.fallbackReason = fallbackReason;
   if (snapshotChanged) {
     state.tokenDetailLoadedKeys.clear();
@@ -1958,8 +1961,11 @@ function renderStatus() {
     : null;
   const discoveryFailed = discoveryStatus.status === "failed";
   const persistence = status.persistence || report.stats?.persistence || {};
+  const targeted = report.scan_profile === "targeted";
+  const deepAt = report.last_deep_scan_at || (targeted ? null : report.generated_at);
+  const deepFreshness = deepAt ? reportFreshness(deepAt) : null;
   els.subtitle.textContent = report.generated_at
-    ? `Last scan ${dateLabel(report.generated_at)}`
+    ? `${targeted ? "Last check" : "Last scan"} ${dateLabel(report.generated_at)}`
     : "No scan report yet";
   const summary = document.querySelector("#scannerSummary");
   if (summary) {
@@ -1976,6 +1982,8 @@ function renderStatus() {
     `<span class="status-pill"><span class="dot ${running ? "warn" : ""}"></span>${running ? "scan running" : "idle"}</span>`,
     failed ? `<span class="status-pill freshness-bad" title="${esc(status.error || "Scanner failed")}"><span class="dot bad"></span>last attempt failed ${esc(dateLabel(status.last_attempt_at))}</span>` : "",
     `<span class="status-pill freshness-${freshness.tone}"><span class="dot ${freshness.tone === "good" ? "" : freshness.tone}"></span>${esc(freshness.label)}</span>`,
+    targeted ? `<span class="status-pill">targeted check: ${esc(report.stats?.scanned_pools ?? "-")} pools</span>` : "",
+    targeted ? `<span class="status-pill freshness-${deepFreshness?.tone || "warn"}">deep scan ${deepAt ? esc(dateLabel(deepAt)) : "not recorded yet"}</span>` : "",
     `<span class="status-pill freshness-${healthTone}" title="${esc(healthReason)}"><span class="dot ${healthTone === "good" ? "" : healthTone}"></span>scan ${esc(healthStatus)}</span>`,
     persistence.status === "pending" ? `<span class="status-pill freshness-warn" title="${esc(persistence.error || "Cloud storage unavailable; retry queued")}">Cloud save pending: ${esc(persistence.pending)}</span>` : "",
     discoveryFailed
@@ -1987,7 +1995,7 @@ function renderStatus() {
     blockedRpcProviders.length ? `<span class="status-pill freshness-warn" title="${esc(rpcTitle)}">${esc(blockedRpcProviders.join(" + "))} blocked</span>` : "",
     athProvider.status && athProvider.status !== "ok" ? `<span class="status-pill freshness-bad" title="${esc(athProvider.error || "GMGN unavailable")}">ATH source ${esc(athProvider.status)}</span>` : "",
     `<span class="status-pill">lane ${esc(laneText)}</span>`,
-    state.dataSource === "remote" ? `<span class="status-pill">live D1</span>` : "",
+    state.dataSource === "remote" ? `<span class="status-pill">${state.storageSource === "durable_snapshot" ? "durable snapshot" : "live D1"}</span>` : "",
     state.dataSource === "static" ? `<span class="status-pill freshness-warn" title="${esc(state.fallbackReason || "remote unavailable")}">fallback snapshot</span>` : "",
     state.publishedDashboard && state.hiddenTokenKeys.size ? `<button class="status-action" id="syncDeleted" type="button">Sync deleted</button>` : "",
     status.next_scan_at ? `<span class="status-pill">next auto ${esc(dateLabel(status.next_scan_at))}</span>` : "",
@@ -3620,11 +3628,12 @@ function renderIntelligence() {
         </div>
         <button class="secondary-action" id="refreshIntelligence" type="button" ${intelligence.status === "loading" ? "disabled" : ""}>Refresh learning</button>
       </section>
+      ${renderEvaluationSummary(state.report?.signal_evaluation)}
       <section class="intelligence-kpis">
-        ${detailMetric("Signal episodes", compact(overview.episodes || 0), `${compact(overview.resolved_72h || 0)} resolved at 72h`)}
-        ${detailMetric("Scanner precision", ratePct(overview.precision_2x_72h), "tradable 2x by 72h")}
+        ${detailMetric("Signal episodes", ready ? compact(overview.episodes || 0) : "-", ready ? `${compact(overview.resolved_72h || 0)} resolved at 72h` : "history unavailable")}
+        ${detailMetric("Observed 2x", ratePct(overview.precision_2x_72h), "saved prices, not executed trades")}
         ${detailMetric("Wallet edge", ratePct(overview.edge_precision_2x_72h), overview.edge_lift ? `${Number(overview.edge_lift).toFixed(2)}x scanner baseline` : "needs more validated samples")}
-        ${detailMetric("Wallets with edge", compact(overview.emerging_or_validated_wallets || 0), `${compact(overview.emerging_or_validated_clusters || 0)} evidence-based clusters`)}
+        ${detailMetric("Wallets with edge", ready ? compact(overview.emerging_or_validated_wallets || 0) : "-", ready ? `${compact(overview.emerging_or_validated_clusters || 0)} evidence-based clusters` : "history unavailable")}
       </section>
       <section class="intelligence-section">
         <div class="section-title-row"><div><h2>Ranked wallets</h2><p>Scores are frozen at signal time to avoid future information leaking into earlier catches.</p></div>${history.pending_outbox ? chip(`${history.pending_outbox} history events pending`, "warn") : ""}</div>

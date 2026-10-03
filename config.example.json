@@ -1,6 +1,12 @@
 {
   "mode": "balanced",
   "lane": "reactivation",
+  "targeted_pool_limit": 6,
+  "signal_evaluation_holdout_start": "2026-10-17T00:00:00Z",
+  "launch_history_enabled": true,
+  "launch_history_tasks_per_scan": 1,
+  "launch_history_window_seconds": 21600,
+  "rpc_monthly_estimated_limits": {"alchemy": 25000000, "helius": 900000, "chainstack": 2700000},
   "coordinated_activity_enabled": true,
   "wallet_source_labels": {},
   "wallet_funding_transaction_limit": 3,

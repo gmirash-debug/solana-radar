@@ -1,3 +1,4 @@
+import {dashboardRecordTokenKey, dashboardMonitorOriginMs, dashboardSignalTimestampMs, dashboardSignalEpochMs, dashboardRecordAgeHours, dashboardRecordMatchesAgeWindow, isCurrentDashboardSignal, isCurrentDashboardPool, dashboardTokenFromRecord, dashboardRecordMatchesToken, compactCoordinationEvidence, compactDashboardAlert, compactDashboardThesis, compactDashboardReport} from "./dashboard-shaping.js";
 import {
   enqueueHistoryEvents,
   flushHistoryOutbox,
@@ -12,6 +13,10 @@ import {
   historyWalletDetail,
   historyWallets,
 } from "./history.js";
+import {runtimeDocument, runtimeDashboardResponse, runtimeCheckpointResponse, runtimeMetadata} from "./runtime.js";
+import {durableHistoryIngestResponse, flushDurableHistory, durableHistoryStatus} from "./runtime-history.js";
+export {RuntimeSnapshots} from "./runtime.js";
+export {HistoryQueue} from "./runtime-history.js";
 
 const DEFAULT_OWNER = "gmirash-debug";
 const DEFAULT_REPO = "solana-radar";
@@ -22,9 +27,9 @@ const DELETED_TOKENS_PATH = "data/deleted_tokens.json";
 const ACCESS_CERT_CACHE_TTL_MS = 60 * 60 * 1000;
 const DISCOVERY_CRON = "*/5 * * * *";
 const DEEP_SCAN_CRON = "7 * * * *";
+const TARGETED_CRON = "22,37,52 * * * *";
 const D1_IN_PARAMETER_LIMIT = 100;
 const GITHUB_STATUS_COMPONENTS_URL = "https://www.githubstatus.com/api/v2/components.json";
-const DEFAULT_DASHBOARD_SIGNAL_EPOCH = "2026-08-13T01:01:00Z";
 let accessCertCache = { expiresAt: 0, keys: new Map() };
 
 function corsHeaders(request, env) {
@@ -258,213 +263,6 @@ function parsePayload(value, fallback = {}) {
 function timestampMs(value) {
   const parsed = Date.parse(value || "");
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-}
-
-function dashboardRecordTokenKey(record = {}) {
-  const pool = record?.pool && typeof record.pool === "object" ? record.pool : {};
-  return normalizeId(record?.token_address)
-    || normalizeId(pool.token_address)
-    || normalizeId(record?.pool_address)
-    || normalizeId(pool.pool_address);
-}
-
-function dashboardMonitorOriginMs(record = {}, report = {}) {
-  const pool = record?.pool && typeof record.pool === "object" ? record.pool : {};
-  const source = String(record?.source || pool.source || record?.market_source || pool.market_source || "");
-  if (source !== "signal_thesis_monitor") return null;
-
-  const tokenKey = dashboardRecordTokenKey(record);
-  const candidates = [record, pool];
-  for (const item of [
-    ...(report?.summaries || []),
-    ...(report?.active_pools || []),
-    ...(report?.universe || []),
-  ]) {
-    if (dashboardRecordTokenKey(item) !== tokenKey) continue;
-    candidates.push(item, item?.pool);
-  }
-  for (const candidate of candidates) {
-    const timestamp = timestampMs(
-      candidate?.first_signal_at
-        || candidate?.first_obs_mcap_at
-        || candidate?.signal_at
-        || null,
-    );
-    if (timestamp) return timestamp;
-  }
-  return 0;
-}
-
-function dashboardSignalTimestampMs(record = {}, report = {}) {
-  const monitorOriginMs = dashboardMonitorOriginMs(record, report);
-  if (monitorOriginMs !== null) return monitorOriginMs;
-  return timestampMs(
-    record.signal_at
-      || record.window_start
-      || record.created_at
-      || record.captured_at
-      || record.window_end
-      || record.first_signal_at
-      || record.first_obs_mcap_at
-      || null,
-  );
-}
-
-function dashboardSignalEpochMs(report = {}) {
-  return timestampMs(
-    report?.config?.dashboard_signal_epoch || DEFAULT_DASHBOARD_SIGNAL_EPOCH,
-  );
-}
-
-function dashboardRecordAgeHours(record = {}) {
-  const pool = record?.pool && typeof record.pool === "object" ? record.pool : {};
-  const pairCreatedAt = Number(pool.pair_created_at ?? record?.pair_created_at);
-  if (Number.isFinite(pairCreatedAt) && pairCreatedAt > 0) {
-    const pairCreatedMs = pairCreatedAt > 10_000_000_000
-      ? pairCreatedAt
-      : pairCreatedAt * 1000;
-    return Math.max(0, (Date.now() - pairCreatedMs) / 3_600_000);
-  }
-  const reportedAgeHours = Number(pool.age_hours ?? record?.age_hours);
-  return Number.isFinite(reportedAgeHours) && reportedAgeHours >= 0
-    ? reportedAgeHours
-    : null;
-}
-
-function dashboardRecordMatchesAgeWindow(record = {}, report = {}) {
-  const minAgeHours = Number(report?.config?.age_min_hours);
-  const maxAgeHours = Number(report?.config?.age_max_hours);
-  const hasMin = Number.isFinite(minAgeHours);
-  const hasMax = Number.isFinite(maxAgeHours);
-  if (!hasMin && !hasMax) return true;
-
-  const ageHours = dashboardRecordAgeHours(record);
-  if (ageHours === null) return false;
-  if (hasMin && ageHours < minAgeHours) return false;
-  if (hasMax && ageHours > maxAgeHours) return false;
-  return true;
-}
-
-function isCurrentDashboardSignal(record = {}, report = {}) {
-  const epochMs = dashboardSignalEpochMs(report);
-  const signalMs = dashboardSignalTimestampMs(record, report);
-  return Boolean(
-    dashboardRecordMatchesAgeWindow(record, report)
-    && (!epochMs || (signalMs && signalMs >= epochMs)),
-  );
-}
-
-function isCurrentDashboardPool(record = {}, report = {}) {
-  const pool = record?.pool && typeof record.pool === "object" ? record.pool : record;
-  const source = String(record?.source || pool?.source || record?.market_source || pool?.market_source || "");
-  if (!dashboardRecordMatchesAgeWindow(record, report)) return false;
-  if (source !== "signal_thesis_monitor") return true;
-  return isCurrentDashboardSignal({ pool }, report);
-}
-
-function dashboardTokenFromRecord(record = {}) {
-  return dashboardRecordTokenKey(record);
-}
-
-function dashboardRecordMatchesToken(record, tokenKey) {
-  return dashboardTokenFromRecord(record) === normalizeId(tokenKey);
-}
-
-function compactCoordinationEvidence(evidence) {
-  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) return evidence;
-  return {...evidence, signals: (Array.isArray(evidence.signals) ? evidence.signals : []).filter(signal => signal && typeof signal === "object").map(signal => {
-    const {members, ...summary} = signal;
-    if (signal.detail && typeof signal.detail === "object") {
-      const {source, ...detail} = signal.detail;
-      summary.detail = detail;
-    }
-    return summary;
-  })};
-}
-
-function compactDashboardAlert(alert = {}) {
-  if (!alert || typeof alert !== "object" || Array.isArray(alert)) return {};
-  const detailFields = new Set([
-    "events",
-    "coordination_events",
-    "common_funders",
-    "common_recipients",
-    "common_executors",
-  ]);
-  const compact = Object.fromEntries(
-    Object.entries(alert).filter(([key]) => !detailFields.has(key)),
-  );
-  for (const field of detailFields) {
-    if (Array.isArray(alert[field])) compact[`${field}_count`] = alert[field].length;
-  }
-  if (alert.wave && typeof alert.wave === "object" && !Array.isArray(alert.wave)) {
-    const { top_buyers: topBuyers, ...wave } = alert.wave;
-    if (Array.isArray(topBuyers)) wave.top_buyers_count = topBuyers.length;
-    compact.wave = wave;
-  }
-  if (alert.wallet_graph && typeof alert.wallet_graph === "object") {
-    const {wallets, clusters, common_funders, common_executors, ...graph} = alert.wallet_graph;
-    compact.wallet_graph = graph;
-  }
-  if (alert.supply_integrity && typeof alert.supply_integrity === "object") {
-    const {
-      top_owners: topOwners,
-      linkage_groups: linkageGroups,
-      linked_clusters: linkedClusters,
-      limitations,
-      errors,
-      invariants,
-      ...summary
-    } = alert.supply_integrity;
-    compact.supply_integrity = summary;
-  }
-  if (alert.coordinated_activity) compact.coordinated_activity = compactCoordinationEvidence(alert.coordinated_activity);
-  return compact;
-}
-
-function compactDashboardThesis(thesis = {}) {
-  if (!thesis || typeof thesis !== "object" || Array.isArray(thesis)) return {};
-  const {
-    cohort,
-    cohort_wallets: cohortWallets,
-    supply_integrity_history: supplyIntegrityHistory,
-    coordination_inputs: coordinationInputs,
-    ...compact
-  } = thesis;
-  if (thesis.supply_integrity && typeof thesis.supply_integrity === "object") {
-    const {
-      top_owners: topOwners,
-      linkage_groups: linkageGroups,
-      linked_clusters: linkedClusters,
-      limitations,
-      errors,
-      invariants,
-      ...summary
-    } = thesis.supply_integrity;
-    compact.supply_integrity = summary;
-  }
-  if (thesis.coordinated_activity) compact.coordinated_activity = compactCoordinationEvidence(thesis.coordinated_activity);
-  return compact;
-}
-
-function compactDashboardReport(report = {}) {
-  if (!report || typeof report !== "object" || Array.isArray(report)) return {};
-  return {
-    ...report,
-    alerts: (report.alerts || [])
-      .filter((alert) => isCurrentDashboardSignal(alert, report))
-      .map(compactDashboardAlert),
-    signal_theses: (report.signal_theses || [])
-      .filter((thesis) => isCurrentDashboardSignal(thesis, report))
-      .map(compactDashboardThesis),
-    active_pools: (report.active_pools || [])
-      .filter((item) => isCurrentDashboardPool(item, report)),
-    universe: (report.universe || [])
-      .filter((pool) => isCurrentDashboardPool(pool, report)),
-    summaries: (report.summaries || [])
-      .filter((summary) => isCurrentDashboardPool(summary, report)),
-    remote_compact: true,
-  };
 }
 
 function ingestAccess(request, env) {
@@ -863,6 +661,18 @@ async function ingestDiscoveryState(env, rows) {
 }
 
 async function dashboardData(env, historyLimit = 40) {
+  const durable = await runtimeDocument(env, "dashboard").catch(() => null);
+  if (durable?.document?.value?.report?.generated_at) {
+    const {detail_signal_theses, detail_current_alerts, detail_history, ...snapshot} = durable.document.value;
+    const scanStatus = await runtimeDocument(env, "scan_status").catch(() => null);
+    const discoveryStatus = await runtimeDocument(env, "discovery_status").catch(() => null);
+    const deleted = await runtimeDocument(env, "deleted_tokens").catch(() => null);
+    return {...snapshot, ok:true, history:(snapshot.history || []).slice(0, Math.max(1, Math.min(250, Number(historyLimit) || 40))),
+      deleted_tokens:deleted?.document?.value || snapshot.deleted_tokens,
+      scan_status:scanStatus?.document?.value || snapshot.scan_status,
+      discovery_status:discoveryStatus?.document?.value || snapshot.discovery_status,
+      report_source_updated_at:durable.document.updated_at, storage_source:"durable_snapshot"};
+  }
   if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
   const limit = Math.max(1, Math.min(250, Number(historyLimit) || 40));
   const [reportDoc, deletedDoc, discoveryStatusDoc, scanStatusDoc, historyStatusDoc, alertsResult] = await Promise.all([
@@ -908,9 +718,21 @@ async function dashboardData(env, historyLimit = 40) {
 }
 
 async function dashboardTokenDetail(env, requestedTokenKey) {
-  if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
   const tokenKey = normalizeId(requestedTokenKey);
   if (!tokenKey) throw new Error("token_key_required");
+  const durable = await runtimeDocument(env, "dashboard").catch(() => null);
+  if (durable?.document?.value) {
+    const snapshot = durable.document.value;
+    const matches = item => dashboardRecordMatchesToken(item, tokenKey);
+    const thesis = (snapshot.detail_signal_theses || []).find(matches) || (snapshot.report?.signal_theses || []).find(matches);
+    const current = (snapshot.detail_current_alerts || snapshot.report?.alerts || []).filter(matches);
+    const history = (snapshot.detail_history || snapshot.history || []).filter(matches);
+    const market = snapshot.market?.[tokenKey] || snapshot.market?.[tokenKey.replace(/^solana:/, "")];
+    if (thesis || current.length || history.length || market) return {ok:true, token_key:tokenKey, thesis:thesis || null,
+      current_alerts:current, history, market:market || null, wallet_edge:null,
+      report_source_updated_at:durable.document.updated_at, storage_source:"durable_snapshot"};
+  }
+  if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
   const [reportDoc, thesisDoc, alertsResult] = await Promise.all([
     env.RADAR_DB.prepare("SELECT payload_json, source_updated_at, updated_at FROM state_docs WHERE key = 'latest_report'").first(),
     env.RADAR_DB.prepare("SELECT payload_json FROM state_docs WHERE key = ?1").bind(`signal_thesis:${tokenKey}`).first(),
@@ -1031,6 +853,8 @@ async function updateDeletedToken(env, payload) {
     }
   }
   if (!commit || !mutation) throw new Error("GitHub deleted-token update did not complete");
+  const durableSync = await runtimeDocument(env, "deleted_tokens", mutation.data, mutation.data.updated_at)
+    .catch(error => ({ok:false, error:error.message}));
   const d1Sync = await syncDeletedTokensToD1(env, mutation.data).catch((error) => ({
     enabled: true,
     ok: false,
@@ -1042,11 +866,13 @@ async function updateDeletedToken(env, payload) {
     deleted_tokens: mutation.data,
     commit_sha: commit?.commit?.sha || null,
     d1_sync: d1Sync,
+    durable_sync: durableSync,
   };
 }
 
 function schedulerKindForCron(cron) {
   if (cron === DISCOVERY_CRON) return "discovery";
+  if (cron === TARGETED_CRON) return "targeted";
   if (cron === DEEP_SCAN_CRON) return "deep_scan";
   return "deep_scan";
 }
@@ -1092,6 +918,8 @@ function schedulerBucket(kind, now = new Date()) {
   const timestamp = new Date(now);
   if (kind === "discovery") {
     timestamp.setUTCMinutes(Math.floor(timestamp.getUTCMinutes() / 5) * 5, 0, 0);
+  } else if (kind === "targeted") {
+    timestamp.setUTCSeconds(0, 0);
   } else {
     timestamp.setUTCMinutes(0, 0, 0);
   }
@@ -1188,7 +1016,7 @@ async function dispatchScan(env, source, options = {}) {
 async function dispatchScheduledScan(event, env) {
   const kind = schedulerKindForCron(event?.cron);
   const bucket = schedulerBucket(kind, event?.scheduledTime || new Date());
-  if (kind === "discovery") {
+  if (kind === "discovery" || kind === "targeted") {
     const guard = await discoveryDispatchGuard(env);
     if (guard.skipped) return {ok: true, ...guard, kind, bucket};
   }
@@ -1226,9 +1054,14 @@ async function discoveryDispatchGuard(env) {
 export default {
   async scheduled(_event, env, ctx) {
     const mode = schedulerMode(env);
-    const historyTask = shouldFlushScheduledHistory(_event, env) && hasHistoryDb(env)
-      ? flushHistoryOutbox(env).catch(() => null)
-      : Promise.resolve(null);
+    const historyTask = env.HISTORY_QUEUE && hasHistoryDb(env) && _event?.cron === DISCOVERY_CRON
+      ? flushDurableHistory(env).then(async result => {
+        const status = await durableHistoryStatus(env);
+        return runtimeDocument(env, "history_status", {...result, ...status, pending_outbox:status.pending,
+          checked_at:isoNow(), storage_source:"durable_history_queue"}, isoNow());
+      }).catch(() => null)
+      : shouldFlushScheduledHistory(_event, env) && hasHistoryDb(env)
+        ? flushHistoryOutbox(env).catch(() => null) : Promise.resolve(null);
     if (mode === "disabled" || shouldFlushScheduledHistory(_event, env)) {
       ctx.waitUntil(historyTask);
       return;
@@ -1262,9 +1095,13 @@ export default {
           d1Error = error.message;
         }
       }
-      const historical = await historyStatus(env).catch((error) => ({ configured: hasHistoryDb(env), healthy: false, error: error.message }));
+      const ready = await runtimeMetadata(env, "dashboard").catch(() => null);
+      const historical = (await runtimeDocument(env, "history_status").catch(() => null))?.document?.value
+        || {configured:hasHistoryDb(env), status:"not_checked_by_health_endpoint"};
       return json({
-        ok: d1Healthy,
+        ok: Boolean(ready?.updated_at) || d1Healthy,
+        durable_snapshot_available: Boolean(ready?.updated_at),
+        durable_snapshot_updated_at:ready?.updated_at || null,
         worker: "solana-radar-scan-dispatcher",
         checked_at: new Date().toISOString(),
         delete_access_configured: Boolean(env.CLOUDFLARE_ACCESS_AUD && env.CLOUDFLARE_ACCESS_TEAM_DOMAIN),
@@ -1282,6 +1119,8 @@ export default {
         return json({ ok: false, error: "GET required" }, 405, corsHeaders(request, env));
       }
       try {
+        const durable = await runtimeDashboardResponse(env, request).catch(() => null);
+        if (durable?.ok) return new Response(durable.body, {headers:{"content-type":"application/json", "cache-control":"no-store", ...corsHeaders(request, env)}});
         return json(
           await dashboardData(env, url.searchParams.get("history_limit")),
           200,
@@ -1296,7 +1135,12 @@ export default {
       if (request.method !== "GET") {
         return json({ ok: false, error: "GET required" }, 405, corsHeaders(request, env));
       }
+      if (!normalizeId(url.searchParams.get("token_key"))) {
+        return json({ok:false, error:"token_key_required"}, 400, corsHeaders(request, env));
+      }
       try {
+        const durable = await runtimeDashboardResponse(env, request).catch(() => null);
+        if (durable?.ok) return new Response(durable.body, {headers:{"content-type":"application/json", "cache-control":"no-store", ...corsHeaders(request, env)}});
         return json(
           await dashboardTokenDetail(env, url.searchParams.get("token_key")),
           200,
@@ -1352,6 +1196,22 @@ export default {
       const access = ingestAccess(request, env);
       if (!access.ok) return json({ ok: false, error: access.error }, access.status, corsHeaders(request, env));
       try {
+        if (url.pathname === "/api/runtime/checkpoint") {
+          const kind = url.searchParams.get("kind") || "deep";
+          if (!["deep", "discovery"].includes(kind)) return json({ok:false, error:"invalid_checkpoint_kind"}, 400);
+          if (!env.RUNTIME_SNAPSHOTS) return json({ok:false, error:"runtime_storage_not_configured"}, 503);
+          if (!["GET", "POST"].includes(request.method)) return json({ok:false, error:"GET or POST required"}, 405);
+          return await runtimeCheckpointResponse(env, request, kind);
+        }
+        if (url.pathname === "/api/runtime/dashboard") {
+          if (request.method !== "POST") return json({ok:false, error:"POST required"}, 405);
+          if (!env.RUNTIME_SNAPSHOTS) return json({ok:false, error:"runtime_storage_not_configured"}, 503);
+          return runtimeDashboardResponse(env, request, true);
+        }
+        if (url.pathname === "/api/runtime/history") {
+          if (request.method !== "POST") return json({ok:false, error:"POST required"}, 405);
+          return await durableHistoryIngestResponse(env, request);
+        }
         if (url.pathname === "/api/ingest/snapshot") {
           if (request.method !== "POST") return json({ ok: false, error: "POST required" }, 405, corsHeaders(request, env));
           return json(await ingestDashboardSnapshot(env, await request.json()), 200, corsHeaders(request, env));
@@ -1378,6 +1238,8 @@ export default {
           if (request.method !== "POST") return json({ ok: false, error: "POST required" }, 405, corsHeaders(request, env));
           const payload = await request.json();
           const now = isoNow();
+          const durable = await runtimeDocument(env, "discovery_status", payload?.status || {}, normalizeId(payload?.status?.last_attempt_at) || now);
+          if (durable) return json({ok:true, updated_at:now, storage_source:"durable_snapshot"});
           await upsertStateDoc(env.RADAR_DB, "discovery_status", payload?.status || {}, normalizeId(payload?.status?.last_attempt_at) || now, now);
           return json({ ok: true, updated_at: now }, 200, corsHeaders(request, env));
         }
@@ -1388,6 +1250,8 @@ export default {
           // Scanner clients send { status }, while an operator can safely replay
           // a raw scanner_status.json document during incident recovery.
           const status = scanStatusPayload(payload);
+          const durable = await runtimeDocument(env, "scan_status", status, normalizeId(status.last_attempt_at) || now);
+          if (durable) return json({ok:true, updated_at:now, storage_source:"durable_snapshot"});
           await upsertStateDoc(
             env.RADAR_DB,
             "scan_status",
@@ -1400,7 +1264,10 @@ export default {
         if (url.pathname === "/api/deleted/sync") {
           if (request.method !== "POST") return json({ ok: false, error: "POST required" }, 405, corsHeaders(request, env));
           const payload = await request.json();
-          return json(await syncDeletedTokensToD1(env, payload?.deleted_tokens || payload), 200, corsHeaders(request, env));
+          const deleted = payload?.deleted_tokens || payload;
+          const durable = await runtimeDocument(env, "deleted_tokens", deleted, deleted.updated_at || isoNow());
+          const d1 = await syncDeletedTokensToD1(env, deleted).catch(error => ({ok:false, error:error.message}));
+          return json({ok: Boolean(durable?.accepted || d1.ok), durable_sync:durable, d1_sync:d1}, 200, corsHeaders(request, env));
         }
         return json({ ok: false, error: "unknown_api_path" }, 404, corsHeaders(request, env));
       } catch (error) {

@@ -235,20 +235,23 @@ class SignalIntegrityTests(unittest.TestCase):
         body = {"report": {"generated_at": s.iso(self.now)},
                 "detail_signal_theses": [{"token_address": str(i)} for i in range(61)],
                 "market": {str(i): {} for i in range(26)},
-                "history_ledger": {"events": [{"event_id": str(i)} for i in range(26)]}}
+                "history_ledger": {"events": [{"event_id": str(i),
+                    "episode": {"episode_id": "episode", "token_address": "mint", "caught_at": s.iso(self.now)},
+                    "event": {"event_type": "signal", "observed_at": s.iso(self.now)}} for i in range(26)]}}
         with patch.object(s, "remote_api_call") as remote:
-            remote.side_effect = [{"ok": True}, {"ok": True}, RuntimeError("temporary quota")]
+            remote.side_effect = [{"ok": True}, {"ok": True}, {"ok": True}, {"ok": True}, RuntimeError("temporary quota")]
             with self.assertRaisesRegex(RuntimeError, "quota"):
                 s.send_remote_snapshot(body, {})
             self.assertEqual(body["_sync_progress"]["detail_signal_theses"], 25)
             self.assertEqual(body["_sync_progress"]["summary"], 1)
+            self.assertEqual(body["_sync_progress"]["durable_history_ledger"], 26)
             remote.reset_mock()
             remote.side_effect = None
             remote.return_value = {"ok": True}
             s.send_remote_snapshot(body, {})
             self.assertEqual(remote.call_args_list[0].args[1], "/api/ingest/details")
             self.assertEqual(remote.call_args_list[0].args[3]["detail_signal_theses"][0]["token_address"], "25")
-            self.assertEqual(len(remote.call_args_list), 6)
+            self.assertEqual(len(remote.call_args_list), 4)
             for call in remote.call_args_list:
                 batch = call.args[3]
                 count = sum(len(batch.get(field) or []) for field in ("detail_signal_theses", "market"))

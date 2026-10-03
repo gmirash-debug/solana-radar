@@ -1,9 +1,9 @@
 import {validSnapshot, isFresh, selectTokens, formatSupplyPercent, walletFresh, supplyRange,
-  REVIEW_GROUPS, reviewGroup, positionBounds, marketFresh, comparePositions, ageFilterLabel, relaySignalLabel} from "./robinhood-state.js?v=20261003-evidence-6";
-import {renderAccumulationEvidence, accumulationSummary} from "./accumulation-evidence.js?v=20261003-evidence-6";
-import {renderCoordinatedActivity} from "./coordinated-activity.js?v=20261003-evidence-6";
-import {installTerminology} from "./terminology.js?v=20261003-evidence-6";
-import {gmgnUrl, renderGmgnMarket, renderGmgnHolders, renderGmgnSecurity} from "./gmgn-context.js?v=20261003-evidence-6";
+  REVIEW_GROUPS, reviewGroup, positionBounds, marketFresh, comparePositions, ageFilterLabel, relaySignalLabel} from "./robinhood-state.js?v=20261003-runtime-7";
+import {renderAccumulationEvidence, accumulationSummary} from "./accumulation-evidence.js?v=20261003-runtime-7";
+import {renderCoordinatedActivity} from "./coordinated-activity.js?v=20261003-runtime-7";
+import {installTerminology} from "./terminology.js?v=20261003-runtime-7";
+import {gmgnUrl, renderGmgnMarket, renderGmgnHolders, renderGmgnSecurity} from "./gmgn-context.js?v=20261003-runtime-7";
 
 const $ = selector => document.querySelector(selector);
 const terminology = installTerminology(document);

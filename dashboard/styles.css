@@ -1982,6 +1982,12 @@ tr:last-child td {
   border-radius: 0;
 }
 
+.evaluation-note {
+  color: var(--muted);
+  line-height: 1.45;
+  padding: 13px 15px;
+}
+
 .inline-token-action {
   background: transparent;
   border: 0;
