@@ -28,7 +28,7 @@ from solana_position_lineage import annotate_pool_activity, freeze_receipt_seeds
 from position_history_rpc import check_receipt_positions
 from runtime_checkpoint import build_checkpoint, restore_checkpoint, checkpoint_documents, hydrate_checkpoint
 from runtime_dashboard import dashboard_documents
-from history_contract import history_event_error
+from history_contract import history_event_error, source_time
 from rpc_budget import configure_monthly_budgets, request_reservation
 from scan_scheduling import targeted_profile, fast_candidate_pools
 from launch_history import advance_launch_history
@@ -1145,13 +1145,13 @@ def build_history_ledger(report_payload, state, config, generated_at):
 
         # Outcomes belong to their original catch, not a renewed thesis for the same mint.
         horizons = outcome.get("horizons") if isinstance(outcome, dict) else {}
-        if horizons and parse_timestamp(outcome.get("caught_at")) != parse_timestamp(caught_at):
+        if horizons and (source_time(caught_at) is None or source_time(outcome.get("caught_at")) != source_time(caught_at)):
             horizons = {}
             foreign_outcome_episodes += 1
         for horizon in HISTORY_LEDGER_HORIZONS:
             checkpoint = horizons.get(horizon) if isinstance(horizons, dict) else None
             checkpoint_at = checkpoint.get("at") if isinstance(checkpoint, dict) else None
-            if not checkpoint_at or parse_timestamp(checkpoint_at) < parse_timestamp(caught_at):
+            if not checkpoint_at or source_time(checkpoint_at) is None or source_time(checkpoint_at) < source_time(caught_at):
                 continue
             events.append(
                 {

@@ -68,6 +68,15 @@ class RuntimePartitioningTests(unittest.TestCase):
         self.assertEqual(ledger["foreign_outcome_episodes_deferred"], 1)
         self.assertEqual(state, original)
 
+    def test_episode_identity_preserves_subsecond_catch_boundaries(self):
+        state = {"pools": {"pool": {"signal_thesis": {"token_address": "mint", "pool_address": "pool",
+                  "signal_at": "2026-10-02T00:00:00.200Z"}}},
+                 "signal_outcomes": {"mint": {"caught_at": "2026-10-02T00:00:00.100Z", "horizons": {
+                     "1h": {"at": "2026-10-02T01:00:00Z"}}}}}
+        with patch.object(s, "load_deleted_tokens", return_value={"tokens": set(), "pools": set()}):
+            ledger = s.build_history_ledger({}, state, {}, "2026-10-03T00:00:00Z")
+        self.assertEqual([row["event"]["event_type"] for row in ledger["events"]], ["signal"])
+
     def test_bad_legacy_event_is_preserved_but_does_not_poison_valid_batch(self):
         valid = {"event_id": "valid", "episode": {"episode_id": "episode", "token_address": "mint", "caught_at": "2026-09-01T00:00:00Z"},
                  "event": {"event_type": "signal", "observed_at": "2026-09-01T00:00:00Z"}}
