@@ -297,8 +297,10 @@ class TursoDatabase {
     this.#endpoint = databaseEndpoint(env.TURSO_DATABASE_URL);
     this.#token = env.TURSO_AUTH_TOKEN;
     if (/[\x00-\x20\x7f]/.test(this.#token)) invalid("storage_sql_auth_token_invalid");
-    this.#fetch = options.fetch ?? options.fetchImpl ?? globalThis.fetch;
-    if (typeof this.#fetch !== "function") invalid("storage_sql_fetch_missing");
+    const fetchImpl = options.fetch ?? options.fetchImpl ?? globalThis.fetch;
+    if (typeof fetchImpl !== "function") invalid("storage_sql_fetch_missing");
+    // Workers' native fetch rejects a database instance as its receiver.
+    this.#fetch = fetchImpl.bind(globalThis);
     this.#timeout = Number(options.timeoutMs ?? env.TURSO_REQUEST_TIMEOUT_MS ?? 15000);
     if (!Number.isSafeInteger(this.#timeout) || this.#timeout < 1 || this.#timeout > 60000) {
       invalid("storage_sql_timeout_invalid");

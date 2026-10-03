@@ -22,6 +22,17 @@ const rowResult = (names = ["n"], rows = [[{type:"integer", value:"1"}]]) => ({
 const staticDb = (body, options = {}) => createTursoDatabase(credentials, {fetch:async()=>Response.json(body), ...options});
 const rejectsCode = (work, code) => assert.rejects(work, error => error instanceof StorageSqlError && error.code === code);
 
+test("native fetch retains the global receiver in Worker runtimes", async t => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  globalThis.fetch = async function () {
+    assert.equal(this, globalThis, "native fetch must not receive the database instance");
+    return Response.json(successfulSingle(rowResult()));
+  };
+  const db = createTursoDatabase(credentials);
+  assert.equal(await db.prepare("SELECT 1 n").first("n"), 1);
+});
+
 // This implements the public Hrana conditions against SQLite, not the adapter's
 // own condition logic, so the rollback tests exercise the transaction contract.
 function fixture(t, {counters = false} = {}) {
