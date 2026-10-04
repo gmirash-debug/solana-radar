@@ -1046,7 +1046,7 @@ button.metric[aria-pressed="true"] {
   border-bottom: 1px solid var(--line);
   display: grid;
   gap: 8px;
-  grid-template-columns: 86px minmax(0, 1fr) 68px 84px;
+  grid-template-columns: 86px minmax(0, 1fr) 68px minmax(84px, 150px);
   padding: 8px 9px;
 }
 
@@ -1065,7 +1065,9 @@ button.metric[aria-pressed="true"] {
 .wallet-preview-row strong {
   font-variant-numeric: tabular-nums;
   text-align: right;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .detail-empty-line {
@@ -1831,7 +1833,7 @@ tr:last-child td {
   }
 
   .wallet-preview-row {
-    grid-template-columns: minmax(0, 1fr) 90px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 
   .wallet-preview-row span {
