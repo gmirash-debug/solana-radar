@@ -152,6 +152,18 @@ class CohortOutflowStatesTests(unittest.TestCase):
         self.assertEqual(thesis["outflow_evidence"]["observed_sale_transactions"], 3)
         self.assertFalse(thesis["invalidation_candidate"])
 
+    def test_reopened_historical_thesis_cannot_seed_a_later_purchase_receipt(self):
+        thesis = s.signal_thesis_from_alert(self.alert(3), {})
+        thesis.pop("position_evidence_version")
+        thesis.update(status="invalidated", invalidation_candidate=True)
+        rpc = Mock()
+        rpc.token_balance.return_value = 0
+        with patch.object(s, "freeze_receipt_seeds") as freeze:
+            s.refresh_signal_thesis(rpc, self.pool, {"signal_thesis": thesis}, [], {}, self.later,
+                observed_transactions=[], observed_swaps=[])
+        freeze.assert_not_called()
+        self.assertEqual(thesis["receipt_position_seeds"]["reason"], "original_capture_receipts_not_available")
+
 
 if __name__ == "__main__":
     unittest.main()

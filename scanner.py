@@ -7954,11 +7954,14 @@ def refresh_signal_thesis(
         schedule_signal_recheck(pool_state, alerts, config)
     if isinstance(thesis, dict) and observed_transactions is not None:
         if "receipt_position_seeds" not in thesis:
+            original_capture = (captured and not thesis.get("cohort_recovered_at")
+                and parse_timestamp(thesis.get("captured_at")) == parse_timestamp(checked_at)
+                and 0 <= parse_timestamp(checked_at) - parse_timestamp(thesis.get("signal_at")) <= 300)
             try:
                 thesis["receipt_position_seeds"] = freeze_receipt_seeds(
                     pool.token_address, observed_transactions, observed_swaps or [],
                     [row["owner"] for row in thesis.get("cohort") or [] if row.get("owner")],
-                    service_owners=[pool.pool_address, SOL_MINT, SOLANA_INCINERATOR, *infrastructure_sources(config)]) if captured else {
+                    service_owners=[pool.pool_address, SOL_MINT, SOLANA_INCINERATOR, *infrastructure_sources(config)]) if original_capture else {
                         "owners": {}, "status": "unavailable", "reason": "original_capture_receipts_not_available"}
             except (TypeError, ValueError):
                 thesis["receipt_position_seeds"] = {"owners": {}, "status": "unavailable", "reason": "ambiguous_capture_receipts"}
