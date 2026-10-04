@@ -85,12 +85,19 @@ def dashboard_documents(body):
                if key not in {"detail_signal_theses", "detail_current_alerts", "detail_history", "history_ledger", "_sync_progress"}}
     summary["report"] = list_report(summary.get("report") or {})
     summary["history"] = [list_evidence(row) for row in summary.get("history", [])]
+    visible = set()
+    for field in ("signal_theses", "alerts", "summaries"):
+        visible.update(token_key(row) for row in summary["report"].get(field, []) if isinstance(row, dict))
+    visible.update(token_key(row) for row in summary.get("history", []) if isinstance(row, dict))
+    # Old callers that provide only a generation and details have no explicit
+    # list to project. Current snapshots carry explicit signal/alert arrays.
+    project_visible = any(field in (body.get("report") or {}) for field in ("signal_theses", "alerts"))
     details = {}
     for field, target in (("detail_signal_theses", "thesis"), ("detail_current_alerts", "current_alerts"),
                           ("detail_history", "history")):
         for row in body.get(field) or []:
             key = token_key(row)
-            if not key:
+            if not key or project_visible and key not in visible:
                 continue
             detail = details.setdefault(key, {"token_key": key, "thesis": None, "current_alerts": [], "history": [],
                                                "market": (body.get("market") or {}).get(key), "wallet_edge": None})
@@ -105,10 +112,7 @@ def dashboard_documents(body):
         refs[key] = {"id": digest, "bytes": len(data)}
         documents.append({"encoding": "json-ascii", "sha256": digest, "encoded_bytes": len(data), "data": data})
     summary["token_detail_refs"] = refs
-    visible = set(details)
-    for field in ("signal_theses", "alerts", "summaries"):
-        visible.update(token_key(row) for row in summary["report"].get(field, []) if isinstance(row, dict))
-    visible.update(token_key(row) for row in summary.get("history", []) if isinstance(row, dict))
+    visible.update(details)
     summary["market"] = {key: value for key, value in (body.get("market") or {}).items() if key in visible}
-    summary["runtime_list_version"] = 2
+    summary["runtime_list_version"] = 3
     return summary, documents

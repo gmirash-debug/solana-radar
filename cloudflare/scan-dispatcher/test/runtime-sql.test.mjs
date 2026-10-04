@@ -75,8 +75,25 @@ test("generation-bound token evidence never becomes a public checkpoint or a dif
   assert.equal(summary.r2_budget.paused,true);
   const detail=await (await sqlDashboardResponse(f.env,new Request("https://worker/api/dashboard/token?token_key=solana:token"))).json();
   assert.equal(detail.thesis.cohort[0].owner,"owner");assert.equal(detail.report_source_updated_at,AT);
+  assert.equal(detail.detail_status,"ready");
   await assert.rejects(writeSqlRuntime(f.env,"dashboard",{...root,token_detail_refs:{wrong:root.token_detail_refs.token}},AT,1),/missing_or_mismatched/);
   assert.equal((await readSqlRuntime(f.env,"dashboard")).value.token_detail_refs.token.id,part.sha256);
+});
+
+test("list-first token responses remain pending until the full generation manifest is published",async t=>{
+  const f=fixture(t),part=await blob(JSON.stringify({token_key:"token",thesis:{token_address:"token",cohort:[{owner:"owner"}]}}),"json-ascii");
+  const root={report:{generated_at:AT,alerts:[],signal_theses:[{token_address:"token"}]},runtime_snapshot_stage:"summary"};
+  await writeSqlRuntime(f.env,"dashboard",root,AT,2);
+  const request=()=>new Request("https://worker/api/dashboard/token?token_key=token");
+  const summary=await (await sqlDashboardResponse(f.env,request())).json();
+  assert.equal(summary.detail_status,"pending");
+  assert.equal(summary.thesis.cohort,undefined);
+  await writeSqlRuntime(f.env,`dashboard:blob:${part.sha256}`,part,AT);
+  await writeSqlRuntime(f.env,"dashboard",{...root,runtime_snapshot_stage:"complete",
+    token_detail_refs:{token:{id:part.sha256,bytes:part.encoded_bytes}}},AT,3);
+  const detail=await (await sqlDashboardResponse(f.env,request())).json();
+  assert.equal(detail.detail_status,"ready");
+  assert.equal(detail.thesis.cohort[0].owner,"owner");
 });
 
 test("bounded dashboard part probe only reads verified dashboard metadata without DO or R2",async t=>{

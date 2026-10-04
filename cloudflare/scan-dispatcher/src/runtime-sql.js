@@ -196,7 +196,8 @@ export async function sqlDashboardResponse(env, request, extra = {}) {
       if (part?.content_id !== ref.id) throw new Error("token_detail_unavailable");
       const detail = JSON.parse(part.value.data);
       if (![token, key].includes(detail.token_key)) throw new Error("token_detail_identity_mismatch");
-      return Response.json({...detail,ok:true,token_key:token,report_source_updated_at:stored.updated_at,storage_source:"turso_runtime"});
+      return Response.json({...detail,ok:true,detail_status:"ready",token_key:token,
+        report_source_updated_at:stored.updated_at,storage_source:"turso_runtime"});
     }
     const matches = row => dashboardRecordMatchesToken(row, token);
     const thesis = (snapshot.detail_signal_theses || snapshot.report.signal_theses || []).find(matches);
@@ -204,7 +205,8 @@ export async function sqlDashboardResponse(env, request, extra = {}) {
     const history = (snapshot.detail_history || snapshot.history || []).filter(matches);
     const market = snapshot.market?.[token] || snapshot.market?.[key];
     if (!thesis && !current.length && !history.length && !market) return null;
-    return Response.json({ok:true,token_key:token,thesis:thesis || null,current_alerts:current,history,market:market || null,
+    return Response.json({ok:true,detail_status:snapshot.runtime_snapshot_stage === "summary" ? "pending" : "ready",
+      token_key:token,thesis:thesis || null,current_alerts:current,history,market:market || null,
       wallet_edge:null,report_source_updated_at:stored.updated_at,storage_source:"turso_runtime"});
   }
   const {detail_signal_theses,detail_current_alerts,detail_history,token_detail_refs,...summary} = snapshot;
