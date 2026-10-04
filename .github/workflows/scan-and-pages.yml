@@ -35,6 +35,7 @@ on:
       - "scan_failure.py"
       - "launch_history.py"
       - "position_history_rpc.py"
+      - "wallet_activity.py"
       - "prospective_evidence.py"
       - "signal_evaluation.py"
       - "lifi_context.py"

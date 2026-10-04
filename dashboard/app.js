@@ -1,10 +1,11 @@
-import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261004-cohort-outflow-v1";
-import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261004-cohort-outflow-v1";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261004-cohort-outflow-v1";
-import { installTerminology } from "./terminology.js?v=20261004-cohort-outflow-v1";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261004-cohort-outflow-v1";
-import { loadTokenDetail } from "./static-detail.js?v=20261004-cohort-outflow-v1";
-import { r2BudgetView } from "./r2-budget-view.js?v=20261004-cohort-outflow-v1";
+import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261004-wallet-activity-v1";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261004-wallet-activity-v1";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261004-wallet-activity-v1";
+import { installTerminology } from "./terminology.js?v=20261004-wallet-activity-v1";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261004-wallet-activity-v1";
+import { loadTokenDetail } from "./static-detail.js?v=20261004-wallet-activity-v1";
+import { r2BudgetView } from "./r2-budget-view.js?v=20261004-wallet-activity-v1";
+import { walletActivityView } from "./wallet-activity-view.js?v=20261004-wallet-activity-v1";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -15,12 +16,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261004-cohort-outflow-v1";
+} from "./token-state.js?v=20261004-wallet-activity-v1";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261004-cohort-outflow-v1";
+} from "./filter-scope.js?v=20261004-wallet-activity-v1";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const PENDING_TOKEN_ACTIONS_KEY = "solana-radar:pending-token-actions:v1";
@@ -2961,7 +2962,8 @@ function renderOverviewTab(token) {
   const known = [
     ["Signal confirmation", view.confirmation],
     ["Original sale history", view.saleHistoryUnknown ? "Unknown; checked balances are only a cap"
-      : thesis.original_sale_history_status === "tracked_from_capture" ? "Tracked from capture" : "Not specified"],
+      : thesis.original_sale_history_status === "reconstructed_from_capture" ? "Wallet history reconstructed since catch"
+        : thesis.original_sale_history_status === "tracked_from_capture" ? "Tracked from capture" : "Not specified"],
     ["Wallets with a balance cap", observedCount(thesis.holders_remaining) !== null
       && observedCount(thesis.original_wallets) !== null && thesis.holders_remaining <= thesis.original_wallets
       ? `${thesis.holders_remaining} of ${thesis.original_wallets} stored wallets at last check` : "Not verified"],
@@ -2970,7 +2972,7 @@ function renderOverviewTab(token) {
     ["Observed sale trades", saleTrades > 0 ? `${saleTrades} matched trades; original inventory not proven` : "Not established"],
     ["Verified sale receipts", saleReceipts > 0 ? `${saleReceipts} matched receipts in partial history` : "Not established"],
     ["Direct transfers", transfers > 0 ? `${transfers} matched receipts; common control unknown` : "Not established"],
-    ["Outflow resolution", "Balance caps and movement receipts are separate; full disposition unknown"],
+    ["Outflow resolution", walletActivityView(thesis).reason],
     ["Control risk", token.supplyIntegrity?.status === "concentrated" ? "High concentration"
       : view.rotation ? "Sell/rebuy rotation pattern" : "Common ownership not established"],
   ];
@@ -2981,6 +2983,7 @@ function renderOverviewTab(token) {
       ${view.retained === null ? "" : `<meter class="retention-meter ${esc(view.tone)}" min="0" max="100" value="${view.retained}" aria-label="Original position retained">${holdings}</meter>`}
       <div class="evidence-facts">${known.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join("")}</div>
     </section>
+    ${renderWalletActivity(token)}
     <section class="decision-caveats">
       <h3>${view.blockers.length ? "What limits the conclusion" : "Evidence checks passed"}</h3>
       ${view.blockers.length ? `<ul>${view.blockers.map((reason) => `<li>${esc(reason)}</li>`).join("")}</ul>` : `<p>Current confirmation, balances and market data are available. This does not establish a profitable entry.</p>`}
@@ -3193,11 +3196,44 @@ function renderWalletsTab(token) {
       <div class="kv"><span>Wallet PnL</span><span>${renderWalletSummary(token)}</span></div>
       ${renderTopWalletPreview(token)}
     </section>
+    ${renderWalletActivity(token, true)}
     <section class="detail-block">
       <div class="detail-block-title">Noticed wallets</div>
       ${renderWalletRows(token)}
     </section>
   `;
+}
+
+function renderWalletActivity(token, receipts = false) {
+  const audit = token.signalThesis?.wallet_activity;
+  const rows = token.signalThesis?.cohort_wallets || [];
+  const events = rows.flatMap(row => row.activity?.events || []).sort((a, b) => b.timestamp - a.timestamp).slice(0, 30);
+  const labels = {sold:"Decoded sales", transferred:"Direct transfers", service:"Service destinations", unclassified:"Unclassified debits"};
+  if (!audit) return `<section class="position-evidence"><h3>Wallet activity</h3><p>History check queued; no complete wallet history yet.</p></section>`;
+  const percentage = value => typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(2)}% of supply` : "Supply share unknown";
+  return `<section class="position-evidence">
+    <div class="section-heading"><h3>Wallet activity</h3><span>${esc(audit.wallets_checked ?? 0)}/${esc(audit.wallets_total ?? 0)} histories checked · ${esc(audit.pages_checked ?? 0)} pages</span></div>
+    ${audit.wallet_status_counts?.retry ? `<p class="muted">${esc(audit.wallet_status_counts.retry)} wallet histories awaiting provider retry; previous evidence is preserved.</p>` : ""}
+    ${audit.wallet_status_counts?.partial ? `<p class="muted">${esc(audit.wallet_status_counts.partial)} wallet histories have incomplete receipts; the affected window is queued for repair.</p>` : ""}
+    <div class="evidence-facts">${Object.entries(labels).map(([kind, label]) => {
+      const amount = audit.amounts_tokens?.[kind];
+      const text = typeof amount === "number" && amount > 0
+        ? `${percentage(audit.amounts_supply_pct?.[kind])} / ${compact(amount)} tokens`
+        : audit.status === "checked" ? "None found in checked history" : "Not established in checked subset";
+      return `<div><span>${esc(label)}</span><strong>${esc(text)}</strong></div>`;
+    }).join("")}</div>
+    <p class="muted">Gross movements since catch; may include later buys. Not a breakdown of the original purchase.</p>
+    ${receipts && events.length ? `<div class="wallet-movement-list">${events.map(event => `<div class="wallet-movement-row">
+      <a href="https://solscan.io/account/${encodeURIComponent(event.source_owner)}" target="_blank" rel="noopener noreferrer">${esc(short(event.source_owner))}</a>
+      <span>${esc(labels[event.kind] || "Same-owner transfer")} / ${esc(compact(event.tokens))} tokens${event.destination_owner ? ` → <a href="https://solscan.io/account/${encodeURIComponent(event.destination_owner)}" target="_blank" rel="noopener noreferrer">${esc(short(event.destination_owner))}</a>` : ""}</span>
+      <a href="https://solscan.io/tx/${encodeURIComponent(event.signature)}" target="_blank" rel="noopener noreferrer">${esc(dateLabel(isoEventTime(event.timestamp)))} · Transaction</a>
+    </div>`).join("")}</div>` : ""}
+  </section>`;
+}
+
+function isoEventTime(value) {
+  const at = typeof value === "number" && Number.isFinite(value) ? new Date(value * 1000) : null;
+  return at && Number.isFinite(at.getTime()) ? at.toISOString() : "";
 }
 
 function renderSocialTab(token) {

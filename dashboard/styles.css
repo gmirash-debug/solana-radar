@@ -2027,3 +2027,6 @@ tr:last-child td {
     display: grid;
   }
 }
+.wallet-movement-list { display: grid; gap: 0; margin-top: 12px; }
+.wallet-movement-row { display: grid; grid-template-columns: 1fr; gap: 6px; padding: 12px 0; border-top: 1px solid var(--line, #d7e1dd); overflow-wrap: anywhere; font-size: 13px; }
+.wallet-movement-row a { width: fit-content; }
