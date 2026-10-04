@@ -1,4 +1,4 @@
-import {numeric} from "./decision-view.js?v=20261004-wallet-activity-v3";
+import {numeric} from "./decision-view.js?v=20261004-wallet-activity-v4";
 
 export const CHAIN_ID = 4663;
 export function ageFilterLabel(config) {
