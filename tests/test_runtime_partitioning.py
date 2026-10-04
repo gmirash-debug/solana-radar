@@ -13,6 +13,26 @@ from runtime_dashboard import dashboard_documents
 
 
 class RuntimePartitioningTests(unittest.TestCase):
+    def test_queue_backpressure_does_not_block_live_sql_or_acknowledge_history(self):
+        for code in ("history_queue_daily_write_budget", "history_queue_pending_capacity",
+                     "history_queue_receipt_capacity", "history_archive_daily_budget", "history_daily_write_budget"):
+            with self.subTest(code=code):
+                body = {"report": {"generated_at": "2026-10-03T00:00:00Z"}, "history_ledger": {"events": [
+                    {"event_id": "valid", "episode": {"episode_id": "episode", "token_address": "mint", "caught_at": "2026-10-03T00:00:00Z"},
+                     "event": {"event_type": "signal", "observed_at": "2026-10-03T00:00:00Z"}}]}}
+                def blocked(method, path, config, payload):
+                    if path == "/api/runtime/history":
+                        raise RuntimeError(f"Remote HTTP 429: {code}")
+                    return {"ok": True}
+                with patch.object(s, "remote_api_call", side_effect=blocked):
+                    self.assertFalse(s.send_remote_snapshot(body, {}))
+                self.assertEqual(body["_sync_progress"]["summary"], 1)
+                self.assertNotIn("durable_history_ledger", body["_sync_progress"])
+                self.assertIn("History queue", body["_sync_deferred_reason"])
+        with patch.object(s, "remote_api_call", side_effect=RuntimeError("history_archive_legacy_identity_mismatch")):
+            with self.assertRaisesRegex(RuntimeError, "identity_mismatch"):
+                s.send_remote_snapshot({"report": body["report"], "history_ledger": body["history_ledger"]}, {})
+
     def test_control_write_quota_keeps_archive_pending_but_publishes_current_sql(self):
         event = {"event_id": "valid", "episode": {"episode_id": "episode", "token_address": "mint", "caught_at": "2026-10-03T00:00:00Z"},
                  "event": {"event_type": "signal", "observed_at": "2026-10-03T00:00:00Z"}}

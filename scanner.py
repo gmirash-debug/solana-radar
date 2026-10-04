@@ -1451,14 +1451,18 @@ def send_remote_snapshot(payload, config, deadline=None, legacy=False):
         except RuntimeError as exc:
             reason = str(exc)
             control_quota = "Exceeded allowed rows written in Durable Objects free tier" in reason
-            if not control_quota and "r2_monthly_budget_paused" not in reason and "r2_budget_" not in reason:
+            queue_limited = any(code in reason for code in (
+                "history_queue_daily_write_budget", "history_queue_pending_capacity",
+                "history_queue_receipt_capacity", "history_archive_daily_budget", "history_daily_write_budget"))
+            if not control_quota and not queue_limited and "r2_monthly_budget_paused" not in reason and "r2_budget_" not in reason:
                 raise
             # Keep unacknowledged evidence in the local outbox, but publish
             # current operational data to SQL while the archive is paused.
             archive_paused = True
             payload["_sync_deferred_reason"] = (
                 "Cloudflare daily control-write quota exhausted; original evidence stays queued"
-                if control_quota else "R2 paused by the monthly budget guard; original evidence stays queued")
+                if control_quota else "History queue allowance exhausted; original evidence stays queued"
+                if queue_limited else "R2 paused by the monthly budget guard; original evidence stays queued")
             break
         start = end
     send("summary", 1, "/api/ingest/snapshot", summary)
