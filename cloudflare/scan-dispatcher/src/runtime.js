@@ -216,7 +216,7 @@ export async function runtimeCheckpointResponse(env, request, kind) {
   } : {}));
 }
 
-export async function runtimeDashboardResponse(env, request, upload = false) {
+export async function runtimeDashboardResponse(env, request, upload = false, extra = {}) {
   if (!runtimeUsesSql(env) && !env.RUNTIME_SNAPSHOTS) return null;
   const url = new URL(request.url);
   const part = upload && url.searchParams.get("part");
@@ -230,7 +230,7 @@ export async function runtimeDashboardResponse(env, request, upload = false) {
   if (runtimeUsesSql(env)) return upload
     ? sqlRuntimeResponse(env, new Request(target, {method:"POST",body:request.body,duplex:"half",headers:{"content-type":"application/json"}}),
       `dashboard${part ? `:blob:${part}` : ""}`)
-    : sqlDashboardResponse(env, request);
+    : sqlDashboardResponse(env, request, extra);
   const stub = env.RUNTIME_SNAPSHOTS.get(env.RUNTIME_SNAPSHOTS.idFromName("dashboard"));
   return stub.fetch(new Request(target, upload ? {method:"POST", body:request.body, duplex:"half", headers:{"content-type":"application/json"}} : {}));
 }

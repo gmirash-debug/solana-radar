@@ -14,7 +14,7 @@ import {
   historyWallets,
 } from "./history.js";
 import {runtimeDocument, runtimeDashboardResponse, runtimeCheckpointResponse, runtimeMetadata} from "./runtime.js";
-import {runtimeUsesSql, collectSqlRuntimeGarbage, sqlRuntimeResponse} from "./runtime-sql.js";
+import {runtimeUsesSql, collectSqlRuntimeGarbage, sqlRuntimeResponse, availableSqlDashboardParts} from "./runtime-sql.js";
 import {durableHistoryIngestResponse, flushDurableHistory, flushDurableHistoryArchives, durableHistoryStatus, migrateLegacyDurableHistory, HISTORY_QUEUE_LIMITS} from "./runtime-history.js";
 import {historySchemaState} from "./history-schema.js";
 import {resolveStorageEnv} from "./storage-sql.js";
@@ -1285,8 +1285,13 @@ export default {
       }
       try {
         const budget = await budgetView(env);
-        const durable = budget.paused && !runtimeUsesSql(env) ? null : await runtimeDashboardResponse(env, request).catch(() => null);
-        if (durable?.ok) return json({...await durable.json(),r2_budget:budget},200,corsHeaders(request,env));
+        const durable = budget.paused && !runtimeUsesSql(env) ? null
+          : await runtimeDashboardResponse(env, request, false, {r2_budget:budget}).catch(() => null);
+        if (durable?.ok) {
+          if (runtimeUsesSql(env)) return new Response(durable.body, {
+            headers:{"content-type":"application/json; charset=utf-8","cache-control":"no-store",...corsHeaders(request,env)}});
+          return json({...await durable.json(),r2_budget:budget},200,corsHeaders(request,env));
+        }
         return json(
           {...await dashboardData(env, url.searchParams.get("history_limit"),budget.paused),r2_budget:budget},
           200,
@@ -1422,6 +1427,12 @@ export default {
           if (!env.RUNTIME_SNAPSHOTS && !runtimeUsesSql(env)) return json({ok:false, error:"runtime_storage_not_configured"}, 503);
           if (!["GET", "POST"].includes(request.method)) return json({ok:false, error:"GET or POST required"}, 405);
           return await runtimeCheckpointResponse(env, request, kind);
+        }
+        if (url.pathname === "/api/runtime/dashboard-parts") {
+          if (request.method !== "POST") return json({ok:false,error:"POST required"},405);
+          if (!runtimeUsesSql(env)) return json({ok:false,error:"dashboard_parts_requires_sql_runtime"},503);
+          const payload = await storageRequestJson(request,64*1024);
+          return json({ok:true,parts:await availableSqlDashboardParts(env,payload.ids)});
         }
         if (url.pathname === "/api/runtime/dashboard") {
           if (request.method !== "POST") return json({ok:false, error:"POST required"}, 405);

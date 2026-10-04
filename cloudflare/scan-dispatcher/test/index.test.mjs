@@ -177,6 +177,17 @@ test("overlapping ingest rotation accepts old and next keys, never arbitrary or 
   assert.equal((await call("")).status,401);
 });
 
+test("dashboard part metadata probe remains private with explicit method and backend boundaries", async () => {
+  const env={RADAR_INGEST_SECRET:"secret"};
+  const call=(authorized,method="POST")=>worker.fetch(new Request("https://worker.example/api/runtime/dashboard-parts",{
+    method,headers:authorized ? {"x-radar-ingest-secret":"secret"} : {},
+    ...(method==="POST" ? {body:JSON.stringify({ids:[]})} : {}),
+  }),env,{});
+  assert.equal((await call(false)).status,401);
+  assert.equal((await call(true,"GET")).status,405);
+  assert.equal((await call(true)).status,503);
+});
+
 test("identical state and thesis replays avoid unnecessary SQL row writes", async () => {
   const db = recordingDb(), generated_at="2026-10-03T00:00:00Z";
   await ingestSnapshotDetails({RADAR_DB:db}, {generated_at,
