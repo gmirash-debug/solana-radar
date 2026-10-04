@@ -1408,7 +1408,7 @@ def publish_runtime_dashboard(body, config):
 
     listing = {key: value for key, value in ready.items() if key != "token_detail_refs"}
     listing["runtime_snapshot_stage"] = "summary"
-    summary = upload({**listing, "revision": 2})
+    summary = upload({**listing, "revision": 4})
     config["_runtime_dashboard_summary_saved"] = summary
     available = {}
     for start in range(0, len(documents), 250):
@@ -1428,7 +1428,7 @@ def publish_runtime_dashboard(body, config):
         if time.monotonic() >= deadline:
             raise RuntimeError("runtime token evidence publication deferred")
         upload({"detail": document, "updated_at": ready["report"]["generated_at"]}, {"part": document["sha256"]})
-    return upload({**ready, "runtime_snapshot_stage": "complete", "revision": 3})
+    return upload({**ready, "runtime_snapshot_stage": "complete", "revision": 5})
 
 
 def sync_remote_snapshot(report_payload, state, config):

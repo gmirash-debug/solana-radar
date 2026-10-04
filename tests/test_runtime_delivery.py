@@ -84,7 +84,7 @@ class RuntimeDeliveryTests(unittest.TestCase):
             self.assertTrue(s.publish_runtime_dashboard(self.body(), {})["accepted"])
         self.assertEqual(calls[1], calls[2])
         self.assertEqual(calls[-1]["runtime_snapshot_stage"], "complete")
-        self.assertEqual(calls[-1]["revision"], 3)
+        self.assertEqual(calls[-1]["revision"], 5)
 
     def test_verified_existing_parts_skip_upload_but_not_manifest_publication(self):
         _, documents = dashboard_documents(self.body())
@@ -122,6 +122,17 @@ class RuntimeDeliveryTests(unittest.TestCase):
         self.assertEqual(ready["market"], {"mint": body["market"]["mint"]})
         self.assertEqual(json.loads(documents[0]["data"])["market"], body["market"]["mint"])
         self.assertIn("unrelated", body["market"])
+
+    def test_out_of_scope_details_do_not_expand_current_runtime_publication(self):
+        body = self.body()
+        body["detail_signal_theses"].append({"token_address": "old", "cohort_wallets": ["original"]})
+        body["market"] = {"mint": {"mcap_usd": 42}, "old": {"mcap_usd": 999}}
+        before = copy.deepcopy(body)
+        ready, documents = dashboard_documents(body)
+        self.assertEqual(set(ready["token_detail_refs"]), {"mint"})
+        self.assertEqual(set(ready["market"]), {"mint"})
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(body, before)
 
 
 if __name__ == "__main__":
