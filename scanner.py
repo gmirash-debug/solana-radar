@@ -1387,6 +1387,36 @@ def sync_runtime_checkpoint(state, config, kind):
         return result
 
 
+def publish_runtime_dashboard(body, config):
+    ready, documents = dashboard_documents(body)
+    deadline = time.monotonic() + 180
+
+    def upload(payload, params=None):
+        for attempt in range(3):
+            try:
+                return remote_api_call("POST", "/api/runtime/dashboard", config, payload,
+                                       **({"params": params} if params else {}))
+            except (RuntimeError, requests.RequestException, ValueError) as exc:
+                transient = isinstance(exc, requests.RequestException) or any(reason in str(exc) for reason in (
+                    "storage_sql_http_error", "storage_sql_timeout", "storage_sql_network_error",
+                    "Remote HTTP 429:", "Remote HTTP 502:", "Remote HTTP 503:", "Remote HTTP 504:"))
+                if not transient or attempt == 2 or time.monotonic() >= deadline:
+                    raise
+                # These documents are content-addressed or timestamp/revision
+                # fenced. Do not use this retry policy for grants or ingestion.
+                time.sleep(0.5 * (attempt + 1))
+
+    listing = {key: value for key, value in ready.items() if key != "token_detail_refs"}
+    listing["runtime_snapshot_stage"] = "summary"
+    summary = upload({**listing, "revision": 0})
+    config["_runtime_dashboard_summary_saved"] = summary
+    for document in documents:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("runtime token evidence publication deferred")
+        upload({"detail": document, "updated_at": ready["report"]["generated_at"]}, {"part": document["sha256"]})
+    return upload({**ready, "runtime_snapshot_stage": "complete", "revision": 1})
+
+
 def sync_remote_snapshot(report_payload, state, config):
     base_url = remote_data_url_from_env()
     if not base_url:
@@ -1395,12 +1425,7 @@ def sync_remote_snapshot(report_payload, state, config):
     durable_synced = False
     durable_error = None
     try:
-        ready, documents = dashboard_documents(body)
-        for document in documents:
-            remote_api_call("POST", "/api/runtime/dashboard", config,
-                            {"detail": document, "updated_at": ready["report"]["generated_at"]},
-                            params={"part": document["sha256"]})
-        published = remote_api_call("POST", "/api/runtime/dashboard", config, ready)
+        published = publish_runtime_dashboard(body, config)
         durable_synced = bool(published.get("accepted"))
     except Exception as exc:
         durable_error = str(exc)[:300]
@@ -1417,7 +1442,8 @@ def sync_remote_snapshot(report_payload, state, config):
     selected = list(dict.fromkeys([current, *paths[:2]]))
     error = None
     deferred_reason = None
-    current_synced = durable_synced
+    summary_synced = (config.get("_runtime_dashboard_summary_saved") or {}).get("accepted") is True
+    current_synced = durable_synced or summary_synced
     deadline = time.monotonic() + max(30, int(config.get("remote_sync_run_budget_seconds", 240)))
     for path in selected:
         pending_body = None
@@ -1459,6 +1485,7 @@ def sync_remote_snapshot(report_payload, state, config):
     pending = len(list(REMOTE_OUTBOX_DIR.glob("*.json.gz")))
     return {"status": "pending" if pending else "synced", "current_synced": current_synced,
             "durable_dashboard_synced": durable_synced, "durable_dashboard_error": durable_error,
+            "durable_dashboard_summary_synced": summary_synced,
             "checkpoint": config.get("_runtime_deep_saved", {}),
             "pending": pending, "quarantined": len(list((REMOTE_OUTBOX_DIR / "quarantine").glob("*.json.gz"))),
             "error": error, "deferred_reason": deferred_reason, "checked_at": utc_now().isoformat()}

@@ -152,11 +152,11 @@ test("explicit migration is required; flag errors never create schema or silentl
 
 test("SQL enqueue rollback is atomic and a lost response retries idempotently", async t => {
   const f = fixture(t);
-  let inserts = 0;
-  f.failSql = sql => /INSERT INTO history_sql_queue_events/.test(sql) && ++inserts === 2;
+  f.sqlite.exec(`CREATE TRIGGER reject_second_test_event BEFORE INSERT ON history_sql_queue_events
+    WHEN NEW.event_id='b' BEGIN SELECT RAISE(ABORT,'injected second-row failure'); END`);
   await assert.rejects(enqueueDurableHistory(f.env,ledger([event("a"),event("b")])),/storage_sql_statement_failed/);
   assert.equal(f.rows().length,0);assert.equal(f.meta().pending_rows,0);
-  f.failSql=null;
+  f.sqlite.exec("DROP TRIGGER reject_second_test_event");
   f.afterCommit = steps => {if(steps.some(step => /INSERT INTO history_sql_queue_events/.test(step.stmt.sql))) throw new Error("response lost");};
   await assert.rejects(enqueueDurableHistory(f.env,ledger([event("a")])),/storage_sql_network_error/);
   assert.equal(f.rows().length,1);
@@ -300,6 +300,40 @@ test("explicit bounded migration acknowledges SQL before advancing, preserving a
   assert.equal(f.meta().legacy_cursor,"b");assert.equal(f.rows().length,2);
   assert.equal(old.sqlite.prepare("SELECT COUNT(*) n FROM history_queue_events").get().n,2);
   assert.equal(old.writes,writes);assert.equal((await flushDurableHistory(f.env)).delivered,2);
+});
+
+test("500 compact legacy receipts migrate in one bounded page, with atomic rollback and no DO writes", async t => {
+  const f=fixture(t),old=legacy(t,f);
+  for(let start=0;start<500;start+=25) old.old.enqueue(Array.from({length:25},(_,i)=>event(`receipt-${String(start+i).padStart(4,'0')}`)));
+  old.sqlite.prepare(`UPDATE history_queue_events SET status='delivered',delivered_at=?,payload_json=NULL,
+    payload_bytes=0,lease_token=NULL`).run(NOW);
+  old.sqlite.prepare("UPDATE history_queue_meta SET pending_rows=0,pending_bytes=0,delivered_rows=500").run();
+  old.readOnly();const writes=old.writes;
+  const page=await exportLegacyDurableHistory(f.env);
+  assert.equal(page.rows.length,500);assert.equal(page.complete,true);
+  let inserts=0;f.failSql=sql=>/INSERT INTO history_sql_queue_events/.test(sql) && ++inserts===2;
+  const options={legacyWritersStopped:true,historyStateMigrated:true};
+  await assert.rejects(migrateLegacyDurableHistory(f.env,options),/storage_sql_statement_failed/);
+  assert.equal(f.meta().legacy_cursor,'');assert.equal(f.rows().length,0);
+  f.failSql=null;
+  const result=await migrateLegacyDurableHistory(f.env,options);
+  assert.equal(result.complete,true);assert.equal(result.queued,500);assert.ok(result.requests<=35);
+  assert.equal(f.meta().delivered_rows,500);assert.equal(f.meta().legacy_imported,500);
+  assert.ok(f.calls.every(call=>call.requests[0].batch.steps.length<100));
+  assert.equal(old.writes,writes);
+  assert.equal((await enqueueDurableHistory(f.env,ledger([event('receipt-0000')]))).duplicates,1);
+});
+
+test("larger receipt pages do not relax the 25-pending-event admission bound",async t=>{
+  const f=fixture(t),old=legacy(t,f);
+  old.old.enqueue(Array.from({length:25},(_,i)=>event(`pending-${String(i).padStart(3,'0')}`)));
+  old.old.enqueue([event('pending-025')]);old.readOnly();
+  const first=await exportLegacyDurableHistory(f.env);
+  assert.equal(first.rows.length,25);assert.equal(first.complete,false);assert.equal(first.after,'pending-024');
+  const second=await exportLegacyDurableHistory(f.env,{after:first.after});
+  assert.equal(second.rows.length,1);assert.equal(second.complete,true);
+  await assert.rejects(exportLegacyDurableHistory(f.env,{limit:501}),/export_cursor_invalid/);
+  await assert.rejects(enqueueDurableHistory(f.env,ledger(Array.from({length:26},(_,i)=>event(`live-${i}`)))),/history_batch_max_25/);
 });
 
 test("cutover stages new raw data apart from inaccessible legacy receipts and resumes after sweep", async t => {

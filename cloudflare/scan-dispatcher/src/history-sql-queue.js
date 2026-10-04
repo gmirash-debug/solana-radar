@@ -129,13 +129,22 @@ export class SqlHistoryQueue {
     this.db.prepare(`DELETE FROM history_sql_queue_events WHERE event_id IN (
       SELECT event_id FROM history_sql_queue_events WHERE status='delivered' AND archive_pending=0 AND delivered_at<?1
       ORDER BY delivered_at,event_id LIMIT ?2)`).bind(now-this.limits.receiptRetentionMs,added.length)];
-    for (const row of added) statements.push(this.db.prepare(`INSERT INTO history_sql_queue_events
-      (event_id,episode_id,source_at,payload_json,payload_bytes,status,attempts,next_attempt_at,
-        progress_json,archive_version,delivered_at,last_error)
-      SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12
-      WHERE NOT EXISTS (SELECT 1 FROM history_sql_queue_events WHERE event_id=?1) RETURNING event_id`)
-      .bind(row.id,row.episodeId,row.sourceAt,row.json,row.bytes,row.status,row.attempts,
-        row.nextAttempt,row.progress,row.archiveVersion,row.deliveredAt,row.lastError));
+    // Compact receipt migration must not create one SQL statement per row.
+    // Live payloads still use the same 25-event and 1-MiB admission bounds.
+    for (let start=0;start<added.length;start+=25) {
+      const args=[], tuples=added.slice(start,start+25).map(row => {
+        const offset=args.length;
+        args.push(row.id,row.episodeId,row.sourceAt,row.json,row.bytes,row.status,row.attempts,
+          row.nextAttempt,row.progress,row.archiveVersion,row.deliveredAt,row.lastError);
+        return `(${Array.from({length:12},(_,i)=>`?${offset+i+1}`).join(",")})`;
+      });
+      statements.push(this.db.prepare(`INSERT INTO history_sql_queue_events
+        (event_id,episode_id,source_at,payload_json,payload_bytes,status,attempts,next_attempt_at,
+          progress_json,archive_version,delivered_at,last_error)
+        SELECT column1,column2,column3,column4,column5,column6,column7,column8,column9,column10,column11,column12
+        FROM (VALUES ${tuples.join(",")})
+        WHERE NOT EXISTS (SELECT 1 FROM history_sql_queue_events WHERE event_id=column1) RETURNING event_id`).bind(...args));
+    }
     statements.push(this.db.prepare("SELECT * FROM history_sql_queue_meta WHERE id=1"));
     const results = await this.batch(statements,requests);
     const queued = results.slice(2,-1).reduce((sum,row) => sum+row.results.length,0);
@@ -439,8 +448,8 @@ export class SqlHistoryQueue {
   async migrateLegacy(options, exporter) {
     if (!options || typeof options!=="object" || Array.isArray(options)) throw this.error("history_legacy_migration_options_invalid",400);
     if (!this.env.HISTORY_QUEUE) return {enabled:true,migration_pending:false,reason:"history_legacy_not_configured"};
-    const limit = options.limit ?? this.limits.enqueueEvents;
-    if (!Number.isInteger(limit) || limit<1 || limit>this.limits.enqueueEvents) throw this.error("history_legacy_export_cursor_invalid",400);
+    const limit = options.limit ?? this.limits.legacyExportRows;
+    if (!Number.isInteger(limit) || limit<1 || limit>this.limits.legacyExportRows) throw this.error("history_legacy_export_cursor_invalid",400);
     if (options.legacyWritersStopped!==true || options.historyStateMigrated!==true) {
       return {enabled:true,migration_pending:true,reason:"history_legacy_migration_prerequisites_required"};
     }
@@ -451,7 +460,8 @@ export class SqlHistoryQueue {
     const page = await exporter({after:meta.legacy_cursor,limit});
     if (page.read_only!==true || !Array.isArray(page.rows) || page.rows.length>limit
         || page.after!==(page.rows.at(-1)?.event_id || meta.legacy_cursor)
-        || typeof page.complete!=="boolean") throw this.error("history_legacy_export_invalid");
+        || typeof page.complete!=="boolean"
+        || page.rows.filter(row=>row.status==="pending").length>this.limits.enqueueEvents) throw this.error("history_legacy_export_invalid");
     if (page.rows.some(row => row.active_lease || (row.lease_token && row.next_attempt_at>Date.now()))) {
       return {enabled:true,migration_pending:true,after:meta.legacy_cursor,reason:"history_legacy_active_lease"};
     }
