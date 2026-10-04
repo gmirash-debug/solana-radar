@@ -102,6 +102,14 @@ test("wallet preview holdings can wrap instead of being clipped on mobile",()=>{
   assert.match(css,/\.wallet-preview-row\s*\{\s*grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1fr\)/);
 });
 
+test("wallet evidence columns retain a readable width inside their scroll container",t=>{
+  const api=fixture(t);
+  assert.match(api.renderWalletRows(api.buildTokenSignals()[0]),/<table class="wallet-evidence-table">/);
+  const css=readFileSync(new URL("../styles.css",import.meta.url),"utf8");
+  assert.match(css,/\.wallet-evidence-table\s*\{\s*min-width: 760px;\s*table-layout: auto;/);
+  assert.match(css,/\.table-wrap\s*\{[^}]*overflow-x: auto;/);
+});
+
 test("the radar and token criteria display the thirty-minute age minimum", t => {
   const api = fixture(t, {signalThesis:null});
   api.state.report.config = {age_min_hours:0.5, age_max_hours:360};
@@ -353,11 +361,11 @@ test("partial movement note needs actual observations and never renders raw amou
 
 test("HTML entrypoint and every dashboard JS import use the same evidence cache tag", () => {
   const html = readFileSync(new URL("../index.html",import.meta.url),"utf8");
-  assert.match(html, /src="radar-bootstrap\.js\?v=20261004-wallet-activity-v3"/);
+  assert.match(html, /src="radar-bootstrap\.js\?v=20261004-wallet-activity-v4"/);
   for (const file of readdirSync(new URL("../",import.meta.url)).filter(file => file.endsWith(".js"))) {
     const source = readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
     for (const match of source.matchAll(/(?:from\s+|import\()"(\.\/[^"?]+\.js\?v=([^"]+))"/g)) {
-      assert.equal(match[2],"20261004-wallet-activity-v3",`${file}: ${match[1]}`);
+      assert.equal(match[2],"20261004-wallet-activity-v4",`${file}: ${match[1]}`);
     }
   }
 });

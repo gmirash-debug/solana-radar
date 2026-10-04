@@ -1,11 +1,11 @@
-import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261004-wallet-activity-v3";
-import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261004-wallet-activity-v3";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261004-wallet-activity-v3";
-import { installTerminology } from "./terminology.js?v=20261004-wallet-activity-v3";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261004-wallet-activity-v3";
-import { loadTokenDetail } from "./static-detail.js?v=20261004-wallet-activity-v3";
-import { r2BudgetView } from "./r2-budget-view.js?v=20261004-wallet-activity-v3";
-import { walletActivityView } from "./wallet-activity-view.js?v=20261004-wallet-activity-v3";
+import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261004-wallet-activity-v4";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261004-wallet-activity-v4";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261004-wallet-activity-v4";
+import { installTerminology } from "./terminology.js?v=20261004-wallet-activity-v4";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261004-wallet-activity-v4";
+import { loadTokenDetail } from "./static-detail.js?v=20261004-wallet-activity-v4";
+import { r2BudgetView } from "./r2-budget-view.js?v=20261004-wallet-activity-v4";
+import { walletActivityView } from "./wallet-activity-view.js?v=20261004-wallet-activity-v4";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -16,12 +16,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261004-wallet-activity-v3";
+} from "./token-state.js?v=20261004-wallet-activity-v4";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261004-wallet-activity-v3";
+} from "./filter-scope.js?v=20261004-wallet-activity-v4";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const PENDING_TOKEN_ACTIONS_KEY = "solana-radar:pending-token-actions:v1";
@@ -2321,7 +2321,7 @@ function renderWalletRows(token) {
   }
   return `
     <div class="table-wrap compact-table">
-      <table>
+      <table class="wallet-evidence-table">
         <thead>
           <tr>
             <th>Wallet</th>

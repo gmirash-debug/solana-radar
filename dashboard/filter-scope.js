@@ -1,4 +1,4 @@
-import { timestampMs } from "./token-state.js?v=20261004-wallet-activity-v3";
+import { timestampMs } from "./token-state.js?v=20261004-wallet-activity-v4";
 
 // The dashboard keeps historical data for Wallet Edge, but operational lists
 // start from the first completed scan that used the 1d-15d Reactivation rule.
