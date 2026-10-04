@@ -69,7 +69,7 @@ export const TERMS = Object.freeze({
 const aliases = {
   control_risk:["Control risk", "Holder scope"], rotation:["Possible market-mediated position rotation", "Sell/rebuy rotation pattern"],
   balance_cap:["Original-position balance cap", "Balances checked", "Balance cap checked", "Balance cap at last check", "Wallets with a balance cap"],
-  position_activity:["Observed position movements", "Observed sale trades", "Verified sale receipts", "Direct transfers", "Outflow resolution"],
+  position_activity:["Observed position movements", "Observed sale trades", "Verified sale receipts", "Pool-window sale trades", "Pool-window sale receipts", "Pool-window transfers", "Partial pool-window observations", "Outflow resolution"],
   wallet_activity:["Wallet activity", "Decoded sales", "Direct transfers", "Service destinations", "Unclassified debits", "Sales observed", "Transfers observed", "Sales + transfers observed", "Service outflow observed"],
   position:["Position left", "Original position", "Original buyer position", "Observed buyer position"],
   retained_supply:["Retained supply", "Cohort supply", "Observed supply", "Holding now"],
