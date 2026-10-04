@@ -23,6 +23,18 @@ export async function readSqlRuntime(env, name, metadataOnly = false) {
   return document(await database(env).prepare(`SELECT ${fields} FROM runtime_sql_documents WHERE name=?1`).bind(name).first(), metadataOnly);
 }
 
+export async function availableSqlDashboardParts(env, ids) {
+  if (!Array.isArray(ids) || ids.length > 250 || ids.some(id => typeof id !== "string" || !/^[a-f0-9]{64}$/.test(id))) {
+    throw new Error("invalid_dashboard_part_probe");
+  }
+  const unique = [...new Set(ids)];
+  if (!unique.length) return [];
+  const rows = await database(env).prepare(`SELECT content_id,encoded_bytes FROM runtime_sql_documents
+    WHERE encoding='json-ascii' AND name IN (${unique.map((_, i) => `?${i + 1}`).join(",")})`)
+    .bind(...unique.map(id => `dashboard:blob:${id}`)).all();
+  return (rows.results || []).map(row => ({id:row.content_id,bytes:row.encoded_bytes}));
+}
+
 async function sha256(value) {
   return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(value))),
     byte => byte.toString(16).padStart(2, "0")).join("");
@@ -170,7 +182,7 @@ export async function sqlRuntimeResponse(env, request, name) {
   }
 }
 
-export async function sqlDashboardResponse(env, request) {
+export async function sqlDashboardResponse(env, request, extra = {}) {
   const url = new URL(request.url);
   const stored = await readSqlRuntime(env, "dashboard");
   if (!stored?.value?.report?.generated_at) return null;
@@ -201,7 +213,7 @@ export async function sqlDashboardResponse(env, request) {
   const names = ["scan_status","discovery_status","deleted_tokens","history_status"];
   const rows = await database(env).prepare(`SELECT name,payload_json FROM runtime_sql_documents WHERE name IN (?1,?2,?3,?4)`).bind(...names).all();
   for (const row of rows.results || []) summary[row.name] = JSON.parse(row.payload_json);
-  return Response.json({...summary,ok:true,report_source_updated_at:stored.updated_at,storage_source:"turso_runtime"});
+  return Response.json({...summary,...extra,ok:true,report_source_updated_at:stored.updated_at,storage_source:"turso_runtime"});
 }
 
 export async function collectSqlRuntimeGarbage(env, now = Date.now()) {

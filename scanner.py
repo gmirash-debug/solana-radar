@@ -1408,13 +1408,27 @@ def publish_runtime_dashboard(body, config):
 
     listing = {key: value for key, value in ready.items() if key != "token_detail_refs"}
     listing["runtime_snapshot_stage"] = "summary"
-    summary = upload({**listing, "revision": 0})
+    summary = upload({**listing, "revision": 2})
     config["_runtime_dashboard_summary_saved"] = summary
+    available = {}
+    for start in range(0, len(documents), 250):
+        try:
+            response = remote_api_call("POST", "/api/runtime/dashboard-parts", config,
+                                      {"ids": [document["sha256"] for document in documents[start:start + 250]]})
+            for part in response.get("parts") or []:
+                if isinstance(part, dict) and isinstance(part.get("id"), str):
+                    available[part["id"]] = part.get("bytes")
+        except Exception:
+            # A failed read only loses the optimization. Manifest validation
+            # still requires every content-addressed part in the transaction.
+            break
     for document in documents:
+        if available.get(document["sha256"]) == document["encoded_bytes"]:
+            continue
         if time.monotonic() >= deadline:
             raise RuntimeError("runtime token evidence publication deferred")
         upload({"detail": document, "updated_at": ready["report"]["generated_at"]}, {"part": document["sha256"]})
-    return upload({**ready, "runtime_snapshot_stage": "complete", "revision": 1})
+    return upload({**ready, "runtime_snapshot_stage": "complete", "revision": 3})
 
 
 def sync_remote_snapshot(report_payload, state, config):

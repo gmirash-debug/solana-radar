@@ -19,17 +19,46 @@ def fact_map(value):
     return result
 
 
+def decision_facts(value, fields=None):
+    if not isinstance(value, dict):
+        return value
+    selected = {key: item for key, item in value.items() if fields is None or key in fields}
+    return fact_map({key: item for key, item in selected.items()
+                     if key not in {"scope", "ownership", "reason", "limitations", "amount_basis", "detail"}})
+
+
 def list_evidence(row):
     if not isinstance(row, dict):
         return row
     result = dict(row)
-    for field in ("supply_integrity", "wallet_activity", "observed_position_activity", "outflow_evidence"):
+    evidence_fields = {
+        "supply_integrity": {"status", "data_quality_status", "checked_at", "evidence_version",
+            "token_supply", "observed_top_accounts_supply_pct", "cohort_top_holder_supply_pct"},
+        "wallet_activity": {"status", "interpretation_complete", "checked_at", "wallet_coverage_pct",
+            "token_coverage_pct", "wallets_checked", "wallets_total", "amounts_tokens"},
+        "outflow_evidence": {"balance_check_complete", "observed_sale_transactions", "direct_transfer_transactions"},
+        "observed_position_activity": {"status", "checked_at"},
+    }
+    for field, fields in evidence_fields.items():
         if isinstance(row.get(field), dict):
-            result[field] = fact_map(row[field])
+            result[field] = decision_facts(row[field], fields)
+            if field == "wallet_activity" and isinstance(row[field].get("amounts_tokens"), dict):
+                result[field]["amounts_tokens"] = decision_facts(row[field]["amounts_tokens"], {"sold", "transferred", "service"})
+    if isinstance(row.get("signal_confirmation"), dict):
+        confirmation = row["signal_confirmation"]
+        result["signal_confirmation"] = decision_facts(confirmation, {"status", "version", "checked_at"})
+        result["signal_confirmation"]["reasons"] = [item[:240] for item in confirmation.get("reasons", [])[:1]
+                                                      if isinstance(item, str)]
     if isinstance(row.get("coordinated_activity"), dict):
         activity = row["coordinated_activity"]
-        result["coordinated_activity"] = {**fact_map(activity),
-            "signals": [fact_map(signal) for signal in activity.get("signals", []) if isinstance(signal, dict)]}
+        metrics = activity.get("metrics") or {}
+        result["coordinated_activity"] = {
+            **decision_facts(activity, {"status", "version", "checked_at"}),
+            "metrics": decision_facts(metrics, {"material_pattern", "material_union_held_supply_pct",
+                "max_material_group_held_supply_pct", "market_rotation_observations", "buyer_count"}),
+            "signals": [decision_facts(signal, {"kind", "code", "family", "label", "supporting_only",
+                         "wallet_count", "held_supply_pct"}) for signal in activity.get("signals", [])[:3]
+                        if isinstance(signal, dict)]}
     return result
 
 
@@ -76,4 +105,10 @@ def dashboard_documents(body):
         refs[key] = {"id": digest, "bytes": len(data)}
         documents.append({"encoding": "json-ascii", "sha256": digest, "encoded_bytes": len(data), "data": data})
     summary["token_detail_refs"] = refs
+    visible = set(details)
+    for field in ("signal_theses", "alerts", "summaries"):
+        visible.update(token_key(row) for row in summary["report"].get(field, []) if isinstance(row, dict))
+    visible.update(token_key(row) for row in summary.get("history", []) if isinstance(row, dict))
+    summary["market"] = {key: value for key, value in (body.get("market") or {}).items() if key in visible}
+    summary["runtime_list_version"] = 2
     return summary, documents

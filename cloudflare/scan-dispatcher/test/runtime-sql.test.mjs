@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {DatabaseSync} from "node:sqlite";
 import {readFileSync} from "node:fs";
 import test from "node:test";
-import {writeSqlRuntime,readSqlRuntime,sqlDashboardResponse,collectSqlRuntimeGarbage} from "../src/runtime-sql.js";
+import {writeSqlRuntime,readSqlRuntime,sqlDashboardResponse,collectSqlRuntimeGarbage,availableSqlDashboardParts} from "../src/runtime-sql.js";
 import {runtimeCheckpointResponse,runtimeDocument} from "../src/runtime.js";
 
 const AT = "2026-10-04T12:00:00Z";
@@ -70,12 +70,28 @@ test("generation-bound token evidence never becomes a public checkpoint or a dif
   await writeSqlRuntime(f.env,`dashboard:blob:${part.sha256}`,part,AT);
   const root={report:{generated_at:AT,alerts:[]},token_detail_refs:{token:{id:part.sha256,bytes:part.encoded_bytes}}};
   await writeSqlRuntime(f.env,"dashboard",root,AT);
-  const summary=await (await sqlDashboardResponse(f.env,new Request("https://worker/api/dashboard"))).json();
+  const summary=await (await sqlDashboardResponse(f.env,new Request("https://worker/api/dashboard"),{r2_budget:{paused:true}})).json();
   assert.equal(summary.token_detail_refs,undefined);assert.equal(summary.storage_source,"turso_runtime");
+  assert.equal(summary.r2_budget.paused,true);
   const detail=await (await sqlDashboardResponse(f.env,new Request("https://worker/api/dashboard/token?token_key=solana:token"))).json();
   assert.equal(detail.thesis.cohort[0].owner,"owner");assert.equal(detail.report_source_updated_at,AT);
   await assert.rejects(writeSqlRuntime(f.env,"dashboard",{...root,token_detail_refs:{wrong:root.token_detail_refs.token}},AT,1),/missing_or_mismatched/);
   assert.equal((await readSqlRuntime(f.env,"dashboard")).value.token_detail_refs.token.id,part.sha256);
+});
+
+test("bounded dashboard part probe only reads verified dashboard metadata without DO or R2",async t=>{
+  const f=fixture(t),part=await blob(JSON.stringify({token_key:"token"}),"json-ascii");
+  await writeSqlRuntime(f.env,`dashboard:blob:${part.sha256}`,part,AT);
+  const other=await blob("AAAA");
+  await writeSqlRuntime(f.env,`checkpoint:deep:blob:${other.sha256}`,other,AT);
+  const before=f.writes;
+  assert.deepEqual(await availableSqlDashboardParts(f.env,[part.sha256,part.sha256,other.sha256]),
+    [{id:part.sha256,bytes:part.encoded_bytes}]);
+  assert.equal(f.writes,before);
+  assert.deepEqual(await availableSqlDashboardParts(f.env,[]),[]);
+  for(const ids of [["bad"],Array(251).fill(part.sha256),null]) {
+    await assert.rejects(availableSqlDashboardParts(f.env,ids),/invalid_dashboard_part_probe/);
+  }
 });
 
 test("bounded garbage collection preserves current references and a superseded restore grace",async t=>{
