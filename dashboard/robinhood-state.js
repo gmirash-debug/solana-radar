@@ -1,4 +1,4 @@
-import {numeric} from "./decision-view.js?v=20261003-r2-budget-v1";
+import {numeric} from "./decision-view.js?v=20261004-cohort-outflow-v1";
 
 export const CHAIN_ID = 4663;
 export function ageFilterLabel(config) {
@@ -59,7 +59,7 @@ export const REVIEW_GROUPS = [
   {id:"buy_wave", label:"New buy waves", tone:"info"},
   {id:"retained", label:"Holding", tone:"positive"},
   {id:"observed", label:"Early observations", tone:"info"},
-  {id:"reduced", label:"Reduced positions", tone:"negative"},
+  {id:"reduced", label:"Outflow from original wallets", tone:"negative"},
   {id:"needs_data", label:"Needs data", tone:"warning"},
   {id:"risk", label:"Contract risk", tone:"negative"},
 ];

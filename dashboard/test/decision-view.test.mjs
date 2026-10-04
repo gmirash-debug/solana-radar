@@ -106,6 +106,31 @@ test("legacy migration: an inconsistent confirmed thesis cannot override unknown
   assert.equal(view(t).confirmation, "Original sale history unknown");
 });
 
+test("checked balance observations escape the unknown-history dead end without becoming Ready", () => {
+  const t = newV3Token({signalLifecycle:{currentConfirmed:false}});
+  Object.assign(t.signalThesis, {status:"unknown", original_sale_history_status:"unknown",
+    balance_status:"present", outflow_evidence:{balance_check_complete:true}});
+  assert.equal(view(t).queue, "holding");
+  assert.equal(view(t).confirmation, "Original sale history unknown");
+  t.signalLifecycle.currentConfirmed = true;
+  assert.notEqual(view(t).queue, "review");
+  t.signalThesis.balance_coverage_pct = 66;
+  assert.equal(view(t).queue, "verification");
+  t.signalThesis.balance_coverage_pct = 100;
+  t.signalThesis.cohort_wallet_coverage_pct = 66;
+  assert.equal(view(t).queue, "verification");
+});
+
+test("outflow is visible but is never labelled a sale or a closed position", () => {
+  const t = newV3Token();
+  Object.assign(t.signalThesis, {status:"weakening", balance_status:"outflow", token_retention_pct:0});
+  const result = view(t);
+  assert.equal(result.queue, "reducing");
+  assert.equal(result.label, "Original-wallet outflow");
+  assert.match(result.reason, /sale\/transfer unresolved/);
+  assert.equal(matchesReviewQueue(result, "overview"), true);
+});
+
 test("new v3 tracked-from-capture histories retain normal readiness while unknown historical balances stay dated", () => {
   const t = newV3Token();
   assert.equal(view(t).queue, "review");

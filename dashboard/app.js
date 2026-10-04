@@ -1,10 +1,10 @@
-import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261003-r2-budget-v1";
-import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261003-r2-budget-v1";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261003-r2-budget-v1";
-import { installTerminology } from "./terminology.js?v=20261003-r2-budget-v1";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261003-r2-budget-v1";
-import { loadTokenDetail } from "./static-detail.js?v=20261003-r2-budget-v1";
-import { r2BudgetView } from "./r2-budget-view.js?v=20261003-r2-budget-v1";
+import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261004-cohort-outflow-v1";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261004-cohort-outflow-v1";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261004-cohort-outflow-v1";
+import { installTerminology } from "./terminology.js?v=20261004-cohort-outflow-v1";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261004-cohort-outflow-v1";
+import { loadTokenDetail } from "./static-detail.js?v=20261004-cohort-outflow-v1";
+import { r2BudgetView } from "./r2-budget-view.js?v=20261004-cohort-outflow-v1";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -15,12 +15,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261003-r2-budget-v1";
+} from "./token-state.js?v=20261004-cohort-outflow-v1";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261003-r2-budget-v1";
+} from "./filter-scope.js?v=20261004-cohort-outflow-v1";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const PENDING_TOKEN_ACTIONS_KEY = "solana-radar:pending-token-actions:v1";
@@ -2149,7 +2149,7 @@ function renderMetrics(tokens) {
     metric("Universe", stats.universe_pools ?? 0),
     metric("Scanned pools", stats.scanned_pools ?? 0),
     metric("Open positions", baseTokens.filter((token) => token.decision.queue !== "inactive").length),
-    metric("Reduced positions", baseTokens.filter((token) => token.decision.queue === "reducing").length),
+    metric("Original-wallet outflow", baseTokens.filter((token) => token.decision.queue === "reducing").length),
     metric(
       "24h median",
       outcomeSamples && outcomeMedian !== null && outcomeMedian !== undefined
@@ -2954,15 +2954,23 @@ function renderOverviewTab(token) {
   const view = token.decision;
   const thesis = token.signalThesis || {};
   const holdings = retentionBound(view.retained);
+  const outflow = thesis.outflow_evidence || {};
+  const saleTrades = observedCount(outflow.observed_sale_transactions);
+  const saleReceipts = observedCount(outflow.verified_sale_receipts);
+  const transfers = observedCount(outflow.direct_transfer_transactions);
   const known = [
     ["Signal confirmation", view.confirmation],
     ["Original sale history", view.saleHistoryUnknown ? "Unknown; checked balances are only a cap"
       : thesis.original_sale_history_status === "tracked_from_capture" ? "Tracked from capture" : "Not specified"],
-    ["Wallets still holding", observedCount(thesis.holders_remaining) !== null
+    ["Wallets with a balance cap", observedCount(thesis.holders_remaining) !== null
       && observedCount(thesis.original_wallets) !== null && thesis.holders_remaining <= thesis.original_wallets
       ? `${thesis.holders_remaining} of ${thesis.original_wallets} stored wallets at last check` : "Not verified"],
     ["Original wallets covered", view.cohortCoverage === null ? "Unknown" : `${view.cohortCoverage.toFixed(0)}%`],
     ["Stored balances checked", view.walletCoverage === null ? "Unknown" : `${view.walletCoverage.toFixed(0)}% wallets / ${view.tokenCoverage?.toFixed(0) ?? "?"}% tokens`],
+    ["Observed sale trades", saleTrades > 0 ? `${saleTrades} matched trades; original inventory not proven` : "Not established"],
+    ["Verified sale receipts", saleReceipts > 0 ? `${saleReceipts} matched receipts in partial history` : "Not established"],
+    ["Direct transfers", transfers > 0 ? `${transfers} matched receipts; common control unknown` : "Not established"],
+    ["Outflow resolution", "Balance caps and movement receipts are separate; full disposition unknown"],
     ["Control risk", token.supplyIntegrity?.status === "concentrated" ? "High concentration"
       : view.rotation ? "Sell/rebuy rotation pattern" : "Common ownership not established"],
   ];
@@ -2976,7 +2984,7 @@ function renderOverviewTab(token) {
     <section class="decision-caveats">
       <h3>${view.blockers.length ? "What limits the conclusion" : "Evidence checks passed"}</h3>
       ${view.blockers.length ? `<ul>${view.blockers.map((reason) => `<li>${esc(reason)}</li>`).join("")}</ul>` : `<p>Current confirmation, balances and market data are available. This does not establish a profitable entry.</p>`}
-      ${view.queue === "reducing" ? `<p>Reduced balances are not proof of a sale: transfers can also move tokens out of the original wallets.</p>` : ""}
+      ${view.queue === "reducing" ? `<p>Outflow from original wallets is not proof of a sale. Transfer receipts do not prove continued common ownership. Empty balances alone do not close the signal.</p>` : ""}
     </section>
     <details class="research-fold"><summary>Why it was caught <span>${esc(dateLabel(token.firstSignalAt))}</span></summary>
       <div class="kv"><span>Signal</span><span>${renderCaughtSignal(token)}</span></div>
