@@ -11,22 +11,26 @@
 ## Presentation contract
 
 The new queues are derived UI views, not new scanner filters or buy recommendations.
-The detector, scoring, confirmation thresholds, age limits, deleted-token blacklist,
-and historical signal records are unchanged.
+The detector, scoring, confirmation thresholds, age limits and deleted-token
+blacklist are unchanged. Cohort capture and balance-based lifecycle handling are
+corrected below, with old automatic closures preserved in an audit record.
 
 1. **Ready to review**: current scanner-confirmed activity, intact cohort, fresh
    balance check, required cohort coverage, fresh market, and complete distributed
    supply evidence. This does not imply a profitable or safe entry.
-2. **Holding**: the backend's intact original position with sufficient coverage.
-   Unversioned historical signals remain explicitly unconfirmed. Stale checks stay
-   visible as *Held at last check* and cannot enter Ready to review.
+2. **Balances checked**: complete, sufficiently covered original-wallet balance
+   observations, even when original sale history is unknown. These are balance
+   caps, not proof of unsold original purchases. Unknown sale history still blocks Ready.
 3. **Early observations**: fresh, unconfirmed activity. Unknown cohort coverage
    and invalidated or weakening positions are not hidden here.
-4. **Reduced positions**: the backend recorded weakening, even if confirmation is
-   missing or checks became overdue. A balance decline is not proof of a sale.
+4. **Outflow from original wallets**: original-position balance caps declined.
+   Sale trades, exact sale receipts and direct transfer receipts are separate,
+   bounded observations, not an inventory partition or common-control proof.
+   Repeated low balances no longer close a signal or replace its original buyers.
 5. **Needs data**: missing, invalid, or insufficient evidence. Coverage of stored
    wallets is distinct from coverage of all original signal wallets.
-6. **Closed**: backend-invalidated positions. Excluded from the default overview.
+6. **Closed**: explicit non-balance closures. Legacy automatic balance-only closures
+   are reopened with their old decision preserved as an audit record.
 
 Overview expands review, holding and early observations; reduced and incomplete
 groups remain accessible as counted collapsed groups and dedicated views. Search
@@ -62,6 +66,17 @@ incoming thesis. Mobile list browsing does not request hidden detail panels.
 - Source icons: Lucide static 0.468.0, license included in `icons/LICENSE`.
 
 ## Remaining limitation
+
+The full verified buyer cohort is saved at capture; the 40-wallet limit now applies
+only to a balance recheck batch under the existing scan-wide allowance. Old truncated
+cohorts can be restored only from a complete copy of the exact original capture:
+same token, pool, signal time, window, buyer amounts and source totals. Later buyers
+never fill the gap. Recovery requires a fresh recheck and does not clear sale-history
+uncertainty. Missing historical captures remain explicitly partial.
+
+Automatic closure based on original-lot sales is not supported until full inventory
+provenance is established. Partial pool receipts and shadow receipt components do
+not supply that proof, even when sale trades have been observed.
 
 The UI cannot fill missing original-wallet coverage or restore an exhausted D1
 quota. It exposes these limitations rather than turning candidates into confirmed

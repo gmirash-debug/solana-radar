@@ -388,6 +388,8 @@ def migrate_scanner_state(state):
         if isinstance(pool_state, dict):
             for key in ("signal_thesis", "pending_signal_thesis"):
                 prepare_thesis_retention_evidence(pool_state.get(key))
+                if prepare_thesis_position_evidence(pool_state.get(key)) and key == "signal_thesis":
+                    pool_state["signal_recheck_due_at"] = iso(int(time.time()))
     return state
 
 
@@ -6733,7 +6735,7 @@ def cohort_retention_totals(cohort):
     }
 
 
-def classified_alert_cohort(alert, wallet_limit):
+def classified_alert_cohort(alert):
     by_owner = {}
     for event in alert.get("events") or []:
         if (
@@ -6778,7 +6780,7 @@ def classified_alert_cohort(alert, wallet_limit):
         by_owner.values(),
         key=lambda row: (row["buy_sol"], row["attributed_tokens"]),
         reverse=True,
-    )[:wallet_limit]
+    )
 
 
 def verified_alert_cluster_members(alert, config=None):
@@ -6937,18 +6939,19 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
     wave_rows = wave.get("top_buyers") or []
     cohort = []
     common_funders, common_executors = verified_alert_cluster_members(alert, config)
-    wallet_limit = max(1, int(config.get("signal_thesis_wallet_limit", 40)))
     holder_min_pct = max(
         0.0,
         float(config.get("signal_thesis_wallet_holder_min_pct", 10)),
     )
     if wave_rows:
-        for row in wave_rows[:wallet_limit]:
+        seen_owners = set()
+        for row in wave_rows:
             if not isinstance(row, dict):
                 continue
             owner = str(row.get("owner") or "").strip()
-            if not owner:
+            if not owner or owner in seen_owners:
                 continue
+            seen_owners.add(owner)
             attributed_tokens = max(
                 0.0,
                 float(
@@ -6998,7 +7001,7 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
                 }
             )
     else:
-        cohort = classified_alert_cohort(alert, wallet_limit)
+        cohort = classified_alert_cohort(alert)
         for row in cohort:
             owner = str(row.get("owner") or "")
             row["common_funder"] = common_funders.get(owner)
@@ -7036,9 +7039,8 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
             if row.get("balance_verified"):
                 row["checked_at"] = signal_at
     initial_totals = cohort_retention_totals(cohort)
-    initial_balance_coverage = float(
-        wave.get("balance_coverage_pct") if wave.get("balance_coverage_pct") is not None else 0.0
-    )
+    initial_balance_coverage = min(float(wave.get("balance_coverage_pct") or 0),
+        sum(bool(row.get("balance_verified")) for row in cohort) / len(cohort) * 100) if wave_signal else 0.0
     initial_holder_retention_pct = (
         initial_totals["holders"] / len(cohort) * 100 if cohort else 0.0
     )
@@ -7056,7 +7058,7 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
         original_owners = {row["owner"] for row in cohort}
         coordination["buys"] = [row for row in coordination["buys"] if row["owner"] in original_owners]
         coordination["profiles"] = {owner: profile for owner, profile in coordination["profiles"].items() if owner in original_owners}
-    return {
+    thesis = {
         "version": 2,
         "retention_evidence_version": RETENTION_EVIDENCE_VERSION,
         "original_sale_history_status": "tracked_from_capture",
@@ -7147,6 +7149,8 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
             else None
         ),
         "balance_coverage_pct": initial_balance_coverage,
+        "token_balance_coverage_pct": sum(row["attributed_tokens"] for row in cohort
+            if row.get("balance_verified")) / original_tokens * 100 if wave_signal else 0.0,
         "invalidation_streak": 0,
         "retention_basis": "Capped original-cohort balance evidence; not a proven inventory ledger",
         "position_resolution": "outflows_unresolved" if initial_totals["retained_tokens"] < original_tokens else "original_balances_present",
@@ -7166,6 +7170,132 @@ def signal_thesis_from_alert(alert, config, captured_at=None):
         } if coordination else None,
         "cohort": cohort,
     }
+    update_thesis_position_observation(thesis, config)
+    return thesis
+
+
+def update_thesis_position_observation(thesis, config=None):
+    """Keep balance bounds and observed movements separate from inventory proof."""
+    config = config or {}
+    complete = (float(thesis.get("balance_coverage_pct") or 0) >= 99.99
+        and float(thesis.get("token_balance_coverage_pct") or 0) >= 99.99
+        and not thesis.get("check_cycle_pending_wallets")
+        and bool(thesis.get("last_checked_at")))
+    cohort_complete = (float(thesis.get("cohort_wallet_coverage_pct") or 0) >= float(config.get("signal_thesis_min_cohort_wallet_coverage_pct", 70))
+        and float(thesis.get("cohort_token_coverage_pct") or 0) >= float(config.get("signal_thesis_min_cohort_token_coverage_pct", 70)))
+    retained = thesis.get("token_retention_pct")
+    holders = thesis.get("holder_retention_pct")
+    if complete and cohort_complete and retained is not None and holders is not None:
+        thesis["balance_status"] = "present" if (float(retained) >= float(config.get("signal_thesis_intact_min_retention_pct", 60))
+            and float(holders) >= float(config.get("signal_thesis_intact_min_holder_pct", 50))) else "outflow"
+    else:
+        thesis["balance_status"] = "partial" if thesis.get("last_checked_at") else "pending"
+    owners = {row["owner"] for row in thesis.get("cohort") or [] if row.get("owner")}
+    activity = thesis.get("observed_position_activity") or {}
+    observations = activity.get("observations") or []
+    movement_events = thesis.setdefault("cohort_movement_events", {})
+    movement_limit = max(0, int(config.get("signal_thesis_movement_receipt_limit", 256)))
+    if (activity.get("scope") == "supplied_pool_transactions_strictly_after_signal"
+            and activity.get("mint") == thesis.get("token_address")):
+        for row in observations:
+            at = parse_timestamp(row.get("timestamp"))
+            resolution = row.get("resolution")
+            if (row.get("source_owner") in owners and row.get("signature")
+                    and parse_timestamp(thesis.get("signal_at")) < at <= parse_timestamp(activity.get("checked_timestamp"))
+                    and resolution in ("verified_sale", "direct_transfer_not_ownership",
+                        "service_destination_unresolved", "unknown_outflow_not_sale")):
+                key = f"{row['signature']}|{resolution}"
+                if key not in movement_events:
+                    if len(movement_events) < movement_limit:
+                        movement_events[key] = {"signature": row["signature"], "resolution": resolution}
+                    else:
+                        thesis["movement_events_truncated"] = True
+    counts = defaultdict(set)
+    for row in movement_events.values():
+        counts[row["resolution"]].add(row["signature"])
+    thesis["position_evidence_version"] = 1
+    thesis["outflow_evidence"] = {
+        "scope": "original_wallet_observations_not_inventory_disposition",
+        "balance_check_complete": complete, "cohort_complete": cohort_complete,
+        "balance_checked_at": thesis.get("last_checked_at"),
+        "balance_cap_reduction_tokens": max(0.0, float(thesis.get("original_retained_tokens") or 0)
+            - float(thesis.get("current_retained_tokens") or 0)) if complete else None,
+        "observed_sale_transactions": len(thesis.get("cohort_sale_events") or {}),
+        "verified_sale_receipts": len(counts["verified_sale"]),
+        "direct_transfer_transactions": len(counts["direct_transfer_not_ownership"]),
+        "service_outflow_transactions": len(counts["service_destination_unresolved"]),
+        "unresolved_debit_transactions": len(counts["unknown_outflow_not_sale"]),
+        "movement_checked_at": iso(int(activity["checked_timestamp"])) if activity.get("checked_timestamp") else None,
+        "movement_history_complete": False, "original_sales_proven": False,
+        "receipt_counts_are_lower_bounds": True,
+        "receipt_limit_reached": bool(thesis.get("movement_events_truncated")),
+        "ownership": "not_established",
+    }
+
+
+def prepare_thesis_position_evidence(thesis):
+    if not isinstance(thesis, dict) or thesis.get("position_evidence_version") == 1:
+        return False
+    # Reopen only automatic balance-based closures, preserving their audit trail.
+    reopened = thesis.get("status") == "invalidated" and (
+        thesis.get("invalidation_candidate") is True
+        or "consecutive complete checks" in str(thesis.get("reason") or ""))
+    if reopened:
+        thesis["legacy_balance_invalidation"] = {key: thesis.get(key) for key in (
+            "status", "reason", "invalidated_at", "invalidation_streak")}
+        thesis.update(status="weakening", invalidation_candidate=False, invalidation_streak=0,
+            reason="outflow from original wallets was observed; a sale or loss of common control was not proven")
+        thesis.pop("invalidated_at", None)
+    update_thesis_position_observation(thesis)
+    return reopened
+
+
+def recover_original_cohort(thesis, alerts, config, recovered_at):
+    """Only restore a complete copy of the exact original capture, never later buyers."""
+    start, end = (parse_timestamp(thesis.get(key)) for key in ("signal_window_start", "signal_window_end"))
+    if not start or not end or end < start:
+        return False
+    existing = {row["owner"]: row for row in thesis.get("cohort") or [] if row.get("owner")}
+    expected_wallets = int(thesis.get("source_signal_wallets") or 0)
+    expected_tokens = float(thesis.get("source_attributed_tokens") or 0)
+    if expected_wallets <= len(existing) or expected_tokens <= 0:
+        return False
+    for alert in alerts or []:
+        pool = alert.get("pool") or {}
+        if (pool.get("token_address") != thesis.get("token_address")
+                or pool.get("pool_address") != thesis.get("pool_address")
+                or parse_timestamp(alert.get("created_at")) != parse_timestamp(thesis.get("signal_at"))
+                or parse_timestamp(alert.get("window_start")) != start
+                or parse_timestamp(alert.get("window_end")) != end):
+            continue
+        incoming = signal_thesis_from_alert(alert, config, captured_at=thesis.get("captured_at"))
+        if not incoming:
+            continue
+        rows = {row["owner"]: row for row in incoming["cohort"]}
+        if (len(rows) != expected_wallets or not existing.keys() <= rows.keys()
+                or not math.isclose(incoming["original_retained_tokens"], expected_tokens, rel_tol=1e-9, abs_tol=1e-6)
+                or any(not math.isclose(row["attributed_tokens"], rows[owner]["attributed_tokens"], rel_tol=1e-9, abs_tol=1e-6)
+                       for owner, row in existing.items())
+                or any(not start <= row.get("first_buy_time", 0) <= end for row in rows.values())):
+            continue
+        # Existing caps/sales are immutable. Restored buyers must be freshly rechecked.
+        thesis["cohort"] = [existing.get(owner, row) for owner, row in rows.items()]
+        thesis.update(original_wallets=len(rows), original_retained_tokens=expected_tokens,
+            original_attributed_tokens=expected_tokens, cohort_wallet_coverage_pct=100.0,
+            cohort_token_coverage_pct=100.0, cohort_recovered_at=recovered_at,
+            cohort_recovery_basis="exact_original_capture", balance_coverage_pct=0.0,
+            token_balance_coverage_pct=0.0, status="unknown", balance_status="pending",
+            current_retained_tokens=None, token_retention_pct=None, current_retained_supply_pct=None,
+            holders_remaining=None, holder_retention_pct=None, last_checked_at=None)
+        if thesis.get("supply"):
+            thesis["original_retained_supply_pct"] = expected_tokens / thesis["supply"] * 100
+        thesis.pop("check_cycle_started_at", None)
+        thesis.pop("check_cycle_verified_owners", None)
+        thesis.pop("last_complete_check_at", None)
+        mark_thesis_sale_history_unknown(thesis, "recovered_buyers_post_capture_history_unknown")
+        update_thesis_position_observation(thesis, config)
+        return True
+    return False
 
 
 def mark_thesis_sale_history_unknown(thesis, issue):
@@ -7210,6 +7340,10 @@ def capture_signal_thesis(
     existing = pool_state.get("signal_thesis")
     if isinstance(existing, dict) and existing.get("version") == 2:
         prepare_thesis_retention_evidence(existing)
+    reopened = prepare_thesis_position_evidence(existing)
+    recovered = isinstance(existing, dict) and recover_original_cohort(existing, alerts, config, captured_at)
+    if reopened or recovered:
+        pool_state["signal_recheck_due_at"] = captured_at or iso(int(time.time()))
     pending = pool_state.get("pending_signal_thesis")
     promoted = False
     if (
@@ -7235,7 +7369,7 @@ def capture_signal_thesis(
         if incoming:
             candidates.append((alert_history_timestamp(alert), incoming))
     if not candidates:
-        return existing, promoted
+        return existing, promoted or reopened or recovered
     for _timestamp, candidate in candidates:
         if (parse_timestamp(candidate.get("captured_at")) - parse_timestamp(candidate.get("signal_at"))) > 300:
             mark_thesis_sale_history_unknown(candidate, "historical_capture_sale_history_not_reconstructed")
@@ -7286,11 +7420,12 @@ def capture_signal_thesis(
 
     existing["last_signal_at"] = incoming.get("last_signal_at")
     existing["updated_at"] = captured_at or incoming.get("last_signal_at")
-    return existing, False
+    return existing, reopened or recovered
 
 
 def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
     thesis = pool_state.get("signal_thesis")
+    prepare_thesis_position_evidence(thesis)
     if not isinstance(thesis, dict) or thesis.get("status") == "invalidated":
         return thesis
     cohort = [
@@ -7310,7 +7445,7 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
         thesis["check_cycle_evidence_version"] = RETENTION_EVIDENCE_VERSION
     checked = []
     errors = 0
-    wallet_limit = max(0, int(config.get("_cohort_check_wallet_limit", len(cohort))))
+    wallet_limit = max(0, int(config.get("_cohort_check_wallet_limit", config.get("signal_thesis_wallet_limit", 40))))
     cycle_at = thesis.get("check_cycle_started_at")
     continuing_cycle = bool(cycle_at)
     if not cycle_at or parse_timestamp(checked_at) - parse_timestamp(cycle_at) > int(config.get("cohort_check_cycle_max_age_seconds", 7200)):
@@ -7412,6 +7547,9 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
         )
         if previous_status != thesis["status"]:
             thesis["status_changed_at"] = checked_at
+        thesis["invalidation_candidate"] = False
+        thesis["low_balance_streak"] = 0
+        update_thesis_position_observation(thesis, config)
         update_thesis_coordination(thesis, config, checked_at)
         return thesis
 
@@ -7444,10 +7582,10 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
     intact_min_holders = float(
         config.get("signal_thesis_intact_min_holder_pct", 50)
     )
-    invalidated_max_retention = float(
+    low_balance_max_retention = float(
         config.get("signal_thesis_invalidated_max_retention_pct", 20)
     )
-    invalidated_max_holders = float(
+    low_balance_max_holders = float(
         config.get("signal_thesis_invalidated_max_holder_pct", 25)
     )
     min_cohort_coverage = float(
@@ -7463,65 +7601,47 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
         if cohort_wallet_coverage_value is None
         else float(cohort_wallet_coverage_value)
     )
-    confirmations_required = max(
-        1,
-        int(
-            config.get(
-                "signal_thesis_invalidation_confirmations_required",
-                2,
-            )
-        ),
-    )
     previous_status = thesis.get("status")
-    can_invalidate = (
+    cohort_complete = (
         cohort_coverage >= min_cohort_coverage
         and cohort_wallet_coverage >= min_cohort_wallet_coverage
         and balance_coverage_pct >= 99.99
         and token_balance_coverage_pct >= 99.99
     )
-    invalidation_candidate = bool(
-        can_invalidate
-        and retention_pct <= invalidated_max_retention
-        and holder_retention_pct <= invalidated_max_holders
+    low_balance_candidate = bool(
+        cohort_complete
+        and retention_pct <= low_balance_max_retention
+        and holder_retention_pct <= low_balance_max_holders
     )
     previous_complete = parse_timestamp(thesis.get("last_complete_check_at"))
     new_check = not previous_complete or parse_timestamp(checked_at) > previous_complete
-    invalidation_streak = (int(thesis.get("invalidation_streak") or 0) + int(new_check)
-        if invalidation_candidate else 0)
+    low_balance_streak = (int(thesis.get("low_balance_streak") or 0) + int(new_check)
+        if low_balance_candidate else 0)
     if balance_coverage_pct >= 99.99 and token_balance_coverage_pct >= 99.99 and new_check:
         thesis["last_complete_check_at"] = checked_at
     if (
-        invalidation_candidate
-        and invalidation_streak >= confirmations_required
-    ):
-        status = "invalidated"
-        reason = (
-            f"the original cohort retains only {retention_pct:.0f}% of its "
-            f"signal-attributed tokens across {holder_retention_pct:.0f}% of wallets "
-            f"on {invalidation_streak} consecutive complete checks"
-        )
-    elif (
         retention_pct >= intact_min_retention
         and holder_retention_pct >= intact_min_holders
     ):
         status = "intact"
         reason = (
-            f"the original cohort still retains {retention_pct:.0f}% of its "
-            f"signal-attributed tokens across {holder_retention_pct:.0f}% of wallets"
+            f"the checked original-wallet balance cap is up to {retention_pct:.0f}% "
+            f"of initial purchases across {holder_retention_pct:.0f}% of wallets; "
+            "this is not a proven original inventory ledger"
         )
-    elif invalidation_candidate:
+    elif low_balance_candidate:
         status = "weakening"
         reason = (
-            f"possible thesis invalidation is awaiting confirmation "
-            f"({invalidation_streak}/{confirmations_required} complete checks); "
-            f"{retention_pct:.0f}% of signal tokens remain across "
-            f"{holder_retention_pct:.0f}% of wallets"
+            f"outflow from original wallets: the balance cap is {retention_pct:.0f}% "
+            f"across {holder_retention_pct:.0f}% of wallets on {low_balance_streak} complete checks; "
+            "sales versus transfers and original inventory disposition are not proven"
         )
-    elif can_invalidate:
+    elif cohort_complete:
         status = "weakening"
         reason = (
-            f"the original cohort retains {retention_pct:.0f}% of its "
-            f"signal-attributed tokens across {holder_retention_pct:.0f}% of wallets"
+            f"the original-wallet balance cap declined to {retention_pct:.0f}% "
+            f"of initial purchases across {holder_retention_pct:.0f}% of wallets; "
+            "a sale versus transfer is unresolved"
         )
     else:
         status = "unknown"
@@ -7542,8 +7662,9 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
             "holder_retention_pct": holder_retention_pct,
             "current_retained_tokens": current_retained,
             "token_retention_pct": retention_pct,
-            "invalidation_candidate": invalidation_candidate,
-            "invalidation_streak": invalidation_streak,
+            "invalidation_candidate": False,
+            "invalidation_streak": 0,
+            "low_balance_streak": low_balance_streak,
             "retention_basis": "Capped original-cohort balance evidence; not a proven inventory ledger",
             "position_resolution": "outflows_unresolved" if current_retained < original_tokens else "original_balances_present",
             "current_retained_supply_pct": (
@@ -7558,7 +7679,7 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
         and confirmation.get("reasons") == ["retention not seasoned"]
         and eligible_at and parse_timestamp(checked_at) >= eligible_at
         and status == "intact" and balance_coverage_pct == 100
-        and token_balance_coverage_pct >= 99.99 and can_invalidate
+        and token_balance_coverage_pct >= 99.99 and cohort_complete
         and retention_pct >= 80 and holder_retention_pct >= 65
         and all(parse_timestamp(row.get("checked_at")) >= eligible_at for row in cohort)
     ):
@@ -7570,6 +7691,7 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
         thesis["status_changed_at"] = checked_at
     if status == "invalidated":
         thesis["invalidated_at"] = checked_at
+    update_thesis_position_observation(thesis, config)
     update_thesis_coordination(thesis, config, checked_at)
     return thesis
 
@@ -7580,6 +7702,12 @@ def public_signal_thesis(thesis):
     public_fields = {
         "version",
         "retention_evidence_version",
+        "position_evidence_version",
+        "balance_status",
+        "outflow_evidence",
+        "legacy_balance_invalidation",
+        "cohort_recovered_at",
+        "cohort_recovery_basis",
         "check_cycle_evidence_version",
         "original_sale_history_status",
         "original_sale_history_issues",
@@ -7632,6 +7760,7 @@ def public_signal_thesis(thesis):
         "balance_errors",
         "invalidation_candidate",
         "invalidation_streak",
+        "low_balance_streak",
         "retention_basis",
         "position_resolution",
         "observed_position_activity",
@@ -7848,6 +7977,8 @@ def refresh_signal_thesis(
                 "confirmation_eligible": False, "ownership": "not_established",
                 "issues": [str(exc)[:160]],
             }
+    if isinstance(thesis, dict):
+        update_thesis_position_observation(thesis, config)
     return public_signal_thesis(thesis)
 
 
@@ -9266,12 +9397,7 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc, state=None):
                 "sticky_bought_pct": sticky_bought_pct,
                 "net_token_retention_pct": net_retention_pct,
                 "supply": supply,
-                "top_buyers": checked[
-                    : min(
-                        int(config.get("signal_thesis_wallet_limit", 40)),
-                        len(checked),
-                    )
-                ],
+                "top_buyers": checked,
             },
             "events": events,
         }

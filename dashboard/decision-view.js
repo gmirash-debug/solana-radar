@@ -1,9 +1,9 @@
 // Presentation only: never upgrades the scanner's confirmation or lifecycle.
 export const REVIEW_QUEUES = [
   { id: "review", label: "Ready to review", note: "Current confirmed signals with fresh cohort and market checks.", tone: "positive" },
-  { id: "holding", label: "Holding", note: "Checked balance bounds for the original cohort. Not proof of unsold holdings or a new entry signal.", tone: "neutral" },
+  { id: "holding", label: "Balances checked", note: "Original-wallet balance bounds checked. Sale history may remain unknown; this is not confirmed accumulation or an entry signal.", tone: "neutral" },
   { id: "early", label: "Early observations", note: "New activity, not confirmed accumulation.", tone: "info" },
-  { id: "reducing", label: "Reduced positions", note: "Tokens left original wallets. Balances alone cannot distinguish sales from transfers.", tone: "negative" },
+  { id: "reducing", label: "Outflow from original wallets", note: "Original-position balance caps declined. Sales, transfers and unresolved outflows are shown separately; common control is not established.", tone: "negative" },
   { id: "verification", label: "Needs data", note: "Insufficient evidence for a current conclusion.", tone: "muted" },
   { id: "inactive", label: "Closed", note: "The scanner invalidated the original accumulation thesis.", tone: "muted" },
 ];
@@ -98,12 +98,14 @@ export function decisionView(token, config = {}, now = Date.now()) {
   let label = "Needs data";
   if (thesis.status === "invalidated" || token.lifecycleStatus === "closed") {
     queue = "inactive"; label = "Closed";
-  } else if (thesis.status === "weakening" || token.lifecycleStatus === "weakening") {
-    queue = "reducing"; label = "Position reduced";
-  } else if (thesis.status === "intact" && retained > 0 && complete) {
+  } else if (thesis.status === "weakening" || token.lifecycleStatus === "weakening"
+    || thesis.balance_status === "outflow" && complete) {
+    queue = "reducing"; label = "Original-wallet outflow";
+  } else if (retained > 0 && complete && (thesis.status === "intact"
+    || thesis.balance_status === "present" && thesis.outflow_evidence?.balance_check_complete === true)) {
     queue = "holding";
     label = saleHistoryUnknown ? (fresh ? "Balance cap checked" : "Balance cap at last check") : fresh ? "Holding" : "Held at last check";
-    if (!saleHistoryUnknown && currentConfirmed && fresh && token.dataStatus === "current" && token.currentMarket?.isFresh
+    if (thesis.status === "intact" && !saleHistoryUnknown && currentConfirmed && fresh && token.dataStatus === "current" && token.currentMarket?.isFresh
       && integrity.data_quality_status === "complete" && integrity.status === "distributed"
       && integrityFresh && linkPolicyCurrent && !rotation
       && ["watch", "actionable", "hot_reactivation"].includes(token.currentSignalTier)) {
@@ -116,8 +118,8 @@ export function decisionView(token, config = {}, now = Date.now()) {
   }
   const meta = REVIEW_QUEUES.find((item) => item.id === queue);
   const reason = queue === "review" ? "Confirmed buying + retained balances"
-    : queue === "holding" ? `${retentionBound(retained).replace("\u2264", "Up to ")} of original position remains${fresh ? "" : "; check overdue"}${saleHistoryUnknown ? "; original sale history unknown" : ""}`
-      : queue === "reducing" ? (retained === null ? "Original cohort balances declined" : `${retentionBound(retained).replace("\u2264", "Up to ")} of original position remains`)
+    : queue === "holding" ? `${retentionBound(retained).replace("\u2264", "Up to ")} original-position balance cap${fresh ? "" : "; check overdue"}${saleHistoryUnknown ? "; original sale history unknown" : ""}`
+      : queue === "reducing" ? (retained === null ? "Original-wallet outflow; cause unresolved" : `${retentionBound(retained).replace("\u2264", "Up to ")} original-position balance cap; sale/transfer unresolved`)
         : queue === "early" ? "Buying observed; confirmation missing"
           : queue === "inactive" ? "Original accumulation invalidated"
             : !cohortComplete && cohortCoverage !== null ? `Only ${Math.round(cohortCoverage)}% of original wallets covered`

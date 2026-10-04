@@ -1912,7 +1912,7 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(thesis["token_retention_pct"], 80)
         self.assertEqual(thesis["holder_retention_pct"], 100)
 
-    def test_signal_thesis_becomes_inactive_only_after_confirmed_distribution(self):
+    def test_repeated_empty_balances_do_not_prove_a_sale_or_close_the_thesis(self):
         pool_state = {
             "signal_thesis": {
                 "status": "intact",
@@ -1936,7 +1936,8 @@ class ScannerCoreTests(unittest.TestCase):
             checked_at="2026-07-29T13:00:00Z",
         )
         self.assertEqual(first_check["status"], "weakening")
-        self.assertEqual(first_check["invalidation_streak"], 1)
+        self.assertEqual(first_check["invalidation_streak"], 0)
+        self.assertEqual(first_check["low_balance_streak"], 1)
         thesis = scanner.recheck_signal_thesis(
             rpc,
             scanner.Pool(pool_address="pool", token_address="token"),
@@ -1944,8 +1945,9 @@ class ScannerCoreTests(unittest.TestCase):
             {},
             checked_at="2026-07-29T14:00:00Z",
         )
-        self.assertEqual(thesis["status"], "invalidated")
-        self.assertEqual(thesis["invalidation_streak"], 2)
+        self.assertEqual(thesis["status"], "weakening")
+        self.assertEqual(thesis["low_balance_streak"], 2)
+        self.assertEqual(thesis["invalidation_streak"], 0)
         self.assertEqual(thesis["token_retention_pct"], 0)
         self.assertEqual(thesis["holders_remaining"], 0)
 
@@ -2124,7 +2126,7 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(thesis["current_retained_supply_pct"], 9)
         rpc.token_balance.assert_called_once_with("wallet-a", "token")
 
-    def test_due_recheck_promotes_pending_thesis_without_repeat_alert(self):
+    def test_due_recheck_does_not_replace_original_buyers_on_balance_only_outflow(self):
         pending = scanner.signal_thesis_from_alert(
             {
                 "created_at": "2026-07-29T12:30:00Z",
@@ -2179,12 +2181,12 @@ class ScannerCoreTests(unittest.TestCase):
                 {},
                 checked_at="2026-07-29T13:00:00Z",
             )
-        self.assertEqual(thesis["signal_at"], "2026-07-29T12:30:00Z")
-        self.assertEqual(thesis["status"], "intact")
-        self.assertNotIn("pending_signal_thesis", pool_state)
+        self.assertEqual(thesis["signal_at"], "2026-07-29T11:00:00Z")
+        self.assertEqual(thesis["status"], "weakening")
+        self.assertIn("pending_signal_thesis", pool_state)
         self.assertEqual(
             [call.args[0] for call in rpc.token_balance.call_args_list],
-            ["wallet-old", "wallet-new"],
+            ["wallet-old"],
         )
 
     def test_concentrated_wave_is_ranked_as_noise_not_dropped(self):

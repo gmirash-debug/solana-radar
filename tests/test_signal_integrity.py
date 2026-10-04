@@ -153,7 +153,8 @@ class SignalIntegrityTests(unittest.TestCase):
         rpc.token_balance.return_value = 0
         for _ in range(2):
             s.recheck_signal_thesis(rpc, self.pool, state, self.config, s.iso(self.now + 600))
-        self.assertEqual(state["signal_thesis"]["invalidation_streak"], 1)
+        self.assertEqual(state["signal_thesis"]["low_balance_streak"], 1)
+        self.assertEqual(state["signal_thesis"]["invalidation_streak"], 0)
         self.assertNotEqual(state["signal_thesis"]["status"], "invalidated")
 
     def test_new_confirmed_wave_replaces_candidate_not_its_metadata(self):
