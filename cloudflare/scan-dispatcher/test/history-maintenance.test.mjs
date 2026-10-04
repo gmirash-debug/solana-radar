@@ -300,6 +300,7 @@ test("invalid modes and budgets reject; retention events do not create Learning 
 test("retention removes only identical archived delivered copies, never pending or unmatched sources", async t => {
   const f = fixture(t);
   f.db.sqlite.exec(`CREATE TABLE history_outbox (event_id TEXT PRIMARY KEY,payload_json TEXT,status TEXT,delivered_at TEXT)`);
+  f.db.sqlite.exec(readFileSync(new URL("../migrations-storage/0004_history_outbox_cleanup_index.sql",import.meta.url),"utf8"));
   const objects = new Map();
   const metadata = row => row ? {key:row.key,size:row.bytes.byteLength,customMetadata:row.metadata,
     checksums:{sha256:Uint8Array.from(Buffer.from(row.sha256,"hex")).buffer}} : null;
@@ -328,9 +329,9 @@ test("retention removes only identical archived delivered copies, never pending 
       .run(original.event_id,id === "mismatch" ? JSON.stringify({...original,changed_evidence:true}) : payload,
         status,"2026-09-20T00:00:00.000Z");
   }
-  const result = await pruneArchivedHistoryOutbox(f.env,{now:NOW,maxQueries:2});
+  const result = await pruneArchivedHistoryOutbox(f.env,{now:NOW,maxQueries:3});
   assert.equal(result.deleted,1);
-  assert.ok(result.queries<=2);
+  assert.ok(result.queries<=3);
   assert.deepEqual(f.db.sqlite.prepare("SELECT event_id FROM history_outbox ORDER BY event_id").all()
     .map(row => row.event_id),["signal:mismatch","signal:missing","signal:pending"]);
   assert.equal(f.db.sqlite.prepare("SELECT COUNT(*) n FROM signal_episode_events").get().n,4);
@@ -350,4 +351,35 @@ test("retention removes only identical archived delivered copies, never pending 
   assert.equal(corrupt.deleted,0);
   assert.equal(corrupt.after,"");
   assert.equal(f.db.sqlite.prepare("SELECT COUNT(*) n FROM history_outbox").get().n,3);
+});
+
+test("missing cleanup index defers explicitly without silently initializing schema or touching payloads", async t => {
+  const f = fixture(t);
+  f.db.sqlite.exec("CREATE TABLE history_outbox (event_id TEXT PRIMARY KEY,payload_json TEXT,status TEXT,delivered_at TEXT)");
+  f.env.RADAR_ARCHIVE={get:async () => assert.fail("no R2 read before the cleanup migration")};
+  const result = await pruneArchivedHistoryOutbox(f.env,{now:NOW});
+  assert.equal(result.enabled,false);assert.equal(result.reason,"history_retention_index_migration_required");
+  assert.equal(result.queries,1);assert.equal(result.deleted,0);
+  assert.ok(!f.db.calls.some(row => /CREATE|ALTER|DELETE/.test(row.sql)));
+});
+
+test("cleanup EXPLAIN keyset selects covering metadata before bounded primary-key JSON lookups", async t => {
+  const f = fixture(t);
+  f.db.sqlite.exec("CREATE TABLE history_outbox (event_id TEXT PRIMARY KEY,payload_json TEXT,status TEXT,delivered_at TEXT)");
+  f.db.sqlite.exec(readFileSync(new URL("../migrations-storage/0004_history_outbox_cleanup_index.sql",import.meta.url),"utf8"));
+  const insert = f.db.sqlite.prepare("INSERT INTO history_outbox VALUES (?,?,?,?)");
+  for (let i=0;i<1000;i++) insert.run(`event-${String(i).padStart(4,"0")}`,"x".repeat(5000),i%2 ? "pending" : "delivered","2026-09-20T00:00:00.000Z");
+  f.env.RADAR_ARCHIVE={get:async () => assert.fail("unmatched candidates must not read R2")};
+  const first = await pruneArchivedHistoryOutbox(f.env,{now:NOW,pageSize:5,after:"event-0100"});
+  assert.equal(first.checked,5);assert.equal(first.after,"event-0110");assert.equal(first.complete,false);
+  const selection = f.db.calls.find(row => row.sql.includes("WITH candidates AS MATERIALIZED"));
+  const plan = f.db.sqlite.prepare(`EXPLAIN QUERY PLAN ${selection.sql}`)
+    .all(Object.fromEntries(selection.values.map((value,i) => [i+1,value]))).map(row => row.detail);
+  assert.ok(plan.some(detail => /SEARCH history_outbox USING COVERING INDEX idx_history_outbox_delivered_keyset \(event_id>\?\)/.test(detail)),plan.join("\n"));
+  assert.ok(plan.some(detail => /SEARCH o USING INDEX sqlite_autoindex_history_outbox_1/.test(detail)),plan.join("\n"));
+  assert.ok(plan.some(detail => /SEARCH e USING INDEX sqlite_autoindex_signal_episode_events_1/.test(detail)),plan.join("\n"));
+  assert.ok(!plan.some(detail => /^SCAN (?:history_outbox|o|e)\b/.test(detail)),plan.join("\n"));
+  const next = await pruneArchivedHistoryOutbox(f.env,{now:NOW,pageSize:5,after:first.after});
+  assert.equal(next.checked,5);assert.equal(next.after,"event-0120");
+  assert.equal(f.db.sqlite.prepare("SELECT COUNT(*) n FROM history_outbox").get().n,1000);
 });

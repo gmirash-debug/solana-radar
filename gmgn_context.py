@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import time
 from datetime import datetime, timezone
+from rpc_limiter import RateLimitDeadline, wait_for_gmgn_slot
 
 VERSION = "1.6.1"
 EVM = re.compile(r"^0x[0-9a-fA-F]{40}$")
@@ -53,12 +54,13 @@ class Unavailable(RuntimeError):
 
 
 class Client:
-    def __init__(self, max_calls=24, seconds=45):
+    def __init__(self, max_calls=24, seconds=45, limiter=None):
         self.calls = 0
         self.max_calls = max_calls
         self.deadline = time.monotonic() + seconds
         self.stopped = None
-        self.next_request_at = 0
+        self.limiter = limiter
+        self.native_units = 0
         self.enabled = bool(os.environ.get("GMGN_API_KEY"))
         self.prefix = ["gmgn-cli"] if shutil.which("gmgn-cli") else ["npx", "-y", f"gmgn-cli@{VERSION}"]
 
@@ -68,20 +70,22 @@ class Client:
         remaining = self.deadline - time.monotonic()
         if not self.enabled or self.stopped or self.calls >= self.max_calls or remaining < 1:
             raise Unavailable(self.stopped or ("missing_api_key" if not self.enabled else "budget_exhausted"))
-        delay = max(0, self.next_request_at - time.monotonic())
-        if delay + 1 >= remaining:
+        arguments = ["token", kind, "--chain", "robinhood", "--address", token, "--raw"]
+        try:
+            # Leave at least one second for the actual subprocess. The shared
+            # Free bucket is 5/5; info/security cost 1, holders cost 5.
+            wait_for_gmgn_slot(arguments, self.deadline - 1, self.limiter)
+        except RateLimitDeadline:
             raise Unavailable("budget_exhausted")
-        if delay:
-            time.sleep(delay)
         remaining = self.deadline - time.monotonic()
-        self.next_request_at = time.monotonic() + 1.1
-        args = [*self.prefix, "token", kind, "--chain", "robinhood", "--address", token, "--raw"]
+        args = [*self.prefix, *arguments]
         if kind == "holders":
             args += ["--limit", "30"]
         env = dict(os.environ, GMGN_RATE_LIMIT_AUTO_RETRY_MAX_WAIT_MS="0")
         env.pop("GMGN_DEBUG", None)
         env.pop("GMGN_PRIVATE_KEY", None)
         self.calls += 1
+        self.native_units += 5 if kind == "holders" else 1
         try:
             result = subprocess.run(args, capture_output=True, text=True, timeout=min(8, remaining), env=env, check=False)
         except (subprocess.TimeoutExpired, OSError):

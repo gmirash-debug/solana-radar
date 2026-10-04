@@ -1,5 +1,6 @@
 """Validate failure-time cache snapshots without importing scanner dependencies."""
 import argparse
+import hashlib
 import json
 import sys
 from datetime import datetime
@@ -8,6 +9,42 @@ from pathlib import Path
 
 STATE_FILES = ("state.json", "discovery_state.json")
 MAX_BYTES = 128 * 1024 * 1024
+
+
+def fingerprints(paths, root):
+    result = {"files": {}, "errors": []}
+    for path in sorted(paths):
+        try:
+            if path.is_symlink():
+                raise ValueError("symlinks cannot prove unchanged cache contents")
+            if not path.is_file():
+                continue
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(block)
+            result["files"][str(path.relative_to(root))] = digest.hexdigest()
+        except (OSError, ValueError) as exc:
+            result["errors"].append(f"{path.name}: {exc}")
+    return result
+
+
+def outbox_fingerprints(data_dir):
+    # Include quarantine and partial files. This helper never acknowledges,
+    # deletes, or replaces evidence; unknown comparisons always require saving.
+    root = data_dir / "remote_outbox"
+    try:
+        if root.is_symlink():
+            raise ValueError("outbox is a symlink")
+        return fingerprints(root.rglob("*"), root)
+    except (OSError, ValueError) as exc:
+        return {"files": {}, "errors": [str(exc)]}
+
+
+def contents_changed(before, after):
+    return (not isinstance(before, dict) or not isinstance(before.get("files"), dict)
+            or bool(before.get("errors")) or bool(after.get("errors"))
+            or before["files"] != after["files"])
 
 
 def reject_constant(value):
@@ -41,8 +78,11 @@ def state_metadata(path):
     return {"revision": revision, "updated_at": timestamp}
 
 
-def capture(data_dir):
+def capture(data_dir, with_fingerprints=True):
     result = {"states": {}, "present": [], "errors": []}
+    if with_fingerprints:
+        result["fingerprints"] = fingerprints(
+            [data_dir / name for name in (*STATE_FILES, "discovery_status.json")], data_dir)
     for name in STATE_FILES:
         path = data_dir / name
         if path.exists():
@@ -65,7 +105,7 @@ def capture(data_dir):
 
 
 def validate(data_dir, baseline):
-    current = capture(data_dir)
+    current = capture(data_dir, with_fingerprints=False)
     # A previously corrupt checkpoint can be repaired by the scanner. Validate
     # the replacement while retaining rollback checks for readable predecessors.
     errors = list(current["errors"])
@@ -88,13 +128,25 @@ def validate(data_dir, baseline):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("capture", "validate"))
+    parser.add_argument("action", choices=("capture", "validate", "capture-outbox", "check-outbox"))
     parser.add_argument("baseline", type=Path)
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
     args = parser.parse_args()
+    if args.action in ("capture-outbox", "check-outbox"):
+        current = outbox_fingerprints(args.data_dir)
+        if args.action == "capture-outbox":
+            args.baseline.write_text(json.dumps(current), encoding="utf-8")
+            return
+        try:
+            baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            baseline = None
+        print(f"changed={'true' if contents_changed(baseline, current) else 'false'}")
+        return
     if args.action == "capture":
         args.baseline.write_text(json.dumps(capture(args.data_dir)), encoding="utf-8")
         return
+    baseline = None
     try:
         baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
         valid, errors = validate(args.data_dir, baseline)
@@ -103,6 +155,10 @@ def main():
     for error in errors:
         print(f"Runtime cache not saved: {error}", file=sys.stderr)
     print(f"valid={'true' if valid else 'false'}")
+    current = fingerprints(
+        [args.data_dir / name for name in (*STATE_FILES, "discovery_status.json")], args.data_dir)
+    before = baseline.get("fingerprints") if isinstance(baseline, dict) else None
+    print(f"changed={'true' if contents_changed(before, current) else 'false'}")
 
 
 if __name__ == "__main__":

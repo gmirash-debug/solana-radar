@@ -76,6 +76,12 @@ class FakeSignatureTransactionRpc:
 
 
 class ScannerCoreTests(unittest.TestCase):
+    def setUp(self):
+        # Pacing has independent fake-clock coverage; transport fixtures don't wait.
+        limiter = mock.patch.object(scanner, "DEFAULT_PROVIDER_LIMITERS", mock.Mock())
+        limiter.start()
+        self.addCleanup(limiter.stop)
+
     def test_dashboard_fallback_excludes_private_runtime_state(self):
         mint = "11111111111111111111111111111111"
         report = {

@@ -15,6 +15,12 @@ def response(result=None, status=200, text="", body=None):
 
 
 class RpcRoutingTests(unittest.TestCase):
+    def setUp(self):
+        # Transport tests must not mix patched clocks with a process-global pacer.
+        limiter = patch.object(s, "DEFAULT_PROVIDER_LIMITERS", Mock())
+        self.native_limiters = limiter.start()
+        self.addCleanup(limiter.stop)
+
     def router(self, config=None):
         with patch.dict(s.os.environ, {"HELIUS_API_KEY": "secret-key", "ALCHEMY_SOLANA_RPC_URL": "https://alchemy.invalid/v2/test-key",
                                       "CHAINSTACK_SOLANA_RPC_URL": "https://chainstack.invalid/test-key"}, clear=True):
@@ -214,6 +220,19 @@ class RpcRoutingTests(unittest.TestCase):
             provider.call("getSlot")
         self.assertEqual(provider.session.post.call_count, 1)
         self.assertEqual(provider.attempted_credits, 1)
+        self.assertEqual(provider.native_limiters.acquire.call_count, 1)
+
+    def test_each_retry_attempt_acquires_native_limiter_and_monthly_reservation(self):
+        provider = s.HeliusRpc("secret", max_retries=2, credit_budget=3)
+        provider.monthly_budget = MonthlyRpcBudget({}, "helius", 2)
+        provider.session.post = Mock(return_value=response(status=500, text="server error"))
+        with patch.object(s.time, "sleep"), self.assertRaises(s.HeliusRpcError):
+            provider.call("getSlot")
+        self.assertEqual(provider.session.post.call_count, 2)
+        self.assertEqual(provider.native_limiters.acquire.call_args_list,
+                         [unittest.mock.call("helius", "getSlot")] * 2)
+        self.assertEqual(provider.monthly_budget.snapshot()["attempts"], 2)
+        self.assertEqual(provider.monthly_budget.remaining, 0)
 
     def test_expensive_history_does_not_disable_remaining_cheap_reads(self):
         rpc = self.router({"helius_rpc_credit_budget_per_scan": 5})

@@ -309,10 +309,17 @@ export async function pruneArchivedHistoryOutbox(env, options = {}) {
   try {
     budget.requireBudget(1);
     if (!maxRequests) throw new MaintenanceYield("history_retention_request_budget");
-    const page = await budget.db.prepare(`SELECT o.event_id,o.payload_json,e.payload_json event_payload,
-      e.raw_object_key FROM history_outbox o JOIN signal_episode_events e USING(event_id)
-      WHERE o.status='delivered' AND o.delivered_at<?1 AND o.event_id>?2
-        AND e.raw_object_key IS NOT NULL ORDER BY o.event_id LIMIT ${pageSize}`).bind(before,after).all();
+    const index = await budget.db.prepare(`SELECT name FROM sqlite_master
+      WHERE type='index' AND name='idx_history_outbox_delivered_keyset'`).first();
+    if (!index) return {enabled:false,deleted:0,reason:"history_retention_index_migration_required",...usage()};
+    budget.requireBudget(1);
+    if (budget.usage.queries+archiveReads+1>maxRequests) throw new MaintenanceYield("history_retention_request_budget");
+    const page = await budget.db.prepare(`WITH candidates AS MATERIALIZED (
+      SELECT event_id FROM history_outbox INDEXED BY idx_history_outbox_delivered_keyset
+      WHERE status='delivered' AND delivered_at<?1 AND event_id>?2 ORDER BY event_id LIMIT ${pageSize}
+    ) SELECT c.event_id,o.payload_json,e.payload_json event_payload,e.raw_object_key
+      FROM candidates c JOIN history_outbox o ON o.event_id=c.event_id
+      LEFT JOIN signal_episode_events e ON e.event_id=c.event_id ORDER BY c.event_id`).bind(before,after).all();
     for (const row of page.results) {
       budget.requireBudget(1,1);
       let ref, original;

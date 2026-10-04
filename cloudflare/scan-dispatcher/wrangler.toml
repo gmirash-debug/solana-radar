@@ -3,7 +3,7 @@ main = "src/index.js"
 compatibility_date = "2026-05-13"
 
 [triggers]
-crons = ["*/5 * * * *", "7 * * * *", "37 * * * *", "22,37,52 * * * *"]
+crons = ["*/5 * * * *", "7 * * * *", "37 * * * *", "22,37,52 * * * *", "47 * * * *"]
 
 [[durable_objects.bindings]]
 name = "DISPATCH_BUCKETS"
@@ -49,6 +49,12 @@ HISTORY_FLUSH_CRON = "37 * * * *"
 # Release-specific deferred migration. Other versions are deliberately rejected.
 HISTORY_SCHEMA_AUTO_UPGRADE = "0003_resumable_history.sql"
 STORAGE_SQL_BACKEND = "turso"
+RUNTIME_STORAGE_BACKEND = "turso_sql"
+RUNTIME_LEGACY_READ = "enabled"
+HISTORY_QUEUE_BACKEND = "turso_sql"
+# Canonical history/resume state was verified before enabling this cutover.
+# New events stage separately until the read-only DO sweep completes.
+HISTORY_LEGACY_MIGRATION = "verified_turso_v1"
 TURSO_DATABASE_URL = "libsql://solana-radar-gmirash-debug.aws-eu-west-1.turso.io"
 HISTORY_ARCHIVE_MODE = "r2"
 RUNTIME_ARCHIVE_MODE = "r2"

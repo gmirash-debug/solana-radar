@@ -30,7 +30,9 @@ from wallet_activity import AuditBudget, advance_wallet_history, summarize_walle
 from runtime_checkpoint import build_checkpoint, restore_checkpoint, checkpoint_documents, hydrate_checkpoint
 from runtime_dashboard import dashboard_documents
 from history_contract import history_event_error, source_time
-from rpc_budget import configure_monthly_budgets, request_reservation
+from rpc_budget import configure_monthly_budgets, request_reservation, native_cost, DurableChunkBudget, monthly_budget_for
+from rpc_limiter import DEFAULT_PROVIDER_LIMITERS, wait_for_gmgn_slot
+from balance_batch import remember_enumeration, prime_known_balances
 from rpc_routing import STANDARD_ORDER, HISTORY_ORDER, BALANCE_ORDER, METHOD_ORDERS, validate_result
 from scan_scheduling import targeted_profile, fast_candidate_pools
 from scan_failure import failure_metadata, scanner_failure_class, PROGRAMMING_ERRORS, SOFT_CATEGORIES
@@ -1292,6 +1294,59 @@ def remote_api_call(method, path, config, payload=None, params=None):
     return result
 
 
+def load_durable_rpc_ledger(state, config):
+    result = remote_api_call("GET", "/api/runtime/rpc-ledger", config)
+    document = result.get("document") or {}
+    value = document.get("value") or {}
+    if document and (value.get("version") != 1 or not isinstance(value.get("ledger"), dict)):
+        raise ValueError("invalid durable RPC ledger")
+    ledger = state.setdefault("rpc_monthly_usage", {})
+    for period, providers in (value.get("ledger") or {}).items():
+        if not isinstance(period, str) or not re.fullmatch(r"\d{4}-\d{2}", period) or not isinstance(providers, dict):
+            raise ValueError("invalid durable RPC ledger period")
+        for provider, entry in providers.items():
+            if not isinstance(entry, dict):
+                raise ValueError("invalid durable RPC ledger entry")
+            local = ledger.setdefault(period, {}).setdefault(provider, {})
+            for field in ("estimated_units", "attempts", "allocated_units", "allocations"):
+                amount, previous = entry.get(field, 0), local.get(field, 0)
+                if any(isinstance(number, bool) or not isinstance(number, int) or number < 0 for number in (amount, previous)):
+                    raise ValueError("invalid durable RPC ledger counter")
+                local[field] = max(previous, amount)
+    config["_rpc_ledger_revision"] = int(document.get("revision") or 0)
+    return True
+
+
+def commit_durable_rpc_ledger(state, config):
+    revision = config.get("_rpc_ledger_revision", 0) + 1
+    result = remote_api_call("POST", "/api/runtime/rpc-ledger", config, {
+        "value": {"version": 1, "ledger": state["rpc_monthly_usage"]},
+        "updated_at": utc_now().isoformat().replace("+00:00", "Z"), "revision": revision})
+    accepted = result.get("ok") is True and result.get("accepted") is True
+    if accepted:
+        config["_rpc_ledger_revision"] = max(revision, int(result.get("revision") or 0))
+    return accepted
+
+
+def configure_durable_rpc_budgets(rpc, state, config):
+    if not remote_data_url_from_env() or not remote_ingest_secret():
+        return
+    try:
+        load_durable_rpc_ledger(state, config)
+        chunks = {"helius": 50, "alchemy": 1000, "chainstack": 100,
+                  **(config.get("rpc_durable_grant_units") or {})}
+        for name, provider in rpc.providers.items():
+            if name in chunks and provider.monthly_budget is not None:
+                provider.monthly_budget = DurableChunkBudget(provider.monthly_budget,
+                    lambda: commit_durable_rpc_ledger(state, config), chunks[name])
+        config["_rpc_ledger_status"] = "durable_preallocation"
+    except Exception:
+        for name, provider in rpc.providers.items():
+            if provider.monthly_budget is not None:
+                provider.monthly_budget = monthly_budget_for(state,name,{"rpc_monthly_estimated_limits":{name:0}})
+        config["_rpc_ledger_status"] = "ledger_unavailable_paid_routes_disabled"
+
+
 def load_runtime_checkpoint(state, config, kind):
     if not remote_data_url_from_env() or not remote_ingest_secret():
         return state
@@ -1921,6 +1976,7 @@ class SolanaRpcProvider:
         }
         self.last_request_started_at = None
         self.rate_limit_lock = threading.Lock()
+        self.native_limiters = DEFAULT_PROVIDER_LIMITERS
         self.consecutive_failures = 0
         self.method_consecutive_failures = Counter()
         self.failures = Counter()
@@ -1940,6 +1996,8 @@ class SolanaRpcProvider:
         return min(self.retry_max_seconds, max(0.1, float(delay)))
 
     def wait_for_rate_slot(self, method):
+        if self.credit_model in {"alchemy", "helius", "chainstack"}:
+            self.native_limiters.acquire(self.credit_model, method)
         min_interval_seconds = max(
             self.min_interval_seconds,
             self.method_min_interval_seconds.get(str(method), 0.0),
@@ -1958,30 +2016,10 @@ class SolanaRpcProvider:
             self.last_request_started_at = now
 
     def credit_cost(self, method, result):
-        if self.credit_model == "helius":
-            if method == "getTransactionsForAddress":
-                data = result.get("data") if isinstance(result, dict) else None
-                returned = len(data) if isinstance(data, list) else 0
-                return max(10, ((returned + 99) // 100) * 10)
-            if method == "getTransfersByAddress":
-                return 10
-            return 1
-        if self.credit_model == "alchemy":
-            return {
-                "getAccountInfo": 10,
-                "getBalance": 10,
-                "getTokenAccountsByOwner": 10,
-                "getMultipleAccounts": 20,
-                "getHealth": 20,
-                "getTokenLargestAccounts": 20,
-                "getTokenAccountBalance": 20,
-                "getTokenSupply": 20,
-                "getSignaturesForAddress": 40,
-                "getTransaction": 40,
-                "getTransactionsForAddress": 100,
-            }.get(method, 20)
-        if self.credit_model == "chainstack":
-            return 1
+        if self.credit_model in {"alchemy", "helius", "chainstack"}:
+            if result is None:
+                return native_cost(self.credit_model, method)
+            return native_cost(self.credit_model, method, result=result)
         if self.credit_model == "drpc":
             return 0 if method == "getHealth" else 20
         return 1
@@ -2458,6 +2496,7 @@ class RoutedSolanaRpc:
         self.health_results = {}
         self.token_supply_cache = {}
         self.token_balance_cache = {}
+        self.token_account_state = None
         self.largest_token_accounts_cache = {}
         self.multiple_accounts_cache = {}
         self.capability_cache = None
@@ -2783,6 +2822,8 @@ class RoutedSolanaRpc:
                 .get("info", {})
             )
             total += rpc_token_amount(info.get("tokenAmount"))
+        if isinstance(self.token_account_state, dict):
+            remember_enumeration(self.token_account_state, owner, mint, result, total, time.time())
         self.token_balance_cache[cache_key] = total
         return total
 
@@ -3209,6 +3250,7 @@ def run_gmgn_cli(config, arguments, label):
     command = [*command_prefix, *arguments]
     if "--raw" not in command:
         command.append("--raw")
+    wait_for_gmgn_slot(arguments)
     delay = max(0, float(config.get("_gmgn_next_request_at") or 0) - time.monotonic())
     if delay:
         time.sleep(delay)
@@ -7471,6 +7513,11 @@ def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
                             if parse_timestamp(row.get("checked_at")) >= eligible_at}
     pending = [row for row in cohort if row["owner"] not in verified_owners]
     to_check = pending[:wallet_limit]
+    if isinstance(getattr(rpc, "token_account_state", None), dict) and to_check:
+        batch_check = prime_known_balances(rpc, [row["owner"] for row in to_check],
+            pool.token_address, rpc.token_account_state, config, time.time())
+        thesis["balance_batch_check"] = {**batch_check, "checked_at": checked_at,
+            "full_enumeration_required": len(batch_check["full_enumeration_required"])}
     for row in cohort:
         if continuing_cycle and row["owner"] in verified_owners:
             checked.append((row, max(0.0, float(row.get("attributed_tokens") or 0)),
@@ -14120,7 +14167,9 @@ def run_once(config, lane_name=None):
         config["_ath_budget"]["target_tokens"] = []
     http = Http()
     rpc = build_rpc_router(config)
+    rpc.token_account_state = state
     configure_monthly_budgets(rpc, state, config)
+    configure_durable_rpc_budgets(rpc, state, config)
     rpc.configure_capabilities(state, config)
     config["_rpc_router"] = rpc
     health = rpc.health()

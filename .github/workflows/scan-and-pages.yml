@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       source:
-        description: "Who triggered the scan"
+        description: "Scan source (manual-ui publishes without scanning; manual-targeted updates the API only)"
         required: false
         default: "manual"
       dispatch_bucket:
@@ -31,6 +31,8 @@ on:
       - "history_contract.py"
       - "rpc_budget.py"
       - "rpc_routing.py"
+      - "rpc_limiter.py"
+      - "balance_batch.py"
       - "scan_scheduling.py"
       - "scan_failure.py"
       - "launch_history.py"
@@ -47,6 +49,11 @@ on:
       - "tests/**"
       - "tools/build_pages.py"
       - "tools/runtime_cache.py"
+      - "tools/flush_history_queue.py"
+      - "tools/workflow_plan.py"
+      - ".github/workflows/discovery-pulse.yml"
+      - ".github/workflows/scan-watchdog.yml"
+      - "tools/scan_watchdog.py"
       - "dashboard/**"
       - "cloudflare/**"
       - "NARRATIVE_PROTOCOL.md"
@@ -54,9 +61,9 @@ on:
 
 concurrency:
   # Cloudflare Worker cron is the single scheduled scan source; runs share one
-  # runtime-state writer lock. UI-only pushes use their own queue so discovery
-  # cannot continually replace pending publications.
-  group: ${{ github.event_name == 'push' && 'solana-radar-ui-publish' || 'solana-radar-state-writer' }}
+  # runtime-state writer lock. Only read-only UI publications have their own
+  # queue; component locks require partitioned/versioned mutable state first.
+  group: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.source == 'manual-ui')) && 'solana-radar-ui-publish' || 'solana-radar-state-writer' }}
   cancel-in-progress: false
 
 permissions:
@@ -91,11 +98,9 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Set up test runtime
-        if: github.event_name == 'push' || !startsWith(inputs.source, 'cloudflare-')
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
+      - name: Plan bounded publication work
+        id: plan
+        run: python tools/workflow_plan.py >> "$GITHUB_OUTPUT"
 
       - name: Check scan freshness
         id: freshness
@@ -120,9 +125,9 @@ jobs:
               pass
           dispatch_source = (event.get("inputs") or {}).get("source", "")
           targeted = dispatch_source == "cloudflare-targeted"
-          if event_name == "workflow_dispatch" and dispatch_source == "robinhood":
+          if event_name == "workflow_dispatch" and dispatch_source in ("robinhood", "manual-ui"):
               print("should_scan=false")
-              print("reason=robinhood_only")
+              print(f"reason={dispatch_source}_only")
               raise SystemExit
           if event_name == "workflow_dispatch" and not dispatch_source.startswith("cloudflare-"):
               print("should_scan=true")
@@ -202,50 +207,73 @@ jobs:
           echo "Skipping scanner because latest report is still fresh: ${{ steps.freshness.outputs.reason }}"
 
       - name: Restore scanner runtime state
-        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        id: state_restore
+        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.publish_pages == 'true' || steps.plan.outputs.observe_robinhood == 'true'
         uses: actions/cache/restore@v4
         with:
           path: |
             data/state.json
             data/discovery_state.json
             data/discovery_status.json
-          key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}
+          key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ${{ runner.os }}-solana-radar-state-v4-
 
       - name: Preserve pending cloud writes
+        id: outbox_restore
         if: steps.freshness.outputs.should_scan == 'true'
         uses: actions/cache/restore@v4
         with:
           path: data/remote_outbox
-          key: ${{ runner.os }}-solana-radar-outbox-v1-${{ github.run_id }}
+          key: ${{ runner.os }}-solana-radar-outbox-v1-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ${{ runner.os }}-solana-radar-outbox-v1-
 
+      - name: Record pre-writer runtime revisions
+        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.observe_robinhood == 'true'
+        run: python tools/runtime_cache.py capture "$RUNNER_TEMP/radar-runtime-baseline.json"
+
+      - name: Record pre-scan outbox contents
+        if: steps.freshness.outputs.should_scan == 'true'
+        run: python tools/runtime_cache.py capture-outbox "$RUNNER_TEMP/radar-outbox-baseline.json"
+
+      - name: Restore Python package downloads
+        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.publish_pages == 'true' || steps.plan.outputs.observe_robinhood == 'true' || steps.plan.outputs.validate == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-radar-pip-py311-${{ hashFiles('requirements.txt') }}
+
       - name: Set up Node
+        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.observe_robinhood == 'true' || steps.plan.outputs.validate == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "24"
           cache: npm
 
-      - name: Install dependencies
-        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+      - name: Install Python dependencies
+        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.publish_pages == 'true' || steps.plan.outputs.observe_robinhood == 'true' || steps.plan.outputs.validate == 'true'
+        # Download caches are not installed environments. Always install on a new runner.
+        run: python -m pip install -r requirements.txt
+
+      - name: Install dashboard test dependencies
+        if: steps.plan.outputs.validate == 'true'
+        run: npm ci
+
+      - name: Install GMGN CLI when used
+        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.observe_robinhood == 'true'
+        env:
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
         run: |
-          python -m pip install -r requirements.txt
-          npm ci
-          npm install -g gmgn-cli@1.6.1
+          if [ -n "$GMGN_API_KEY" ]; then npm install -g gmgn-cli@1.6.1; fi
 
       - name: Validate scanner and dashboard
-        if: github.event_name == 'push' || (steps.freshness.outputs.should_scan == 'true' && !startsWith(inputs.source, 'cloudflare-'))
+        if: steps.plan.outputs.validate == 'true'
         run: |
           python -m unittest discover -s tests -v
           python -m json.tool config.example.json > /dev/null
           node --test cloudflare/scan-dispatcher/test/*.test.mjs dashboard/test/*.test.mjs
           node --check dashboard/app.js
-
-      - name: Record pre-scan runtime revisions
-        if: steps.freshness.outputs.should_scan == 'true'
-        run: python tools/runtime_cache.py capture "$RUNNER_TEMP/radar-runtime-baseline.json"
 
       - name: Run scanner
         id: run_scanner
@@ -262,13 +290,15 @@ jobs:
           BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
           RADAR_DATA_API_URL: https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev
           RADAR_INGEST_SECRET: ${{ secrets.RADAR_INGEST_SECRET }}
-          # D1 is canonical; the compact Pages snapshot remains available if
-          # the remote write is temporarily unavailable.
+          # Live API publication is independent of Pages. Pending writes remain
+          # in the outbox; cache is best-effort recovery, not durable SQL ack.
           RADAR_REMOTE_SYNC_REQUIRED: "false"
           SCAN_SOURCE: ${{ inputs.source }}
         run: |
           set +e
           scan_args=()
+          # Existing targeted mode omits launch/position-history recovery. Core
+          # derived evaluation has no independent skip flag yet.
           if [ "$SCAN_SOURCE" = "cloudflare-targeted" ] || [ "$SCAN_SOURCE" = "manual-targeted" ]; then scan_args+=(--targeted); fi
           timeout --signal=TERM --kill-after=30s 25m python scanner.py --once --lane reactivation "${scan_args[@]}"
           status=$?
@@ -318,42 +348,46 @@ jobs:
           print(f"classification={classification}")
           PY
 
-      - name: Save pending cloud writes
+      - name: Flush bounded SQL history queue after live publication
+        id: history_flush
+        if: steps.run_scanner.outputs.exit_code == '0' && hashFiles('tools/flush_history_queue.py') != ''
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          RADAR_DATA_API_URL: ${{ secrets.RADAR_DATA_URL || 'https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev' }}
+          RADAR_INGEST_SECRET: ${{ secrets.RADAR_INGEST_SECRET }}
+        # Reserved helper contract: at most 10 flushes, 55s internal deadline,
+        # 60s outer timeout. Failure must not undo the already-published live data.
+        run: timeout --signal=TERM --kill-after=5s 60s python tools/flush_history_queue.py --max-flushes 10 --max-seconds 55
+
+      - name: Check pending cloud write changes
+        id: outbox_changes
         if: always() && steps.freshness.outputs.should_scan == 'true'
+        run: python tools/runtime_cache.py check-outbox "$RUNNER_TEMP/radar-outbox-baseline.json" >> "$GITHUB_OUTPUT"
+
+      - name: Save pending cloud writes
+        # Keep legacy keys/backlog, including quarantine. Never prune or infer
+        # SQL acknowledgement here. A failed comparison or cache miss must save.
+        if: always() && steps.freshness.outputs.should_scan == 'true' && (steps.outbox_changes.outputs.changed != 'false' || steps.outbox_restore.outputs.cache-matched-key == '' || steps.outbox_restore.outcome != 'success')
         uses: actions/cache/save@v4
         with:
           path: data/remote_outbox
-          key: ${{ runner.os }}-solana-radar-outbox-v1-${{ github.run_id }}
-
-      - name: Validate failure-safe runtime cache
-        id: runtime_cache
-        if: always() && steps.freshness.outputs.should_scan == 'true'
-        run: python tools/runtime_cache.py validate "$RUNNER_TEMP/radar-runtime-baseline.json" >> "$GITHUB_OUTPUT"
-
-      - name: Save scanner runtime state
-        if: always() && steps.runtime_cache.outputs.valid == 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            data/state.json
-            data/discovery_state.json
-            data/discovery_status.json
-          key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}
+          key: ${{ runner.os }}-solana-radar-outbox-v1-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Restore independent Robinhood observations
-        if: github.event_name == 'workflow_dispatch' && !endsWith(inputs.source, '-targeted')
+        if: steps.plan.outputs.observe_robinhood == 'true'
         uses: actions/cache/restore@v4
         with:
           path: |
             data/robinhood.json
             data/robinhood.sqlite
-          key: ${{ runner.os }}-robinhood-state-v2-${{ github.run_id }}
+          key: ${{ runner.os }}-robinhood-state-v2-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ${{ runner.os }}-robinhood-state-v2-
 
       - name: Recover durable Robinhood backup
         id: robinhood_backup
-        if: github.event_name == 'workflow_dispatch' && !endsWith(inputs.source, '-targeted')
+        if: steps.plan.outputs.observe_robinhood == 'true'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -361,7 +395,7 @@ jobs:
 
       - name: Observe Robinhood mainnet
         id: robinhood
-        if: github.event_name == 'workflow_dispatch' && !endsWith(inputs.source, '-targeted') && steps.robinhood_backup.outcome == 'success'
+        if: steps.plan.outputs.observe_robinhood == 'true' && steps.robinhood_backup.outcome == 'success'
         timeout-minutes: 10
         continue-on-error: true
         env:
@@ -369,7 +403,27 @@ jobs:
           ROBINHOOD_ARCHIVE_RPC_URL: ${{ secrets.ROBINHOOD_ARCHIVE_RPC_URL }}
           RELAY_API_KEY: ${{ secrets.RELAY_API_KEY }}
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+          RADAR_DATA_API_URL: ${{ secrets.RADAR_DATA_URL || 'https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev' }}
+          RADAR_INGEST_SECRET: ${{ secrets.RADAR_INGEST_SECRET }}
+        # The observer also updates Solana's shared account ledger. It remains
+        # hourly/manual, never targeted, and holds the same global writer lock.
         run: python robinhood.py
+
+      - name: Validate failure-safe runtime cache
+        id: runtime_cache
+        if: always() && (steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.observe_robinhood == 'true')
+        run: python tools/runtime_cache.py validate "$RUNNER_TEMP/radar-runtime-baseline.json" >> "$GITHUB_OUTPUT"
+
+      - name: Save scanner runtime state
+        # Save only after every shared ledger writer, including failed observers.
+        if: always() && steps.runtime_cache.outputs.valid == 'true' && (steps.runtime_cache.outputs.changed != 'false' || steps.state_restore.outputs.cache-matched-key == '' || steps.state_restore.outcome != 'success')
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/state.json
+            data/discovery_state.json
+            data/discovery_status.json
+          key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Preserve Robinhood observations
         if: steps.robinhood.outcome == 'success'
@@ -378,7 +432,7 @@ jobs:
           path: |
             data/robinhood.json
             data/robinhood.sqlite
-          key: ${{ runner.os }}-robinhood-state-v2-${{ github.run_id }}
+          key: ${{ runner.os }}-robinhood-state-v2-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Daily Robinhood database backup
         if: steps.robinhood.outcome == 'success' && steps.robinhood.outputs.persisted == 'true' && steps.robinhood_backup.outputs.backup_due == 'true'
@@ -392,7 +446,10 @@ jobs:
           if-no-files-found: error
 
       - name: Build Pages artifact
-        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        id: build_pages
+        # Scheduled fallback refreshes occupy 00/06/12/18 UTC deep slots only.
+        # Keep original report.generated_at: an older fallback is not live data.
+        if: steps.plan.outputs.publish_pages == 'true' && (steps.freshness.outputs.should_scan != 'true' || steps.run_scanner.outputs.exit_code == '0')
         run: |
           git fetch origin main
           publisher=$(mktemp -d "${RUNNER_TEMP:-/tmp}/radar-publisher.XXXXXX")
@@ -405,14 +462,14 @@ jobs:
           python "$publisher/tools/build_pages.py"
 
       - name: Configure Pages
-        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        if: steps.build_pages.outcome == 'success'
         uses: actions/configure-pages@v5
         with:
           enablement: true
 
       - name: Upload Pages artifact
         id: pages_artifact
-        if: steps.freshness.outputs.should_scan == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        if: steps.build_pages.outcome == 'success'
         uses: actions/upload-pages-artifact@v3
         with:
           # A unique name prevents a stale Pages artifact from another queued

@@ -1,9 +1,10 @@
 # Solana Radar Scan Dispatcher
 
 Cloudflare Worker that triggers the five-minute discovery pulse, the hourly deep
-scan, serves the live dashboard from Durable Objects, and syncs dashboard token deletions.
-Canonical operational and Learning SQL lives in Turso. Verified compressed evidence
-and runtime blobs live in a private R2 bucket. D1 bindings remain for rollback only.
+scan, serves the live dashboard from Turso, and syncs dashboard token deletions.
+Operational data, checkpoints, queue leases and Learning SQL live in Turso.
+Verified compressed evidence archives live in private R2. D1 and old DO bindings
+remain for lossless migration/rollback, not new runtime mirrors.
 
 ## Deploy
 
@@ -72,6 +73,41 @@ while the state-writer workflow is queued or in progress.
 
 ## Storage Safety
 
+Apply `migrations-storage/0002_runtime_sql.sql` through `0005_cutover_staging.sql`
+to the canonical Turso database before deploying the SQL runtime/queue flags.
+Do not run them against the legacy Durable Object or automatically on every read.
+`HISTORY_LEGACY_MIGRATION=verified_turso_v1` is specific to the verified canonical
+history/resume-state import. Do not enable it on an empty replacement database.
+
+During that verified cutover, new raw events first enter a bounded separate Turso
+staging queue (2048 rows / 16 MiB). The old DO is export-only; consumers wait until
+all old receipts and progress have been acknowledged in SQL. Automatic flushes
+advance at most 25 old rows per invocation. DO quota failures keep migration
+pending without deleting data or blocking current SQL dashboard/checkpoints.
+After the sweep, staged events move into the primary queue before their staged
+copies are removed. Overflow is explicit backpressure, never a successful drop.
+
+Live queue consumption caps at 35 counted requests, leaving headroom under the
+free Worker's 50 external-request limit. Learning and archive cleanup run at
+minute 47, separately from discovery (every 5 minutes), targeted checks (22/37/52)
+and hourly deep checks (7). Archive backfill and legacy SQL forwarding use the
+minute-37 maintenance invocation, not the discovery critical path.
+
+SQL checkpoint manifests publish only after every immutable part is present and
+hash/identity-valid. Superseded parts have a 48-hour restore grace. No R2 request
+is needed for new checkpoints. Unarchived delivered raw events remain in SQL;
+their last copy cannot expire just because analytics has completed.
+
+Native RPC usage is reserved in small durable SQL grants before requests:
+Helius 50 credits, Alchemy 1000 CU, Chainstack 100 RU. Unused/uncertain grants stay
+charged; these are conservative scanner reservations, not provider invoices.
+Robinhood reserves its bounded Alchemy grant in the same ledger. The private
+`/api/runtime/rpc-ledger` rejects counter regression and stale acknowledgements.
+Missing ledger access disables paid routes, not public fallbacks. Keep the global
+GitHub state-writer lock: do not replay grants or run independent shared-state
+writers concurrently. Known Solana accounts batch in groups of at most 100;
+declines/closures and six-hour expiry immediately require owner re-enumeration.
+
 - During cutover, `STORAGE_WRITES_FROZEN=true` stops all cron tasks and HTTP
   mutations, including manual dispatch. Reads remain available. Use it only after
   ongoing GitHub state-writer runs finish, and remove it after verified reconciliation.
@@ -120,9 +156,9 @@ invoice**. The guard covers this scanner's binding; another bucket, manual uploa
 or external API client can consume the account free tier outside this guard.
 Cloudflare does not provide an account-wide R2 hard spending cap.
 
-Budget-paused scans still publish current operational data and token details to
-Turso. R2 evidence stays in the unacknowledged outbox, with the previous complete
-checkpoint retained. The public dashboard and token routes use SQL while paused.
+Budget-paused scans still publish current operational data, checkpoints and token
+details to Turso. R2 evidence stays durable in SQL with an archive-pending marker.
+The public dashboard and token routes use SQL while paused.
 These are degraded archive guarantees, not a claim that archives remain current.
 
 Monitoring: public `GET /api/storage/r2-budget` never accesses R2. The dashboard

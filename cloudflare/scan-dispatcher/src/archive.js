@@ -1,5 +1,5 @@
 import { historyEventId } from "./history.js";
-import {R2BudgetError} from "./r2-budget.js";
+import {R2BudgetError, R2_BATCH_LIMITS, guardR2Env, withR2BudgetBatch} from "./r2-budget.js";
 
 export const HISTORY_ARCHIVE_LIMITS = Object.freeze({
   eventBytes: 128 * 1024, compressedBytes: 129 * 1024, timeoutMs: 10000, depth: 100,
@@ -163,21 +163,24 @@ async function operation(options, kind, bytes = 0) {
   await options?.onOperation?.(kind, bytes);
 }
 
-export async function archiveHistoryEvent(env, raw, options = {}) {
-  const store = bucket(env);
+async function prepareHistoryEvent(raw, options) {
   const ids = identity(raw);
   const bytes = ENCODER.encode(canonical(raw));
   if (bytes.byteLength > HISTORY_ARCHIVE_LIMITS.eventBytes) throw new HistoryArchiveError("history_event_oversize", 413);
   const sha256 = await digest(bytes);
   const expected = {key: archiveKey(sha256), sha256, decoded_bytes: bytes.byteLength, ...ids};
-  await operation(options, "read");
-  const existing = await bounded(() => store.head(expected.key), options);
-  if (existing) return verifiedObject(existing, expected);
   const compressed = await collect(new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip")),
     HISTORY_ARCHIVE_LIMITS.compressedBytes, options);
   const ref = {schema_version: 1, storage: "r2", encoding: "gzip+json", ...expected,
     compressed_sha256: await digest(compressed), compressed_bytes: compressed.byteLength};
   validateHistoryArchiveReference(ref);
+  return {expected, ref, compressed};
+}
+
+async function storeHistoryEvent(store, {expected, ref, compressed}, options) {
+  await operation(options, "read");
+  const existing = await bounded(() => store.head(expected.key), options);
+  if (existing) return verifiedObject(existing, expected);
   await operation(options, "write", compressed.byteLength);
   await bounded(() => store.put(ref.key, compressed, {
     onlyIf: new Headers({"If-None-Match": "*"}), sha256: ref.compressed_sha256, storageClass: "Standard",
@@ -188,9 +191,29 @@ export async function archiveHistoryEvent(env, raw, options = {}) {
   return verifiedObject(await bounded(() => store.head(ref.key), options), expected);
 }
 
+export async function archiveHistoryEvents(env, raws, options = {}) {
+  bucket(env);
+  if (!Array.isArray(raws) || !raws.length || raws.length * 3 > R2_BATCH_LIMITS.operations) {
+    throw new HistoryArchiveError("history_archive_batch_too_large", 400);
+  }
+  const prepared = [];
+  for (const raw of raws) prepared.push(await prepareHistoryEvent(raw, options));
+  const plan = prepared.flatMap(({ref})=>[{kind:"head",key:ref.key},
+    {kind:"put",key:ref.key,bytes:ref.compressed_bytes},{kind:"head",key:ref.key}]);
+  return withR2BudgetBatch(env,plan,async scoped => {
+    const store = bucket(scoped), refs = [];
+    for (const item of prepared) refs.push(await storeHistoryEvent(store,item,options));
+    return refs;
+  }, options);
+}
+
+export async function archiveHistoryEvent(env, raw, options = {}) {
+  return (await archiveHistoryEvents(env,[raw],options))[0];
+}
+
 export async function readHistoryArchive(env, reference, options = {}) {
   const ref = validateHistoryArchiveReference(reference);
-  const store = bucket(env);
+  const store = bucket(guardR2Env(env));
   await operation(options, "read");
   const object = await bounded(() => store.get(ref.key), options);
   try { verifiedObject(object, ref); }

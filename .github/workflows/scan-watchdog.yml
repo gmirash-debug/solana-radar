@@ -19,10 +19,8 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
       - name: Dispatch only when the primary scheduler left scans stale
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python tools/scan_watchdog.py
+        # Stdlib-only helper uses the hosted Ubuntu Python; no dependency install.
+        run: python3 tools/scan_watchdog.py
