@@ -33,15 +33,17 @@ def workflow_plan(event, now=None):
     push = event_name == "push"
     targeted = dispatch and source in ("cloudflare-targeted", "manual-targeted")
     ui_only = dispatch and source == "manual-ui"
+    recover_runtime = dispatch and source == "publication-recovery"
     scheduled = source.startswith("cloudflare-")
-    pages = push or (dispatch and not targeted and (
+    pages = push or (dispatch and not targeted and not recover_runtime and (
         not scheduled or scheduled_pages_slot(source, inputs.get("dispatch_bucket"), now)))
     return {
         "targeted": targeted,
         "ui_only": ui_only,
+        "recover_runtime": recover_runtime,
         "publish_pages": pages,
         "validate": push or (dispatch and not scheduled),
-        "observe_robinhood": dispatch and not targeted and not ui_only,
+        "observe_robinhood": dispatch and not targeted and not ui_only and not recover_runtime,
     }
 
 

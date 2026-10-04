@@ -183,16 +183,29 @@ Production uses two scan layers:
 - `Reactivation discovery pulse` runs every 5 minutes without Solana RPC calls.
   It uses a narrow low-cost GMGN set (`1m`/`5m` volume and swaps plus two
   Trenches rankings), updates current market snapshots, quiet-regime baselines,
-  and the priority queue in Cloudflare D1.
+  and the priority queue through the Worker into Turso.
 - `Scan and deploy dashboard` runs the deep onchain pass hourly. It restores raw
   cursors and swap buffers from GitHub Actions Cache, loads the latest discovery
-  context from D1, scans selected pools, and publishes the dashboard.
+  context from Turso, scans selected pools, and publishes the dashboard.
 
-Cloudflare D1 is the primary dashboard read path. GitHub Pages keeps a compact
-snapshot fallback. Market/baseline/outcome data is stored one row per token; raw
-transaction buffers, RPC cursors, and the wallet cache remain only in the Actions
-runtime cache. A temporary D1 outage does not stop the hourly scan: it publishes
-the prior verified fallback and retries the remote sync on the next run.
+Turso is the production SQL and runtime backend; the Cloudflare Worker provides
+authenticated ingestion and public reads. GitHub Pages keeps a compact fallback.
+Raw buffers, cursors and wallet caches have content-addressed SQL checkpoints;
+Actions Cache is secondary recovery, not the durable acknowledgement. Runtime
+publication saves the lightweight list first, then generation-bound token
+details. Full evidence remains unchanged in the per-token documents.
+
+To replay the latest saved publication without scanning, dispatch
+`Scan and deploy dashboard` with `source=publication-recovery`. It uses the
+global writer lock, restores the outbox, preserves the original scan timestamp,
+and never deletes outbox files, invokes RPC or rebuilds Pages.
+
+History ingestion uses a bounded SQL queue, with raw archive copies in private R2.
+R2 pauses fail closed if its budget guard is unavailable. Legacy DO/D1 data is
+retained for explicit migration and rollback; new runtime writes are not mirrored
+there. Legacy receipt export is read-only, up to 500 rows per page, capped at 25
+pending full events and 1 MiB. See `INFRASTRUCTURE_CAPACITY_PLAN_2026-10-04.md` for
+remaining blockers, actual checks and unverified capacity assumptions.
 
 Cloudflare production setup:
 

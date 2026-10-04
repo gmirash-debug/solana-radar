@@ -17,6 +17,7 @@ export const HISTORY_QUEUE_LIMITS = Object.freeze({
   // Metadata only: retain 30 days even at 5,000 minimum-cost events/day,
   // including UTC-boundary bursts and pending work. Payload caps stay unchanged.
   pendingRows: 2048, pendingBytes: 16 * 1024 * 1024, receiptRows: 160000,
+  legacyExportRows: 500,
   receiptRetentionMs: 30 * 86400_000, leaseMs: 10 * 60_000,
   dailyDoWriteUnits: 50000, dailyHistoryWriteUnits: 80000, flushHistoryWriteUnits: 40000,
   // Internal SQL/index estimates, not billed rows; reserve headroom for other workloads.
@@ -212,17 +213,18 @@ export class HistoryQueue {
     return this.rows("SELECT name FROM sqlite_master WHERE type='table' AND name='history_queue_events'").length > 0;
   }
 
-  exportLegacy({after = "", limit = HISTORY_QUEUE_LIMITS.enqueueEvents} = {}, now = Date.now()) {
+  exportLegacy({after = "", limit = HISTORY_QUEUE_LIMITS.legacyExportRows} = {}, now = Date.now()) {
     if (typeof after !== "string" || after.length > 240 || !Number.isInteger(limit) || limit < 1
-        || limit > HISTORY_QUEUE_LIMITS.enqueueEvents) throw new QueueError("history_legacy_export_cursor_invalid");
+        || limit > HISTORY_QUEUE_LIMITS.legacyExportRows) throw new QueueError("history_legacy_export_cursor_invalid");
     if (!this.legacyPresent()) return {rows:[],after,complete:true,read_only:true};
     const columns = new Set(this.rows("PRAGMA table_info(history_queue_events)").map(row => row.name));
     const rows = this.rows(`SELECT *,${columns.has("progress_json") ? "progress_json" : "NULL"} exported_progress,
       ${columns.has("archive_version") ? "archive_version" : "0"} exported_archive_version
       FROM history_queue_events WHERE event_id>? ORDER BY event_id LIMIT ?`, after, limit + 1);
     const page = [];
-    let bytes = 1024;
+    let bytes = 1024, pending = 0;
     for (const row of rows.slice(0,limit)) {
+      if (row.status === "pending" && pending >= HISTORY_QUEUE_LIMITS.enqueueEvents) break;
       row.progress_json = row.exported_progress;
       row.archive_version = row.exported_archive_version;
       delete row.exported_progress; delete row.exported_archive_version;
@@ -230,6 +232,7 @@ export class HistoryQueue {
       bytes += ENCODER.encode(JSON.stringify(row)).byteLength + 1;
       if (bytes > HISTORY_QUEUE_LIMITS.requestBytes) break;
       page.push(row);
+      if (row.status === "pending") pending++;
     }
     if (rows.length && !page.length) throw new QueueError("history_legacy_export_row_oversize", 413);
     return {rows:page,after:page.at(-1)?.event_id || after,complete:page.length === rows.length,read_only:true};
@@ -637,7 +640,7 @@ export class HistoryQueue {
       if (request.method === "GET" && path === "/export") {
         const params = new URL(request.url).searchParams;
         return Response.json({ok:true,...this.exportLegacy({after:params.get("after") || "",
-          limit:params.has("limit") ? Number(params.get("limit")) : HISTORY_QUEUE_LIMITS.enqueueEvents})});
+          limit:params.has("limit") ? Number(params.get("limit")) : HISTORY_QUEUE_LIMITS.legacyExportRows})});
       }
       if (request.method !== "POST") throw new QueueError("history_queue_post_required", 405);
       if (path === "/enqueue") return Response.json({ ok: true, ...await this.enqueue((await readRequest(request)).events) });
@@ -749,7 +752,7 @@ export async function durableHistoryStatus(env) {
 // Internal helpers only. The parent must authenticate any HTTP route exposing
 // them and stop legacy writers before starting this explicit bounded migration.
 export async function exportLegacyDurableHistory(env, options = {}) {
-  const after = options.after || "", limit = options.limit ?? HISTORY_QUEUE_LIMITS.enqueueEvents;
+  const after = options.after || "", limit = options.limit ?? HISTORY_QUEUE_LIMITS.legacyExportRows;
   return queueRequest(env,`export?${new URLSearchParams({after,limit:String(limit)})}`,undefined,"GET");
 }
 

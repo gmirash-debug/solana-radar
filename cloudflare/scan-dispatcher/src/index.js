@@ -1128,7 +1128,7 @@ async function flushAndPublishHistoryHealth(env, maximum = 1, {upgradeSchema=fal
       const migration = await env.RADAR_HISTORY_DB.prepare("SELECT legacy_complete FROM history_sql_queue_meta WHERE id=1").first();
       if (migration && !migration.legacy_complete) {
         migrating = true;
-        const next = await migrateLegacyDurableHistory(env,{limit:25,legacyWritersStopped:true,historyStateMigrated:true});
+        const next = await migrateLegacyDurableHistory(env,{limit:HISTORY_QUEUE_LIMITS.legacyExportRows,legacyWritersStopped:true,historyStateMigrated:true});
         result = {...next,migration_progressed:next.queued || next.duplicates || 0};
       }
     }

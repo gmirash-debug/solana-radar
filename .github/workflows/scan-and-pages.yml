@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       source:
-        description: "Scan source (manual-ui publishes without scanning; manual-targeted updates the API only)"
+        description: "Source: manual-ui, manual-targeted, publication-recovery (saved dashboard only), or manual"
         required: false
         default: "manual"
       dispatch_bucket:
@@ -51,6 +51,7 @@ on:
       - "tools/runtime_cache.py"
       - "tools/flush_history_queue.py"
       - "tools/workflow_plan.py"
+      - "tools/recover_runtime_publication.py"
       - ".github/workflows/discovery-pulse.yml"
       - ".github/workflows/scan-watchdog.yml"
       - "tools/scan_watchdog.py"
@@ -125,7 +126,7 @@ jobs:
               pass
           dispatch_source = (event.get("inputs") or {}).get("source", "")
           targeted = dispatch_source == "cloudflare-targeted"
-          if event_name == "workflow_dispatch" and dispatch_source in ("robinhood", "manual-ui"):
+          if event_name == "workflow_dispatch" and dispatch_source in ("robinhood", "manual-ui", "publication-recovery"):
               print("should_scan=false")
               print(f"reason={dispatch_source}_only")
               raise SystemExit
@@ -221,7 +222,7 @@ jobs:
 
       - name: Preserve pending cloud writes
         id: outbox_restore
-        if: steps.freshness.outputs.should_scan == 'true'
+        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.recover_runtime == 'true'
         uses: actions/cache/restore@v4
         with:
           path: data/remote_outbox
@@ -274,6 +275,14 @@ jobs:
           python -m json.tool config.example.json > /dev/null
           node --test cloudflare/scan-dispatcher/test/*.test.mjs dashboard/test/*.test.mjs
           node --check dashboard/app.js
+
+      - name: Recover runtime publication without scanning
+        if: steps.plan.outputs.recover_runtime == 'true'
+        timeout-minutes: 5
+        env:
+          RADAR_DATA_API_URL: https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev
+          RADAR_INGEST_SECRET: ${{ secrets.RADAR_INGEST_SECRET }}
+        run: python tools/recover_runtime_publication.py
 
       - name: Run scanner
         id: run_scanner

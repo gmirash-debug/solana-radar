@@ -68,6 +68,21 @@ class WorkflowPlanTests(unittest.TestCase):
             self.assertFalse(plan["observe_robinhood"])
             self.assertTrue(plan["validate"])
 
+    def test_recovery_only_publishes_saved_runtime(self):
+        plan = self.plan("publication-recovery")
+        self.assertTrue(plan["recover_runtime"])
+        self.assertTrue(plan["validate"])
+        self.assertFalse(plan["publish_pages"])
+        self.assertFalse(plan["observe_robinhood"])
+        steps = workflow_steps("scan-and-pages.yml")
+        values = {"steps.freshness.outputs.should_scan": "false",
+                  "steps.plan.outputs.recover_runtime": "true"}
+        self.assertTrue(condition(steps["Preserve pending cloud writes"], values))
+        self.assertTrue(condition(steps["Recover runtime publication without scanning"], values))
+        for name in ("Run scanner", "Observe Robinhood mainnet", "Save pending cloud writes",
+                     "Install GMGN CLI when used", "Build Pages artifact"):
+            self.assertFalse(condition(steps[name], values))
+
     def test_six_hour_deep_and_watchdog_slots(self):
         for hour in range(24):
             now = self.now.replace(hour=hour)
@@ -309,6 +324,20 @@ class WorkflowContracts(unittest.TestCase):
             output = io.StringIO()
             with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(path), "GITHUB_EVENT_NAME": "workflow_dispatch"}), \
                     patch("urllib.request.urlopen", side_effect=AssertionError("UI publication must not probe scan freshness")), \
+                    contextlib.redirect_stdout(output):
+                with self.assertRaises(SystemExit):
+                    exec(compile(textwrap.dedent(code), "workflow-freshness", "exec"), {})
+        self.assertIn("should_scan=false", output.getvalue())
+
+    def test_recovery_freshness_never_probes_or_scans(self):
+        source = self.steps["Check scan freshness"]
+        code = re.search(r"python - <<'PY'[^\n]*\n(.*?)^          PY$", source, re.M | re.S)[1]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "event.json"
+            path.write_text(json.dumps({"inputs": {"source": "publication-recovery"}}))
+            output = io.StringIO()
+            with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(path), "GITHUB_EVENT_NAME": "workflow_dispatch"}), \
+                    patch("urllib.request.urlopen", side_effect=AssertionError("recovery must not probe freshness")), \
                     contextlib.redirect_stdout(output):
                 with self.assertRaises(SystemExit):
                     exec(compile(textwrap.dedent(code), "workflow-freshness", "exec"), {})
