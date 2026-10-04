@@ -1,5 +1,6 @@
 """Task-specific routes and read-result contracts, independent of billing units."""
 import math
+from urllib.parse import urlparse
 
 STANDARD_ORDER = ["chainstack", "helius", "alchemy", "drpc", "publicnode"]
 HISTORY_ORDER = ["alchemy", "helius"]
@@ -15,6 +16,42 @@ METHOD_ORDERS = {
     "getTransactionsForAddress": HISTORY_ORDER,
     "getTokenAccountsByOwner": BALANCE_ORDER,
 }
+
+
+def evm_endpoint_provider(endpoint):
+    """No credentials in provider labels; custom proxy classification is parent-owned."""
+    host = (urlparse(endpoint).hostname or "").lower()
+    if host == "alchemy.com" or host.endswith(".alchemy.com"):
+        return "alchemy"
+    if host == "robinhood-rpc.publicnode.com":
+        return "publicnode"
+    if host == "rpc.mainnet.chain.robinhood.com":
+        return "robinhood_public"
+    if host == "rpc.ordofi.network":
+        return "ordo"
+    return "configured"
+
+
+def evm_route_supports(provider, method, params):
+    """Conservative known plan gates; dynamic unsupported routes are learned by Rpc."""
+    if method != "eth_getLogs":
+        return True
+    if provider == "publicnode":
+        return False  # Existing probe: historical logs require a provider token.
+    if provider != "alchemy":
+        return True
+    if not params or not isinstance(params[0], dict):
+        return False
+    query = params[0]
+    if query.get("blockHash"):
+        return True
+    start, end = query.get("fromBlock", "latest"), query.get("toBlock", "latest")
+    if start == end and start in {"latest", "pending", "safe", "finalized"}:
+        return True
+    try:
+        return 1 <= int(end, 16) - int(start, 16) + 1 <= 10
+    except (ValueError, TypeError):
+        return False  # Do not send an unbounded range to the Free-plan route.
 
 
 def validate_result(method, params, result):

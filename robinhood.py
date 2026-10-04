@@ -9,6 +9,9 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from rpc_budget import monthly_budget_for, native_cost, allocate_run_budget, PreallocatedRpcBudget
+from rpc_limiter import DEFAULT_PROVIDER_LIMITERS, NativeUnitLimiter, RateLimitDeadline
+from rpc_routing import evm_endpoint_provider, evm_route_supports
 
 import requests
 from eth_abi import decode, encode
@@ -71,8 +74,13 @@ class RpcError(RuntimeError):
     pass
 
 
+class RpcUnsupported(RpcError):
+    pass
+
+
 class Rpc:
-    def __init__(self, url=None, budget=300, session=None):
+    def __init__(self, url=None, budget=300, session=None, shared_state=None,
+                 budget_config=None, monthly_budget=None, limiters=None, endpoint_providers=None):
         configured = url or os.environ.get("ROBINHOOD_RPC_URL")
         archive = os.environ.get("ROBINHOOD_ARCHIVE_RPC_URL")
         self.routes = list(dict.fromkeys(x for x in (configured, archive, PUBLIC_NODE, PUBLIC_RPC, ORDO_RPC) if x))
@@ -92,6 +100,32 @@ class Rpc:
         self.next_by_endpoint = {}
         self.next_request_at = 0
         self.deadline = time.monotonic() + 510
+        self.endpoint_providers = endpoint_providers or {}
+        self.limiters = limiters or DEFAULT_PROVIDER_LIMITERS
+        self.public_limiters = {
+            "publicnode": NativeUnitLimiter(1 / 0.15),
+            "robinhood_public": NativeUnitLimiter(1 / 0.9),
+            "ordo": NativeUnitLimiter(1 / 0.9),
+            "configured": NativeUnitLimiter(1 / 0.15),
+        }
+        self.unsupported_routes = set()
+        self.attempted_units = Counter()
+        self.monthly_budget = None
+        if monthly_budget is not None:
+            if monthly_budget.provider != "alchemy":
+                raise ValueError("Robinhood requires the shared Alchemy budget")
+            self.monthly_budget = monthly_budget
+        elif shared_state is not None:
+            self.configure_monthly_budget(shared_state, budget_config)
+
+    def configure_monthly_budget(self, state, config=None):
+        """Set before any RPC; parent owns restore/serialization/durable checkpoint."""
+        if self.calls:
+            raise ValueError("configure shared budget before RPC attempts")
+        self.monthly_budget = monthly_budget_for(state, "alchemy", config)
+
+    def endpoint_provider(self, endpoint):
+        return self.endpoint_providers.get(endpoint, evm_endpoint_provider(endpoint))
 
     def call(self, method, params):
         if self.calls >= self.budget:
@@ -103,13 +137,18 @@ class Rpc:
         if preferred is None:
             preferred = self.routes[0] if historical else PUBLIC_RPC if method == "eth_getLogs" else PUBLIC_NODE
         routes = sorted(self.routes, key=lambda u: u != preferred)
-        if method == "eth_getLogs":
-            # PublicNode gates historical logs; Alchemy Free caps ranges at ten blocks.
-            span = int(params[0].get("toBlock", "0x0"), 16) - int(params[0].get("fromBlock", "0x0"), 16) + 1
-            routes = [u for u in routes if u != PUBLIC_NODE and not (".g.alchemy.com/" in u and span > 10)]
+        routes = [u for u in routes if evm_route_supports(self.endpoint_provider(u), method, params)]
         for endpoint in routes:
-            if endpoint in self.disabled:
+            provider = self.endpoint_provider(endpoint)
+            if endpoint in self.disabled or (endpoint, route_key) in self.unsupported_routes:
                 continue
+            if provider == "alchemy":
+                try:
+                    cost = native_cost(provider, method, params)
+                except ValueError:
+                    continue
+                if self.monthly_budget is None or not self.monthly_budget.allows(cost):
+                    continue
             if endpoint not in self.verified and method != "eth_chainId":
                 try:
                     if int(self.request(endpoint, "eth_chainId", []), 16) != CHAIN_ID:
@@ -129,6 +168,8 @@ class Rpc:
                     self.head = int(value, 16)
                 return value
             except RpcError as exc:
+                if isinstance(exc, RpcUnsupported):
+                    self.unsupported_routes.add((endpoint, route_key))
                 self.failures[self.route_names[endpoint]] += 1
                 self.last_errors[endpoint] = str(exc)
         reasons = "; ".join(f"{self.route_names[u]}: {self.last_errors[u]}" for u in routes if u in self.last_errors)
@@ -152,13 +193,37 @@ class Rpc:
             if time.monotonic() + delay >= self.deadline:
                 raise RpcError("RPC time budget exhausted")
             time.sleep(delay)
+            provider = self.endpoint_provider(endpoint)
+            cost = 1
+            if provider == "alchemy":
+                if self.monthly_budget is None:
+                    raise RpcError("Shared Alchemy monthly budget unavailable")
+                try:
+                    cost = native_cost(provider, method, params)
+                except ValueError:
+                    raise RpcError("Unknown Alchemy method cost") from None
+                if not self.monthly_budget.allows(cost):
+                    raise RpcError("Shared Alchemy monthly budget exhausted")
+            try:
+                if provider == "alchemy":
+                    self.limiters.acquire(provider, method, self.deadline)
+                else:
+                    self.public_limiters[provider].acquire(deadline=self.deadline)
+            except RateLimitDeadline:
+                raise RpcError("RPC time budget exhausted") from None
+            # Waiting can cross a month/deadline. Reserve just before the send,
+            # and retain failed attempts independently of evidence rollback.
+            if time.monotonic() >= self.deadline:
+                raise RpcError("RPC time budget exhausted")
+            if provider == "alchemy" and not self.monthly_budget.reserve(cost):
+                raise RpcError("Shared Alchemy monthly budget exhausted")
             self.calls += 1
-            self.next_by_endpoint[endpoint] = time.monotonic() + (0.9 if endpoint in (PUBLIC_RPC, ORDO_RPC) else 0.15)
             self.stats[self.route_names[endpoint]] += 1
+            self.attempted_units[provider] += cost
             try:
                 result = self.session.post(endpoint, json={"jsonrpc": "2.0", "id": self.calls,
-                    "method": method, "params": params}, timeout=15)
-                if result.status_code in (429, 502, 503, 504) and attempt < 2:
+                    "method": method, "params": params}, timeout=min(15, self.deadline - time.monotonic()))
+                if result.status_code in (429, 500, 502, 503, 504) and attempt < 2:
                     self.backoff(endpoint, attempt, result.headers)
                     continue
                 if result.status_code >= 400:
@@ -174,9 +239,18 @@ class Rpc:
                 if isinstance(error, dict):
                     code = error.get("code")
                     safe_code = str(code) if isinstance(code, int) else "unknown"
+                    if code == -32601 or any(marker in message for marker in (
+                            "method not found", "method not supported", "not supported in your plan",
+                            "missing trie node", "historical state unavailable", "archive is not available")):
+                        raise RpcUnsupported(f"RPC unsupported during {method}")
                     raise RpcError(f"RPC {safe_code}{' throttled' if busy else ''} during {method}")
                 break
-            except (requests.RequestException, ValueError):
+            except requests.RequestException:
+                if attempt < 2:
+                    self.backoff(endpoint, attempt, {})
+                    continue
+                raise RpcError(f"RPC unavailable during {method}") from None
+            except ValueError:
                 # Never persist provider URLs, which may contain credentials.
                 raise RpcError(f"RPC unavailable during {method}") from None
         if not isinstance(payload, dict) or payload.get("error") or payload.get("result") is None:
@@ -1022,9 +1096,18 @@ def inspect_incremental(rpc, pool, start, head, config, store, session, now, rel
 
 
 
-def scan(previous=None, config=None, rpc=None, session=None, store=None):
+def scan(previous=None, config=None, rpc=None, session=None, store=None,
+         shared_state=None, budget_config=None, monthly_budget=None):
     config = config or CONFIG
-    rpc = rpc or Rpc(budget=config["rpc_budget"])
+    if rpc is None:
+        rpc = Rpc(budget=config["rpc_budget"], shared_state=shared_state,
+                  budget_config=budget_config, monthly_budget=monthly_budget)
+    elif isinstance(rpc, Rpc) and shared_state is not None and monthly_budget is None:
+        rpc.configure_monthly_budget(shared_state, budget_config)
+    elif isinstance(rpc, Rpc) and monthly_budget is not None:
+        if rpc.calls or monthly_budget.provider != "alchemy":
+            raise ValueError("configure shared Alchemy budget before RPC attempts")
+        rpc.monthly_budget = monthly_budget
     session = session or requests.Session()
     store = store or Store()
     previous = previous if (previous or {}).get("chain_id") == CHAIN_ID else {}
@@ -1125,11 +1208,82 @@ def scan(previous=None, config=None, rpc=None, session=None, store=None):
     if isinstance(rpc, Rpc):
         output["provider_requests"] = dict(rpc.stats)
         output["provider_failures"] = dict(rpc.failures)
+        output["alchemy_monthly_usage"] = rpc.monthly_budget.snapshot() if rpc.monthly_budget else {
+            "status": "missing_shared_ledger_alchemy_disabled"}
+        output["provider_attempted_native_units"] = dict(rpc.attempted_units)
     if output["status"] != "unavailable":
         output["gmgn_status"] = enrich_gmgn(output["tokens"], store)
         store.put("snapshot", output)
         store.finish()
     return output
+
+
+def scan_with_shared_ledger(previous, store, budget_config=None, runtime=None):
+    """CLI bridge under the existing global workflow writer lock.
+
+    Uses scanner's state/checkpoint APIs, not the Robinhood evidence cache.
+    Persist a bounded run grant before paid requests so process termination
+    cannot lose consumption. Unused CU stays reserved (deliberately conservative).
+    Other writers must preserve this ledger; the shared workflow lock remains a
+    prerequisite, not something this helper implements. No remote call per RPC.
+    """
+    if runtime is None:
+        import scanner as runtime
+    runtime.load_env()
+    config = budget_config if budget_config is not None else runtime.load_json(
+        runtime.CONFIG_PATH if runtime.CONFIG_PATH.exists() else runtime.DEFAULT_CONFIG_PATH, {})
+    rpc = Rpc(budget=CONFIG["rpc_budget"])
+    state = None
+    ledger_status = "shared_state_unavailable_alchemy_disabled"
+    try:
+        # Missing/malformed local state isn't proof of zero monthly usage.
+        path = Path(runtime.STATE_PATH)
+        local = json.loads(path.read_text()) if path.exists() else {}
+        if not isinstance(local, dict):
+            raise ValueError("invalid shared runtime state")
+        state = runtime.load_runtime_checkpoint(local, config, "deep")
+        durable_ledger = False
+        if os.environ.get("RADAR_DATA_API_URL") and os.environ.get("RADAR_INGEST_SECRET"):
+            durable_ledger = runtime.load_durable_rpc_ledger(state, config)
+        if config.get("_runtime_deep_restore_error") or not isinstance(state.get("rpc_monthly_usage"), dict):
+            state = None
+        else:
+            account = monthly_budget_for(state, "alchemy", config)
+            ledger_status = "shared_state_restored"
+            if any(rpc.endpoint_provider(u) == "alchemy" for u in rpc.routes):
+                # Local operating ceiling, NOT provider billing/account accuracy.
+                ceiling = config.get("robinhood_rpc_native_units_per_scan", 10_000)
+                if isinstance(ceiling, bool) or not isinstance(ceiling, int) or ceiling < 0:
+                    raise ValueError("invalid Robinhood native-unit ceiling")
+                payload = allocate_run_budget(account, min(ceiling, account.remaining), "robinhood")
+                runtime.save_runtime_state(state, config, "robinhood_rpc_preallocation")
+                saved = config.get("_runtime_deep_saved") or {}
+                if saved.get("ok") is not True or saved.get("accepted") is not True:
+                    ledger_status = "checkpoint_failed_alchemy_disabled"
+                elif durable_ledger and not runtime.commit_durable_rpc_ledger(state, config):
+                    ledger_status = "ledger_checkpoint_failed_alchemy_disabled"
+                elif payload is not None:
+                    rpc.monthly_budget = PreallocatedRpcBudget(payload)
+                    ledger_status = "durable_run_grant_reserved"
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+        # No URLs, keys, state contents, or raw checkpoint diagnostics in output.
+        rpc.monthly_budget = None
+        ledger_status = "shared_budget_setup_failed_alchemy_disabled"
+    try:
+        result = scan(previous, rpc=rpc, store=store)
+    finally:
+        if state is not None:
+            try:
+                runtime.save_runtime_state(state, config, "robinhood_rpc_finished")
+                saved = config.get("_runtime_deep_saved") or {}
+                if saved.get("ok") is not True or saved.get("accepted") is not True:
+                    ledger_status = "final_checkpoint_failed_preallocation_retained"
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+                ledger_status = "final_checkpoint_failed_preallocation_retained"
+    result["rpc_ledger_status"] = ledger_status
+    if state is not None:
+        result["alchemy_account_monthly_usage"] = monthly_budget_for(state, "alchemy", config).snapshot()
+    return result
 
 
 def main():
@@ -1147,7 +1301,7 @@ def main():
     cached = store.get("snapshot")
     if cached and cached.get("generated_at", "") > previous.get("generated_at", ""):
         previous = cached
-    result = scan(previous, store=store)
+    result = scan_with_shared_ledger(previous, store)
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a") as f:
             f.write(f"persisted={'true' if store.get('snapshot') else 'false'}\n")

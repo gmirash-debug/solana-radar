@@ -73,19 +73,24 @@ def main():
     if not token:
         raise SystemExit("watchdog_token_missing")
     snapshots = []
+    now = datetime.now(timezone.utc)
     for url in [
         "https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev/api/dashboard?history_limit=1",
         "https://gmirash-debug.github.io/solana-radar/data/dashboard_fallback.json",
     ]:
         try:
             snapshots.append(fetch_json(url))
+            decision = watchdog_decision(snapshots, [], now)
+            if decision == (False, "deep_scan_fresh"):
+                print(json.dumps({"dispatch": False, "reason": decision[1]}))
+                return
         except Exception:
             pass
     try:
         runs = fetch_json(f"https://api.github.com/repos/{repository}/actions/workflows/scan-and-pages.yml/runs?per_page=20", token).get("workflow_runs")
     except Exception:
         runs = None
-    dispatch, reason = watchdog_decision(snapshots, runs, datetime.now(timezone.utc))
+    dispatch, reason = watchdog_decision(snapshots, runs, now)
     print(json.dumps({"dispatch": dispatch, "reason": reason}))
     if dispatch:
         body = json.dumps({"ref": "main", "inputs": {"source": "cloudflare-watchdog",

@@ -34,13 +34,14 @@ jobs:
           python-version: "3.11"
 
       - name: Restore shared scanner state
+        id: state_restore
         uses: actions/cache/restore@v4
         with:
           path: |
             data/state.json
             data/discovery_state.json
             data/discovery_status.json
-          key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}
+          key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ${{ runner.os }}-solana-radar-state-v4-
 
@@ -87,15 +88,31 @@ jobs:
         run: |
           echo "Skipping duplicate discovery pulse: ${{ steps.freshness.outputs.reason }}"
 
-      - name: Install discovery dependencies
-        if: steps.freshness.outputs.should_run == 'true'
-        run: |
-          python -m pip install -r requirements.txt
-          npm install -g gmgn-cli@1.6.1
-
       - name: Record pre-pulse runtime revisions
         if: steps.freshness.outputs.should_run == 'true'
         run: python tools/runtime_cache.py capture "$RUNNER_TEMP/radar-runtime-baseline.json"
+
+      - name: Restore Python package downloads
+        if: steps.freshness.outputs.should_run == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-radar-pip-py311-${{ hashFiles('requirements.txt') }}
+
+      - name: Set up Node for GMGN
+        if: steps.freshness.outputs.should_run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install discovery dependencies
+        if: steps.freshness.outputs.should_run == 'true'
+        env:
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+        run: |
+          python -m pip install -r requirements.txt
+          if [ -n "$GMGN_API_KEY" ]; then npm install -g gmgn-cli@1.6.1; fi
 
       - name: Refresh discovery baselines
         id: discovery_pulse
@@ -121,11 +138,11 @@ jobs:
         run: python tools/runtime_cache.py validate "$RUNNER_TEMP/radar-runtime-baseline.json" >> "$GITHUB_OUTPUT"
 
       - name: Save shared scanner state
-        if: always() && steps.runtime_cache.outputs.valid == 'true'
+        if: always() && steps.runtime_cache.outputs.valid == 'true' && (steps.runtime_cache.outputs.changed != 'false' || steps.state_restore.outputs.cache-matched-key == '' || steps.state_restore.outcome != 'success')
         uses: actions/cache/save@v4
         with:
           path: |
             data/state.json
             data/discovery_state.json
             data/discovery_status.json
-          key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}
+          key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}-${{ github.run_attempt }}

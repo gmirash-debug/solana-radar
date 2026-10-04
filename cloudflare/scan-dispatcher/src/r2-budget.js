@@ -3,7 +3,10 @@ export const R2_FREE_LIMITS = Object.freeze({class_a:1_000_000, class_b:10_000_0
 const STOP = 0.9, WARN = 0.8, METADATA_ALLOWANCE = 4096;
 const SAFETY_DAYS = 33, DAY_MS = 86400000;
 const WRAPPED = Symbol("r2-budget-wrapped");
+const STORES = new WeakMap();
 const KEY = "budget:v1";
+export const R2_BATCH_LIMITS = Object.freeze({operations:128, putBytes:32 * 1024 * 1024,
+  durationMs:30000, boundaryMarginMs:1000});
 
 export class R2BudgetError extends Error {
   constructor(reason = "r2_monthly_budget_paused") { super(reason); this.status = 503; }
@@ -23,6 +26,41 @@ function objectKey(key) {
 function amount(value) {
   if (!Number.isSafeInteger(value) || value < 0) throw new R2BudgetError("r2_budget_amount_invalid");
   return value;
+}
+
+function catalogueEntry(value) {
+  if (value === undefined) return {bytes:0, retained:false};
+  if (typeof value === "number") return {bytes:amount(value), retained:false};
+  if (value?.retained === true) return {bytes:amount(value.bytes), retained:true};
+  throw new R2BudgetError("r2_budget_catalogue_invalid");
+}
+
+function batchPlan(operations) {
+  if (!Array.isArray(operations) || !operations.length || operations.length > R2_BATCH_LIMITS.operations) {
+    throw new R2BudgetError("r2_budget_batch_too_large");
+  }
+  let putBytes = 0;
+  return Array.from(operations,op => {
+    if (!["get","head","put","list"].includes(op?.kind)) throw new R2BudgetError("r2_budget_operation_unsupported");
+    const key = op.kind === "list" ? null : objectKey(op.key);
+    if (op.kind !== "put") return {kind:op.kind, key};
+    const bytes = amount(op.bytes);
+    putBytes += bytes;
+    if (putBytes > R2_BATCH_LIMITS.putBytes) throw new R2BudgetError("r2_budget_batch_bytes_exceeded");
+    return {kind:op.kind, key, bytes};
+  });
+}
+
+function batchExpiry(now, deadline) {
+  if (deadline !== undefined && (!Number.isSafeInteger(deadline) || deadline <= now)) {
+    throw new R2BudgetError("r2_budget_batch_expired");
+  }
+  // Daily attribution must not outlive its UTC day (and therefore its calendar month).
+  const nextDay = (Math.floor(now / DAY_MS) + 1) * DAY_MS;
+  const expires = Math.min(now + R2_BATCH_LIMITS.durationMs,
+    nextDay - R2_BATCH_LIMITS.boundaryMarginMs, deadline ?? Infinity);
+  if (expires <= now) throw new R2BudgetError("r2_budget_batch_expired");
+  return expires;
 }
 
 function initial(now) {
@@ -71,7 +109,7 @@ function evaluate(state, now) {
   if (rollingReason && !state.paused) Object.assign(state,{paused:true,pause_reason:`rolling_${rollingReason}`});
   if (previousPaused && !state.paused) notify(state,"resumed",now);
   if (state.paused) notify(state,"paused",now);
-  else if (Object.keys(R2_FREE_LIMITS).some(key => state[key] >= R2_FREE_LIMITS[key] * WARN)) notify(state,"warning",now);
+  else if (Object.keys(R2_FREE_LIMITS).some(key => Math.max(state[key],usage[key] || 0) >= R2_FREE_LIMITS[key] * WARN)) notify(state,"warning",now);
   return state;
 }
 
@@ -85,7 +123,7 @@ function status(state) {
     usage, calendar_usage:{class_a:state.class_a,class_b:state.class_b}, rolling_usage:rollingUsage,rolling_window_days:SAFETY_DAYS,
     limits:R2_FREE_LIMITS, stop_limits:Object.fromEntries(Object.entries(R2_FREE_LIMITS).map(([k,v])=>[k,v*STOP])),
     used_pct:Object.fromEntries(Object.entries(R2_FREE_LIMITS).map(([k,v])=>[k,100*usage[k]/v])),
-    accounting:"conservative calendar-month and 33-day reservations; persistent storage upper bound; not a Cloudflare invoice",
+    accounting:"conservative calendar-month and 33-day reservations; unused grants and batch PUT storage high-water marks are never refunded; not a Cloudflare invoice",
     scope:"scanner R2 binding; baseline includes account usage before activation",
     notifications:state.notifications, dispatch_at:state.dispatch_at};
 }
@@ -95,15 +133,17 @@ export class R2Budget {
 
   async fetch(request) {
     try {
-      const url = new URL(request.url), now = Date.now();
+      const url = new URL(request.url);
       const body = request.method === "POST" ? await request.json() : {};
       if (url.pathname === "/status" && request.method === "GET") {
         // Monitoring remains strictly read-only, including month rollover.
         // Persist derived transitions on the next reservation/dispatch, not GET.
         const previous = await this.storage.get(KEY);
+        const now = Date.now();
         return Response.json({ok:true,...status(evaluate(previous ? structuredClone(previous) : initial(now), now))});
       }
       const result = await this.storage.transaction(async tx => {
+        const now = Date.now();
         const previous = await tx.get(KEY);
         const original = JSON.stringify(previous);
         const current = evaluate(previous || initial(now), now);
@@ -133,7 +173,8 @@ export class R2Budget {
           if (kind !== "delete" && (!current.initialized || current.paused)) extra = {allowed:false,error:!current.initialized ? "r2_budget_baseline_required" : "r2_monthly_budget_paused"};
           else if (kind !== "delete") {
             const counter = ["put","list"].includes(kind) ? "class_a" : "class_b";
-            const oldBytes = kind === "put" ? await tx.get(`object:${key}`) || 0 : 0;
+            const old = kind === "put" ? catalogueEntry(await tx.get(`object:${key}`)) : {bytes:0};
+            const oldBytes = old.bytes;
             const bytes = kind === "put" ? amount(body.bytes) + METADATA_ALLOWANCE : 0;
             const delta = Math.max(0,bytes-oldBytes);
             const reason = current[counter]+1 >= R2_FREE_LIMITS[counter]*STOP ? counter
@@ -147,15 +188,54 @@ export class R2Budget {
               current[counter]++; current.storage_bytes += delta;
               chargeDay(current,now,counter,1);
               // Uncertain PUT outcomes stay charged. Never refund a failed network request.
-              if (kind === "put") await tx.put({[`object:${key}`]:Math.max(oldBytes,bytes)});
+              if (kind === "put") await tx.put({[`object:${key}`]:old.retained
+                ? {bytes:Math.max(oldBytes,bytes),retained:true} : Math.max(oldBytes,bytes)});
               evaluate(current,now); extra = {allowed:true};
             }
           } else extra = {allowed:true}; // R2 DELETE is free; existing safe GC may reclaim storage.
+        } else if (url.pathname === "/reserve-batch") {
+          const operations = batchPlan(body.operations), expires_at = batchExpiry(now,body.deadline);
+          if (body.invocation_id !== undefined && !/^[a-f0-9-]{36}$/.test(body.invocation_id)) {
+            throw new R2BudgetError("r2_budget_batch_invocation_invalid");
+          }
+          if (!current.initialized || current.paused) extra = {allowed:false,
+            error:!current.initialized ? "r2_budget_baseline_required" : "r2_monthly_budget_paused"};
+          else {
+            const counts = {class_a:0,class_b:0}, puts = new Map(), catalogue = {};
+            for (const op of operations) {
+              counts[["put","list"].includes(op.kind) ? "class_a" : "class_b"]++;
+              if (op.kind === "put") puts.set(op.key,Math.max(puts.get(op.key) || 0,op.bytes + METADATA_ALLOWANCE));
+            }
+            let delta = 0;
+            for (const [key,bytes] of puts) {
+              const old = catalogueEntry(await tx.get(`object:${key}`));
+              delta += Math.max(0,bytes-old.bytes);
+              // Retain a tombstone even after DELETE: an admitted PUT can finish late or have an uncertain outcome.
+              // Immutable-key replay can reuse this upper bound, but never the operation allowance.
+              if (!old.retained || bytes > old.bytes) catalogue[`object:${key}`] = {bytes:Math.max(old.bytes,bytes),retained:true};
+            }
+            const usage = rolling(current,now);
+            const reason = ["class_a","class_b"].find(key=>current[key]+counts[key] >= R2_FREE_LIMITS[key]*STOP)
+              || ["class_a","class_b"].filter(key=>usage[key]+counts[key] >= R2_FREE_LIMITS[key]*STOP).map(key=>`rolling_${key}`)[0]
+              || (current.storage_bytes+delta >= R2_FREE_LIMITS.storage_bytes*STOP ? "storage_bytes" : null);
+            if (reason) {
+              Object.assign(current,{paused:true,pause_reason:reason}); notify(current,"paused",now);
+              extra = {allowed:false,error:"r2_monthly_budget_paused"};
+            } else {
+              for (const key of ["class_a","class_b"]) {current[key] += counts[key];chargeDay(current,now,key,counts[key]);}
+              current.storage_bytes += delta;
+              const catalog_rows_written = Object.keys(catalogue).length;
+              if (catalog_rows_written) await tx.put(catalogue);
+              evaluate(current,now);
+              extra = {allowed:true,grant:{invocation_id:body.invocation_id,issued_at:now,expires_at,operations:operations.length,
+                ...counts,storage_bytes:delta,catalog_rows_written,budget_rows_written:1}};
+            }
+          }
         } else if (url.pathname === "/deleted") {
           for (const key of Array.isArray(body.keys) ? body.keys : []) {
             objectKey(key);
-            const bytes = await tx.get(`object:${key}`) || 0;
-            if (bytes) { current.storage_bytes = Math.max(0,current.storage_bytes-bytes); await tx.delete([`object:${key}`]); }
+            const {bytes,retained} = catalogueEntry(await tx.get(`object:${key}`));
+            if (bytes && !retained) { current.storage_bytes = Math.max(0,current.storage_bytes-bytes); await tx.delete([`object:${key}`]); }
           }
         } else if (url.pathname === "/ack") {
           const item = current.notifications.find(row => row.id === body.id);
@@ -206,6 +286,7 @@ export function guardR2Env(env) {
   if (env.R2_BUDGET_GUARD !== "enabled" || !env.RADAR_ARCHIVE || env.RADAR_ARCHIVE[WRAPPED]) return env;
   const store = env.RADAR_ARCHIVE;
   const wrapper = {[WRAPPED]:true};
+  STORES.set(wrapper,{store});
   for (const method of ["head","get","put","list","delete"]) {
     wrapper[method] = async (...args) => {
       const keys = method === "delete" && Array.isArray(args[0]) ? args[0] : [args[0]];
@@ -222,6 +303,49 @@ export function guardR2Env(env) {
     };
   }
   return {...env,RADAR_ARCHIVE:wrapper};
+}
+
+// The callback's environment is ephemeral. It is not a token/cache and cannot be used after return.
+// Replaying a reservation request creates a new charge; no caller-supplied grant/id can authorize I/O.
+export async function withR2BudgetBatch(env, operations, action, options = {}) {
+  const guarded = guardR2Env(env), plan = batchPlan(operations);
+  if (typeof action !== "function") throw new R2BudgetError("r2_budget_batch_callback_invalid");
+  if (env.R2_BUDGET_GUARD !== "enabled") return action(guarded);
+  const info = STORES.get(guarded.RADAR_ARCHIVE);
+  if (!info || info.batch) throw new R2BudgetError("r2_budget_batch_scope_invalid");
+  const started = Date.now(), deadline = batchExpiry(started,options.deadline);
+  const invocation_id = crypto.randomUUID();
+  let result, timer;
+  try {
+    // A timed-out authority call may still commit. Abandon it without I/O or a refund.
+    result = await Promise.race([r2BudgetCall(env,"reserve-batch",{operations:plan,deadline,invocation_id}),
+      new Promise((_,reject)=>{timer=setTimeout(()=>reject(new R2BudgetError("r2_budget_batch_expired")),deadline-started);})]);
+  } finally { clearTimeout(timer); }
+  if (!result.allowed) throw new R2BudgetError(result.error);
+  const grant = result.grant;
+  const counts = plan.reduce((n,op)=>{n[["put","list"].includes(op.kind) ? "class_a" : "class_b"]++;return n;},{class_a:0,class_b:0});
+  if (!grant || grant.invocation_id !== invocation_id || grant.operations !== plan.length || grant.class_a !== counts.class_a || grant.class_b !== counts.class_b
+      || !Number.isSafeInteger(grant.issued_at) || grant.issued_at < started
+      || !Number.isSafeInteger(grant.expires_at) || grant.expires_at > deadline || grant.expires_at <= grant.issued_at
+      || result.month !== period(grant.issued_at).month) throw new R2BudgetError("r2_budget_batch_grant_invalid");
+  if (Date.now() < grant.issued_at || Date.now() >= grant.expires_at) throw new R2BudgetError("r2_budget_batch_expired");
+  const slots = plan.map(op=>({...op,used:false})), wrapper = {[WRAPPED]:true};
+  let open = true;
+  STORES.set(wrapper,{store:info.store,batch:true});
+  for (const method of ["head","get","put","list","delete"]) wrapper[method] = async (...args) => {
+    if (!open) throw new R2BudgetError("r2_budget_batch_closed");
+    if (Date.now() < grant.issued_at || Date.now() >= grant.expires_at) throw new R2BudgetError("r2_budget_batch_expired");
+    if (method === "put" && args[2]?.storageClass && args[2].storageClass !== "Standard") throw new R2BudgetError("r2_budget_infrequent_access_refused");
+    const key = method === "list" ? null : objectKey(args[0]);
+    const bytes = method === "put" ? byteLength(args[1]) : 0;
+    const slot = slots.find(op=>!op.used && op.kind === method && op.key === key && (method !== "put" || bytes <= op.bytes));
+    if (!slot) throw new R2BudgetError("r2_budget_batch_operation_not_reserved");
+    // Consume synchronously, before any native call/await; failures cannot make a slot reusable.
+    slot.used = true;
+    return info.store[method](...args);
+  };
+  try { return await action({...guarded,RADAR_ARCHIVE:wrapper}); }
+  finally { open = false; }
 }
 
 export async function dispatchR2BudgetNotice(env, fetchFn = globalThis.fetch.bind(globalThis)) {

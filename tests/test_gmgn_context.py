@@ -6,6 +6,8 @@ from unittest.mock import Mock, patch
 import gmgn_context as gm
 import scanner
 from robinhood_store import Store
+from rpc_limiter import NativeUnitLimiter
+import rpc_limiter
 
 TOKEN = "0x" + "1" * 40
 OTHER = "0x" + "2" * 40
@@ -102,17 +104,40 @@ class GmgnTests(unittest.TestCase):
                     client.query("info", TOKEN)
             self.assertEqual(run.call_count, 1)
 
-    def test_cli_spaces_requests_without_exceeding_deadline(self):
+    def test_cli_weighted_bucket_spaces_requests_without_exceeding_deadline(self):
         with patch.dict("os.environ", {"GMGN_API_KEY": "test"}), patch.object(gm.subprocess, "run") as run, patch.object(gm.time, "monotonic", return_value=100), patch.object(gm.time, "sleep") as sleep:
             run.return_value = Mock(returncode=0, stdout=json.dumps(info()))
-            client = gm.Client()
+            bucket = NativeUnitLimiter(5, capacity=5)
+            client = gm.Client(limiter=bucket)
             client.query("info", TOKEN)
             client.query("info", TOKEN)
-            self.assertAlmostEqual(sleep.call_args.args[0], 1.1)
+            sleep.assert_not_called()
+            client.query("holders", TOKEN)
+            self.assertAlmostEqual(sleep.call_args.args[0], 0.4)
             client.deadline = 101
             with self.assertRaisesRegex(gm.Unavailable, "budget_exhausted"):
                 client.query("holders", TOKEN)
-            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_count, 3)
+            self.assertEqual(client.native_units, 7)
+
+    def test_context_and_discovery_use_one_weighted_process_bucket(self):
+        now, waits = [100.0], []
+
+        def sleep(seconds):
+            waits.append(seconds)
+            now[0] += seconds
+
+        bucket = NativeUnitLimiter(5, capacity=5, clock=lambda: now[0], sleep=sleep)
+        with patch.dict("os.environ", {"GMGN_API_KEY": "test"}), \
+                patch.object(rpc_limiter, "DEFAULT_GMGN_LIMITER", bucket), \
+                patch.object(gm.time, "monotonic", side_effect=lambda: now[0]), \
+                patch.object(gm.subprocess, "run", return_value=Mock(returncode=0, stdout=json.dumps(info()))):
+            rpc_limiter.wait_for_gmgn_slot(["market", "trending"])
+            rpc_limiter.wait_for_gmgn_slot(["market", "trenches"])
+            client = gm.Client()
+            client.query("holders", TOKEN)
+        self.assertEqual(waits, [1.0])
+        self.assertEqual(client.native_units, 5)
 
     def test_legacy_cache_is_quarantined_losslessly_for_other_data(self):
         state = {"market": {TOKEN: {"token_address": TOKEN, "ath_source": "gmgn", "ath_mcap_usd": 5000, "ath_checked_at": 99, "latest_mcap_usd": 1000}}}

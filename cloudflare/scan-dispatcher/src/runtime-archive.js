@@ -1,3 +1,5 @@
+import {R2_BATCH_LIMITS, guardR2Env, withR2BudgetBatch} from "./r2-budget.js";
+
 const MAX_BYTES = 8 * 1024 * 1024;
 const HEX = /^[a-f0-9]{64}$/;
 const ENCODER = new TextEncoder();
@@ -69,36 +71,63 @@ function metadataMatches(object, ref) {
     && object.checksums?.sha256 && hex(object.checksums.sha256) === ref.compressed_sha256;
 }
 
-export async function archiveRuntimeDocument(env, name, value, options = {}) {
-  if (!runtimeArchiveEnabled(env)) throw new Error("runtime_archive_disabled");
+async function prepareRuntimeDocument(name, value, until) {
   if (!/^(?:dashboard|checkpoint:(?:deep|discovery))(?::blob:[a-f0-9]{64})?$/.test(name)) {
     throw new Error("runtime_archive_name_invalid");
   }
   const bytes = ENCODER.encode(JSON.stringify(value));
   if (!bytes.byteLength || bytes.byteLength > MAX_BYTES) throw new Error("runtime_archive_size_exceeded");
   const sha256 = await digest(bytes);
-  const until = deadline(options);
+  const decoded_bytes = bytes.byteLength;
   const key = `runtime/${name.replaceAll(":", "/")}/${sha256}.json.gz`;
   const fromObject = object => {
-    const ref = {version:1, key, sha256, decoded_bytes:bytes.byteLength,
+    const ref = {version:1, key, sha256, decoded_bytes,
       compressed_bytes:object?.size, compressed_sha256:object?.customMetadata?.compressed_sha256};
     validateRuntimeArchiveReference(ref);
     if (!metadataMatches(object, ref)) throw new Error("runtime_archive_write_unverified");
     return ref;
   };
-  const existing = await timed(() => env.RADAR_ARCHIVE.head(key), until);
-  if (existing) return fromObject(existing);
   const compressed = await bounded(new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip")), MAX_BYTES + 65536, until);
   const compressed_sha256 = await digest(compressed);
-  if (!existing) {
-    await timed(() => env.RADAR_ARCHIVE.put(key, compressed, {
+  return {key, compressed, compressed_sha256, sha256, decoded_bytes, fromObject};
+}
+
+async function storeRuntimeDocument(store, {key, compressed, compressed_sha256, sha256, decoded_bytes, fromObject}, until) {
+  const existing = await timed(() => store.head(key), until);
+  if (existing) return fromObject(existing);
+  await timed(() => store.put(key, compressed, {
       onlyIf:new Headers({"If-None-Match":"*"}), sha256:compressed_sha256, storageClass:"Standard",
       httpMetadata:{contentType:"application/gzip"},
       customMetadata:{sha256, compressed_sha256, compressed_bytes:String(compressed.byteLength),
-        decoded_bytes:String(bytes.byteLength), kind:"runtime", schema_version:"1"},
+        decoded_bytes:String(decoded_bytes), kind:"runtime", schema_version:"1"},
     }), until);
+  return fromObject(await timed(() => store.head(key), until));
+}
+
+export async function archiveRuntimeDocuments(env, documents, options = {}) {
+  if (!runtimeArchiveEnabled(env)) throw new Error("runtime_archive_disabled");
+  if (!Array.isArray(documents) || !documents.length || documents.length * 3 > R2_BATCH_LIMITS.operations) {
+    throw new Error("runtime_archive_batch_too_large");
   }
-  return fromObject(await timed(() => env.RADAR_ARCHIVE.head(key), until));
+  const until = deadline(options), prepared = [];
+  let putBytes = 0, decodedBytes = 0;
+  for (const doc of documents) {
+    const item = await prepareRuntimeDocument(doc?.name,doc?.value,until);
+    putBytes += item.compressed.byteLength; decodedBytes += item.decoded_bytes;
+    if (Math.max(putBytes,decodedBytes) > R2_BATCH_LIMITS.putBytes) throw new Error("runtime_archive_batch_bytes_exceeded");
+    prepared.push(item);
+  }
+  const plan = prepared.flatMap(({key,compressed})=>[{kind:"head",key},
+    {kind:"put",key,bytes:compressed.byteLength},{kind:"head",key}]);
+  return withR2BudgetBatch(env,plan,async scoped => {
+    const refs = [];
+    for (const item of prepared) refs.push(await storeRuntimeDocument(scoped.RADAR_ARCHIVE,item,until));
+    return refs;
+  }, {deadline:until});
+}
+
+export async function archiveRuntimeDocument(env, name, value, options = {}) {
+  return (await archiveRuntimeDocuments(env,[{name,value}],options))[0];
 }
 
 export function validateRuntimeArchiveReference(ref) {
@@ -118,7 +147,7 @@ export async function readRuntimeArchive(env, ref, options = {}) {
   if (!env.RADAR_ARCHIVE?.get) throw new Error("runtime_archive_not_configured");
   validateRuntimeArchiveReference(ref);
   const until = deadline(options);
-  const object = await timed(() => env.RADAR_ARCHIVE.get(ref.key), until);
+  const object = await timed(() => guardR2Env(env).RADAR_ARCHIVE.get(ref.key), until);
   if (!metadataMatches(object, ref)) {
     object?.body?.cancel().catch(() => {});
     throw new Error("runtime_archive_missing_or_mismatched");
@@ -134,5 +163,5 @@ export async function readRuntimeArchive(env, ref, options = {}) {
 export async function deleteRuntimeArchive(env, ref, options = {}) {
   validateRuntimeArchiveReference(ref);
   if (typeof env.RADAR_ARCHIVE?.delete !== "function") throw new Error("runtime_archive_not_configured");
-  await timed(() => env.RADAR_ARCHIVE.delete(ref.key), deadline(options));
+  await timed(() => guardR2Env(env).RADAR_ARCHIVE.delete(ref.key), deadline(options));
 }

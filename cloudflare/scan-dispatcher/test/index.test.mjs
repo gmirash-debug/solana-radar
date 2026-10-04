@@ -5,7 +5,7 @@ import worker from "../src/index.js";
 test("cutover freeze stops all cron work and mutations but keeps reads available", async () => {
   const tasks=[];
   const env={STORAGE_WRITES_FROZEN:"true",SCHEDULER_ENABLED:"auto",RADAR_INGEST_SECRET:"secret"};
-  for (const cron of ["*/5 * * * *", "7 * * * *", "37 * * * *", "22,37,52 * * * *"]) {
+  for (const cron of ["*/5 * * * *", "7 * * * *", "37 * * * *", "22,37,52 * * * *", "47 * * * *"]) {
     await worker.scheduled({cron},env,{waitUntil:task=>tasks.push(task)});
   }
   assert.equal(tasks.length,0);
@@ -26,6 +26,24 @@ test("cutover freeze stops all cron work and mutations but keeps reads available
     method:"POST",headers:{"x-radar-ingest-secret":"secret"},body:"{}",
   }),env,{});
   assert.notEqual((await read.json()).error,"storage_cutover_writes_frozen");
+});
+
+test("legacy migration is authenticated and requires the operational write freeze", async () => {
+  const request = authorized => new Request("https://worker.example/api/runtime/history/migrate-legacy", {
+    method:"POST",headers:authorized ? {"x-radar-ingest-secret":"secret"} : {},body:"{}",
+  });
+  const env = {RADAR_INGEST_SECRET:"secret",STORAGE_WRITES_FROZEN:"true"};
+  assert.equal((await worker.fetch(request(false),env,{})).status,401);
+  const response = await worker.fetch(request(true),{...env,STORAGE_WRITES_FROZEN:"false"},{});
+  assert.equal(response.status,409);
+  assert.equal((await response.json()).error,"history_legacy_migration_requires_write_freeze");
+});
+
+test("maintenance-only cron cannot dispatch a scan or consume the live queue", async () => {
+  const tasks=[];
+  await worker.scheduled({cron:"47 * * * *"}, {SCHEDULER_ENABLED:"auto"}, {waitUntil:task=>tasks.push(task)});
+  await Promise.all(tasks);
+  assert.equal(tasks.length,1);
 });
 
 test("archive cron is isolated from frequent discovery and deep scans", async () => {
@@ -130,6 +148,11 @@ test("new evidence ingestion route requires the server ingest secret", async () 
     method:"POST",body:JSON.stringify({generated_at:"2026-10-03T00:00:00Z"}),
   }), {RADAR_INGEST_SECRET:"test-secret",RADAR_DB:recordingDb()}, {});
   assert.equal(response.status, 401);
+});
+
+test("native RPC ledger is a private server endpoint",async()=>{
+  const response=await worker.fetch(new Request("https://worker.example/api/runtime/rpc-ledger"),{RADAR_INGEST_SECRET:"secret"},{});
+  assert.equal(response.status,401);
 });
 
 test("storage endpoints require authorization and reject unbounded or malformed JSON", async () => {

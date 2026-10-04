@@ -2,13 +2,17 @@ import { historyEventId, checkedHistoryDb } from "./history.js";
 import { resumeHistoryEvent, HistoryYield, minimumHistoryWork, minimumProgressWork, estimatedHistoryQueries, historyInfrastructure } from "./history-progress.js";
 import { archiveHistoryEvent, readHistoryArchive, validateHistoryArchiveReference, historyArchiveEnabled } from "./archive.js";
 import { resolveStorageEnv } from "./storage-sql.js";
+import { SqlHistoryQueue } from "./history-sql-queue.js";
 
-// Parent integration (no public DO route): export {HistoryQueue} from index.js;
+// Legacy DO integration (no public DO route): export {HistoryQueue} from index.js;
 // bind HISTORY_QUEUE to HistoryQueue and append a new_sqlite_classes migration.
 // Await enqueueDurableHistory before acknowledging an authenticated ingest.
 // Invoke flushDurableHistory from the existing bounded background scheduler.
+// SQL mode requires migrations-storage/0003_sql_queue.sql before activation;
+// keep the legacy binding for read-only migration and invoke the separate
+// flushDurableHistoryArchives consumer for delayed evidence compaction.
 export const HISTORY_QUEUE_LIMITS = Object.freeze({
-  enqueueEvents: 25, flushEvents: 25, flushQueries: 40, flushRequests: 45,
+  enqueueEvents: 25, flushEvents: 25, flushQueries: 40, flushRequests: 45, sqlFlushRequests: 35,
   eventBytes: 128 * 1024, requestBytes: 1024 * 1024,
   // Metadata only: retain 30 days even at 5,000 minimum-cost events/day,
   // including UTC-boundary bursts and pending work. Payload caps stay unchanged.
@@ -32,7 +36,7 @@ class QueueError extends Error {
 }
 
 function requestBudget(maximum, reason = "history_flush_request_budget") {
-  return { used: 0, archive: 0, history: 0,
+  return { used: 0, archive: 0, history: 0, queue: 0,
     get remaining() { return maximum - this.used; },
     reserve(kind) {
       if (this.used >= maximum) throw new HistoryYield(reason);
@@ -144,7 +148,8 @@ async function readRequest(request) {
 export class HistoryQueue {
   constructor(ctx, env = {}) {
     this.ctx = ctx;
-    this.env = resolveStorageEnv(env);
+    this.readOnly = env.HISTORY_QUEUE_BACKEND === "turso_sql";
+    this.env = this.readOnly ? env : resolveStorageEnv(env);
     env = this.env;
     this.sql = ctx.storage.sql;
     this.inFlight = null;
@@ -163,6 +168,8 @@ export class HistoryQueue {
     this.archiveWrites = lowered(env, "HISTORY_ARCHIVE_DAILY_WRITES", HISTORY_QUEUE_LIMITS.dailyArchiveWrites);
     this.archiveReads = lowered(env, "HISTORY_ARCHIVE_DAILY_READS", HISTORY_QUEUE_LIMITS.dailyArchiveReads);
     this.archiveBytes = lowered(env, "HISTORY_ARCHIVE_DAILY_WRITE_BYTES", HISTORY_QUEUE_LIMITS.dailyArchiveWriteBytes);
+    // Legacy inspection must not create tables, run ALTERs or initialize meta.
+    if (this.readOnly) return;
     ctx.storage.transactionSync(() => {
       this.sql.exec(`CREATE TABLE IF NOT EXISTS history_queue_events (
         event_id TEXT PRIMARY KEY, episode_id TEXT NOT NULL, source_at INTEGER NOT NULL,
@@ -197,6 +204,37 @@ export class HistoryQueue {
 
   rows(sql, ...values) { return this.sql.exec(sql, ...values).toArray(); }
 
+  assertWritable() {
+    if (this.readOnly) throw new QueueError("history_legacy_queue_read_only", 409);
+  }
+
+  legacyPresent() {
+    return this.rows("SELECT name FROM sqlite_master WHERE type='table' AND name='history_queue_events'").length > 0;
+  }
+
+  exportLegacy({after = "", limit = HISTORY_QUEUE_LIMITS.enqueueEvents} = {}, now = Date.now()) {
+    if (typeof after !== "string" || after.length > 240 || !Number.isInteger(limit) || limit < 1
+        || limit > HISTORY_QUEUE_LIMITS.enqueueEvents) throw new QueueError("history_legacy_export_cursor_invalid");
+    if (!this.legacyPresent()) return {rows:[],after,complete:true,read_only:true};
+    const columns = new Set(this.rows("PRAGMA table_info(history_queue_events)").map(row => row.name));
+    const rows = this.rows(`SELECT *,${columns.has("progress_json") ? "progress_json" : "NULL"} exported_progress,
+      ${columns.has("archive_version") ? "archive_version" : "0"} exported_archive_version
+      FROM history_queue_events WHERE event_id>? ORDER BY event_id LIMIT ?`, after, limit + 1);
+    const page = [];
+    let bytes = 1024;
+    for (const row of rows.slice(0,limit)) {
+      row.progress_json = row.exported_progress;
+      row.archive_version = row.exported_archive_version;
+      delete row.exported_progress; delete row.exported_archive_version;
+      row.active_lease = row.status === "pending" && Boolean(row.lease_token) && row.next_attempt_at > now;
+      bytes += ENCODER.encode(JSON.stringify(row)).byteLength + 1;
+      if (bytes > HISTORY_QUEUE_LIMITS.requestBytes) break;
+      page.push(row);
+    }
+    if (rows.length && !page.length) throw new QueueError("history_legacy_export_row_oversize", 413);
+    return {rows:page,after:page.at(-1)?.event_id || after,complete:page.length === rows.length,read_only:true};
+  }
+
   historyDay(now) { return `${this.isTurso ? "turso:" : ""}${new Date(now).toISOString().slice(0, 10)}`; }
 
   meta(now) {
@@ -230,6 +268,7 @@ export class HistoryQueue {
   }
 
   enqueue(events, now = Date.now()) {
+    this.assertWritable();
     const validated = validateHistoryEvents(events, now, this.eventBytes);
     if (events.some(event => minimumHistoryWork(event,this.infra) > this.historyBudget)) {
       throw new QueueError("history_event_exceeds_atomic_daily_allowance");
@@ -293,6 +332,7 @@ export class HistoryQueue {
   }
 
   async spillLegacyRows(requests = requestBudget(HISTORY_QUEUE_LIMITS.flushRequests)) {
+    this.assertWritable();
     if (!historyArchiveEnabled(this.env)) return 0;
     const rows = this.rows(`SELECT event_id,episode_id,source_at,payload_json,payload_bytes FROM history_queue_events
       WHERE status='pending' AND archive_version=0 AND lease_token IS NULL
@@ -327,6 +367,7 @@ export class HistoryQueue {
   }
 
   persistEnqueue(validated, now) {
+    this.assertWritable();
     return this.ctx.storage.transactionSync(() => {
       const meta = this.meta(now);
       const unique = new Map();
@@ -367,6 +408,7 @@ export class HistoryQueue {
   }
 
   claim(now, remainingRequests = HISTORY_QUEUE_LIMITS.flushRequests) {
+    this.assertWritable();
     return this.ctx.storage.transactionSync(() => {
       const meta = this.meta(now);
       // A poisoned episode waits, but unrelated newer episodes remain eligible.
@@ -411,6 +453,7 @@ export class HistoryQueue {
   }
 
   finish(claim, result, used, error, now = Date.now()) {
+    this.assertWritable();
     return this.ctx.storage.transactionSync(() => {
       const meta = this.meta(now);
       if (meta.do_day!==claim.doDay) this.reserveDo(meta,claim.rows.length*8+2);
@@ -540,6 +583,7 @@ export class HistoryQueue {
   }
 
   flush() {
+    this.assertWritable();
     if (!this.inFlight) this.inFlight = this.runFlush().catch(error => {
       // A failed claim has no finish path. Record it without changing payloads
       // or counters; status also derives exhausted budgets from current meta.
@@ -557,6 +601,7 @@ export class HistoryQueue {
   }
 
   status(now = Date.now()) {
+    if (this.readOnly && !this.legacyPresent()) return {enabled:true,pending:0,pending_bytes:0,delivered_receipts:0,read_only:true};
     const meta = this.meta(now);
     const oldest = this.rows(`SELECT source_at FROM history_queue_events
       WHERE status='pending' ORDER BY source_at,event_id LIMIT 1`)[0];
@@ -564,7 +609,7 @@ export class HistoryQueue {
       WHERE status='pending' ORDER BY next_attempt_at,source_at,event_id LIMIT 1`)[0];
     const failure = this.rows(`SELECT last_error FROM history_queue_events
       WHERE status='pending' AND last_error IS NOT NULL ORDER BY source_at,event_id LIMIT 1`)[0];
-    return { enabled: true, pending: meta.pending_rows, pending_bytes: meta.pending_bytes,
+    return { enabled: true, read_only:this.readOnly, pending: meta.pending_rows, pending_bytes: meta.pending_bytes,
       delivered_receipts: meta.delivered_rows,
       last_flush_at: meta.last_flush_at, last_flush_error: meta.last_flush_error,
       last_flush_delivered: meta.last_flush_delivered,
@@ -589,6 +634,11 @@ export class HistoryQueue {
     try {
       const path = new URL(request.url).pathname;
       if (request.method === "GET" && path === "/status") return Response.json({ ok: true, ...this.status() });
+      if (request.method === "GET" && path === "/export") {
+        const params = new URL(request.url).searchParams;
+        return Response.json({ok:true,...this.exportLegacy({after:params.get("after") || "",
+          limit:params.has("limit") ? Number(params.get("limit")) : HISTORY_QUEUE_LIMITS.enqueueEvents})});
+      }
       if (request.method !== "POST") throw new QueueError("history_queue_post_required", 405);
       if (path === "/enqueue") return Response.json({ ok: true, ...await this.enqueue((await readRequest(request)).events) });
       if (path === "/receipts") {
@@ -629,13 +679,41 @@ function historyLedgerEvents(payload) {
   return ledger?.events === undefined ? [] : ledger.events;
 }
 
+function sqlQueue(env) {
+  const backend = env?.HISTORY_QUEUE_BACKEND || "durable_object";
+  if (backend === "durable_object") return null;
+  if (backend !== "turso_sql") throw new QueueError("history_queue_backend_invalid", 503);
+  const resolved = resolveStorageEnv(env);
+  if (resolved.STORAGE_SQL_BACKEND !== "turso" || !resolved.RADAR_HISTORY_DB?.prepare) {
+    throw new QueueError("history_queue_turso_backend_required", 503);
+  }
+  return new SqlHistoryQueue(resolved, {limits:HISTORY_QUEUE_LIMITS, validateHistoryEvents, lowered,
+    progressWork, progressQueries, requestBudget, QueueError, archivedEnvelope});
+}
+
 export async function enqueueDurableHistory(env, payload) {
   const events = historyLedgerEvents(payload);
   validateHistoryEvents(events);
+  const queue = sqlQueue(env);
+  if (queue) {
+    if (ENCODER.encode(JSON.stringify({events})).byteLength > HISTORY_QUEUE_LIMITS.requestBytes) {
+      throw new QueueError("history_request_oversize", 413);
+    }
+    return queue.enqueue(events);
+  }
   return queueRequest(env, "enqueue", { events });
 }
 
-export function durableHistoryIngestResponse(env, request) {
+export async function durableHistoryIngestResponse(env, request) {
+  if (env?.HISTORY_QUEUE_BACKEND === "turso_sql") {
+    try {
+      const payload = await readRequest(request);
+      return Response.json({ok:true,...await enqueueDurableHistory(env,payload)});
+    } catch (error) {
+      return Response.json({ok:false,error:String(error?.message || error)},{status:error.status || 503});
+    }
+  }
+  sqlQueue(env); // Reject unknown modes instead of silently writing to the DO.
   if (!env?.HISTORY_QUEUE) throw new QueueError("history_queue_not_configured", 503);
   const stub = env.HISTORY_QUEUE.get(env.HISTORY_QUEUE.idFromName(QUEUE_NAME));
   return stub.fetch(new Request("https://history-queue/ingest", {
@@ -644,14 +722,39 @@ export function durableHistoryIngestResponse(env, request) {
 }
 
 export async function flushDurableHistory(env) {
+  const queue = sqlQueue(env);
+  if (queue) return queue.flush();
   return queueRequest(env, "flush");
 }
 
+export async function flushDurableHistoryArchives(env) {
+  const queue = sqlQueue(env);
+  if (!queue) return {enabled:false,reason:"history_sql_queue_backend_required"};
+  return queue.flushArchives();
+}
+
 export async function durableHistoryReceipts(env, ids) {
+  const queue = sqlQueue(env);
+  if (queue) return queue.receipts(ids);
   return queueRequest(env,"receipts",{ids});
 }
 
 export async function durableHistoryStatus(env) {
+  const queue = sqlQueue(env);
+  if (queue) return queue.status();
   if (!env?.HISTORY_QUEUE) return { enabled: false, error: "history_queue_not_configured" };
   return queueRequest(env, "status", undefined, "GET");
+}
+
+// Internal helpers only. The parent must authenticate any HTTP route exposing
+// them and stop legacy writers before starting this explicit bounded migration.
+export async function exportLegacyDurableHistory(env, options = {}) {
+  const after = options.after || "", limit = options.limit ?? HISTORY_QUEUE_LIMITS.enqueueEvents;
+  return queueRequest(env,`export?${new URLSearchParams({after,limit:String(limit)})}`,undefined,"GET");
+}
+
+export async function migrateLegacyDurableHistory(env, options = {}) {
+  const queue = sqlQueue(env);
+  if (!queue) throw new QueueError("history_sql_queue_migration_backend_required", 409);
+  return queue.migrateLegacy(options, cursor => exportLegacyDurableHistory(env,cursor));
 }

@@ -14,7 +14,8 @@ import {
   historyWallets,
 } from "./history.js";
 import {runtimeDocument, runtimeDashboardResponse, runtimeCheckpointResponse, runtimeMetadata} from "./runtime.js";
-import {durableHistoryIngestResponse, flushDurableHistory, durableHistoryStatus, HISTORY_QUEUE_LIMITS} from "./runtime-history.js";
+import {runtimeUsesSql, collectSqlRuntimeGarbage, sqlRuntimeResponse} from "./runtime-sql.js";
+import {durableHistoryIngestResponse, flushDurableHistory, flushDurableHistoryArchives, durableHistoryStatus, migrateLegacyDurableHistory, HISTORY_QUEUE_LIMITS} from "./runtime-history.js";
 import {historySchemaState} from "./history-schema.js";
 import {resolveStorageEnv} from "./storage-sql.js";
 import {archiveHistoryEvent, readHistoryArchive} from "./archive.js";
@@ -35,6 +36,7 @@ const ACCESS_CERT_CACHE_TTL_MS = 60 * 60 * 1000;
 const DISCOVERY_CRON = "*/5 * * * *";
 const DEEP_SCAN_CRON = "7 * * * *";
 const TARGETED_CRON = "22,37,52 * * * *";
+const MAINTENANCE_CRON = "47 * * * *";
 const D1_IN_PARAMETER_LIMIT = 100;
 const GITHUB_STATUS_COMPONENTS_URL = "https://www.githubstatus.com/api/v2/components.json";
 let accessCertCache = { expiresAt: 0, keys: new Map() };
@@ -1116,12 +1118,21 @@ async function discoveryDispatchGuard(env) {
   }
 }
 
-async function flushAndPublishHistoryHealth(env, maximum = 1, {upgradeSchema=false,legacy=false} = {}) {
+async function flushAndPublishHistoryHealth(env, maximum = 1, {upgradeSchema=false,legacy=false,archives=false} = {}) {
   let result = {};
   const schema=await historySchemaState(env,{upgrade:upgradeSchema});
   let error = schema.ready ? null : schema.error;
   try {
-    for (let index=0;schema.ready && index<maximum;index++) {
+    let migrating = false;
+    if (schema.ready && env.HISTORY_LEGACY_MIGRATION === "verified_turso_v1" && env.HISTORY_QUEUE_BACKEND === "turso_sql") {
+      const migration = await env.RADAR_HISTORY_DB.prepare("SELECT legacy_complete FROM history_sql_queue_meta WHERE id=1").first();
+      if (migration && !migration.legacy_complete) {
+        migrating = true;
+        const next = await migrateLegacyDurableHistory(env,{limit:25,legacyWritersStopped:true,historyStateMigrated:true});
+        result = {...next,migration_progressed:next.queued || next.duplicates || 0};
+      }
+    }
+    for (let index=0;!migrating && schema.ready && index<maximum;index++) {
       const next=await (legacy ? flushHistoryOutbox(env) : flushDurableHistory(env));
       result={...next,delivered:(result.delivered || 0)+(next.delivered || 0),failed:(result.failed || 0)+(next.failed || 0),
         continued:(result.continued || 0)+(next.continued || 0),history_write_units:(result.history_write_units || 0)+(next.history_write_units || 0),
@@ -1130,6 +1141,10 @@ async function flushAndPublishHistoryHealth(env, maximum = 1, {upgradeSchema=fal
     }
   }
   catch (caught) { error = String(caught?.message || caught); }
+  if (archives && schema.ready && result.migration_progressed === undefined) {
+    try { result.archive_result = await flushDurableHistoryArchives(env); }
+    catch (caught) { result.archive_result = {error:String(caught?.message || caught)}; }
+  }
   let status = {};
   try { status = await durableHistoryStatus(env); }
   catch (caught) { error ||= String(caught?.message || caught); }
@@ -1140,7 +1155,7 @@ async function flushAndPublishHistoryHealth(env, maximum = 1, {upgradeSchema=fal
     error: error || null, healthy: !error,
     last_flush_at: checkedAt, last_flush_error: error || null,
     pending_outbox: status.pending ?? result.pending ?? null,
-    checked_at: checkedAt, storage_source: "durable_history_queue"}, checkedAt);
+    checked_at: checkedAt, storage_source: env.HISTORY_QUEUE_BACKEND === "turso_sql" ? "turso_sql_queue" : "durable_history_queue"}, checkedAt);
   return {result,status,error,checked_at:checkedAt,...(schema.enabled ? {history_schema:schema} : {})};
 }
 
@@ -1170,16 +1185,23 @@ export default {
     if (_event?.cron === DISCOVERY_CRON) ctx.waitUntil(dispatchR2BudgetNotice(env).catch(() => null));
     const mode = schedulerMode(env);
     const turso = env.STORAGE_SQL_BACKEND === "turso";
+    if (_event?.cron === MAINTENANCE_CRON) {
+      // These bounded jobs share one invocation. Keep their combined external
+      // SQL requests below 50, separately from queue consumption and dispatch.
+      if (env.HISTORY_DERIVED_MODE === "daily") {
+        ctx.waitUntil(runHistoryMaintenance(env,{maxQueries:turso ? 16 : 32,maxWrites:turso ? 50 : 100}));
+      }
+      ctx.waitUntil(runArchiveRetention(env));
+      if (runtimeUsesSql(env)) ctx.waitUntil(collectSqlRuntimeGarbage(env).catch(() => null));
+      return;
+    }
     const historyTask = env.HISTORY_QUEUE && hasHistoryDb(env) && _event?.cron === DISCOVERY_CRON
       ? flushAndPublishHistoryHealth(env,turso ? 1 : HISTORY_QUEUE_LIMITS.scheduledFlushes,{upgradeSchema:true})
       : shouldFlushScheduledHistory(_event, env) && hasHistoryDb(env)
         ? env.HISTORY_SCHEMA_AUTO_UPGRADE !== undefined
-          ? flushAndPublishHistoryHealth(env,1,{legacy:true})
+          ? flushAndPublishHistoryHealth(env,1,{legacy:true,archives:env.HISTORY_QUEUE_BACKEND === "turso_sql"})
           : flushHistoryOutbox(env).catch(() => null) : Promise.resolve(null);
-    if (_event?.cron === DISCOVERY_CRON && env.HISTORY_DERIVED_MODE === "daily") {
-      ctx.waitUntil(runHistoryMaintenance(env,{maxQueries:turso ? 16 : 32,maxWrites:turso ? 50 : 100}));
-    }
-    if (shouldFlushScheduledHistory(_event, env)) ctx.waitUntil(runArchiveRetention(env));
+    if (runtimeUsesSql(env) && _event?.cron === DISCOVERY_CRON) ctx.waitUntil(collectSqlRuntimeGarbage(env).catch(() => null));
     if (mode === "disabled" || shouldFlushScheduledHistory(_event, env)) {
       ctx.waitUntil(historyTask);
       return;
@@ -1212,7 +1234,7 @@ export default {
 
     if (env.STORAGE_WRITES_FROZEN === "true"
         && !["GET", "HEAD"].includes(request.method)
-        && !(request.method === "POST" && url.pathname === "/api/storage/archive/read")) {
+        && !(request.method === "POST" && ["/api/storage/archive/read", "/api/runtime/history/migrate-legacy"].includes(url.pathname))) {
       return json({ok:false, error:"storage_cutover_writes_frozen"}, 503,
         {...corsHeaders(request, env), "retry-after":"120"});
     }
@@ -1250,6 +1272,8 @@ export default {
         archive_configured: Boolean(env.RADAR_ARCHIVE),
         history_archive_mode: env.HISTORY_ARCHIVE_MODE || "durable",
         runtime_archive_mode: env.RUNTIME_ARCHIVE_MODE || "durable",
+        runtime_storage_backend: env.RUNTIME_STORAGE_BACKEND || "durable",
+        history_queue_backend: env.HISTORY_QUEUE_BACKEND || "durable",
         r2_budget: await budgetView(env),
         history: historical,
       }, 200, corsHeaders(request, env));
@@ -1261,7 +1285,7 @@ export default {
       }
       try {
         const budget = await budgetView(env);
-        const durable = budget.paused ? null : await runtimeDashboardResponse(env, request).catch(() => null);
+        const durable = budget.paused && !runtimeUsesSql(env) ? null : await runtimeDashboardResponse(env, request).catch(() => null);
         if (durable?.ok) return json({...await durable.json(),r2_budget:budget},200,corsHeaders(request,env));
         return json(
           {...await dashboardData(env, url.searchParams.get("history_limit"),budget.paused),r2_budget:budget},
@@ -1282,7 +1306,7 @@ export default {
       }
       try {
         const budget = await budgetView(env);
-        const durable = budget.paused ? null : await runtimeDashboardResponse(env, request).catch(() => null);
+        const durable = budget.paused && !runtimeUsesSql(env) ? null : await runtimeDashboardResponse(env, request).catch(() => null);
         if (durable?.ok) return new Response(durable.body, {headers:{"content-type":"application/json", "cache-control":"no-store", ...corsHeaders(request, env)}});
         return json(
           await dashboardTokenDetail(env, url.searchParams.get("token_key"),budget.paused),
@@ -1395,14 +1419,18 @@ export default {
         if (url.pathname === "/api/runtime/checkpoint") {
           const kind = url.searchParams.get("kind") || "deep";
           if (!["deep", "discovery"].includes(kind)) return json({ok:false, error:"invalid_checkpoint_kind"}, 400);
-          if (!env.RUNTIME_SNAPSHOTS) return json({ok:false, error:"runtime_storage_not_configured"}, 503);
+          if (!env.RUNTIME_SNAPSHOTS && !runtimeUsesSql(env)) return json({ok:false, error:"runtime_storage_not_configured"}, 503);
           if (!["GET", "POST"].includes(request.method)) return json({ok:false, error:"GET or POST required"}, 405);
           return await runtimeCheckpointResponse(env, request, kind);
         }
         if (url.pathname === "/api/runtime/dashboard") {
           if (request.method !== "POST") return json({ok:false, error:"POST required"}, 405);
-          if (!env.RUNTIME_SNAPSHOTS) return json({ok:false, error:"runtime_storage_not_configured"}, 503);
+          if (!env.RUNTIME_SNAPSHOTS && !runtimeUsesSql(env)) return json({ok:false, error:"runtime_storage_not_configured"}, 503);
           return runtimeDashboardResponse(env, request, true);
+        }
+        if (url.pathname === "/api/runtime/rpc-ledger") {
+          if (!runtimeUsesSql(env)) return json({ok:false,error:"rpc_ledger_requires_sql_runtime"},503);
+          return sqlRuntimeResponse(env,request,"rpc_ledger");
         }
         if (url.pathname === "/api/runtime/history") {
           if (request.method !== "POST") return json({ok:false, error:"POST required"}, 405);
@@ -1421,6 +1449,14 @@ export default {
           const schema=await historySchemaState(env);
           if (!schema.ready) return json({ok:false,error:schema.error,history_schema:schema},503,corsHeaders(request,env));
           return json({ok:true,...await flushHistoryOutbox(env,{limit:25})},200,corsHeaders(request,env));
+        }
+        if (url.pathname === "/api/runtime/history/migrate-legacy") {
+          if (request.method !== "POST") return json({ok:false,error:"POST required"},405);
+          if (env.STORAGE_WRITES_FROZEN !== "true" && env.HISTORY_LEGACY_MIGRATION !== "verified_turso_v1") {
+            return json({ok:false,error:"history_legacy_migration_requires_write_freeze"},409);
+          }
+          const options = await storageRequestJson(request,4096);
+          return json({ok:true,...await migrateLegacyDurableHistory(env,options)},200,corsHeaders(request,env));
         }
         if (url.pathname === "/api/ingest/snapshot") {
           if (request.method !== "POST") return json({ ok: false, error: "POST required" }, 405, corsHeaders(request, env));

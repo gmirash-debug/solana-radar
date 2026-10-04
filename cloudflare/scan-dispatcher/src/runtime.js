@@ -3,6 +3,7 @@ import {compactDashboardReport, compactDashboardAlert, dashboardRecordMatchesTok
 import {isContentId, validateBlob, documentReferences, validateReferences, collectOldBlobs, protectSupersededBlobs} from "./runtime-documents.js";
 import {shouldArchiveRuntime, archiveRuntimeDocument, readRuntimeArchive, deleteRuntimeArchive} from "./runtime-archive.js";
 import {guardR2Env} from "./r2-budget.js";
+import {runtimeUsesSql, sqlRuntimeResponse, sqlDashboardResponse, readSqlRuntime, writeSqlRuntime} from "./runtime-sql.js";
 const MAX_BYTES = 8 * 1024 * 1024;
 const CHUNK_CHARS = 32000;
 
@@ -190,23 +191,34 @@ export class RuntimeSnapshots {
   }
 }
 
-export function runtimeCheckpointResponse(env, request, kind) {
+export async function runtimeCheckpointResponse(env, request, kind) {
   const name = `checkpoint:${kind}`;
-  const stub = env.RUNTIME_SNAPSHOTS.get(env.RUNTIME_SNAPSHOTS.idFromName(name));
   const part = new URL(request.url).searchParams.get("part");
   if (part && !isContentId(part)) return Response.json({ok:false, error:"invalid_runtime_part_id"}, {status:400});
   const target = new URL(`https://runtime/${name}${part ? `:blob:${part}` : ""}`);
   const upload = request.method === "POST";
   if (upload) target.searchParams.set("ingest_checkpoint", "1");
+  if (runtimeUsesSql(env)) {
+    const response = await sqlRuntimeResponse(env, new Request(target, upload ? {
+      method:"POST", body:request.body, duplex:"half", headers:{"content-type":"application/json"},
+    } : {}), `${name}${part ? `:blob:${part}` : ""}`);
+    if (upload || !response.ok || env.RUNTIME_LEGACY_READ !== "enabled" || !env.RUNTIME_SNAPSHOTS) return response;
+    const result = await response.clone().json();
+    if (result.document) return response;
+    // Existing checkpoints stay recoverable during staged cutover. This path
+    // reads only the legacy object; all new writes go exclusively to SQL.
+    const legacy = env.RUNTIME_SNAPSHOTS.get(env.RUNTIME_SNAPSHOTS.idFromName(name));
+    return legacy.fetch(new Request(target));
+  }
+  const stub = env.RUNTIME_SNAPSHOTS.get(env.RUNTIME_SNAPSHOTS.idFromName(name));
   return stub.fetch(new Request(target, upload ? {
     method:"POST", body:request.body, duplex:"half", headers:{"content-type":"application/json"},
   } : {}));
 }
 
 export async function runtimeDashboardResponse(env, request, upload = false) {
-  if (!env.RUNTIME_SNAPSHOTS) return null;
+  if (!runtimeUsesSql(env) && !env.RUNTIME_SNAPSHOTS) return null;
   const url = new URL(request.url);
-  const stub = env.RUNTIME_SNAPSHOTS.get(env.RUNTIME_SNAPSHOTS.idFromName("dashboard"));
   const part = upload && url.searchParams.get("part");
   if (part && !isContentId(part)) return Response.json({ok:false, error:"invalid_runtime_part_id"}, {status:400});
   const target = new URL(`https://runtime/dashboard${part ? `:blob:${part}` : ""}`);
@@ -215,10 +227,16 @@ export async function runtimeDashboardResponse(env, request, upload = false) {
     target.searchParams.set("projection", "public");
     for (const field of ["token_key", "history_limit"]) if (url.searchParams.has(field)) target.searchParams.set(field, url.searchParams.get(field));
   }
+  if (runtimeUsesSql(env)) return upload
+    ? sqlRuntimeResponse(env, new Request(target, {method:"POST",body:request.body,duplex:"half",headers:{"content-type":"application/json"}}),
+      `dashboard${part ? `:blob:${part}` : ""}`)
+    : sqlDashboardResponse(env, request);
+  const stub = env.RUNTIME_SNAPSHOTS.get(env.RUNTIME_SNAPSHOTS.idFromName("dashboard"));
   return stub.fetch(new Request(target, upload ? {method:"POST", body:request.body, duplex:"half", headers:{"content-type":"application/json"}} : {}));
 }
 
 export async function runtimeMetadata(env, name) {
+  if (runtimeUsesSql(env)) return readSqlRuntime(env, name, true);
   if (!env.RUNTIME_SNAPSHOTS) return null;
   const stub = env.RUNTIME_SNAPSHOTS.get(env.RUNTIME_SNAPSHOTS.idFromName(name));
   const response = await stub.fetch(new Request(`https://runtime/${encodeURIComponent(name)}?meta=1`));
@@ -226,6 +244,9 @@ export async function runtimeMetadata(env, name) {
 }
 
 export async function runtimeDocument(env, name, value, updatedAt, revision = 0) {
+  if (runtimeUsesSql(env)) return value === undefined
+    ? {ok:true,document:await readSqlRuntime(env, name)}
+    : writeSqlRuntime(env, name, value, updatedAt, revision);
   if (!env.RUNTIME_SNAPSHOTS) return null;
   const stub = env.RUNTIME_SNAPSHOTS.get(env.RUNTIME_SNAPSHOTS.idFromName(name));
   const response = await stub.fetch(new Request(`https://runtime/${encodeURIComponent(name)}`, value === undefined ? {} : {
