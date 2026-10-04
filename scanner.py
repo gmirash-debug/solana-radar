@@ -26,6 +26,7 @@ from coordinated_activity import analyze_coordinated_activity, compact_coordinat
 from wallet_links import SERVICE_KINDS, infrastructure_sources, normalize_link as normalize_wallet_link, source_kind
 from solana_position_lineage import annotate_pool_activity, freeze_receipt_seeds
 from position_history_rpc import check_receipt_positions
+from wallet_activity import AuditBudget, advance_wallet_history, summarize_wallet_activity, recover_sale_history_status
 from runtime_checkpoint import build_checkpoint, restore_checkpoint, checkpoint_documents, hydrate_checkpoint
 from runtime_dashboard import dashboard_documents
 from history_contract import history_event_error, source_time
@@ -7705,6 +7706,8 @@ def public_signal_thesis(thesis):
         "position_evidence_version",
         "balance_status",
         "outflow_evidence",
+        "wallet_activity",
+        "sale_history_recovery",
         "legacy_balance_invalidation",
         "cohort_recovered_at",
         "cohort_recovery_basis",
@@ -7772,6 +7775,12 @@ def public_signal_thesis(thesis):
         for key, value in thesis.items()
         if key in public_fields
     }
+    activity = thesis.get("wallet_activity") or {}
+    if activity:
+        public["wallet_activity"] = {key: value for key, value in activity.items() if key not in {"owners", "events"}}
+    else:
+        public.pop("wallet_activity", None)
+    activity_owners = {row["owner"]: row for row in activity.get("owners") or []}
     cohort_fields = {
         "owner",
         "wallet_class",
@@ -7800,6 +7809,9 @@ def public_signal_thesis(thesis):
             for key, value in row.items()
             if key in cohort_fields and value is not None
         }
+        if row["owner"] in activity_owners:
+            public_row["activity"] = {**activity_owners[row["owner"]], "events": [
+                event for event in activity.get("events") or [] if event.get("source_owner") == row["owner"]][:5]}
         if "is_holder" not in public_row and row.get("retention_pct") is not None:
             public_row["is_holder"] = (
                 float(row.get("retention_pct") or 0) >= holder_min_pct
@@ -13968,6 +13980,9 @@ def publish_targeted_balance_report(rpc, universe, state, config, lane_configs, 
                   lanes_scanned=list(lane_stats))
     report["stats"]["scan_health"] = config["_scan_health"]
     report["stats"]["rpc_providers"] = rpc.provider_stats()
+    report["stats"]["wallet_activity"] = config.get("_wallet_activity_stats", {})
+    if report["stats"]["wallet_activity"].get("pages"):
+        report["check_scope"] = "cohort_balances_and_wallet_activity"
     report["signal_evaluation"] = evaluate_signals({"generated_at": generated_at,
         "signal_evaluation_dataset": state.get("signal_evaluation_dataset", {})},
         options=EvaluationOptions(bootstrap_samples=200, holdout_start=config.get("signal_evaluation_holdout_start")))["summary"]
@@ -14021,6 +14036,64 @@ def run_position_history_task(rpc, universe, state, config, observed_at):
                 "reason": "history_unavailable", "confirmation_eligible": False}
             return {"status": "partial", "checked": 0}
     return {"status": "idle", "checked": 0}
+
+
+def run_wallet_activity_tasks(rpc, universe, state, config, observed_at):
+    if not config.get("wallet_activity_enabled", True):
+        return {"status": "disabled", "pages": 0, "checked": 0}
+    targeted = config.get("_scan_profile") == "targeted"
+    budget = AuditBudget(config.get("wallet_activity_targeted_pages" if targeted else "wallet_activity_pages", 24),
+                         config.get("wallet_activity_max_seconds", 90))
+    now = parse_timestamp(observed_at)
+    tasks, seen, theses = [], set(), {}
+    for pool in universe:
+        if pool.pool_address in seen:
+            continue
+        seen.add(pool.pool_address)
+        thesis = (state.get("pools", {}).get(pool.pool_address) or {}).get("signal_thesis") or {}
+        if not thesis.get("token_address") or not thesis.get("signal_at") or thesis.get("status") == "invalidated":
+            continue
+        theses[pool.pool_address] = thesis
+        for row in thesis.get("cohort") or []:
+            if not row.get("owner"):
+                continue
+            audit = (thesis.get("wallet_activity_checks") or {}).get(row["owner"]) or {}
+            retry = parse_timestamp(audit.get("retry_after"))
+            if retry > now or not audit.get("query") and now - int(audit.get("complete_through") or 0) < 600:
+                continue
+            attempt = parse_timestamp(audit.get("last_attempt_at"))
+            recent = now - parse_timestamp(thesis["signal_at"]) < 48 * 3600
+            tasks.append((attempt, -float(row.get("balance_reduced_tokens") or 0), pool.pool_address,
+                          row["owner"], recent, pool, thesis, row))
+    recent = sorted((item for item in tasks if item[4]), key=lambda item: item[:4])
+    older = sorted((item for item in tasks if not item[4]), key=lambda item: item[:4])
+    # Reserve a quarter for old evidence: recent catches cannot starve repairs.
+    order = []
+    while recent or older:
+        order.extend(recent[:3]); recent = recent[3:]
+        if older:
+            order.append(older.pop(0))
+        elif recent:
+            continue
+        if not recent:
+            order.extend(older); older = []
+    changed, touched = 0, {}
+    for _, _, _, _, _, pool, thesis, row in order:
+        if not budget.available():
+            break
+        changed += int(advance_wallet_history(rpc, thesis, row, budget, observed_at,
+            services=[pool.pool_address, *infrastructure_sources(config)],
+            page_size=int(config.get("wallet_activity_page_size", 100))))
+        touched[pool.pool_address] = thesis
+    recovered = 0
+    for pool_address, thesis in theses.items():
+        summary = summarize_wallet_activity(thesis, observed_at)
+        recovered += int(recover_sale_history_status(thesis, summary))
+        if pool_address in touched:
+            thesis["updated_at"] = observed_at
+    return {"status": "progress" if changed else "idle" if not tasks else "deferred", "checked": len(touched),
+            "pages": budget.used, "advanced_wallets": changed, "pending_wallets": len(tasks) - changed,
+            "histories_recovered": recovered}
 
 
 def run_once(config, lane_name=None):
@@ -14131,9 +14204,11 @@ def run_once(config, lane_name=None):
     config["_rpc_failovers"] = dict(rpc.route_failovers)
     config["_rpc_estimated_credits"] = int(rpc.estimated_credits)
     if config.get("_scan_profile") == "targeted" and not summaries:
+        config["_wallet_activity_stats"] = run_wallet_activity_tasks(rpc, universe, state, config,
+            utc_now().isoformat().replace("+00:00", "Z"))
         checks = sum(int(((lane.get("selection") or {}).get("cohort_monitor") or {}).get("checked") or 0)
                      for lane in lane_stats.values())
-        if checks:
+        if checks or config["_wallet_activity_stats"].get("checked"):
             publish_targeted_balance_report(rpc, universe, state, config, lane_configs, lane_stats)
         else:
             save_runtime_state(state, config, "targeted_idle")
@@ -14153,6 +14228,8 @@ def run_once(config, lane_name=None):
         state["last_deep_scan_at"] = generated_at
     config["_launch_history_stats"] = run_launch_history_tasks(rpc, universe, state, config, generated_at)
     config["_position_history_stats"] = run_position_history_task(rpc, universe, state, config, generated_at)
+    config["_wallet_activity_stats"] = run_wallet_activity_tasks(rpc, universe, state, config, generated_at)
+    config["_rpc_providers"] = rpc.provider_stats()
     config["_rpc_retries"] = dict(rpc.retries)
     config["_rpc_failures"] = dict(rpc.failures)
     config["_rpc_failovers"] = dict(rpc.route_failovers)
@@ -14207,6 +14284,7 @@ def run_once(config, lane_name=None):
         options=EvaluationOptions(bootstrap_samples=200, holdout_start=config.get("signal_evaluation_holdout_start"))) ["summary"]
     report_payload["stats"]["launch_history"] = config.get("_launch_history_stats", {})
     report_payload["stats"]["position_history"] = config.get("_position_history_stats", {})
+    report_payload["stats"]["wallet_activity"] = config.get("_wallet_activity_stats", {})
     report_payload["stats"]["rpc_providers"] = rpc.provider_stats()
     write_report_json(report_payload)
     write_dashboard_fallback(report_payload, state, config)

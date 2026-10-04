@@ -1,3 +1,4 @@
+import { walletActivityView } from "./wallet-activity-view.js?v=20261004-wallet-activity-v1";
 // Presentation only: never upgrades the scanner's confirmation or lifecycle.
 export const REVIEW_QUEUES = [
   { id: "review", label: "Ready to review", note: "Current confirmed signals with fresh cohort and market checks.", tone: "positive" },
@@ -17,7 +18,13 @@ export function numeric(value) {
 export function originalSaleHistoryUnknown(thesis) {
   if (!thesis || typeof thesis !== "object" || Array.isArray(thesis) || !Object.keys(thesis).length) return false;
   const version = numeric(thesis.retention_evidence_version);
-  return version === null || version < 3 || thesis.original_sale_history_status !== "tracked_from_capture";
+  if (version === null || version < 3) return true;
+  if (thesis.original_sale_history_status === "tracked_from_capture") return false;
+  const audit = thesis.wallet_activity;
+  return thesis.original_sale_history_status !== "reconstructed_from_capture"
+    || audit?.status !== "checked" || audit.interpretation_complete !== true
+    || audit.wallet_coverage_pct !== 100 || (numeric(audit.token_coverage_pct) ?? 0) < 99.99
+    || thesis.sale_history_recovery?.checked_at !== audit.checked_at;
 }
 
 function percent(value) {
@@ -71,6 +78,7 @@ export function decisionView(token, config = {}, now = Date.now()) {
   const complete = balanceComplete && cohortComplete && retained !== null;
   const currentConfirmed = token.signalLifecycle?.currentConfirmed === true;
   const saleHistoryUnknown = originalSaleHistoryUnknown(token.signalThesis);
+  const movement = walletActivityView(thesis);
   const thesisConfirmed = !saleHistoryUnknown && thesis.signal_confirmation?.status === "confirmed";
   const blockers = [];
   if (!Number.isFinite(checked)) blockers.push("Original wallet balances have not been checked.");
@@ -100,7 +108,7 @@ export function decisionView(token, config = {}, now = Date.now()) {
     queue = "inactive"; label = "Closed";
   } else if (thesis.status === "weakening" || token.lifecycleStatus === "weakening"
     || thesis.balance_status === "outflow" && complete) {
-    queue = "reducing"; label = "Original-wallet outflow";
+    queue = "reducing"; label = movement.label;
   } else if (retained > 0 && complete && (thesis.status === "intact"
     || thesis.balance_status === "present" && thesis.outflow_evidence?.balance_check_complete === true)) {
     queue = "holding";
@@ -119,12 +127,12 @@ export function decisionView(token, config = {}, now = Date.now()) {
   const meta = REVIEW_QUEUES.find((item) => item.id === queue);
   const reason = queue === "review" ? "Confirmed buying + retained balances"
     : queue === "holding" ? `${retentionBound(retained).replace("\u2264", "Up to ")} original-position balance cap${fresh ? "" : "; check overdue"}${saleHistoryUnknown ? "; original sale history unknown" : ""}`
-      : queue === "reducing" ? (retained === null ? "Original-wallet outflow; cause unresolved" : `${retentionBound(retained).replace("\u2264", "Up to ")} original-position balance cap; sale/transfer unresolved`)
+      : queue === "reducing" ? `${retained === null ? "Balance cap unknown" : `${retentionBound(retained).replace("\u2264", "Up to ")} original-position balance cap`}; ${movement.reason.toLowerCase()}`
         : queue === "early" ? "Buying observed; confirmation missing"
           : queue === "inactive" ? "Original accumulation invalidated"
             : !cohortComplete && cohortCoverage !== null ? `Only ${Math.round(cohortCoverage)}% of original wallets covered`
               : !fresh ? "Fresh wallet evidence missing" : "Evidence is incomplete";
-  return { queue, label, tone: meta.tone, reason, retained, supply, fresh, complete, balanceComplete,
+  return { queue, label, tone: queue === "reducing" ? movement.tone : meta.tone, reason, retained, supply, fresh, complete, balanceComplete,
     cohortComplete, walletCoverage, tokenCoverage, cohortCoverage, cohortTokenCoverage,
     checkedAt: Number.isFinite(checked) ? thesis.last_checked_at : null, blockers,
     integrityFresh, linkPolicyCurrent, rotation, saleHistoryUnknown,

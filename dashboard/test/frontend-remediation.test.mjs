@@ -15,6 +15,7 @@ import * as robinhood from "../robinhood-state.js";
 import * as accumulation from "../accumulation-evidence.js";
 import * as gmgn from "../gmgn-context.js";
 import * as r2Budget from "../r2-budget-view.js";
+import * as walletActivity from "../wallet-activity-view.js";
 
 const now = Date.parse("2026-10-03T12:00:00Z"), checked = "2026-10-03T11:50:00Z";
 const start = "2026-10-03T11:00:00Z", end = "2026-10-03T11:05:00Z";
@@ -50,7 +51,7 @@ function harness(t, {fetch = async () => { throw new Error("Unmocked network req
   dom.window.scrollTo = () => {};
   setup(dom.window);
   const context = vm.createContext({...dataSource, ...coordination, ...terminology, ...decision,
-    ...staticDetail, ...tokenState, ...scope, ...evaluation, ...robinhood, ...accumulation, ...gmgn, ...r2Budget,
+    ...staticDetail, ...tokenState, ...scope, ...evaluation, ...robinhood, ...accumulation, ...gmgn, ...r2Budget, ...walletActivity,
     decisionView:(token, config) => decision.decisionView(token, config, clock.now),
     resolveCurrentMarket:args => tokenState.resolveCurrentMarket({...args, now:clock.now}),
     isFresh:p => robinhood.isFresh(p, clock.now), walletFresh:row => robinhood.walletFresh(row, clock.now),
@@ -626,7 +627,7 @@ test("cache integration: every versioned entry asset uses the unified remediatio
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const tags = [...html.matchAll(/(?:href|src)="(?:[^"]+)\?v=([^"]+)"/g)].map(match => match[1]);
   assert.equal(tags.length, 5);
-  assert.ok(tags.every(tag => tag === "20261004-cohort-outflow-v1"));
+  assert.ok(tags.every(tag => tag === "20261004-wallet-activity-v1"));
 });
 
 test("legacy migration integration: a fresh confirmed alert cannot upgrade the original unknown-sale thesis", t => {

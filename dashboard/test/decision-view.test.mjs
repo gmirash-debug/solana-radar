@@ -127,7 +127,7 @@ test("outflow is visible but is never labelled a sale or a closed position", () 
   const result = view(t);
   assert.equal(result.queue, "reducing");
   assert.equal(result.label, "Original-wallet outflow");
-  assert.match(result.reason, /sale\/transfer unresolved/);
+  assert.match(result.reason, /wallet history queued/);
   assert.equal(matchesReviewQueue(result, "overview"), true);
 });
 

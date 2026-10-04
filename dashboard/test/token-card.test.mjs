@@ -11,6 +11,7 @@ import * as staticDetail from "../static-detail.js";
 import * as tokenState from "../token-state.js";
 import * as filterScope from "../filter-scope.js";
 import * as r2Budget from "../r2-budget-view.js";
+import * as walletActivity from "../wallet-activity-view.js";
 
 const now = Date.parse("2026-10-03T12:00:00Z");
 const checked = "2026-10-03T11:50:00Z";
@@ -36,7 +37,7 @@ function fixture(t, {signalThesis = thesis(), alerts = [], overrides = {}} = {})
     static now() { return now; }
   }
   const context = vm.createContext({...dataSource, ...coordination, ...terminology, ...decision,
-    ...staticDetail, ...tokenState, ...filterScope, ...r2Budget,
+    ...staticDetail, ...tokenState, ...filterScope, ...r2Budget, ...walletActivity,
     decisionView:(token, config) => decision.decisionView(token, config, now),
     resolveCurrentMarket:args => tokenState.resolveCurrentMarket({...args, now}),
     document:dom.window.document, window:dom.window, localStorage:dom.window.localStorage,
@@ -49,12 +50,37 @@ function fixture(t, {signalThesis = thesis(), alerts = [], overrides = {}} = {})
   const api = vm.runInContext(`({state, buildTokenSignals, renderWalletRows, walletHeldLabel,
     renderReviewRow, renderThesisSummary, renderSupplyLinkageGroups, supplyPct,
     mergeTokenAlertDetails, ensureTokenDetail, applyDashboardPayload, detailLoadMessage,
-    renderObservedPositionActivity, renderStatus, renderFilters, filterMeta})`, context);
+    renderObservedPositionActivity, renderWalletActivity, renderStatus, renderFilters, filterMeta})`, context);
   api.state.report = {generated_at:checked, alerts, signal_theses:signalThesis ? [signalThesis] : [], config:{}};
   api.state.history = [];
   t.after(() => dom.window.close());
   return {...api, dom, context};
 }
+
+test("wallet activity exposes gross amounts, partial progress and signature-linked receipts", t => {
+  const activity = {status:"backfilling",wallets_checked:1,wallets_total:4,pages_checked:3,
+    wallet_status_counts:{retry:2},amounts_tokens:{sold:25,transferred:10,service:0,unclassified:0},
+    amounts_supply_pct:{sold:2.5,transferred:1}};
+  const api = fixture(t, {signalThesis:thesis({wallet_activity:activity,cohort_wallets:[cohortWallet({
+    activity:{events:[{source_owner:"buyer",destination_owner:"recipient",signature:"sell-receipt",
+      kind:"sold",tokens:25,timestamp:Date.parse(checked)/1000}]}})]})});
+  const html = api.renderWalletActivity(api.buildTokenSignals()[0], true);
+  assert.match(html,/1\/4 histories checked/);
+  assert.match(html,/2\.50% of supply/);
+  assert.match(html,/25 tokens/);
+  assert.match(html,/Not established in checked subset/);
+  assert.match(html,/2 wallet histories awaiting provider retry/);
+  assert.match(html,/https:\/\/solscan\.io\/tx\/sell-receipt/);
+  assert.match(html,/https:\/\/solscan\.io\/account\/recipient/);
+  assert.match(html,/Not a breakdown of the original purchase/);
+});
+
+test("wallet activity does not turn a missing history into checked zero sales", t => {
+  const api = fixture(t);
+  const html = api.renderWalletActivity(api.buildTokenSignals()[0], true);
+  assert.match(html,/History check queued/);
+  assert.doesNotMatch(html,/None found|0\/0/);
+});
 
 test("the radar and token criteria display the thirty-minute age minimum", t => {
   const api = fixture(t, {signalThesis:null});
@@ -307,11 +333,11 @@ test("partial movement note needs actual observations and never renders raw amou
 
 test("HTML entrypoint and every dashboard JS import use the same evidence cache tag", () => {
   const html = readFileSync(new URL("../index.html",import.meta.url),"utf8");
-  assert.match(html, /src="radar-bootstrap\.js\?v=20261004-cohort-outflow-v1"/);
+  assert.match(html, /src="radar-bootstrap\.js\?v=20261004-wallet-activity-v1"/);
   for (const file of readdirSync(new URL("../",import.meta.url)).filter(file => file.endsWith(".js"))) {
     const source = readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
     for (const match of source.matchAll(/(?:from\s+|import\()"(\.\/[^"?]+\.js\?v=([^"]+))"/g)) {
-      assert.equal(match[2],"20261004-cohort-outflow-v1",`${file}: ${match[1]}`);
+      assert.equal(match[2],"20261004-wallet-activity-v1",`${file}: ${match[1]}`);
     }
   }
 });
