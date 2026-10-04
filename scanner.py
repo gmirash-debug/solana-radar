@@ -1371,6 +1371,7 @@ def sync_remote_snapshot(report_payload, state, config):
                 raise RuntimeError("Remote sync pending: RADAR_INGEST_SECRET is missing")
             pending_body = json.loads(gzip.decompress(path.read_bytes()))
             complete = send_remote_snapshot(pending_body, config, deadline=deadline, legacy=path != current)
+            current_synced = current_synced or (path == current and bool((pending_body.get("_sync_progress") or {}).get("summary")))
             if not complete:
                 temp = path.with_suffix(".tmp")
                 temp.write_bytes(gzip.compress(json.dumps(pending_body, separators=(",", ":")).encode()))
@@ -1434,7 +1435,7 @@ def send_remote_snapshot(payload, config, deadline=None, legacy=False):
             rejected[str(index)] = {"event_id": row.get("event_id") if isinstance(row, dict) else None, "reason": reason}
     def history_batch(start, end):
         return [row for index, row in enumerate(events[start:end], start) if str(index) not in rejected]
-    # Archive events before any operational D1 write: its daily quota can be exhausted.
+    # Preserve archive delivery independently of operational SQL publication.
     start = int(progress.get("durable_history_ledger") or 0)
     archive_paused = False
     while start < len(events):
@@ -1448,12 +1449,20 @@ def send_remote_snapshot(payload, config, deadline=None, legacy=False):
             send("durable_history_ledger", end, "/api/runtime/history",
                  {"generated_at": generated_at, "history_ledger": {"events": history_batch(start, end)}})
         except RuntimeError as exc:
-            if "r2_monthly_budget_paused" not in str(exc) and "r2_budget_" not in str(exc):
+            reason = str(exc)
+            control_quota = "Exceeded allowed rows written in Durable Objects free tier" in reason
+            queue_limited = any(code in reason for code in (
+                "history_queue_daily_write_budget", "history_queue_pending_capacity",
+                "history_queue_receipt_capacity", "history_archive_daily_budget", "history_daily_write_budget"))
+            if not control_quota and not queue_limited and "r2_monthly_budget_paused" not in reason and "r2_budget_" not in reason:
                 raise
             # Keep unacknowledged evidence in the local outbox, but publish
             # current operational data to SQL while the archive is paused.
             archive_paused = True
-            payload["_sync_deferred_reason"] = "R2 paused by the monthly budget guard; original evidence stays queued"
+            payload["_sync_deferred_reason"] = (
+                "Cloudflare daily control-write quota exhausted; original evidence stays queued"
+                if control_quota else "History queue allowance exhausted; original evidence stays queued"
+                if queue_limited else "R2 paused by the monthly budget guard; original evidence stays queued")
             break
         start = end
     send("summary", 1, "/api/ingest/snapshot", summary)

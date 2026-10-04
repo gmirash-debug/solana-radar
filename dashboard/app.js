@@ -1,11 +1,11 @@
-import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261004-wallet-activity-v1";
-import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261004-wallet-activity-v1";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261004-wallet-activity-v1";
-import { installTerminology } from "./terminology.js?v=20261004-wallet-activity-v1";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261004-wallet-activity-v1";
-import { loadTokenDetail } from "./static-detail.js?v=20261004-wallet-activity-v1";
-import { r2BudgetView } from "./r2-budget-view.js?v=20261004-wallet-activity-v1";
-import { walletActivityView } from "./wallet-activity-view.js?v=20261004-wallet-activity-v1";
+import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261004-wallet-activity-v2";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261004-wallet-activity-v2";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261004-wallet-activity-v2";
+import { installTerminology } from "./terminology.js?v=20261004-wallet-activity-v2";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261004-wallet-activity-v2";
+import { loadTokenDetail } from "./static-detail.js?v=20261004-wallet-activity-v2";
+import { r2BudgetView } from "./r2-budget-view.js?v=20261004-wallet-activity-v2";
+import { walletActivityView } from "./wallet-activity-view.js?v=20261004-wallet-activity-v2";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -16,12 +16,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261004-wallet-activity-v1";
+} from "./token-state.js?v=20261004-wallet-activity-v2";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261004-wallet-activity-v1";
+} from "./filter-scope.js?v=20261004-wallet-activity-v2";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const PENDING_TOKEN_ACTIONS_KEY = "solana-radar:pending-token-actions:v1";
@@ -2969,9 +2969,6 @@ function renderOverviewTab(token) {
       ? `${thesis.holders_remaining} of ${thesis.original_wallets} stored wallets at last check` : "Not verified"],
     ["Original wallets covered", view.cohortCoverage === null ? "Unknown" : `${view.cohortCoverage.toFixed(0)}%`],
     ["Stored balances checked", view.walletCoverage === null ? "Unknown" : `${view.walletCoverage.toFixed(0)}% wallets / ${view.tokenCoverage?.toFixed(0) ?? "?"}% tokens`],
-    ["Observed sale trades", saleTrades > 0 ? `${saleTrades} matched trades; original inventory not proven` : "Not established"],
-    ["Verified sale receipts", saleReceipts > 0 ? `${saleReceipts} matched receipts in partial history` : "Not established"],
-    ["Direct transfers", transfers > 0 ? `${transfers} matched receipts; common control unknown` : "Not established"],
     ["Outflow resolution", walletActivityView(thesis).reason],
     ["Control risk", token.supplyIntegrity?.status === "concentrated" ? "High concentration"
       : view.rotation ? "Sell/rebuy rotation pattern" : "Common ownership not established"],
@@ -2984,6 +2981,12 @@ function renderOverviewTab(token) {
       <div class="evidence-facts">${known.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join("")}</div>
     </section>
     ${renderWalletActivity(token)}
+    ${saleTrades > 0 || saleReceipts > 0 || transfers > 0 ? `<details class="research-fold"><summary>Partial pool-window observations</summary>
+      <p>Separate, incomplete pool sample. Missing events here do not contradict wallet-history receipts above.</p>
+      ${saleTrades > 0 ? `<div class="kv"><span>Pool-window sale trades</span><span>${saleTrades} matched trades; original inventory not proven</span></div>` : ""}
+      ${saleReceipts > 0 ? `<div class="kv"><span>Pool-window sale receipts</span><span>${saleReceipts} matched receipts</span></div>` : ""}
+      ${transfers > 0 ? `<div class="kv"><span>Pool-window transfers</span><span>${transfers} matched receipts; common control unknown</span></div>` : ""}
+    </details>` : ""}
     <section class="decision-caveats">
       <h3>${view.blockers.length ? "What limits the conclusion" : "Evidence checks passed"}</h3>
       ${view.blockers.length ? `<ul>${view.blockers.map((reason) => `<li>${esc(reason)}</li>`).join("")}</ul>` : `<p>Current confirmation, balances and market data are available. This does not establish a profitable entry.</p>`}

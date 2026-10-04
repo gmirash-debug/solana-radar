@@ -50,7 +50,7 @@ function fixture(t, {signalThesis = thesis(), alerts = [], overrides = {}} = {})
   const api = vm.runInContext(`({state, buildTokenSignals, renderWalletRows, walletHeldLabel,
     renderReviewRow, renderThesisSummary, renderSupplyLinkageGroups, supplyPct,
     mergeTokenAlertDetails, ensureTokenDetail, applyDashboardPayload, detailLoadMessage,
-    renderObservedPositionActivity, renderWalletActivity, renderStatus, renderFilters, filterMeta})`, context);
+    renderObservedPositionActivity, renderWalletActivity, renderOverviewTab, renderStatus, renderFilters, filterMeta})`, context);
   api.state.report = {generated_at:checked, alerts, signal_theses:signalThesis ? [signalThesis] : [], config:{}};
   api.state.history = [];
   t.after(() => dom.window.close());
@@ -80,6 +80,18 @@ test("wallet activity does not turn a missing history into checked zero sales", 
   const html = api.renderWalletActivity(api.buildTokenSignals()[0], true);
   assert.match(html,/History check queued/);
   assert.doesNotMatch(html,/None found|0\/0/);
+});
+
+test("partial pool observations cannot contradict decoded wallet sales in the main facts",t=>{
+  const api=fixture(t,{signalThesis:thesis({wallet_activity:{status:"backfilling",wallets_checked:0,wallets_total:1,
+    pages_checked:1,amounts_tokens:{sold:25},amounts_supply_pct:{sold:2.5}},
+    outflow_evidence:{observed_sale_transactions:0,verified_sale_receipts:0,direct_transfer_transactions:1}})});
+  const html=api.renderOverviewTab(api.buildTokenSignals()[0]);
+  assert.doesNotMatch(html,/Observed sale trades|Verified sale receipts/);
+  assert.match(html,/2\.50% of supply/);
+  assert.match(html,/<details class="research-fold"><summary>Partial pool-window observations/);
+  assert.match(html,/Pool-window transfers/);
+  assert.match(html,/Missing events here do not contradict wallet-history receipts above/);
 });
 
 test("the radar and token criteria display the thirty-minute age minimum", t => {
@@ -333,11 +345,11 @@ test("partial movement note needs actual observations and never renders raw amou
 
 test("HTML entrypoint and every dashboard JS import use the same evidence cache tag", () => {
   const html = readFileSync(new URL("../index.html",import.meta.url),"utf8");
-  assert.match(html, /src="radar-bootstrap\.js\?v=20261004-wallet-activity-v1"/);
+  assert.match(html, /src="radar-bootstrap\.js\?v=20261004-wallet-activity-v2"/);
   for (const file of readdirSync(new URL("../",import.meta.url)).filter(file => file.endsWith(".js"))) {
     const source = readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
     for (const match of source.matchAll(/(?:from\s+|import\()"(\.\/[^"?]+\.js\?v=([^"]+))"/g)) {
-      assert.equal(match[2],"20261004-wallet-activity-v1",`${file}: ${match[1]}`);
+      assert.equal(match[2],"20261004-wallet-activity-v2",`${file}: ${match[1]}`);
     }
   }
 });

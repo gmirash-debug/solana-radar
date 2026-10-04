@@ -97,6 +97,12 @@ export class R2Budget {
     try {
       const url = new URL(request.url), now = Date.now();
       const body = request.method === "POST" ? await request.json() : {};
+      if (url.pathname === "/status" && request.method === "GET") {
+        // Monitoring remains strictly read-only, including month rollover.
+        // Persist derived transitions on the next reservation/dispatch, not GET.
+        const previous = await this.storage.get(KEY);
+        return Response.json({ok:true,...status(evaluate(previous ? structuredClone(previous) : initial(now), now))});
+      }
       const result = await this.storage.transaction(async tx => {
         const previous = await tx.get(KEY);
         const original = JSON.stringify(previous);
