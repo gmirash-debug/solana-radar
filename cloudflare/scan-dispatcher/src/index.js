@@ -1448,8 +1448,8 @@ export default {
           if (request.method !== "POST") return json({ ok: false, error: "POST required" }, 405, corsHeaders(request, env));
           const payload = await request.json();
           const now = isoNow();
-          const durable = await runtimeDocument(env, "discovery_status", payload?.status || {}, normalizeId(payload?.status?.last_attempt_at) || now);
-          if (durable) return json({ok:true, updated_at:now, storage_source:"durable_snapshot"});
+          const durable = await runtimeDocument(env, "discovery_status", payload?.status || {}, normalizeId(payload?.status?.last_attempt_at) || now).catch(() => null);
+          if (durable?.ok) return json({ok:true, updated_at:now, storage_source:"durable_snapshot"});
           await upsertStateDoc(env.RADAR_DB, "discovery_status", payload?.status || {}, normalizeId(payload?.status?.last_attempt_at) || now, now);
           return json({ ok: true, updated_at: now }, 200, corsHeaders(request, env));
         }
@@ -1460,8 +1460,8 @@ export default {
           // Scanner clients send { status }, while an operator can safely replay
           // a raw scanner_status.json document during incident recovery.
           const status = scanStatusPayload(payload);
-          const durable = await runtimeDocument(env, "scan_status", status, normalizeId(status.last_attempt_at) || now);
-          if (durable) return json({ok:true, updated_at:now, storage_source:"durable_snapshot"});
+          const durable = await runtimeDocument(env, "scan_status", status, normalizeId(status.last_attempt_at) || now).catch(() => null);
+          if (durable?.ok) return json({ok:true, updated_at:now, storage_source:"durable_snapshot"});
           await upsertStateDoc(
             env.RADAR_DB,
             "scan_status",

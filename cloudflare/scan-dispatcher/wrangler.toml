@@ -58,6 +58,8 @@ HISTORY_DERIVED_MODE = "daily"
 HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS = "180000"
 # Turso calls are external requests; share the free invocation cap with Learning.
 HISTORY_QUEUE_FLUSH_QUERIES = "24"
+# Preserve free DO write headroom for operational state and the R2 guard.
+HISTORY_QUEUE_DAILY_WRITE_UNITS = "15000"
 
 # Retained for an explicit rollback; the Turso adapter does not write to D1.
 [[d1_databases]]

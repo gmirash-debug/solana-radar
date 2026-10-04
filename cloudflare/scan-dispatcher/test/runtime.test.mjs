@@ -25,6 +25,26 @@ function namespace() {
   }};
 }
 const AT = "2026-10-02T23:00:00Z";
+
+test("scan and discovery status fall back to operational SQL on control-write quota errors",async()=>{
+  for(const failure of ["throw","response"]){
+    for(const name of ["scan","discovery"]){
+      const saved=[];
+      const env={RADAR_INGEST_SECRET:"secret",RADAR_DB:{prepare(){return {bind(...args){this.args=args;return this;},
+        async run(){saved.push(this.args);return {meta:{changes:1}};}};}},
+        RUNTIME_SNAPSHOTS:{idFromName:n=>n,get:()=>({async fetch(){
+          if(failure==="throw")throw new Error("Exceeded allowed rows written in Durable Objects free tier.");
+          return Response.json({ok:false,error:"control storage unavailable"},{status:400});
+        }})}};
+      const status={last_attempt_at:AT,status:"completed"};
+      const response=await worker.fetch(new Request(`https://worker/api/${name}/status`,{method:"POST",
+        headers:{"x-radar-ingest-secret":"secret"},body:JSON.stringify({status})}),env,{});
+      assert.equal(response.status,200);assert.equal((await response.json()).ok,true);
+      assert.equal(saved.length,1);assert.equal(saved[0][0],`${name}_status`);
+      assert.equal(JSON.parse(saved[0][1]).last_attempt_at,AT);
+    }
+  }
+});
 async function put(object, value, updated_at=AT, revision=1) {
   return object.fetch(new Request("https://runtime/doc", {method:"POST", body:JSON.stringify({value,updated_at,revision})}));
 }

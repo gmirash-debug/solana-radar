@@ -13,6 +13,38 @@ from runtime_dashboard import dashboard_documents
 
 
 class RuntimePartitioningTests(unittest.TestCase):
+    def test_control_write_quota_keeps_archive_pending_but_publishes_current_sql(self):
+        event = {"event_id": "valid", "episode": {"episode_id": "episode", "token_address": "mint", "caught_at": "2026-10-03T00:00:00Z"},
+                 "event": {"event_type": "signal", "observed_at": "2026-10-03T00:00:00Z"}}
+        report = {"generated_at": "2026-10-03T00:00:00Z"}
+        body = {"report": report, "history_ledger": {"events": [event]},
+                "detail_signal_theses": [{"token_address": "mint"}]}
+        original = copy.deepcopy(body)
+        def exhausted(method, path, config, payload, **kwargs):
+            if path.startswith("/api/runtime/"):
+                raise RuntimeError("Remote HTTP 500: Exceeded allowed rows written in Durable Objects free tier.")
+            return {"ok": True}
+        with tempfile.TemporaryDirectory() as directory, patch.object(s, "REMOTE_OUTBOX_DIR", Path(directory)), \
+             patch.object(s, "remote_data_url_from_env", return_value="https://example.invalid"), \
+             patch.object(s, "remote_ingest_secret", return_value="test"), \
+             patch.object(s, "build_dashboard_snapshot", return_value=body), \
+             patch.object(s, "remote_api_call", side_effect=exhausted) as remote:
+            result = s.sync_remote_snapshot(report, {}, {})
+            self.assertTrue(result["current_synced"])
+            self.assertEqual(result["pending"], 1)
+            self.assertFalse(result["durable_dashboard_synced"])
+            self.assertIn("Cloudflare daily", result["deferred_reason"])
+            self.assertEqual(body["history_ledger"], original["history_ledger"])
+            self.assertIn("/api/ingest/details", [call.args[1] for call in remote.call_args_list])
+            import gzip
+            pending = json.loads(gzip.decompress(next(Path(directory).glob("*.gz")).read_bytes()))
+            self.assertNotIn("durable_history_ledger", pending["_sync_progress"])
+            self.assertEqual(pending["_sync_progress"]["summary"], 1)
+            with patch.object(s, "remote_api_call", return_value={"ok": True}) as resumed:
+                self.assertTrue(s.send_remote_snapshot(pending, {}))
+            self.assertEqual([call.args[1] for call in resumed.call_args_list], ["/api/runtime/history"])
+            self.assertEqual(pending["history_ledger"], original["history_ledger"])
+
     def test_r2_budget_pause_keeps_history_unacknowledged_but_publishes_current_sql(self):
         event = {"event_id": "valid", "episode": {"episode_id": "episode", "token_address": "mint", "caught_at": "2026-10-03T00:00:00Z"},
                  "event": {"event_type": "signal", "observed_at": "2026-10-03T00:00:00Z"}}

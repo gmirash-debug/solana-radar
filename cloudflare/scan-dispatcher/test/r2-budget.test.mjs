@@ -7,7 +7,7 @@ function fixture(t, baseline = {}) {
   let now = Date.parse("2026-10-03T12:00:00Z");
   const saved = Date.now; Date.now = () => now; t.after(()=>{Date.now=saved;});
   const values = new Map(); let tail = Promise.resolve(), writes = 0;
-  const storage = {transaction(fn) {
+  const storage = {async get(key) { return structuredClone(values.get(key)); }, transaction(fn) {
     const promise = tail.then(async()=>{
       const staged = new Map(structuredClone([...values]));
       const result = await fn({async get(key){return staged.get(key);},
@@ -39,6 +39,21 @@ test("every HEAD, GET, PUT and LIST is charged before native I/O",async t=>{
   assert.equal(f.calls.length,4);
   const before=f.writes;await f.call("status");await f.call("status");assert.equal(f.writes,before);
   assert.equal(guardR2Env(env),env);
+});
+
+test("public budget monitoring survives write exhaustion without mutating the guard or bypassing reservations",async t=>{
+  const f=fixture(t,{class_a:899999});await f.seed();
+  const saved=structuredClone([...f.values]),writes=f.writes;
+  f.storage.transaction=async()=>{throw new Error("Exceeded allowed rows written in Durable Objects free tier.");};
+  f.advance("2026-11-01T00:00:00Z");
+  const response=await worker.fetch(new Request("https://radar/api/storage/r2-budget"),f.env);
+  assert.equal(response.status,200);
+  const budget=await response.json();
+  assert.equal(budget.paused,true);assert.equal(budget.pause_reason,"rolling_class_a");
+  assert.equal(budget.usage.class_a,899999);assert.equal(budget.calendar_usage.class_a,0);
+  assert.equal(f.writes,writes);assert.deepEqual([...f.values],saved);
+  await assert.rejects(guardR2Env(f.env).RADAR_ARCHIVE.put("blocked","x"),/r2_budget_unavailable/);
+  assert.equal(f.calls.length,0);
 });
 
 test("failed network operations remain conservatively charged",async t=>{
