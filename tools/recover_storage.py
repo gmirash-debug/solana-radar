@@ -23,8 +23,9 @@ def recover(maximum=10, seconds=120):
     result = {"archived":0,"replayed":0,"deferred":0,"rpc_calls":0}
     state = scanner.load_json(scanner.STATE_PATH,{})
     if (state.get("_runtime") or {}).get("updated_at"):
-        checkpoint = scanner.sync_runtime_checkpoint(state,{"runtime_checkpoint_budget_seconds":60},"deep")
+        checkpoint = scanner.sync_runtime_checkpoint(state,{"runtime_checkpoint_budget_seconds":min(180,seconds)},"deep")
         result["checkpoint_saved"] = checkpoint.get("accepted") is True
+        result["checkpoint_parts"] = {key:checkpoint.get(key,0) for key in ("parts_total","parts_reused","parts_uploaded")}
     paths = sorted([*scanner.REMOTE_OUTBOX_DIR.glob("*.json.gz"),
                     *(scanner.REMOTE_OUTBOX_DIR/"quarantine").glob("*.json.gz")])[:maximum]
     for path in paths:
@@ -90,8 +91,10 @@ def main():
     parser.add_argument("--max-seconds",type=int,default=120,choices=range(1,181))
     args = parser.parse_args()
     try:
-        print(json.dumps(recover(args.max_items,args.max_seconds)))
-        return 0
+        result=recover(args.max_items,args.max_seconds)
+        result["status"] = "checkpoint_pending" if result.get("checkpoint_saved") is False else "partial" if result["deferred"] else "ok"
+        print(json.dumps(result))
+        return 1 if result["status"]=="checkpoint_pending" else 0
     except (ValueError,RuntimeError,requests.RequestException):
         print("Storage recovery deferred; unacknowledged originals remain preserved")
         return 1

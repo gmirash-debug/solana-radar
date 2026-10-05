@@ -1218,7 +1218,7 @@ export default {
     catch (error) { return json({ok:false, error:error.message}, 503); }
     const url = new URL(request.url);
 
-    if (url.pathname === "/api/storage/archive-backup") {
+    if (["/api/storage/archive-backup","/api/storage/archive-backup/batch"].includes(url.pathname)) {
       try { return await archiveBackupResponse(env,request); }
       catch { return json({ok:false,error:"archive_backup_unavailable"},503); }
     }

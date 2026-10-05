@@ -144,7 +144,8 @@ function archiveFixture(f) {
   f.env.RADAR_ARCHIVE={
     async put(key,data,options){rows.set(key,{data:Uint8Array.from(data),meta:options.customMetadata});},
     async head(key){return metadata(rows.get(key));},
-    async get(key){const row=rows.get(key);return row ? {...metadata(row),body:new Blob([row.data]).stream()} : null;},
+    async get(key){const row=rows.get(key);return row ? {...metadata(row),body:new Blob([row.data]).stream(),
+      arrayBuffer:async()=>Uint8Array.from(row.data).buffer} : null;},
     async list(){return {objects:[...rows].map(([key,row])=>({key,size:row.data.byteLength,etag:"etag"})),truncated:false};}
   };
   return rows;
@@ -190,4 +191,41 @@ test("archive backup credential permits only reads and cannot bypass the R2 guar
   assert.equal((await data.arrayBuffer()).byteLength,3);
   f.env.R2_BUDGET_GUARD="enabled";
   await assert.rejects(archiveBackupResponse(f.env,new Request(url,{headers})),/R2|DO|r2_budget/);
+});
+
+test("bounded archive batch preserves requested order and exact binary bodies",async t=>{
+  const f=fixture(t),objects=archiveFixture(f),keys=["history/v1/b","outbox/v1/a"];
+  keys.forEach((key,i)=>objects.set(key,{data:new Uint8Array([i,0,255]),meta:{}}));
+  f.env.RADAR_ARCHIVE_BACKUP_SECRET="read-only-test";
+  const request=()=>new Request("https://worker/api/storage/archive-backup/batch",{method:"POST",
+    headers:{"x-radar-archive-backup-secret":"read-only-test"},body:JSON.stringify({keys})});
+  const before=f.writes,response=await archiveBackupResponse(f.env,request());
+  assert.equal(response.headers.get("x-radar-batch-count"),"2");
+  const bytes=new Uint8Array(await response.arrayBuffer());let offset=0;
+  for(const [index,key] of keys.entries()) {
+    const size=new DataView(bytes.buffer).getUint32(offset);offset+=4;
+    const header=JSON.parse(new TextDecoder().decode(bytes.slice(offset,offset+size)));offset+=size;
+    assert.deepEqual(header,{key,bytes:3,etag:"etag"});
+    assert.deepEqual(bytes.slice(offset,offset+header.bytes),new Uint8Array([index,0,255]));offset+=header.bytes;
+  }
+  assert.equal(offset,bytes.length);assert.equal(f.writes,before);
+  f.env.R2_BUDGET_GUARD="enabled";
+  await assert.rejects(archiveBackupResponse(f.env,request()),/R2|DO|r2_budget/);
+});
+
+test("archive batch rejects invalid, missing, oversized and incomplete bodies",async t=>{
+  const f=fixture(t),objects=archiveFixture(f),key="runtime/v1/a";
+  f.env.RADAR_ARCHIVE_BACKUP_SECRET="read-only-test";
+  const request=keys=>new Request("https://worker/api/storage/archive-backup/batch",{method:"POST",
+    headers:{"x-radar-archive-backup-secret":"read-only-test"},body:JSON.stringify({keys})});
+  for(const keys of [[],[key,key],Array.from({length:17},(_,i)=>`runtime/v1/${i}`),["secrets/a"],["outbox/../a"]]) {
+    assert.equal((await archiveBackupResponse(f.env,request(keys))).status,400);
+  }
+  await assert.rejects(archiveBackupResponse(f.env,request([key])),/capacity_or_missing/);
+  objects.set(key,{data:new Uint8Array(8*1024*1024),meta:{}});
+  assert.equal((await archiveBackupResponse(f.env,request([key]))).status,200);
+  objects.set("runtime/v1/b",{data:new Uint8Array(1),meta:{}});
+  await assert.rejects(archiveBackupResponse(f.env,request([key,"runtime/v1/b"])),/capacity_or_missing/);
+  f.env.RADAR_ARCHIVE.get=async()=>({size:2,etag:"etag",arrayBuffer:async()=>new Uint8Array(1).buffer});
+  await assert.rejects(archiveBackupResponse(f.env,request([key])),/body_incomplete/);
 });

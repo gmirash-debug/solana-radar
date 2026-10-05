@@ -1369,9 +1369,11 @@ def load_runtime_checkpoint(state, config, kind):
 def sync_runtime_checkpoint(state, config, kind):
     if not remote_data_url_from_env() or not remote_ingest_secret():
         return {"status": "local_only"}
+    progress = {"parts_total":0,"parts_reused":0,"parts_uploaded":0}
     try:
         runtime = state.get("_runtime", {})
         checkpoint, parts = checkpoint_documents(build_checkpoint(state))
+        progress["parts_total"] = len(parts)
         deadline = time.monotonic() + min(180,max(10,int(config.get("runtime_checkpoint_budget_seconds",180))))
         available = {}
         for start in range(0, len(parts), 250):
@@ -1384,19 +1386,22 @@ def sync_runtime_checkpoint(state, config, kind):
                 break
         for part in parts:
             if available.get(part["sha256"]) == part["encoded_bytes"]:
+                progress["parts_reused"] += 1
                 continue
             safe_runtime_upload("/api/runtime/checkpoint", config, {
                 "checkpoint": part, "updated_at": runtime.get("updated_at"), "revision": runtime.get("revision", 0)},
                 deadline, params={"kind": kind, "part": part["sha256"]})
+            progress["parts_uploaded"] += 1
         result = safe_runtime_upload("/api/runtime/checkpoint", config, {
             "checkpoint": checkpoint, "updated_at": runtime.get("updated_at"),
             "revision": runtime.get("revision", 0)}, deadline, params={"kind": kind})
         if result.get("ok") is not True or result.get("accepted") is not True:
             raise RuntimeError("runtime checkpoint was not acknowledged")
+        result.update(progress)
         config[f"_runtime_{kind}_saved"] = result
         return result
     except Exception as exc:
-        result = {"ok": False, "error": str(exc)[:300]}
+        result = {"ok": False, "error": str(exc)[:300],**progress}
         config[f"_runtime_{kind}_saved"] = result
         print(f"Durable checkpoint save unavailable; local state kept: {exc}", file=sys.stderr)
         return result
@@ -1564,13 +1569,16 @@ def send_remote_snapshot(payload, config, deadline=None, legacy=False):
     generated_at = (payload.get("report") or {}).get("generated_at") or payload.get("generated_at")
     events = (payload.get("history_ledger") or {}).get("events") or []
     generated_time = source_time(generated_at)
-    recent_episodes = {row.get("episode", {}).get("episode_id") for row in events if isinstance(row,dict)
-                       and generated_time is not None and source_time(row.get("event", {}).get("observed_at")) is not None
-                       and source_time(row["event"]["observed_at"])>=generated_time-24*3600}
+    def priority_identity(row):
+        if not isinstance(row,dict) or not isinstance(row.get("episode"),dict) or not isinstance(row.get("event"),dict):
+            return "",None
+        episode = row["episode"].get("episode_id")
+        return (episode if isinstance(episode,str) and episode else "",source_time(row["event"].get("observed_at")))
+    recent_episodes = {episode for episode,observed in map(priority_identity,events)
+                       if episode and generated_time is not None and observed is not None and observed>=generated_time-24*3600}
     if not progress.get("durable_history_ledger") and config.get("remote_legacy_snapshot_enabled") is False:
-        events.sort(key=lambda row: (row.get("episode", {}).get("episode_id") not in recent_episodes,
-                                    row.get("episode", {}).get("episode_id") or "",
-                                    row.get("event", {}).get("observed_at") or ""))
+        events.sort(key=lambda row: (priority_identity(row)[0] not in recent_episodes,
+                                    priority_identity(row)[0],priority_identity(row)[1] or 0))
     rejected = payload.setdefault("_sync_rejected_history", {})
     for index, row in enumerate(events):
         reason = history_event_error(row)
@@ -1592,8 +1600,8 @@ def send_remote_snapshot(payload, config, deadline=None, legacy=False):
         try:
             send("durable_history_ledger", end, "/api/runtime/history",
                  {"generated_at": generated_at, "history_ledger": {"events": history_batch(start, end)},
-                  "priority_episodes": sorted({row.get("episode", {}).get("episode_id") for row in batch
-                                               if row.get("episode", {}).get("episode_id") in recent_episodes})})
+                  "priority_episodes": sorted({priority_identity(row)[0] for row in batch
+                                               if priority_identity(row)[0] in recent_episodes})})
         except RuntimeError as exc:
             reason = str(exc)
             control_quota = "Exceeded allowed rows written in Durable Objects free tier" in reason
