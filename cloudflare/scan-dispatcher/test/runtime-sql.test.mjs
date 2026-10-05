@@ -70,6 +70,25 @@ test("SQL checkpoint rejects missing or corrupted parts, publishes atomically, a
   assert.equal(f.sql.prepare("SELECT COUNT(*) n FROM runtime_sql_references").get().n,1);
 });
 
+test("equivalent checkpoint representations can change without changing source time or revision",async t=>{
+  const f=fixture(t),a=await blob("AAAA"),b=await blob("BBBB"),runtime={updated_at:AT,revision:2};
+  await writeSqlRuntime(f.env,`checkpoint:deep:blob:${a.sha256}`,a,AT);
+  await writeSqlRuntime(f.env,`checkpoint:deep:blob:${b.sha256}`,b,AT);
+  const before={...manifest(a),runtime};
+  await writeSqlRuntime(f.env,"checkpoint:deep",before,AT,2);
+  const next={...manifest(b),runtime};
+  assert.equal((await writeSqlRuntime(f.env,"checkpoint:deep",next,AT,2)).accepted,true);
+  assert.equal((await readSqlRuntime(f.env,"checkpoint:deep")).updated_at,AT);
+  assert.equal((await readSqlRuntime(f.env,"checkpoint:deep")).revision,2);
+  const wrong={...before,sha256:"e".repeat(64)};
+  assert.equal((await writeSqlRuntime(f.env,"checkpoint:deep",wrong,AT,2)).accepted,false);
+  assert.deepEqual((await readSqlRuntime(f.env,"checkpoint:deep")).value,next);
+  const missing={...next,parts:[{id:"d".repeat(64),bytes:4}]};
+  assert.equal((await writeSqlRuntime(f.env,"checkpoint:deep",missing,AT,2)).accepted,false);
+  assert.deepEqual((await readSqlRuntime(f.env,"checkpoint:deep")).value,next);
+  assert.equal((await writeSqlRuntime(f.env,"checkpoint:deep",before,"2026-10-03T12:00:00Z",9)).accepted,false);
+});
+
 test("generation-bound token evidence never becomes a public checkpoint or a different token",async t=>{
   const f=fixture(t),part=await blob(JSON.stringify({token_key:"token",thesis:{cohort:[{owner:"owner"}]}}),"json-ascii");
   await writeSqlRuntime(f.env,`dashboard:blob:${part.sha256}`,part,AT);

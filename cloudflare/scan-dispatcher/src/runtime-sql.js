@@ -57,6 +57,13 @@ export async function writeSqlRuntime(env, name, value, updatedAt, revision = 0)
   const bytes = payload ? encoder.encode(payload).byteLength : 0;
   if (!bytes || bytes > MAX_BYTES) throw new Error("runtime_document_exceeds_8mb");
   const digest = await sha256(payload);
+  const representationUpgrade = !blob && /^checkpoint:(deep|discovery)$/.test(name)
+    && value?.schema_version===2 && /^[a-f0-9]{64}$/.test(value.sha256 || "")
+    ? ` OR (excluded.source_ms=runtime_sql_documents.source_ms AND excluded.revision=runtime_sql_documents.revision
+       AND json_extract(runtime_sql_documents.payload_json,'$.sha256')=json_extract(excluded.payload_json,'$.sha256')
+       AND json_extract(runtime_sql_documents.payload_json,'$.decoded_bytes')=json_extract(excluded.payload_json,'$.decoded_bytes')
+       AND json_extract(runtime_sql_documents.payload_json,'$.runtime')=json_extract(excluded.payload_json,'$.runtime'))`
+    : "";
   const db = database(env);
   const touchedAt = Date.now();
   let previousLedger;
@@ -121,7 +128,8 @@ export async function writeSqlRuntime(env, name, value, updatedAt, revision = 0)
     WHERE (runtime_sql_documents.content_id IS NOT NULL AND runtime_sql_documents.payload_sha256=excluded.payload_sha256)
       OR (runtime_sql_documents.content_id IS NULL AND
       (excluded.source_ms>runtime_sql_documents.source_ms OR
-       (excluded.source_ms=runtime_sql_documents.source_ms AND excluded.revision>runtime_sql_documents.revision)))`).bind(...args);
+       (excluded.source_ms=runtime_sql_documents.source_ms AND excluded.revision>runtime_sql_documents.revision)
+       ${representationUpgrade}))`).bind(...args);
   const statements = [write];
   if (!blob) {
     // A restore that fetched the superseded manifest keeps its parts for 48h.

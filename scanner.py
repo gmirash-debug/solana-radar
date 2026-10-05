@@ -1396,7 +1396,10 @@ def sync_runtime_checkpoint(state, config, kind):
             "checkpoint": checkpoint, "updated_at": runtime.get("updated_at"),
             "revision": runtime.get("revision", 0)}, deadline, params={"kind": kind})
         if result.get("ok") is not True or result.get("accepted") is not True:
-            raise RuntimeError("runtime checkpoint was not acknowledged")
+            raise RuntimeError("runtime checkpoint was not acknowledged: " + json.dumps({
+                "ignored":result.get("ignored"),"server_updated_at":result.get("updated_at"),
+                "server_revision":result.get("revision"),"local_updated_at":runtime.get("updated_at"),
+                "local_revision":runtime.get("revision",0)},separators=(",",":")))
         result.update(progress)
         config[f"_runtime_{kind}_saved"] = result
         return result
