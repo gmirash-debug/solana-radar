@@ -21,8 +21,9 @@ def build_checkpoint(state):
     encoded = base64.b64encode(gzip.compress(raw, mtime=0)).decode("ascii")
     if len(encoded) > MAX_ENCODED_BYTES:
         raise ValueError("runtime checkpoint exceeds durable capacity; evidence was not truncated")
+    runtime = json.loads(json.dumps(durable.get("_runtime", {}),sort_keys=True,ensure_ascii=True,allow_nan=False))
     return {"schema_version": 1, "encoding": "gzip+base64", "sha256": hashlib.sha256(raw).hexdigest(),
-            "decoded_bytes": len(raw), "data": encoded, "runtime": durable.get("_runtime", {})}
+            "decoded_bytes": len(raw), "data": encoded, "runtime": runtime}
 
 
 def decode_checkpoint(payload):
