@@ -15,7 +15,7 @@ REBUILDABLE_KEYS = {"wallet_cache", "social_cache", "gmgn_cache", "enrichment_ca
 
 def build_checkpoint(state):
     durable = {key: value for key, value in state.items() if key not in REBUILDABLE_KEYS}
-    raw = json.dumps(durable, separators=(",", ":"), ensure_ascii=True).encode()
+    raw = json.dumps(durable, separators=(",", ":"), ensure_ascii=True, sort_keys=True, allow_nan=False).encode()
     if len(raw) > MAX_DECODED_BYTES:
         raise ValueError("runtime checkpoint exceeds decoded safety limit")
     encoded = base64.b64encode(gzip.compress(raw, mtime=0)).decode("ascii")
