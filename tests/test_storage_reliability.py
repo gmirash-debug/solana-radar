@@ -1,8 +1,11 @@
 import copy
+import base64
 import gzip
+import hashlib
 import json
 import random
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -82,6 +85,58 @@ class StorageReliabilityTests(unittest.TestCase):
                  patch("sys.argv",["recover_storage"]),patch("builtins.print") as output:
                 self.assertEqual(recover_storage.main(),exit_code)
             self.assertEqual(json.loads(output.call_args.args[0])["status"],status)
+
+    def test_checkpoint_identity_survives_sorted_state_round_trip(self):
+        state={"z":{"last":1,"first":2},"a":[{"y":3,"x":4}],
+               "_runtime":{"revision":3,"updated_at":"2026-10-05T12:00:00Z"}}
+        reloaded=json.loads(json.dumps(state,sort_keys=True))
+        self.assertEqual(build_checkpoint(state),build_checkpoint(reloaded))
+
+    def test_verified_legacy_order_migration_keeps_source_dates_and_advances_only_private_revision(self):
+        remote_state={"pools":{"token":{"cohort":[{"owner":"holder","caught_at":"2026-09-02T00:00:00Z"}]}},
+                      "_runtime":{"revision":3,"updated_at":"2026-10-05T12:00:00Z","schema_version":1}}
+        raw=json.dumps(remote_state,separators=(",",":"),ensure_ascii=True).encode()
+        remote={"schema_version":1,"encoding":"gzip+base64","sha256":hashlib.sha256(raw).hexdigest(),
+                "decoded_bytes":len(raw),"data":base64.b64encode(gzip.compress(raw,mtime=0)).decode(),
+                "runtime":remote_state["_runtime"]}
+        local=json.loads(json.dumps(remote_state,sort_keys=True))
+        with patch.object(scanner,"remote_api_call",return_value={"document":{"value":remote}}), \
+             patch.object(scanner,"save_json") as write, \
+             patch.object(scanner,"sync_runtime_checkpoint",return_value={"ok":True,"accepted":True}) as sync:
+            result=recover_storage.recover_checkpoint(local,{},time.monotonic()+420)
+        self.assertTrue(result["canonicalized"])
+        saved=sync.call_args.args[0]
+        self.assertEqual(saved["_runtime"]["revision"],4)
+        self.assertEqual(saved["_runtime"]["updated_at"],remote_state["_runtime"]["updated_at"])
+        self.assertEqual(saved["pools"],remote_state["pools"])
+        write.assert_called_once()
+
+    def test_same_version_changed_evidence_or_corruption_cannot_be_migrated(self):
+        local={"pools":{"token":{"held":10}},"_runtime":{"revision":3,"updated_at":"2026-10-05T12:00:00Z"}}
+        different=copy.deepcopy(local);different["pools"]["token"]["held"]=0
+        for corrupt in (False,True):
+            remote=build_checkpoint(different)
+            if corrupt:
+                remote["sha256"]="0"*64
+            with patch.object(scanner,"remote_api_call",return_value={"document":{"value":remote}}), \
+                 patch.object(scanner,"save_json") as write,patch.object(scanner,"sync_runtime_checkpoint") as sync:
+                with self.assertRaises((RuntimeError,ValueError)):
+                    recover_storage.recover_checkpoint(local,{},time.monotonic()+420)
+            write.assert_not_called();sync.assert_not_called()
+        self.assertEqual(local["pools"]["token"]["held"],10)
+
+    def test_newer_verified_remote_state_is_restored_without_replacing_source_dates(self):
+        remote_state={"pools":{"new":{"held":9,"caught_at":"2026-09-02T00:00:00Z"}},
+                      "_runtime":{"revision":4,"updated_at":"2026-10-05T13:00:00Z"}}
+        local={"_runtime":{"revision":3,"updated_at":"2026-10-05T12:00:00Z"},"wallet_cache":{"kept":1}}
+        with patch.object(scanner,"remote_api_call",return_value={"document":{"value":build_checkpoint(remote_state)}}), \
+             patch.object(scanner,"save_json"), \
+             patch.object(scanner,"sync_runtime_checkpoint",return_value={"ok":True,"accepted":True}) as sync:
+            result=recover_storage.recover_checkpoint(local,{},time.monotonic()+420)
+        self.assertTrue(result["restored_newer"])
+        self.assertFalse(result["canonicalized"])
+        self.assertEqual(sync.call_args.args[0]["pools"],remote_state["pools"])
+        self.assertEqual(sync.call_args.args[0]["wallet_cache"],{"kept":1})
 
     def test_archive_identity_is_stable_across_progress_and_progress_needs_ack(self):
         body={"report":{"generated_at":"2026-10-05T12:00:00Z"},"original":{"caught":"2026-09-02T00:00:00Z"},

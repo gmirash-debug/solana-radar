@@ -238,7 +238,7 @@ jobs:
             ${{ runner.os }}-solana-radar-outbox-v1-
 
       - name: Record pre-writer runtime revisions
-        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.observe_robinhood == 'true'
+        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.observe_robinhood == 'true' || steps.plan.outputs.recover_storage == 'true'
         run: python tools/runtime_cache.py capture "$RUNNER_TEMP/radar-runtime-baseline.json"
 
       - name: Record pre-scan outbox contents
@@ -297,7 +297,7 @@ jobs:
         env:
           RADAR_DATA_API_URL: https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev
           RADAR_INGEST_SECRET: ${{ secrets.RADAR_INGEST_SECRET }}
-        run: python tools/recover_storage.py --max-items 25 --max-seconds 180
+        run: python tools/recover_storage.py --max-items 25 --max-seconds 420
 
       - name: Run scanner
         id: run_scanner
@@ -435,7 +435,7 @@ jobs:
 
       - name: Validate failure-safe runtime cache
         id: runtime_cache
-        if: always() && (steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.observe_robinhood == 'true')
+        if: always() && (steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.observe_robinhood == 'true' || steps.plan.outputs.recover_storage == 'true')
         run: python tools/runtime_cache.py validate "$RUNNER_TEMP/radar-runtime-baseline.json" >> "$GITHUB_OUTPUT"
 
       - name: Save scanner runtime state
