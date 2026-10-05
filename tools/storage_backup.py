@@ -25,7 +25,9 @@ lacks system trust roots; never bypass TLS verification. A non-published local
 backup requires --output pointing to an empty private directory.
 
 The 1000-second workflow budget includes export, full local verification, gzip
-restoration verification and upload. Requests have at most 20-second timeouts.
+restoration verification and upload. SQL/control requests have at most 20-second
+timeouts; streamed asset upload waits are bounded to 120 seconds and the same
+total deadline.
 The job is capped at 20 minutes; configurable tool budgets cannot exceed 1080
 seconds, preserving setup/termination headroom. Runtime on the complete remote
 dataset must be measured before declaring the daily recovery path ready.
@@ -146,6 +148,10 @@ class Deadline:
     def timeout(self):
         self.check()
         return max(0.01, min(20, self.end - self.clock()))
+
+    def upload_timeout(self):
+        self.check()
+        return max(0.01,min(120,self.end-self.clock()))
 
 
 def compact(value):
@@ -836,7 +842,36 @@ class GitHub:
         if size > MAX_ASSET_BYTES:
             raise BackupError("backup exceeds GitHub release asset size limit")
         endpoint = self.prefix + f"/releases/{release_id}/assets?name=" + urllib.parse.quote(path.name, safe="")
-        connection = self.connection_factory("uploads.github.com", timeout=self.deadline.timeout())
+        connection = self.connection_factory("uploads.github.com", timeout=self.deadline.upload_timeout())
+        def set_timeout():
+            value=self.deadline.upload_timeout()
+            connection.timeout=value
+            if getattr(connection,"sock",None):
+                connection.sock.settimeout(value)
+        def matches(asset):
+            return (isinstance(asset,dict) and asset.get("size")==size and asset.get("name")==path.name
+                and asset.get("state")=="uploaded" and asset.get("digest")=="sha256:"+expected_sha)
+        def reconcile():
+            # Recover an uncertain acknowledgement by reading metadata, never
+            # by blindly posting the same large asset again.
+            end=min(self.deadline.end,self.deadline.clock()+60)
+            for _ in range(12):
+                self.deadline.check()
+                assets=self.request(self.prefix+f"/releases/{release_id}/assets?per_page=100")
+                if not isinstance(assets,list):
+                    return None
+                found=[asset for asset in assets if asset.get("name")==path.name]
+                if not found or len(found)>1:
+                    return None
+                if found and matches(found[0]):
+                    return found[0]
+                if found and found[0].get("digest"):
+                    return None
+                if self.deadline.clock()>=end:
+                    break
+                time.sleep(min(5,max(0,end-self.deadline.clock())))
+            return None
+        print(f"Private backup upload: bytes={size}",flush=True)
         try:
             connection.putrequest("POST", endpoint)
             for name, value in {**self.headers(), "Content-Type":"application/octet-stream", "Content-Length":str(size)}.items():
@@ -844,20 +879,36 @@ class GitHub:
             connection.endheaders()
             with path.open("rb") as handle:
                 for block in iter(lambda:handle.read(1024 * 1024), b""):
-                    self.deadline.check()
+                    set_timeout()
                     connection.send(block)
+            set_timeout()
             response = connection.getresponse()
+            set_timeout()
             raw = response.read(MAX_REQUEST_BYTES + 1)
             if response.status != 201 or len(raw) > MAX_REQUEST_BYTES:
                 raise ValueError
             asset = json.loads(raw)
-            if (asset.get("size") != size or asset.get("name") != path.name or asset.get("state") != "uploaded"
-                    or asset.get("digest") != "sha256:" + expected_sha):
+            if not matches(asset):
+                print("Private backup upload acknowledgement: " + compact({"http_status":response.status,
+                    "size_matches":asset.get("size")==size,"uploaded":asset.get("state")=="uploaded",
+                    "digest_present":bool(asset.get("digest")),"digest_matches":asset.get("digest")=="sha256:"+expected_sha}),flush=True)
+                if not asset.get("digest"):
+                    confirmed=reconcile()
+                    if confirmed:
+                        return confirmed
                 raise ValueError
             return asset
         except ssl.SSLCertVerificationError:
             raise BackupTLSCertificateError() from None
-        except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException):
+        except (OSError, http.client.HTTPException):
+            try:
+                confirmed=reconcile()
+                if confirmed:
+                    return confirmed
+            except BackupError:
+                pass
+            raise BackupError("private backup upload or remote SHA-256 verification failed") from None
+        except (ValueError, KeyError, TypeError):
             raise BackupError("private backup upload or remote SHA-256 verification failed") from None
         finally:
             connection.close()
@@ -906,9 +957,9 @@ class GitHub:
         release_id = release["id"]
         verified = False
         try:
-            self.upload(release_id, archive, manifest["archive_sha256"])
             manifest_sha = file_sha(manifest_path, self.deadline)
             self.upload(release_id, manifest_path, manifest_sha)
+            self.upload(release_id, archive, manifest["archive_sha256"])
             verified = True
             self.assert_private()
             self.request(self.prefix + "/releases/" + str(release_id), "PATCH", {"body":RELEASE_MARKER
@@ -926,13 +977,9 @@ class GitHub:
             # Do not delete a verified recovery point after a publication or
             # retention failure. No prior backup is ever
             # removed before both replacement assets have passed SHA checks.
-            if not verified:
-                try:
-                    self.assert_private()
-                    self.request(self.prefix + "/releases/" + str(release_id), "DELETE")
-                    self.request(self.prefix + "/git/refs/tags/" + tag, "DELETE")
-                except BackupError:
-                    pass
+            # An uncertain upload may finish after our timeout. Its private
+            # draft and verified manifest stay available for reconciliation;
+            # it is never published or counted as a verified recovery point.
             raise
         return release_id
 
