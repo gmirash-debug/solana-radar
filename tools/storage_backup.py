@@ -234,6 +234,46 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise BackupError("HTTP redirect refused; credentials not forwarded")
 
 
+class PersistentHTTPS:
+    """Reuse TLS within one verified snapshot; never retry a failed request."""
+    def __init__(self):
+        self.connection=None
+        self.host=None
+
+    def close(self):
+        if self.connection:
+            self.connection.close()
+        self.connection=self.host=None
+
+    def open(self,request,timeout):
+        target=urllib.parse.urlsplit(request.full_url)
+        if (target.scheme!="https" or target.username or target.password or target.port
+                or target.query or target.fragment or target.path!="/v3/pipeline"
+                or not (target.hostname or "").endswith(".turso.io")):
+            raise BackupError("invalid Turso database URL")
+        if self.host!=target.hostname:
+            self.close()
+            self.connection=http.client.HTTPSConnection(target.hostname,timeout=timeout,context=ssl.create_default_context())
+            self.host=target.hostname
+        self.connection.timeout=timeout
+        if self.connection.sock:
+            self.connection.sock.settimeout(timeout)
+        try:
+            self.connection.request(request.get_method(),target.path,body=request.data,
+                headers=dict(request.header_items()))
+            response=self.connection.getresponse()
+            if 300<=response.status<400:
+                response.close()
+                raise BackupError("HTTP redirect refused; credentials not forwarded")
+            if response.status>=400:
+                response.close()
+                raise urllib.error.HTTPError(request.full_url,response.status,"database request rejected",response.headers,None)
+            return response
+        except Exception:
+            self.close()
+            raise
+
+
 def turso_endpoint(url):
     try:
         parsed = urllib.parse.urlsplit(re.sub(r"^libsql:", "https:", url, flags=re.I))
@@ -271,7 +311,7 @@ class ReadSnapshot:
             raise BackupError("missing read-only Turso token")
         self._token = token
         self.deadline = deadline or Deadline()
-        self.opener = opener or urllib.request.build_opener(NoRedirect())
+        self.opener = opener or PersistentHTTPS()
         self.baton = None
         self.active = False
         self.broken = False
@@ -400,9 +440,13 @@ class ReadSnapshot:
         return [parse_result(responses[index]["result"]) for index in range(1,len(responses),3)]
 
     def close(self):
-        if self.baton is not None and not self.broken:
-            self._request([self._statement("ROLLBACK"), {"type":"close"}], closing=True)
-        self.active = False
+        try:
+            if self.baton is not None and not self.broken:
+                self._request([self._statement("ROLLBACK"), {"type":"close"}], closing=True)
+        finally:
+            self.active = False
+            if callable(getattr(self.opener,"close",None)):
+                self.opener.close()
 
 
 class LocalReader:
