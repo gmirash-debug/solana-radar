@@ -62,6 +62,8 @@ R2_BUDGET_GUARD = "enabled"
 HISTORY_DERIVED_MODE = "daily"
 # Estimated queue work only; leave room for daily Learning and operational SQL.
 HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS = "180000"
+HISTORY_QUEUE_LIVE_RESERVED_UNITS = "90000"
+HISTORY_QUEUE_LIVE_RESERVED_ROWS = "512"
 # Turso calls are external requests; share the free invocation cap with Learning.
 HISTORY_QUEUE_FLUSH_QUERIES = "24"
 # Preserve free DO write headroom for operational state and the R2 guard.

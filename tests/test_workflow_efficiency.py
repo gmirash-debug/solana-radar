@@ -45,6 +45,12 @@ def condition(step, values=None, succeeded=True):
 
 
 class WorkflowPlanTests(unittest.TestCase):
+    def test_scheduled_storage_recovery_never_runs_rpc_or_pages(self):
+        plan=workflow_plan({"event_name":"schedule"})
+        self.assertTrue(plan["recover_storage"])
+        self.assertFalse(plan["publish_pages"])
+        self.assertFalse(plan["observe_robinhood"])
+
     def setUp(self):
         self.now = datetime(2026, 10, 4, 6, 45, tzinfo=timezone.utc)
 

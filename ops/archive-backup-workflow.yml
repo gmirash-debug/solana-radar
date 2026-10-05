@@ -1,0 +1,31 @@
+# Install only in the PRIVATE backup repository. This read-only token cannot
+# ingest data, modify counters directly, delete source objects or run scans.
+name: Private daily R2 archive backup
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 3 * * *"
+permissions:
+  contents: write
+concurrency:
+  group: private-r2-backup
+  cancel-in-progress: false
+jobs:
+  backup:
+    if: github.event.repository.private == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install requests
+      - name: Copy and verify private archive bodies
+        env:
+          RADAR_DATA_API_URL: https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev
+          RADAR_ARCHIVE_BACKUP_SECRET: ${{ secrets.RADAR_ARCHIVE_BACKUP_SECRET }}
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/archive_backup.py

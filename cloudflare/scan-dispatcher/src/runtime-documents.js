@@ -22,7 +22,7 @@ export async function validateBlob(value, id) {
 export function documentReferences(value, root) {
   if (root.startsWith("checkpoint:") && value?.schema_version === 2) {
     if (value.encoding !== "gzip+base64+parts" || !Array.isArray(value.parts) || !value.parts.length
-        || value.parts.length > 192 || !isContentId(value.sha256)
+        || value.parts.length > 768 || !isContentId(value.sha256)
         || !Number.isInteger(value.decoded_bytes) || value.decoded_bytes < 1 || value.decoded_bytes > 128 * 1024 * 1024) {
       throw new Error("invalid_checkpoint_manifest");
     }

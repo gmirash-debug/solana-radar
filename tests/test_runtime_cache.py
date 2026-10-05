@@ -128,14 +128,17 @@ class WorkflowFailureContractTests(unittest.TestCase):
                                    "error": "credit quota timeout",
                                    "last_attempt_at": datetime.now(timezone.utc).isoformat()}}
         output = io.StringIO()
-        with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "schedule", "GITHUB_EVENT_PATH": "",
-                                    "RADAR_DATA_API_URL": "https://example.invalid"}), \
-                patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps(payload).encode())), \
-                contextlib.redirect_stdout(output):
-            try:
-                exec(compile(textwrap.dedent(block[1]), "workflow-freshness", "exec"), {})
-            except SystemExit:
-                pass
+        with tempfile.TemporaryDirectory() as directory:
+            event=Path(directory)/"event.json"
+            event.write_text(json.dumps({"inputs":{"source":"cloudflare-deep_scan"}}))
+            with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_EVENT_PATH": str(event),
+                                        "RADAR_DATA_API_URL": "https://example.invalid"}), \
+                    patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps(payload).encode())), \
+                    contextlib.redirect_stdout(output):
+                try:
+                    exec(compile(textwrap.dedent(block[1]), "workflow-freshness", "exec"), {})
+                except SystemExit:
+                    pass
         return output.getvalue()
 
     def test_programming_error_with_quota_word_or_health_never_causes_backoff(self):

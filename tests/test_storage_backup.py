@@ -628,6 +628,122 @@ class FakeGitHub:
             "body":backup.RELEASE_MARKER if managed else "Other project release", "draft":draft})
 
 
+class SnapshotRestartTests(unittest.TestCase):
+    def test_cli_retry_discards_old_snapshot_and_exports_a_fresh_one_with_original_deadline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source_path = Path(temporary) / "source.sqlite"
+            writer = sqlite3.connect(source_path)
+            self.addCleanup(writer.close)
+            writer.execute("PRAGMA journal_mode=WAL")
+            fill(writer)
+            now = [0]
+            deadline = backup.Deadline(1000, clock=lambda: now[0])
+            original_client = backup.ReadSnapshot
+            clients, servers, outputs = [], [], []
+            class Publisher:
+                def assert_private(inner):
+                    pass
+                def publish(inner, archive, manifest_path, manifest, keep):
+                    outputs.append((Path(archive), manifest))
+                    self.assertTrue(backup.verify_backup(archive, manifest_path, deadline))
+                    self.assertEqual(manifest["fingerprints"], backup.sqlite_fingerprints(source_path, deadline=deadline))
+            def new_client(url, token, shared_deadline, opener=None):
+                db = sqlite3.connect(source_path)
+                self.addCleanup(db.close)
+                server = FakeHrana(db)
+                if not servers:
+                    original = server.open
+                    def interrupted(request, timeout):
+                        # The first attempt already has a read transaction and
+                        # partial local pages. A new source version is published
+                        # after its transport dies, before the CLI retries.
+                        if len(server.calls) == 3:
+                            now[0] = 200
+                            writer.execute("INSERT INTO sparse(rowid,text) VALUES(999,'new snapshot')")
+                            writer.commit()
+                            raise TimeoutError(TOKEN)
+                        return original(request, timeout)
+                    server.open = interrupted
+                client = original_client(url, token, shared_deadline, server)
+                clients.append(client)
+                servers.append(server)
+                return client
+            out, err = io.StringIO(), io.StringIO()
+            with patch.dict(backup.os.environ, {"TURSO_DATABASE_URL": URL,
+                    "TURSO_BACKUP_AUTH_TOKEN": TOKEN}, clear=True), \
+                    patch.object(backup, "Deadline", return_value=deadline) as deadlines, \
+                    patch.object(backup, "ReadSnapshot", side_effect=new_client), \
+                    patch.object(backup, "GitHub", return_value=Publisher()), \
+                    redirect_stdout(out), redirect_stderr(err):
+                result = backup.main(["backup", "--publish", "--repository", "owner/private-backups"])
+            self.assertEqual(result, 0, err.getvalue())
+            self.assertEqual(len(clients), 2)
+            self.assertTrue(clients[0].broken)
+            self.assertIsNot(clients[0], clients[1])
+            self.assertTrue(all(client.deadline is deadline for client in clients))
+            self.assertEqual(deadline.end, 1000)
+            deadlines.assert_called_once_with(1000)
+            self.assertIsNone(servers[1].calls[0][1]["baton"])
+            self.assertEqual(servers[1].calls[0][1]["requests"][0]["stmt"]["sql"], "BEGIN")
+            self.assertEqual(len(servers[0].calls), 3)
+            self.assertEqual(len(outputs), 1)
+            self.assertEqual(outputs[0][0].parent.name, "attempt-1")
+            self.assertFalse(outputs[0][0].exists())
+            self.assertNotIn(TOKEN, out.getvalue() + err.getvalue())
+
+    def run_failures(self, failures, consumed=0, local=False):
+        now = [0]
+        deadline = backup.Deadline(1000, clock=lambda: now[0])
+        attempts, published = [], []
+        class Publisher:
+            def assert_private(inner):
+                pass
+            def publish(inner, *args):
+                published.append(args)
+        failures = iter(failures)
+        def fail(url, token, output, shared_deadline, **kwargs):
+            attempts.append((Path(output).name, shared_deadline))
+            now[0] += consumed
+            raise next(failures)
+        out, err = io.StringIO(), io.StringIO()
+        args = ["backup", "--output", "/unused-test-output"] if local else [
+            "backup", "--publish", "--repository", "owner/private-backups"]
+        with patch.dict(backup.os.environ, {"TURSO_DATABASE_URL": URL,
+                "TURSO_BACKUP_AUTH_TOKEN": TOKEN}, clear=True), \
+                patch.object(backup, "Deadline", return_value=deadline), \
+                patch.object(backup, "create_backup", side_effect=fail), \
+                patch.object(backup, "GitHub", return_value=Publisher()), \
+                redirect_stdout(out), redirect_stderr(err):
+            result = backup.main(args)
+        self.assertEqual(result, 1)
+        self.assertEqual(published, [])
+        self.assertNotIn(TOKEN, out.getvalue() + err.getvalue())
+        return attempts, deadline
+
+    def test_only_one_whole_snapshot_retry_is_permitted(self):
+        attempts, deadline = self.run_failures([
+            backup.BackupError("database request timed out; read snapshot discarded"),
+            backup.BackupError("database snapshot request failed; incomplete backup discarded")], consumed=100)
+        self.assertEqual([name for name, _ in attempts], ["attempt-0", "attempt-1"])
+        self.assertTrue(all(value is deadline for _, value in attempts))
+        self.assertEqual(deadline.end, 1000)
+
+    def test_retry_is_not_started_without_original_deadline_headroom(self):
+        attempts, _ = self.run_failures([
+            backup.BackupError("database request timed out; read snapshot discarded")], consumed=881)
+        self.assertEqual(len(attempts), 1)
+
+    def test_no_snapshot_retry_for_auth_protocol_tls_or_local_output(self):
+        for error in (backup.BackupError("database authentication rejected"),
+                      backup.BackupError("invalid typed database response"), backup.BackupTLSCertificateError()):
+            with self.subTest(error=type(error).__name__):
+                attempts, _ = self.run_failures([error])
+                self.assertEqual(len(attempts), 1)
+        attempts, _ = self.run_failures([
+            backup.BackupError("database request timed out; read snapshot discarded")], local=True)
+        self.assertEqual(len(attempts), 1)
+
+
 class GitHubTests(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.TemporaryDirectory()

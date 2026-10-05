@@ -2,6 +2,8 @@ name: Scan and deploy dashboard
 run-name: "Scan and deploy dashboard [source=${{ github.event_name == 'workflow_dispatch' && (inputs.source || 'manual') || github.event_name }}]"
 
 on:
+  schedule:
+    - cron: "41 */6 * * *"
   workflow_dispatch:
     inputs:
       source:
@@ -27,6 +29,7 @@ on:
       - "position_evidence.py"
       - "solana_position_lineage.py"
       - "runtime_checkpoint.py"
+      - "cold_outbox.py"
       - "runtime_dashboard.py"
       - "history_contract.py"
       - "rpc_budget.py"
@@ -125,8 +128,12 @@ jobs:
           except Exception:
               pass
           dispatch_source = (event.get("inputs") or {}).get("source", "")
+          if event_name == "schedule":
+              print("should_scan=false")
+              print("reason=storage_recovery_only")
+              raise SystemExit
           targeted = dispatch_source == "cloudflare-targeted"
-          if event_name == "workflow_dispatch" and dispatch_source in ("robinhood", "manual-ui", "publication-recovery"):
+          if event_name == "workflow_dispatch" and dispatch_source in ("robinhood", "manual-ui", "publication-recovery", "storage-recovery"):
               print("should_scan=false")
               print(f"reason={dispatch_source}_only")
               raise SystemExit
@@ -209,7 +216,7 @@ jobs:
 
       - name: Restore scanner runtime state
         id: state_restore
-        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.publish_pages == 'true' || steps.plan.outputs.observe_robinhood == 'true'
+        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.publish_pages == 'true' || steps.plan.outputs.observe_robinhood == 'true' || steps.plan.outputs.recover_storage == 'true'
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -222,7 +229,7 @@ jobs:
 
       - name: Preserve pending cloud writes
         id: outbox_restore
-        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.recover_runtime == 'true'
+        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.recover_runtime == 'true' || steps.plan.outputs.recover_storage == 'true'
         uses: actions/cache/restore@v4
         with:
           path: data/remote_outbox
@@ -235,7 +242,7 @@ jobs:
         run: python tools/runtime_cache.py capture "$RUNNER_TEMP/radar-runtime-baseline.json"
 
       - name: Record pre-scan outbox contents
-        if: steps.freshness.outputs.should_scan == 'true'
+        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.recover_storage == 'true'
         run: python tools/runtime_cache.py capture-outbox "$RUNNER_TEMP/radar-outbox-baseline.json"
 
       - name: Restore Python package downloads
@@ -283,6 +290,14 @@ jobs:
           RADAR_DATA_API_URL: https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev
           RADAR_INGEST_SECRET: ${{ secrets.RADAR_INGEST_SECRET }}
         run: python tools/recover_runtime_publication.py
+
+      - name: Recover durable storage without scanning
+        if: steps.plan.outputs.recover_storage == 'true'
+        timeout-minutes: 5
+        env:
+          RADAR_DATA_API_URL: https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev
+          RADAR_INGEST_SECRET: ${{ secrets.RADAR_INGEST_SECRET }}
+        run: python tools/recover_storage.py --max-items 25 --max-seconds 180
 
       - name: Run scanner
         id: run_scanner
@@ -371,13 +386,13 @@ jobs:
 
       - name: Check pending cloud write changes
         id: outbox_changes
-        if: always() && steps.freshness.outputs.should_scan == 'true'
+        if: always() && (steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.recover_storage == 'true')
         run: python tools/runtime_cache.py check-outbox "$RUNNER_TEMP/radar-outbox-baseline.json" >> "$GITHUB_OUTPUT"
 
       - name: Save pending cloud writes
         # Keep legacy keys/backlog, including quarantine. Never prune or infer
         # SQL acknowledgement here. A failed comparison or cache miss must save.
-        if: always() && steps.freshness.outputs.should_scan == 'true' && (steps.outbox_changes.outputs.changed != 'false' || steps.outbox_restore.outputs.cache-matched-key == '' || steps.outbox_restore.outcome != 'success')
+        if: always() && (steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.recover_storage == 'true') && (steps.outbox_changes.outputs.changed != 'false' || steps.outbox_restore.outputs.cache-matched-key == '' || steps.outbox_restore.outcome != 'success')
         uses: actions/cache/save@v4
         with:
           path: data/remote_outbox

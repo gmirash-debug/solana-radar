@@ -30,6 +30,9 @@ export class SqlHistoryQueue {
     this.limits = policy.limits;
     const {lowered} = policy, limits = this.limits;
     this.maxRows = lowered(env,"HISTORY_QUEUE_MAX_PENDING_ROWS",limits.pendingRows);
+    this.coldRows = this.maxRows;
+    this.liveRows = lowered(env,"HISTORY_QUEUE_LIVE_RESERVED_ROWS",512,0);
+    this.maxRows += this.liveRows;
     this.maxBytes = lowered(env,"HISTORY_QUEUE_MAX_PENDING_BYTES",limits.pendingBytes);
     this.maxReceipts = lowered(env,"HISTORY_QUEUE_MAX_RECEIPT_ROWS",limits.receiptRows);
     this.eventBytes = lowered(env,"HISTORY_QUEUE_MAX_EVENT_BYTES",limits.eventBytes);
@@ -37,6 +40,7 @@ export class SqlHistoryQueue {
     this.requestLimit = limits.sqlFlushRequests;
     this.historyBudget = lowered(env,"HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS",
       limits.maximumTursoHistoryWriteUnits,limits.dailyTursoHistoryWriteUnits);
+    this.liveUnits = lowered(env,"HISTORY_QUEUE_LIVE_RESERVED_UNITS",this.historyBudget,0);
     this.archiveWrites = lowered(env,"HISTORY_ARCHIVE_DAILY_WRITES",limits.dailyArchiveWrites);
     this.archiveReads = lowered(env,"HISTORY_ARCHIVE_DAILY_READS",limits.dailyArchiveReads);
     this.archiveBytes = lowered(env,"HISTORY_ARCHIVE_DAILY_WRITE_BYTES",limits.dailyArchiveWriteBytes);
@@ -64,35 +68,76 @@ export class SqlHistoryQueue {
     return row;
   }
 
-  async enqueue(events, now = Date.now()) {
+  async admissionModel(requests) {
+    if (!this.liveRows && !this.liveUnits) return;
+    if (this.admissionReady) return;
+    await this.batch([
+      this.db.prepare(`CREATE TABLE IF NOT EXISTS history_sql_queue_admission
+        (id INTEGER PRIMARY KEY CHECK(id=1),cold_rows INTEGER NOT NULL CHECK(cold_rows>=1))`),
+      this.db.prepare(`CREATE TABLE IF NOT EXISTS history_sql_live_priority
+        (event_id TEXT PRIMARY KEY,priority_until INTEGER NOT NULL,
+         FOREIGN KEY(event_id) REFERENCES history_sql_queue_events(event_id) ON DELETE CASCADE)`),
+      this.db.prepare(`CREATE TABLE IF NOT EXISTS history_sql_cutover_priority
+        (event_id TEXT PRIMARY KEY,priority_until INTEGER NOT NULL,
+         FOREIGN KEY(event_id) REFERENCES history_sql_cutover_events(event_id) ON DELETE CASCADE)`),
+      this.db.prepare(`INSERT INTO history_sql_queue_admission(id,cold_rows) VALUES(1,?1)
+        ON CONFLICT(id) DO UPDATE SET cold_rows=excluded.cold_rows
+        WHERE cold_rows!=excluded.cold_rows`).bind(this.coldRows),
+      this.db.prepare("DROP TRIGGER IF EXISTS history_sql_queue_cold_capacity"),
+      this.db.prepare(`CREATE TRIGGER IF NOT EXISTS history_sql_queue_cold_capacity_v2
+        BEFORE INSERT ON history_sql_queue_events BEGIN
+        SELECT CASE WHEN NEW.status='pending' AND COALESCE(json_extract(NEW.progress_json,'$._live_until'),0)=0
+          AND EXISTS (SELECT 1 FROM history_sql_queue_meta WHERE id=1 AND pending_rows+archive_pending_rows+1>
+            (SELECT cold_rows FROM history_sql_queue_admission WHERE id=1))
+        THEN RAISE(ABORT,'history_queue_pending_capacity') END; END`),
+    ],requests);
+    this.admissionReady=true;
+  }
+
+  async enqueue(events, now = Date.now(), priorities = new Set()) {
     const rows = this.policy.validateHistoryEvents(events,now,this.eventBytes);
     if (events.some(event => minimumHistoryWork(event,this.infra)>this.historyBudget)) {
       throw this.error("history_event_exceeds_atomic_daily_allowance",400);
     }
     const meta = await this.meta();
     if (this.migrationPending(meta) && this.env.HISTORY_LEGACY_MIGRATION === "verified_turso_v1") {
+      await this.admissionModel();
       const statements = rows.map(row => this.db.prepare(`INSERT OR IGNORE INTO history_sql_cutover_events
         (event_id,episode_id,source_at,payload_json,payload_bytes) VALUES(?1,?2,?3,?4,?5)`)
         .bind(row.id,row.episodeId,row.sourceAt,row.json,row.bytes));
+      if (this.liveRows || this.liveUnits) {
+        for (const row of rows.filter(row=>priorities.has(row.episodeId) || row.sourceAt>=now-24*3600000)) {
+          statements.push(this.db.prepare(`INSERT INTO history_sql_cutover_priority(event_id,priority_until) VALUES(?1,?2)
+            ON CONFLICT(event_id) DO UPDATE SET priority_until=MAX(priority_until,excluded.priority_until)`)
+            .bind(row.id,now+24*3600000));
+        }
+      }
       statements.push(this.db.prepare("SELECT * FROM history_sql_cutover_meta WHERE id=1"));
       const saved = await this.batch(statements);
       const staging = saved.at(-1).results[0];
       if (!staging) throw this.error("history_cutover_schema_required");
-      const queued = saved.slice(0,-1).reduce((sum,row) => sum+(row.meta?.changes || 0),0);
+      const queued = saved.slice(0,rows.length).reduce((sum,row) => sum+(row.meta?.changes || 0),0);
       return {...this.enqueueResult(meta,queued,events.length),staged:true,
         cutover_pending:staging.pending_rows,cutover_pending_bytes:staging.pending_bytes};
     }
     return this.persist(rows.map(row => ({...row,status:"pending",attempts:0,nextAttempt:now,
-      progress:null,archiveVersion:0,deliveredAt:null,lastError:null})),events.length,now);
+      progress:priorities.has(row.episodeId) || row.sourceAt>=now-24*3600000
+        ? JSON.stringify({_live_until:now+24*3600000}) : null,
+      archiveVersion:0,deliveredAt:null,lastError:null})),events.length,now);
   }
 
   async drainCutover(requests, now) {
     if (this.env.HISTORY_LEGACY_MIGRATION !== "verified_turso_v1") return {enabled:false};
-    const [page] = await this.batch([this.db.prepare(`SELECT * FROM history_sql_cutover_events
-      ORDER BY source_at,event_id LIMIT 25`)],requests);
+    await this.admissionModel(requests);
+    const [page] = await this.batch([this.db.prepare(`SELECT c.*${this.liveRows || this.liveUnits ? ",p.priority_until" : ""}
+      FROM history_sql_cutover_events c ${this.liveRows || this.liveUnits
+        ? "LEFT JOIN history_sql_cutover_priority p ON p.event_id=c.event_id" : ""}
+      ORDER BY c.source_at,c.event_id LIMIT 25`)],requests);
     const rows = page.results.map(row => ({id:row.event_id,episodeId:row.episode_id,sourceAt:row.source_at,
       json:row.payload_json,bytes:row.payload_bytes,status:"pending",attempts:0,nextAttempt:now,
-      progress:null,archiveVersion:0,deliveredAt:null,lastError:null}));
+      progress:row.source_at>=now-24*3600000 || row.priority_until>now
+        ? JSON.stringify({_live_until:Math.max(row.priority_until || 0,now+24*3600000)}) : null,
+      archiveVersion:0,deliveredAt:null,lastError:null}));
     if (!rows.length) return {enabled:true,forwarded:0};
     try { await this.persist(rows,rows.length,now,requests); }
     catch (error) {
@@ -118,17 +163,26 @@ export class SqlHistoryQueue {
     const ids = new Set(known.results.map(row => row.event_id));
     const added = unique.filter(row => !ids.has(row.id));
     const meta = await this.meta(requests);
+    await this.admissionModel(requests);
+    const promoted = unique.filter(row=>ids.has(row.id) && JSON.parse(row.progress || "{}")._live_until>now);
+    if (promoted.length && (this.liveRows || this.liveUnits)) await this.batch(promoted.map(row=>this.db.prepare(`INSERT INTO history_sql_live_priority(event_id,priority_until)
+      SELECT event_id,?2 FROM history_sql_queue_events WHERE event_id=?1 AND status='pending'
+      ON CONFLICT(event_id) DO UPDATE SET priority_until=MAX(priority_until,excluded.priority_until)`)
+      .bind(row.id,JSON.parse(row.progress)._live_until)),requests);
     const pending = added.filter(row => row.status === "pending");
+    const cold = pending.some(row => row.sourceAt < now-24*3600000 && !(JSON.parse(row.progress || "{}")._live_until>=now));
     if (pending.length && (meta.pending_rows+meta.archive_pending_rows+pending.length>this.maxRows
+        || (cold && meta.pending_rows+meta.archive_pending_rows+pending.length>this.coldRows)
         || meta.pending_bytes+meta.archive_pending_bytes+pending.reduce((sum,row) => sum+row.bytes,0)>this.maxBytes)) {
       throw this.error("history_queue_pending_capacity",507);
     }
     if (!added.length) return this.enqueueResult(meta,0,count);
-    const statements = [this.db.prepare(`UPDATE history_sql_queue_meta SET max_pending_rows=?1,
+    const statements = [];
+    statements.push(this.db.prepare(`UPDATE history_sql_queue_meta SET max_pending_rows=?1,
       max_pending_bytes=?2,max_receipts=?3 WHERE id=1`).bind(this.maxRows,this.maxBytes,this.maxReceipts),
     this.db.prepare(`DELETE FROM history_sql_queue_events WHERE event_id IN (
       SELECT event_id FROM history_sql_queue_events WHERE status='delivered' AND archive_pending=0 AND delivered_at<?1
-      ORDER BY delivered_at,event_id LIMIT ?2)`).bind(now-this.limits.receiptRetentionMs,added.length)];
+      ORDER BY delivered_at,event_id LIMIT ?2)`).bind(now-this.limits.receiptRetentionMs,added.length));
     // Compact receipt migration must not create one SQL statement per row.
     // Live payloads still use the same 25-event and 1-MiB admission bounds.
     for (let start=0;start<added.length;start+=25) {
@@ -207,27 +261,36 @@ export class SqlHistoryQueue {
       cutover_pending:cutover?.pending_rows || 0,cutover_pending_bytes:cutover?.pending_bytes || 0,
       legacy_migration:{after:meta.legacy_cursor,complete:Boolean(meta.legacy_complete),imported:meta.legacy_imported},
       limits:{...this.limits,flushQueries:this.queryLimit,flushRequests:this.requestLimit,pendingRows:this.maxRows,
+        liveReservedRows:this.liveRows,liveReservedWorkUnits:this.liveUnits,
         pendingBytes:this.maxBytes,receiptRows:this.maxReceipts,eventBytes:this.eventBytes,
         dailyHistoryWriteUnits:this.historyBudget,dailyDoWriteUnits:0,
         dailyArchiveWrites:this.archiveWrites,dailyArchiveReads:this.archiveReads,dailyArchiveWriteBytes:this.archiveBytes}};
   }
 
   async claim(now, requests, maximumWork = this.limits.flushHistoryWriteUnits) {
+    await this.admissionModel(requests);
     const selection = await this.batch([this.db.prepare("SELECT * FROM history_sql_queue_meta WHERE id=1"),
-      this.db.prepare(`SELECT q.* FROM history_sql_queue_events q WHERE q.status='pending'
+      this.db.prepare(`SELECT q.*,EXISTS (SELECT 1 FROM history_sql_queue_events fresh
+          WHERE fresh.status='pending' AND fresh.episode_id=q.episode_id
+          AND (fresh.source_at>=?3 OR json_extract(fresh.progress_json,'$._live_until')>=?1
+            ${this.liveRows || this.liveUnits ? `OR EXISTS (SELECT 1 FROM history_sql_live_priority promoted WHERE promoted.event_id=fresh.event_id
+              AND promoted.priority_until>=?1)` : ""})) live_episode
+        FROM history_sql_queue_events q WHERE q.status='pending'
         AND q.next_attempt_at<=?1 AND q.source_at<=?1 AND (q.lease_until IS NULL OR q.lease_until<=?1)
         AND NOT EXISTS (SELECT 1 FROM history_sql_queue_events older WHERE older.status='pending'
           AND older.episode_id=q.episode_id AND (older.source_at,older.event_id)<(q.source_at,q.event_id))
-        ORDER BY q.source_at,q.event_id LIMIT ?2`).bind(now,this.limits.flushEvents)],requests,2);
+        ORDER BY live_episode DESC,q.source_at,q.event_id LIMIT ?2`).bind(now,this.limits.flushEvents,now-24*3600000)],requests,2);
     const meta = selection[0].results[0];
     if (!meta) throw this.error("history_sql_queue_schema_required");
     if (this.migrationPending(meta)) return {meta,migration_pending:true};
     const candidates = selection[1].results;
     if (!candidates.length) return {meta};
     const day = this.day(now), spent = meta.hist_day === day ? meta.hist_writes : 0;
+    const allowance = row => this.historyBudget-(row.live_episode ? 0 : this.liveUnits);
     const row = candidates.find(row => this.policy.progressWork(JSON.parse(row.payload_json),
-      JSON.parse(row.progress_json || "{}"),this.infra)<=this.historyBudget-spent);
-    if (!row) throw this.error("history_daily_write_budget",429);
+      JSON.parse(row.progress_json || "{}"),this.infra)<=allowance(row)-spent);
+    if (!row) throw this.error(spent<this.historyBudget && this.liveUnits
+      ? "history_live_budget_reserved" : "history_daily_write_budget",429);
     const minimum = this.policy.progressWork(JSON.parse(row.payload_json),JSON.parse(row.progress_json || "{}"),this.infra);
     const token = crypto.randomUUID();
     const results = await this.batch([
@@ -241,7 +304,7 @@ export class SqlHistoryQueue {
           AND NOT EXISTS (SELECT 1 FROM history_sql_queue_events older WHERE older.status='pending'
             AND older.episode_id=history_sql_queue_events.episode_id
             AND (older.source_at,older.event_id)<(history_sql_queue_events.source_at,history_sql_queue_events.event_id))`)
-        .bind(row.event_id,token,now+this.limits.leaseMs,day,maximumWork,this.historyBudget,now,minimum),
+        .bind(row.event_id,token,now+this.limits.leaseMs,day,maximumWork,allowance(row),now,minimum),
       this.db.prepare(`UPDATE history_sql_queue_meta SET hist_writes=hist_writes+COALESCE((
         SELECT budget_reserved FROM history_sql_queue_events WHERE event_id=?1 AND lease_token=?2),0) WHERE id=1`)
         .bind(row.event_id,token),
@@ -322,7 +385,14 @@ export class SqlHistoryQueue {
       }
       for (let action = 0; action<this.limits.flushEvents && requests.remaining>=6
           && queries<this.queryLimit && used<this.limits.flushHistoryWriteUnits; action++) {
-        const claim = await this.claim(Date.now(),requests,this.limits.flushHistoryWriteUnits-used);
+        let claim;
+        try { claim = await this.claim(Date.now(),requests,this.limits.flushHistoryWriteUnits-used); }
+        catch (error) {
+          if ((total.delivered || total.continued) && ["history_live_budget_reserved","history_daily_write_budget"].includes(error.message)) {
+            return {...total,history_write_units:used,deferred_reason:error.message,...metrics()};
+          }
+          throw error;
+        }
         if (!claim.row) return {...total,pending:claim.meta.pending_rows,pending_bytes:claim.meta.pending_bytes,
           archive_pending:claim.meta.archive_pending_rows,archive_pending_bytes:claim.meta.archive_pending_bytes,
           history_write_units:used,migration_pending:Boolean(claim.migration_pending),...(claim.migration_pending
