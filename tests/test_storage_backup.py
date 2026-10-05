@@ -641,6 +641,8 @@ class ProtocolTests(unittest.TestCase):
         deadline = backup.Deadline(1080, clock=lambda:10)
         self.assertEqual(deadline.end, 1090)
         self.assertEqual(deadline.timeout(), 20)
+        self.assertEqual(deadline.upload_timeout(),120)
+        self.assertEqual(backup.Deadline(10,clock=lambda:10).upload_timeout(),10)
         self.assertEqual(backup.Deadline(clock=lambda:10).end, 1010)
         for invalid in (0,1081,True,float('inf'),float('nan'),None):
             with self.assertRaises(backup.BackupError):
@@ -668,6 +670,9 @@ class FakeGitHub:
         self.bad_digest = False
         self.fail_publish = False
         self.temporary_draft_tag = False
+        self.assets={}
+        self.commit_before_error=False
+        self.delayed_digest=False
 
     def open(self, request, timeout):
         path = urllib.parse.urlsplit(request.full_url).path
@@ -688,6 +693,9 @@ class FakeGitHub:
             self.next_id += 1
             self.releases.append(row)
             return Response(row)
+        if path.endswith("/assets") and method=="GET":
+            release_id=int(path.split("/")[-2])
+            return Response([value for (owner,_),value in self.assets.items() if owner==release_id])
         if "/releases/" in path:
             release_id = int(path.rsplit("/",1)[1])
             row = next(row for row in self.releases if row["id"] == release_id)
@@ -724,11 +732,16 @@ class FakeGitHub:
                 self.digest.update(block)
             def getresponse(self):
                 outer.uploads.append(self)
-                if outer.fail_upload:
+                if outer.fail_upload and not outer.commit_before_error:
                     raise OSError(TOKEN)
                 name = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)["name"][0]
-                return Response({"size":self.total, "name":name, "state":"uploaded",
-                    "digest":"sha256:" + ("wrong" if outer.bad_digest else self.digest.hexdigest())}, 201)
+                asset={"size":self.total,"name":name,"state":"uploaded",
+                    "digest":"sha256:"+("wrong" if outer.bad_digest else self.digest.hexdigest())}
+                release_id=int(urllib.parse.urlsplit(self.path).path.split("/")[-2])
+                outer.assets[(release_id,name)]=asset
+                if outer.fail_upload:
+                    raise TimeoutError(TOKEN)
+                return Response({**asset,**({"digest":None} if outer.delayed_digest else {})},201)
             def close(self):
                 pass
         return Connection()
@@ -888,26 +901,45 @@ class GitHubTests(unittest.TestCase):
         self.assertIn(result, [row["id"] for row in managed])
         self.assertFalse(next(row for row in managed if row["id"] == result)["draft"])
         self.assertEqual(self.server.assert_host, "uploads.github.com")
-        self.assertEqual(max(self.server.uploads[0].block_lengths), 1024 * 1024)
-        self.assertEqual(self.server.uploads[0].total, self.archive.stat().st_size)
-        self.assertEqual(self.server.uploads[0].headers["Content-Length"], str(self.archive.stat().st_size))
+        archive_upload=self.server.uploads[-1]
+        self.assertEqual(max(archive_upload.block_lengths), 1024 * 1024)
+        self.assertEqual(archive_upload.total, self.archive.stat().st_size)
+        self.assertEqual(archive_upload.headers["Content-Length"], str(self.archive.stat().st_size))
         self.assertTrue(any(method == "DELETE" and "/git/refs/tags/" in path for method,path,_ in self.server.calls))
 
-    def test_upload_failure_keeps_all_old_backups_and_cleans_unverified_draft(self):
+    def test_upload_failure_keeps_all_old_backups_and_reconcilable_private_draft(self):
         for index in range(1,8):
             self.server.add_old(index)
         self.server.fail_upload = True
         with self.assertRaises(backup.BackupError) as error:
             self.client.publish(self.archive, self.manifest_path, self.manifest)
         self.assertNotIn(TOKEN, str(error.exception))
-        self.assertEqual([row["id"] for row in self.server.releases], list(range(1,8)))
+        self.assertEqual([row["id"] for row in self.server.releases], [*range(1,8),100])
+        self.assertTrue(self.server.releases[-1]["draft"])
+        self.assertFalse(self.server.releases[-1]["body"].startswith(backup.RELEASE_MARKER))
 
     def test_checksum_mismatch_never_prunes_good_backups(self):
         self.server.add_old(1)
         self.server.bad_digest = True
         with self.assertRaises(backup.BackupError):
             self.client.publish(self.archive, self.manifest_path, self.manifest)
-        self.assertEqual([row["id"] for row in self.server.releases], [1])
+        self.assertEqual([row["id"] for row in self.server.releases], [1,100])
+        self.assertTrue(self.server.releases[-1]["draft"])
+
+    def test_lost_upload_response_reconciles_hash_without_posting_the_asset_twice(self):
+        self.server.fail_upload=True;self.server.commit_before_error=True
+        result=self.client.publish(self.archive,self.manifest_path,self.manifest)
+        self.assertEqual(result,100)
+        self.assertEqual(len(self.server.uploads),2)
+        self.assertFalse(self.server.releases[0]["draft"])
+
+    def test_delayed_digest_must_be_confirmed_before_release_publication(self):
+        self.server.delayed_digest=True
+        result=self.client.publish(self.archive,self.manifest_path,self.manifest)
+        self.assertEqual(result,100)
+        reads=[path for method,path,_ in self.server.calls if method=="GET" and path.endswith("/assets")]
+        self.assertEqual(len(reads),2)
+        self.assertEqual(len(self.server.uploads),2)
 
     def test_publication_failure_preserves_verified_draft_and_all_old_copies(self):
         for index in range(1,8):
