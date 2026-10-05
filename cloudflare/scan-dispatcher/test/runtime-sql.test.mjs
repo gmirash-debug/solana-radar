@@ -4,6 +4,11 @@ import {readFileSync} from "node:fs";
 import test from "node:test";
 import {writeSqlRuntime,readSqlRuntime,sqlDashboardResponse,collectSqlRuntimeGarbage,availableSqlDashboardParts} from "../src/runtime-sql.js";
 import {runtimeCheckpointResponse,runtimeDocument} from "../src/runtime.js";
+import {availableSqlRuntimeParts} from "../src/runtime-sql.js";
+import {coldOutboxResponse} from "../src/cold-outbox.js";
+import {archiveBackupResponse} from "../src/archive-backup.js";
+import {gzipSync} from "node:zlib";
+import {createHash} from "node:crypto";
 
 const AT = "2026-10-04T12:00:00Z";
 function fixture(t) {
@@ -123,4 +128,66 @@ test("bounded garbage collection preserves current references and a superseded r
   await collectSqlRuntimeGarbage(f.env,retired+48*3600000+1);
   assert.equal(await readSqlRuntime(f.env,`checkpoint:deep:blob:${a.sha256}`),null);
   assert.ok(await readSqlRuntime(f.env,`checkpoint:deep:blob:${b.sha256}`));
+});
+
+test("checkpoint probes read only their own immutable parts",async t=>{
+  const f=fixture(t),part=await blob("AAAA");
+  await writeSqlRuntime(f.env,`checkpoint:deep:blob:${part.sha256}`,part,AT);
+  assert.deepEqual(await availableSqlRuntimeParts(f.env,"checkpoint:deep",[part.sha256]),[{id:part.sha256,bytes:4}]);
+  assert.deepEqual(await availableSqlRuntimeParts(f.env,"checkpoint:discovery",[part.sha256]),[]);
+  await assert.rejects(availableSqlRuntimeParts(f.env,"outbox",[]),/invalid_runtime_part_root/);
+});
+
+function archiveFixture(f) {
+  const rows=new Map();
+  const metadata=row=>row ? {size:row.data.byteLength,customMetadata:row.meta,etag:"etag"} : null;
+  f.env.RADAR_ARCHIVE={
+    async put(key,data,options){rows.set(key,{data:Uint8Array.from(data),meta:options.customMetadata});},
+    async head(key){return metadata(rows.get(key));},
+    async get(key){const row=rows.get(key);return row ? {...metadata(row),body:new Blob([row.data]).stream()} : null;},
+    async list(){return {objects:[...rows].map(([key,row])=>({key,size:row.data.byteLength,etag:"etag"})),truncated:false};}
+  };
+  return rows;
+}
+
+test("cold originals are acknowledged only after R2 confirmation plus SQL and retry never resets progress",async t=>{
+  const f=fixture(t),objects=archiveFixture(f),data=gzipSync(JSON.stringify({report:{generated_at:AT}}));
+  const id=createHash("sha256").update(data).digest("hex"),url=`https://worker/api/storage/outbox?id=${id}`;
+  const post=()=>new Request(url,{method:"POST",body:data,headers:{"x-radar-generated-at":AT}});
+  const saved=await (await coldOutboxResponse(f.env,post())).json();
+  assert.equal(saved.accepted,true);assert.equal(objects.size,1);
+  assert.equal((await readSqlRuntime(f.env,`outbox:${id}`)).value.completed,false);
+  await coldOutboxResponse(f.env,new Request(url,{method:"PATCH",body:JSON.stringify({progress:{durable_history_ledger:7}})}));
+  const retry=await (await coldOutboxResponse(f.env,post())).json();
+  assert.equal(retry.progress.durable_history_ledger,7);assert.equal(retry.unchanged,true);
+  const body=await (await coldOutboxResponse(f.env,new Request(url))).arrayBuffer();
+  assert.deepEqual(Buffer.from(body),data);
+  await coldOutboxResponse(f.env,new Request(url,{method:"PATCH",body:JSON.stringify({completed:true})}));
+  assert.equal((await readSqlRuntime(f.env,`outbox:${id}`)).value.completed,true);
+});
+
+test("failed cold SQL acknowledgement leaves the source archived but unacknowledged",async t=>{
+  const f=fixture(t),objects=archiveFixture(f),data=gzipSync("original");
+  const id=createHash("sha256").update(data).digest("hex");
+  f.sql.exec("CREATE TRIGGER fail_archive BEFORE INSERT ON runtime_sql_documents BEGIN SELECT RAISE(ABORT,'unavailable'); END");
+  await assert.rejects(coldOutboxResponse(f.env,new Request(`https://worker/api/storage/outbox?id=${id}`,
+    {method:"POST",body:data,headers:{"x-radar-generated-at":AT}})),/unavailable/);
+  assert.equal(objects.size,1);assert.equal(await readSqlRuntime(f.env,`outbox:${id}`),null);
+});
+
+test("archive backup credential permits only reads and cannot bypass the R2 guard",async t=>{
+  const f=fixture(t),objects=archiveFixture(f);
+  objects.set("outbox/v1/source.json.gz",{data:new Uint8Array([1,2,3]),meta:{}});
+  f.env.RADAR_ARCHIVE_BACKUP_SECRET="read-only-test";
+  const url="https://worker/api/storage/archive-backup";
+  assert.equal((await archiveBackupResponse(f.env,new Request(url))).status,403);
+  const headers={"x-radar-archive-backup-secret":"read-only-test"};
+  assert.equal((await archiveBackupResponse(f.env,new Request(url,{method:"POST",headers}))).status,405);
+  const inventory=await (await archiveBackupResponse(f.env,new Request(url,{headers}))).json();
+  assert.equal(inventory.objects[0].bytes,3);
+  const data=await archiveBackupResponse(f.env,new Request(url+"?key=outbox/v1/source.json.gz",{headers}));
+  assert.equal(data.headers.get("x-radar-source-etag"),"etag");
+  assert.equal((await data.arrayBuffer()).byteLength,3);
+  f.env.R2_BUDGET_GUARD="enabled";
+  await assert.rejects(archiveBackupResponse(f.env,new Request(url,{headers})),/R2|DO|r2_budget/);
 });

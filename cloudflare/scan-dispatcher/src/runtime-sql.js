@@ -24,14 +24,20 @@ export async function readSqlRuntime(env, name, metadataOnly = false) {
 }
 
 export async function availableSqlDashboardParts(env, ids) {
+  return availableSqlRuntimeParts(env, "dashboard", ids);
+}
+
+export async function availableSqlRuntimeParts(env, root, ids) {
+  if (!["dashboard", "checkpoint:deep", "checkpoint:discovery"].includes(root)) throw new Error("invalid_runtime_part_root");
   if (!Array.isArray(ids) || ids.length > 250 || ids.some(id => typeof id !== "string" || !/^[a-f0-9]{64}$/.test(id))) {
     throw new Error("invalid_dashboard_part_probe");
   }
   const unique = [...new Set(ids)];
   if (!unique.length) return [];
+  const encoding = root === "dashboard" ? "json-ascii" : "gzip+base64-part";
   const rows = await database(env).prepare(`SELECT content_id,encoded_bytes FROM runtime_sql_documents
-    WHERE encoding='json-ascii' AND name IN (${unique.map((_, i) => `?${i + 1}`).join(",")})`)
-    .bind(...unique.map(id => `dashboard:blob:${id}`)).all();
+    WHERE encoding=?1 AND name IN (${unique.map((_, i) => `?${i + 2}`).join(",")})`)
+    .bind(encoding,...unique.map(id => `${root}:blob:${id}`)).all();
   return (rows.results || []).map(row => ({id:row.content_id,bytes:row.encoded_bytes}));
 }
 

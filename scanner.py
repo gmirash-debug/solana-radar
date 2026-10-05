@@ -28,6 +28,7 @@ from solana_position_lineage import annotate_pool_activity, freeze_receipt_seeds
 from position_history_rpc import check_receipt_positions
 from wallet_activity import AuditBudget, advance_wallet_history, summarize_wallet_activity, recover_sale_history_status
 from runtime_checkpoint import build_checkpoint, restore_checkpoint, checkpoint_documents, hydrate_checkpoint
+from cold_outbox import archive_snapshot
 from runtime_dashboard import dashboard_documents
 from history_contract import history_event_error, source_time
 from rpc_budget import configure_monthly_budgets, request_reservation, native_cost, DurableChunkBudget, monthly_budget_for
@@ -1371,13 +1372,27 @@ def sync_runtime_checkpoint(state, config, kind):
     try:
         runtime = state.get("_runtime", {})
         checkpoint, parts = checkpoint_documents(build_checkpoint(state))
+        deadline = time.monotonic() + min(180,max(10,int(config.get("runtime_checkpoint_budget_seconds",180))))
+        available = {}
+        for start in range(0, len(parts), 250):
+            try:
+                found = remote_api_call("POST", "/api/runtime/checkpoint-parts", config,
+                                        {"ids": [part["sha256"] for part in parts[start:start + 250]]},
+                                        params={"kind": kind})
+                available.update({part["id"]: part["bytes"] for part in found.get("parts") or []})
+            except Exception:
+                break
         for part in parts:
-            remote_api_call("POST", "/api/runtime/checkpoint", config, {
+            if available.get(part["sha256"]) == part["encoded_bytes"]:
+                continue
+            safe_runtime_upload("/api/runtime/checkpoint", config, {
                 "checkpoint": part, "updated_at": runtime.get("updated_at"), "revision": runtime.get("revision", 0)},
-                params={"kind": kind, "part": part["sha256"]})
-        result = remote_api_call("POST", "/api/runtime/checkpoint", config, {
+                deadline, params={"kind": kind, "part": part["sha256"]})
+        result = safe_runtime_upload("/api/runtime/checkpoint", config, {
             "checkpoint": checkpoint, "updated_at": runtime.get("updated_at"),
-            "revision": runtime.get("revision", 0)}, params={"kind": kind})
+            "revision": runtime.get("revision", 0)}, deadline, params={"kind": kind})
+        if result.get("ok") is not True or result.get("accepted") is not True:
+            raise RuntimeError("runtime checkpoint was not acknowledged")
         config[f"_runtime_{kind}_saved"] = result
         return result
     except Exception as exc:
@@ -1387,24 +1402,28 @@ def sync_runtime_checkpoint(state, config, kind):
         return result
 
 
+def safe_runtime_upload(path, config, payload, deadline, params=None):
+    """Retry only immutable or timestamp-fenced writes, never grants or ingestion."""
+    for attempt in range(3):
+        if time.monotonic() >= deadline:
+            raise RuntimeError("runtime publication time budget exhausted")
+        try:
+            return remote_api_call("POST", path, config, payload,
+                                   **({"params": params} if params else {}))
+        except (RuntimeError, requests.RequestException, ValueError) as exc:
+            transient = isinstance(exc, requests.RequestException) or any(reason in str(exc) for reason in (
+                "storage_sql_http_error", "storage_sql_timeout", "storage_sql_network_error",
+                "Remote HTTP 429:", "Remote HTTP 502:", "Remote HTTP 503:", "Remote HTTP 504:"))
+            if not transient or attempt == 2 or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+
+
 def publish_runtime_dashboard(body, config):
     ready, documents = dashboard_documents(body)
     deadline = time.monotonic() + 180
-
     def upload(payload, params=None):
-        for attempt in range(3):
-            try:
-                return remote_api_call("POST", "/api/runtime/dashboard", config, payload,
-                                       **({"params": params} if params else {}))
-            except (RuntimeError, requests.RequestException, ValueError) as exc:
-                transient = isinstance(exc, requests.RequestException) or any(reason in str(exc) for reason in (
-                    "storage_sql_http_error", "storage_sql_timeout", "storage_sql_network_error",
-                    "Remote HTTP 429:", "Remote HTTP 502:", "Remote HTTP 503:", "Remote HTTP 504:"))
-                if not transient or attempt == 2 or time.monotonic() >= deadline:
-                    raise
-                # These documents are content-addressed or timestamp/revision
-                # fenced. Do not use this retry policy for grants or ingestion.
-                time.sleep(0.5 * (attempt + 1))
+        return safe_runtime_upload("/api/runtime/dashboard", config, payload, deadline, params)
 
     listing = {key: value for key, value in ready.items() if key != "token_detail_refs"}
     listing["runtime_snapshot_stage"] = "summary"
@@ -1441,6 +1460,8 @@ def sync_remote_snapshot(report_payload, state, config):
     try:
         published = publish_runtime_dashboard(body, config)
         durable_synced = bool(published.get("accepted"))
+        if durable_synced:
+            body.setdefault("_sync_progress", {})["runtime_dashboard"] = 1
     except Exception as exc:
         durable_error = str(exc)[:300]
     REMOTE_OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
@@ -1455,6 +1476,7 @@ def sync_remote_snapshot(report_payload, state, config):
     # A poison historical item must never block today's operational dashboard.
     selected = list(dict.fromkeys([current, *paths[:2]]))
     error = None
+    archived = 0
     deferred_reason = None
     summary_synced = (config.get("_runtime_dashboard_summary_saved") or {}).get("accepted") is True
     current_synced = durable_synced or summary_synced
@@ -1468,6 +1490,16 @@ def sync_remote_snapshot(report_payload, state, config):
             complete = send_remote_snapshot(pending_body, config, deadline=deadline, legacy=path != current)
             current_synced = current_synced or (path == current and bool((pending_body.get("_sync_progress") or {}).get("summary")))
             if not complete:
+                if config.get("remote_cold_outbox_enabled") and time.monotonic() < deadline:
+                    try:
+                        archive_snapshot(pending_body, base_url, remote_ingest_secret(),
+                                         timeout=max(1, min(25, int(deadline-time.monotonic()))))
+                        path.unlink()
+                        archived += 1
+                        deferred_reason = "Original evidence archived durably; analytics delivery is pending"
+                        continue
+                    except (RuntimeError, ValueError, requests.RequestException):
+                        pass
                 temp = path.with_suffix(".tmp")
                 temp.write_bytes(gzip.compress(json.dumps(pending_body, separators=(",", ":")).encode()))
                 temp.replace(path)
@@ -1493,15 +1525,23 @@ def sync_remote_snapshot(report_payload, state, config):
             print(f"Remote sync pending: {error}", file=sys.stderr)
             if remote_sync_required(config):
                 raise
+            if pending_body and config.get("remote_cold_outbox_enabled") and time.monotonic()<deadline:
+                try:
+                    archive_snapshot(pending_body, base_url, remote_ingest_secret(),
+                                     timeout=max(1,min(25,int(deadline-time.monotonic()))))
+                    path.unlink()
+                    archived += 1
+                except (RuntimeError, ValueError, requests.RequestException):
+                    pass
             if time.monotonic() >= deadline:
                 break
             continue
     pending = len(list(REMOTE_OUTBOX_DIR.glob("*.json.gz")))
-    return {"status": "pending" if pending else "synced", "current_synced": current_synced,
+    return {"status": "pending" if pending or archived else "synced", "current_synced": current_synced,
             "durable_dashboard_synced": durable_synced, "durable_dashboard_error": durable_error,
             "durable_dashboard_summary_synced": summary_synced,
             "checkpoint": config.get("_runtime_deep_saved", {}),
-            "pending": pending, "quarantined": len(list((REMOTE_OUTBOX_DIR / "quarantine").glob("*.json.gz"))),
+            "pending": pending, "archived_pending": archived, "quarantined": len(list((REMOTE_OUTBOX_DIR / "quarantine").glob("*.json.gz"))),
             "error": error, "deferred_reason": deferred_reason, "checked_at": utc_now().isoformat()}
 
 
@@ -1523,6 +1563,14 @@ def send_remote_snapshot(payload, config, deadline=None, legacy=False):
         progress[part] = end
     generated_at = (payload.get("report") or {}).get("generated_at") or payload.get("generated_at")
     events = (payload.get("history_ledger") or {}).get("events") or []
+    generated_time = source_time(generated_at)
+    recent_episodes = {row.get("episode", {}).get("episode_id") for row in events if isinstance(row,dict)
+                       and generated_time is not None and source_time(row.get("event", {}).get("observed_at")) is not None
+                       and source_time(row["event"]["observed_at"])>=generated_time-24*3600}
+    if not progress.get("durable_history_ledger") and config.get("remote_legacy_snapshot_enabled") is False:
+        events.sort(key=lambda row: (row.get("episode", {}).get("episode_id") not in recent_episodes,
+                                    row.get("episode", {}).get("episode_id") or "",
+                                    row.get("event", {}).get("observed_at") or ""))
     rejected = payload.setdefault("_sync_rejected_history", {})
     for index, row in enumerate(events):
         reason = history_event_error(row)
@@ -1543,7 +1591,9 @@ def send_remote_snapshot(payload, config, deadline=None, legacy=False):
         end = start + len(batch)
         try:
             send("durable_history_ledger", end, "/api/runtime/history",
-                 {"generated_at": generated_at, "history_ledger": {"events": history_batch(start, end)}})
+                 {"generated_at": generated_at, "history_ledger": {"events": history_batch(start, end)},
+                  "priority_episodes": sorted({row.get("episode", {}).get("episode_id") for row in batch
+                                               if row.get("episode", {}).get("episode_id") in recent_episodes})})
         except RuntimeError as exc:
             reason = str(exc)
             control_quota = "Exceeded allowed rows written in Durable Objects free tier" in reason
@@ -1561,6 +1611,12 @@ def send_remote_snapshot(payload, config, deadline=None, legacy=False):
                 if queue_limited else "R2 paused by the monthly budget guard; original evidence stays queued")
             break
         start = end
+    if progress.get("runtime_dashboard") == 1 or config.get("remote_legacy_snapshot_enabled") is False:
+        # History delivery is independent of the already-published runtime.
+        progress["history_ledger"] = int(progress.get("durable_history_ledger") or 0)
+        if not archive_paused:
+            payload.pop("_sync_deferred_reason", None)
+        return not archive_paused and bool(progress.get("runtime_dashboard") or progress.get("source_archive"))
     send("summary", 1, "/api/ingest/snapshot", summary)
     # Bounded requests resume from the last acknowledged batch after a failure.
     for field in ("detail_current_alerts", "detail_history", "detail_signal_theses"):

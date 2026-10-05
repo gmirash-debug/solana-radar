@@ -201,6 +201,15 @@ global writer lock, restores the outbox, preserves the original scan timestamp,
 and never deletes outbox files, invokes RPC or rebuilds Pages.
 
 History ingestion uses a bounded SQL queue, with raw archive copies in private R2.
+Fresh episodes have 512 reserved queue places and 90,000 reserved work units
+within the unchanged 180,000 daily allowance; their older prerequisite events
+retain source order and original catch times. Cold recovery cannot consume this
+reservation. Pending full snapshots move to content-addressed private R2 only
+after both object verification and a Turso manifest acknowledgement. A bounded
+`storage-recovery` pass every six hours restores checkpoints, archives the old
+outbox and resumes its SQL delivery without RPC or Pages work. R2 guard failure
+keeps the local original. The private backup repository separately copies SQL
+and the R2 bodies, verifies recovery checksums and retains confirmed copies.
 R2 pauses fail closed if its budget guard is unavailable. Legacy DO/D1 data is
 retained for explicit migration and rollback; new runtime writes are not mirrored
 there. Legacy receipt export is read-only, up to 500 rows per page, capped at 25

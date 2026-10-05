@@ -18,9 +18,21 @@ function event(id, {episode = id, at = NOW-3600_000, wallets = [], type = "snaps
   event:{event_type:type,observed_at:iso(at)},wallets,evidence:{untouched:[1,{extra:"source"}]}};
 }
 
+function coldEvent(id, {episode = id, at = NOW-48*3600_000} = {}) {
+  const row = event(id,{episode,at});
+  row.episode.caught_at = iso(at-24*3600_000);
+  return row;
+}
+
+function seedHistoryBudget(f, units, at = Date.now()) {
+  f.sqlite.prepare("UPDATE history_sql_queue_meta SET hist_day=?,hist_writes=? WHERE id=1")
+    .run(`turso:${iso(at).slice(0,10)}`,units);
+}
+
 // Execute the production Hrana transaction/conditional steps on real SQLite.
 // No fake queue state or SQL matching supplies the query results.
 function fixture(t, overrides = {}, {migrate = true} = {}) {
+  t.mock.timers.enable({apis:["Date"],now:NOW});
   const sqlite = new DatabaseSync(":memory:");
   t.after(() => sqlite.close());
   for (const name of ["0001_wallet_edge_history.sql","0002_cluster_edge_evidence.sql","0003_resumable_history.sql"]) {
@@ -36,10 +48,8 @@ function fixture(t, overrides = {}, {migrate = true} = {}) {
   const condition = (cond, results) => !cond ? true : cond.type === "ok" ? results[cond.step]!==null
     : cond.type === "not" ? !condition(cond.cond,results)
     : cond.type === "and" ? cond.conds.every(child => condition(child,results)) : assert.fail("Hrana condition");
-  const oldFetch = globalThis.fetch, oldNow = Date.now;
-  let clock = NOW;
-  Date.now = () => clock;
-  t.after(() => { globalThis.fetch=oldFetch; Date.now=oldNow; });
+  const oldFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch=oldFetch; });
   globalThis.fetch = async (_,options) => {
     const body = JSON.parse(options.body), steps = body.requests[0].batch.steps;
     f.calls.push(body);
@@ -70,7 +80,7 @@ function fixture(t, overrides = {}, {migrate = true} = {}) {
   const poison = {prepare() {assert.fail("D1 fallback must not be accessed");}};
   f.env = {...credentials,STORAGE_SQL_BACKEND:"turso",HISTORY_QUEUE_BACKEND:"turso_sql",HISTORY_DERIVED_MODE:"daily",
     RADAR_DB:poison,RADAR_HISTORY_DB:poison,...overrides};
-  f.advance = ms => {clock+=ms;};
+  f.advance = ms => t.mock.timers.tick(ms);
   f.rows = () => sqlite.prepare("SELECT * FROM history_sql_queue_events ORDER BY source_at,event_id").all();
   f.meta = () => sqlite.prepare("SELECT * FROM history_sql_queue_meta WHERE id=1").get();
   return f;
@@ -484,6 +494,370 @@ test("SQL daily write reservations persist across restarts and reset only at UTC
   f.advance(86400_000);
   assert.equal((await durableHistoryStatus(f.env)).history_budget_exhausted,false);
   assert.equal((await flushDurableHistory(f.env)).delivered,1);assert.equal(f.meta().hist_writes,8);
+});
+
+test("fresh events have reserved capacity and are processed ahead of cold recovery",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_MAX_PENDING_ROWS:1,HISTORY_QUEUE_LIVE_RESERVED_ROWS:1,HISTORY_QUEUE_FLUSH_QUERIES:1});
+  const cold=event("cold",{at:NOW-48*3600_000});cold.episode.caught_at=iso(NOW-72*3600_000);
+  await enqueueDurableHistory(f.env,ledger([cold]));
+  const second=structuredClone(cold);second.event_id="cold-2";second.episode.episode_id="cold-2";
+  await assert.rejects(enqueueDurableHistory(f.env,ledger([second])),/pending_capacity/);
+  await enqueueDurableHistory(f.env,ledger([event("fresh")]));
+  await flushDurableHistory(f.env);
+  assert.equal(JSON.parse(f.rows().find(row=>row.event_id==="fresh").progress_json).phase,"event");
+  assert.equal(f.rows().find(row=>row.event_id==="cold").progress_json,null);
+});
+
+test("fresh episode prerequisites use reserved slots without rewriting catch times",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_MAX_PENDING_ROWS:1,HISTORY_QUEUE_LIVE_RESERVED_ROWS:1});
+  const cold=event("cold",{at:NOW-48*3600_000});cold.episode.caught_at=iso(NOW-72*3600_000);
+  await enqueueDurableHistory(f.env,ledger([cold]));
+  const prerequisite=structuredClone(cold);prerequisite.event_id="prior";prerequisite.episode.episode_id="current";
+  await enqueueDurableHistory(f.env,{...ledger([prerequisite]),generated_at:iso(NOW),priority_episodes:["current"]});
+  assert.equal(f.rows().length,2);
+  assert.deepEqual(JSON.parse(f.rows().find(row=>row.event_id==="prior").payload_json),prerequisite);
+});
+
+test("concurrent cold admission cannot consume any of the 512 reserved live slots",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_MAX_PENDING_ROWS:2,HISTORY_QUEUE_LIVE_RESERVED_ROWS:512});
+  await enqueueDurableHistory(f.env,ledger([coldEvent("cold-existing")]));
+  let release, arrivals=0;
+  const gate=new Promise(resolve=>{release=resolve;});
+  f.before=async steps=>{
+    if (!steps.some(step=>/INSERT INTO history_sql_queue_events/.test(step.stmt.sql))) return;
+    if (++arrivals===2) release();
+    await gate;
+  };
+  const results=await Promise.allSettled([
+    enqueueDurableHistory(f.env,ledger([coldEvent("cold-race-a")])),
+    enqueueDurableHistory(f.env,ledger([coldEvent("cold-race-b")])),
+  ]);
+  f.before=null;
+  assert.equal(arrivals,2,"both requests must pass their stale preflight before either INSERT");
+  assert.equal(results.filter(row=>row.status==="fulfilled").length,1);
+  assert.match(results.find(row=>row.status==="rejected").reason.message,/storage_sql_statement_failed:SQLITE_CONSTRAINT/);
+  assert.equal(f.meta().pending_rows,2);
+  assert.equal(f.meta().max_pending_rows,514);
+  for (let start=0;start<512;start+=25) {
+    const count=Math.min(25,512-start);
+    const saved=await enqueueDurableHistory(f.env,ledger(Array.from({length:count},(_,i)=>event(`live-${start+i}`))));
+    assert.equal(saved.queued,count);
+  }
+  assert.equal(f.meta().pending_rows,514);
+  assert.equal(f.rows().filter(row=>JSON.parse(row.progress_json || "{}")._live_until).length,512);
+  await assert.rejects(enqueueDurableHistory(f.env,ledger([event("live-over-capacity")])),/history_queue_pending_capacity/);
+  assert.equal(f.meta().pending_rows,514);
+});
+
+test("SQL cold capacity rolls back a mixed live/cold batch after concurrent admission",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_MAX_PENDING_ROWS:2,HISTORY_QUEUE_LIVE_RESERVED_ROWS:2});
+  let release, entered;
+  const gate=new Promise(resolve=>{release=resolve;}), started=new Promise(resolve=>{entered=resolve;});
+  f.before=async steps=>{
+    if (steps.some(step=>/INSERT INTO history_sql_queue_events/.test(step.stmt.sql)
+        && step.stmt.args.some(arg=>arg.value==="mixed-live"))) {entered();await gate;}
+  };
+  const mixed=enqueueDurableHistory(f.env,ledger([event("mixed-live"),coldEvent("mixed-cold")]));
+  const rejection=assert.rejects(mixed,/storage_sql_statement_failed:SQLITE_CONSTRAINT/);
+  await started;
+  try {
+    await enqueueDurableHistory(f.env,ledger([coldEvent("winner-a"),coldEvent("winner-b")]));
+  } finally {release();}
+  await rejection;f.before=null;
+  assert.deepEqual(f.rows().map(row=>row.event_id),["winner-a","winner-b"]);
+  assert.equal(f.meta().pending_rows,2);
+  assert.equal(f.meta().pending_bytes,f.rows().reduce((sum,row)=>sum+row.payload_bytes,0));
+  await enqueueDurableHistory(f.env,ledger([event("live-after-rollback")]));
+  assert.equal(f.meta().pending_rows,3);
+});
+
+test("cold archive-pending payloads consume cold capacity but leave live slots available",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_MAX_PENDING_ROWS:1,HISTORY_QUEUE_LIVE_RESERVED_ROWS:1,HISTORY_ARCHIVE_MODE:"r2"});
+  const cold=coldEvent("cold-archive");
+  await enqueueDurableHistory(f.env,ledger([cold]));
+  assert.equal((await flushDurableHistory(f.env)).delivered,1);
+  assert.equal(f.meta().pending_rows,0);assert.equal(f.meta().archive_pending_rows,1);
+  await assert.rejects(enqueueDurableHistory(f.env,ledger([coldEvent("second-cold")])),/history_queue_pending_capacity/);
+  await enqueueDurableHistory(f.env,ledger([event("fresh-with-archive-backlog")]));
+  assert.equal(f.meta().pending_rows,1);assert.equal(f.meta().archive_pending_rows,1);
+  assert.deepEqual(JSON.parse(f.rows().find(row=>row.event_id===cold.event_id).payload_json),cold);
+});
+
+test("cold work stops at 90000 while live can use the rest of the 180000 total",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:180000,HISTORY_QUEUE_LIVE_RESERVED_UNITS:90000,
+    HISTORY_QUEUE_FLUSH_QUERIES:1});
+  await enqueueDurableHistory(f.env,ledger([coldEvent("cold-budget")]));
+  seedHistoryBudget(f,89992);
+  assert.equal((await flushDurableHistory(f.env)).continued,1);
+  assert.equal(f.meta().hist_writes,90000);
+  f.advance(1001);
+  await assert.rejects(flushDurableHistory(f.env),/history_live_budget_reserved/);
+  assert.equal(f.meta().hist_writes,90000);
+  assert.equal(f.rows()[0].lease_token,null);
+  await enqueueDurableHistory(f.env,ledger([event("live-budget")]));
+  assert.equal((await flushDurableHistory(f.env)).continued,1);
+  assert.equal(f.meta().hist_writes,90008);
+  assert.equal(JSON.parse(f.rows().find(row=>row.event_id==="cold-budget").progress_json).phase,"event");
+  seedHistoryBudget(f,179992);
+  f.advance(1001);
+  assert.equal((await flushDurableHistory(f.env)).delivered,1);
+  assert.equal(f.meta().hist_writes,180000);
+  await enqueueDurableHistory(f.env,ledger([event("live-budget-exhausted")]));
+  await assert.rejects(flushDurableHistory(f.env),/history_daily_write_budget/);
+  assert.equal(f.meta().hist_writes,180000);
+  assert.equal((await durableHistoryStatus(f.env)).history_budget_exhausted,true);
+});
+
+test("a cold claim with a stale preflight cannot spend reserved live work",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:180000,HISTORY_QUEUE_LIVE_RESERVED_UNITS:90000,
+    HISTORY_QUEUE_FLUSH_QUERIES:1});
+  await enqueueDurableHistory(f.env,ledger([coldEvent("cold-stale-budget")]));
+  seedHistoryBudget(f,89992);
+  let release, entered, gated=false;
+  const gate=new Promise(resolve=>{release=resolve;}), started=new Promise(resolve=>{entered=resolve;});
+  f.before=async steps=>{
+    if (!gated && steps.some(step=>/budget_reserved=MIN/.test(step.stmt.sql))) {
+      gated=true;entered();await gate;
+    }
+  };
+  const cold=flushDurableHistory(f.env);await started;
+  try {
+    await enqueueDurableHistory(f.env,ledger([event("live-budget-winner")]));
+    assert.equal((await flushDurableHistory(f.env)).continued,1);
+    assert.equal(f.meta().hist_writes,90000);
+  } finally {release();}
+  assert.equal((await cold).delivered,0);f.before=null;
+  const row=f.rows().find(row=>row.event_id==="cold-stale-budget");
+  assert.equal(row.progress_json,null);assert.equal(row.lease_token,null);assert.equal(row.budget_reserved,0);
+  assert.equal(f.meta().hist_writes,90000);
+});
+
+test("a fresh episode processes its oldest prerequisites before the new observation",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:180000,HISTORY_QUEUE_LIVE_RESERVED_UNITS:90000,
+    HISTORY_QUEUE_LIVE_RESERVED_ROWS:512,HISTORY_QUEUE_FLUSH_QUERIES:1});
+  const first=coldEvent("prior-a",{episode:"current",at:NOW-48*3600_000});
+  const second=coldEvent("prior-b",{episode:"current",at:NOW-36*3600_000});
+  second.episode.caught_at=first.episode.caught_at;
+  const fresh=event("current-check",{episode:"current"});
+  fresh.episode.caught_at=first.episode.caught_at;fresh.episode.caught_mcap_usd=999999;
+  const unrelated=coldEvent("unrelated-cold",{at:NOW-96*3600_000});
+  await enqueueDurableHistory(f.env,ledger([second,unrelated,first,fresh]));
+  seedHistoryBudget(f,90000);
+  const order=[];
+  f.afterCommit=(steps,errors)=>{
+    steps.forEach((step,index)=>{
+      if (!errors[index] && /INSERT OR IGNORE INTO signal_episode_events/.test(step.stmt.sql)) order.push(step.stmt.args[0].value);
+    });
+  };
+  for (let attempt=0;attempt<8;attempt++) {
+    await flushDurableHistory(f.env);
+    if (f.rows().find(row=>row.event_id===fresh.event_id).status==="delivered") break;
+    f.advance(1001);
+  }
+  assert.deepEqual(order,[first.event_id,second.event_id,fresh.event_id]);
+  assert.equal(f.rows().find(row=>row.event_id===unrelated.event_id).progress_json,null);
+  assert.equal(f.rows().find(row=>row.event_id===fresh.event_id).status,"delivered");
+  const episode=f.sqlite.prepare("SELECT caught_at,caught_mcap_usd FROM signal_episodes WHERE episode_id='current'").get();
+  assert.equal(episode.caught_at,first.episode.caught_at);assert.equal(episode.caught_mcap_usd,first.episode.caught_mcap_usd);
+  const stored=f.sqlite.prepare("SELECT event_id,observed_at,payload_json FROM signal_episode_events WHERE episode_id='current' ORDER BY observed_at,event_id").all();
+  for (const [index,original] of [first,second,fresh].entries()) {
+    assert.equal(stored[index].observed_at,original.event.observed_at);
+    assert.deepEqual(JSON.parse(stored[index].payload_json),original);
+    assert.equal(f.rows().find(row=>row.event_id===original.event_id).source_at,Date.parse(original.event.observed_at));
+  }
+});
+
+test("retry backoff on an older prerequisite prevents a fresh event overtaking its episode",async t=>{
+  const f=fixture(t);
+  const prior=coldEvent("blocked-prior",{episode:"blocked"});
+  const fresh=event("blocked-fresh",{episode:"blocked"});fresh.episode.caught_at=prior.episode.caught_at;
+  await enqueueDurableHistory(f.env,ledger([fresh,prior,event("independent-live")]));
+  f.sqlite.prepare("UPDATE history_sql_queue_events SET next_attempt_at=? WHERE event_id=?").run(NOW+120000,prior.event_id);
+  const first=await flushDurableHistory(f.env);
+  assert.equal(first.delivered,1);
+  assert.equal(f.rows().find(row=>row.event_id===fresh.event_id).progress_json,JSON.stringify({_live_until:NOW+24*3600_000}));
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) n FROM signal_episode_events WHERE episode_id='blocked'").get().n,0);
+  f.advance(120000);
+  assert.equal((await flushDurableHistory(f.env)).delivered,2);
+  const stored=f.sqlite.prepare("SELECT event_id,observed_at FROM signal_episode_events WHERE episode_id='blocked' ORDER BY rowid").all();
+  assert.deepEqual(stored.map(row=>row.event_id),[prior.event_id,fresh.event_id]);
+  assert.deepEqual(stored.map(row=>row.observed_at),[prior.event.observed_at,fresh.event.observed_at]);
+});
+
+test("only a current generated_at can give an old prerequisite live priority",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_MAX_PENDING_ROWS:1,HISTORY_QUEUE_LIVE_RESERVED_ROWS:1});
+  await enqueueDurableHistory(f.env,ledger([coldEvent("cold-full")]));
+  const prerequisite=coldEvent("priority-boundary",{episode:"current"});
+  for (const generated_at of [iso(NOW-24*3600_000-1),iso(NOW+300001),"not-a-date"]) {
+    await assert.rejects(enqueueDurableHistory(f.env,{...ledger([prerequisite]),generated_at,priority_episodes:["current"]}),
+      /history_queue_pending_capacity/);
+    assert.equal(f.meta().pending_rows,1);
+  }
+  await enqueueDurableHistory(f.env,{...ledger([prerequisite]),generated_at:iso(NOW-24*3600_000),priority_episodes:["current"]});
+  const row=f.rows().find(row=>row.event_id===prerequisite.event_id);
+  assert.deepEqual(JSON.parse(row.payload_json),prerequisite);
+  assert.equal(row.source_at,Date.parse(prerequisite.event.observed_at));
+  assert.equal(JSON.parse(row.progress_json)._live_until,NOW+24*3600_000);
+});
+
+test("live priority promotes an already queued prerequisite without replacing its source payload",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:180000,HISTORY_QUEUE_LIVE_RESERVED_UNITS:90000,
+    HISTORY_QUEUE_LIVE_RESERVED_ROWS:512,HISTORY_QUEUE_FLUSH_QUERIES:1});
+  const original=coldEvent("existing-prerequisite",{episode:"current"});
+  await enqueueDurableHistory(f.env,ledger([original]));
+  const changed=structuredClone(original);changed.evidence.changed=true;
+  const duplicate=await enqueueDurableHistory(f.env,{...ledger([changed]),generated_at:iso(NOW),priority_episodes:["current"]});
+  assert.equal(duplicate.queued,0);assert.equal(duplicate.duplicates,1);
+  const stored=f.rows()[0];
+  assert.deepEqual(JSON.parse(stored.payload_json),original);
+  assert.equal(stored.source_at,Date.parse(original.event.observed_at));
+  seedHistoryBudget(f,90000);
+  assert.equal((await flushDurableHistory(f.env)).continued,1);
+  assert.equal(f.meta().hist_writes,90008);
+  assert.equal(JSON.parse(f.rows()[0].progress_json).phase,"event");
+});
+
+test("live promotion survives a leased writer saving its pre-promotion phase cursor",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:180000,HISTORY_QUEUE_LIVE_RESERVED_UNITS:90000,
+    HISTORY_QUEUE_LIVE_RESERVED_ROWS:512,HISTORY_QUEUE_FLUSH_QUERIES:1});
+  const original=coldEvent("promotion-phase-race",{episode:"current"});
+  await enqueueDurableHistory(f.env,ledger([original]));
+  let release, entered, gated=false;
+  const gate=new Promise(resolve=>{release=resolve;}), started=new Promise(resolve=>{entered=resolve;});
+  f.before=async steps=>{
+    if (!gated && steps.some(step=>/SET progress_json=\?3/.test(step.stmt.sql))) {
+      gated=true;entered();await gate;
+    }
+  };
+  const writer=flushDurableHistory(f.env);await started;
+  const held=f.rows()[0];
+  assert.ok(held.lease_token);assert.equal(held.progress_json,null);
+  try {
+    const response=await enqueueDurableHistory(f.env,{...ledger([original]),generated_at:iso(NOW),priority_episodes:["current"]});
+    assert.equal(response.queued,0);assert.equal(response.duplicates,1);
+    const promoted=f.rows()[0];
+    for (const key of ["source_at","payload_json","progress_json","lease_token","lease_until","attempts","budget_reserved"]) {
+      assert.equal(promoted[key],held[key],`promotion must not rewrite the active writer's ${key}`);
+    }
+    assert.equal(f.sqlite.prepare("SELECT priority_until FROM history_sql_live_priority WHERE event_id=?").get(original.event_id).priority_until,
+      NOW+24*3600_000);
+    const competing=await flushDurableHistory(f.env);
+    assert.equal(competing.delivered,0);assert.equal(competing.continued,0);
+    assert.equal(f.rows()[0].lease_token,held.lease_token);
+  } finally {release();}
+  assert.equal((await writer).continued,1);f.before=null;
+  assert.equal(JSON.parse(f.rows()[0].progress_json).phase,"event");
+  assert.equal(JSON.parse(f.rows()[0].progress_json)._live_until,undefined,
+    "the writer really saved a cursor captured before the promotion");
+  assert.equal(f.rows()[0].lease_token,null);
+  seedHistoryBudget(f,90000);f.advance(1001);
+  assert.equal((await flushDurableHistory(f.env)).delivered,1);
+  assert.equal(f.meta().hist_writes,90008);
+  const stored=f.sqlite.prepare("SELECT payload_json,observed_at FROM signal_episode_events WHERE event_id=?").get(original.event_id);
+  assert.deepEqual(JSON.parse(stored.payload_json),original);assert.equal(stored.observed_at,original.event.observed_at);
+  assert.equal(f.sql.filter(sql=>/INSERT INTO signal_episodes/.test(sql)).length,1);
+});
+
+test("fresh cutover staging can drain into reserved live capacity while cold slots are full",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_MAX_PENDING_ROWS:1,HISTORY_QUEUE_LIVE_RESERVED_ROWS:512,
+    HISTORY_LEGACY_MIGRATION:"verified_turso_v1"});
+  const cold=coldEvent("cold-before-cutover");
+  await enqueueDurableHistory(f.env,ledger([cold]));
+  legacy(t,f,{empty:true}).readOnly();
+  const fresh=event("fresh-cutover-reserved");
+  assert.equal((await enqueueDurableHistory(f.env,ledger([fresh]))).staged,true);
+  assert.equal(f.sqlite.prepare("SELECT pending_rows FROM history_sql_cutover_meta WHERE id=1").get().pending_rows,1);
+  assert.equal((await migrateLegacyDurableHistory(f.env,{legacyWritersStopped:true,historyStateMigrated:true})).complete,true);
+  const result=await flushDurableHistory(f.env);
+  assert.equal(result.cutover_drain.forwarded,1);
+  assert.equal(f.sqlite.prepare("SELECT pending_rows FROM history_sql_cutover_meta WHERE id=1").get().pending_rows,0);
+  const stored=f.sqlite.prepare("SELECT payload_json,observed_at FROM signal_episode_events WHERE event_id=?").get(fresh.event_id);
+  assert.equal(stored.observed_at,fresh.event.observed_at);assert.deepEqual(JSON.parse(stored.payload_json),fresh);
+  assert.equal(f.rows().find(row=>row.event_id===fresh.event_id).status,"delivered");
+});
+
+test("cutover preserves trusted live priority for an old prerequisite without changing its timestamps",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_MAX_PENDING_ROWS:1,HISTORY_QUEUE_LIVE_RESERVED_ROWS:512,
+    HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:180000,HISTORY_QUEUE_LIVE_RESERVED_UNITS:90000,
+    HISTORY_QUEUE_FLUSH_QUERIES:2,
+    HISTORY_LEGACY_MIGRATION:"verified_turso_v1"});
+  await enqueueDurableHistory(f.env,ledger([coldEvent("cold-before-priority-cutover")]));
+  legacy(t,f,{empty:true}).readOnly();
+  const prior=coldEvent("old-live-cutover-prerequisite",{episode:"current"});
+  const saved=await enqueueDurableHistory(f.env,{...ledger([prior]),generated_at:iso(NOW),priority_episodes:["current"]});
+  assert.equal(saved.staged,true);
+  assert.equal(saved.queued,1);assert.equal(saved.duplicates,0);
+  const staged=f.sqlite.prepare("SELECT source_at,payload_json FROM history_sql_cutover_events WHERE event_id=?").get(prior.event_id);
+  assert.equal(staged.source_at,Date.parse(prior.event.observed_at));assert.deepEqual(JSON.parse(staged.payload_json),prior);
+  assert.equal((await migrateLegacyDurableHistory(f.env,{legacyWritersStopped:true,historyStateMigrated:true})).complete,true);
+  seedHistoryBudget(f,90000);
+  const result=await flushDurableHistory(f.env);
+  assert.equal(result.cutover_drain.forwarded,1);assert.equal(result.delivered,1);
+  assert.equal(f.sqlite.prepare("SELECT pending_rows FROM history_sql_cutover_meta WHERE id=1").get().pending_rows,0);
+  const stored=f.sqlite.prepare("SELECT payload_json,observed_at FROM signal_episode_events WHERE event_id=?").get(prior.event_id);
+  assert.equal(stored.observed_at,prior.event.observed_at);assert.deepEqual(JSON.parse(stored.payload_json),prior);
+  assert.equal(f.sqlite.prepare("SELECT caught_at FROM signal_episodes WHERE episode_id='current'").get().caught_at,prior.episode.caught_at);
+});
+
+test("atomic cold capacity follows a changed live reservation rather than the first trigger definition",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_MAX_PENDING_ROWS:2,HISTORY_QUEUE_LIVE_RESERVED_ROWS:1});
+  await enqueueDurableHistory(f.env,ledger([coldEvent("before-reservation-change")]));
+  f.env.HISTORY_QUEUE_LIVE_RESERVED_ROWS=512;
+  let release, arrivals=0;
+  const gate=new Promise(resolve=>{release=resolve;});
+  f.before=async steps=>{
+    if (!steps.some(step=>/INSERT INTO history_sql_queue_events/.test(step.stmt.sql))) return;
+    if (++arrivals===2) release();
+    await gate;
+  };
+  const results=await Promise.allSettled([
+    enqueueDurableHistory(f.env,ledger([coldEvent("resized-race-a")])),
+    enqueueDurableHistory(f.env,ledger([coldEvent("resized-race-b")])),
+  ]);
+  f.before=null;
+  assert.equal(arrivals,2);
+  assert.equal(results.filter(row=>row.status==="fulfilled").length,1);
+  assert.equal(f.meta().pending_rows,2);assert.equal(f.meta().max_pending_rows,514);
+});
+
+test("the 180000 work limit resets at UTC midnight, not the local midnight",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:180000,HISTORY_QUEUE_LIVE_RESERVED_UNITS:90000,
+    HISTORY_QUEUE_FLUSH_QUERIES:1});
+  await enqueueDurableHistory(f.env,ledger([event("utc-reset")]));
+  seedHistoryBudget(f,180000);
+  f.advance(10*3600_000-1);
+  await assert.rejects(flushDurableHistory(f.env),/history_daily_write_budget/);
+  f.advance(1);
+  assert.equal(iso(Date.now()),"2026-10-04T22:00:00.000Z");
+  assert.equal((await durableHistoryStatus(f.env)).history_write_units,180000);
+  f.advance(2*3600_000-1);
+  assert.equal((await durableHistoryStatus(f.env)).history_budget_exhausted,true);
+  f.advance(1);
+  const status=await durableHistoryStatus(f.env);
+  assert.equal(status.write_budget_day,"turso:2026-10-05");
+  assert.equal(status.history_write_units,0);assert.equal(status.history_budget_exhausted,false);
+  assert.equal((await flushDurableHistory(f.env)).continued,1);
+  assert.equal(f.meta().hist_day,"turso:2026-10-05");assert.equal(f.meta().hist_writes,8);
+});
+
+test("an in-flight history job stops on a UTC day change and resumes its saved cursor",async t=>{
+  const f=fixture(t,{HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS:180000,HISTORY_QUEUE_LIVE_RESERVED_UNITS:90000});
+  await enqueueDurableHistory(f.env,ledger([event("utc-in-flight")]));
+  f.advance(12*3600_000-1);
+  let crossed=false;
+  f.afterCommit=steps=>{
+    if (!crossed && steps.some(step=>/INSERT INTO signal_episodes/.test(step.stmt.sql))) {crossed=true;f.advance(1);}
+  };
+  const result=await flushDurableHistory(f.env);
+  assert.equal(result.failed,1);assert.equal(result.error,"history_write_day_changed");
+  assert.equal(f.rows()[0].status,"pending");assert.ok(f.rows()[0].payload_json);
+  assert.equal(JSON.parse(f.rows()[0].progress_json).phase,"event");
+  assert.equal(f.meta().hist_day,"turso:2026-10-04");assert.equal(f.meta().hist_writes,8);
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) n FROM signal_episode_events").get().n,0);
+  f.afterCommit=null;f.advance(120001);
+  assert.equal((await flushDurableHistory(f.env)).delivered,1);
+  assert.equal(f.meta().hist_day,"turso:2026-10-05");assert.equal(f.meta().hist_writes,8);
+  assert.equal(f.sql.filter(sql=>/INSERT INTO signal_episodes/.test(sql)).length,1);
 });
 
 test("SQL graph work resumes bounded daily-mode phases without replaying the frozen catch", async t => {

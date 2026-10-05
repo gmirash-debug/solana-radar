@@ -14,7 +14,7 @@ import {
   historyWallets,
 } from "./history.js";
 import {runtimeDocument, runtimeDashboardResponse, runtimeCheckpointResponse, runtimeMetadata} from "./runtime.js";
-import {runtimeUsesSql, collectSqlRuntimeGarbage, sqlRuntimeResponse, availableSqlDashboardParts} from "./runtime-sql.js";
+import {runtimeUsesSql, collectSqlRuntimeGarbage, sqlRuntimeResponse, availableSqlDashboardParts, availableSqlRuntimeParts} from "./runtime-sql.js";
 import {durableHistoryIngestResponse, flushDurableHistory, flushDurableHistoryArchives, durableHistoryStatus, migrateLegacyDurableHistory, HISTORY_QUEUE_LIMITS} from "./runtime-history.js";
 import {historySchemaState} from "./history-schema.js";
 import {resolveStorageEnv} from "./storage-sql.js";
@@ -22,6 +22,8 @@ import {archiveHistoryEvent, readHistoryArchive} from "./archive.js";
 import {validateHistoryEvents} from "./runtime-history.js";
 import {runHistoryMaintenance, historyMaintenanceStatus, pruneArchivedHistoryOutbox} from "./history-maintenance.js";
 import {r2BudgetStatus, r2BudgetCall, dispatchR2BudgetNotice} from "./r2-budget.js";
+import {coldOutboxResponse,coldOutboxStatus} from "./cold-outbox.js";
+import {archiveBackupResponse} from "./archive-backup.js";
 export {RuntimeSnapshots} from "./runtime.js";
 export {HistoryQueue} from "./runtime-history.js";
 export {R2Budget} from "./r2-budget.js";
@@ -1216,6 +1218,11 @@ export default {
     catch (error) { return json({ok:false, error:error.message}, 503); }
     const url = new URL(request.url);
 
+    if (url.pathname === "/api/storage/archive-backup") {
+      try { return await archiveBackupResponse(env,request); }
+      catch { return json({ok:false,error:"archive_backup_unavailable"},503); }
+    }
+
     if (url.pathname === "/api/storage/r2-budget" && request.method === "GET") {
       const budget = await budgetView(env);
       return json({ok:budget.status !== "unavailable",...budget},budget.status === "unavailable" ? 503 : 200,corsHeaders(request,env));
@@ -1274,6 +1281,7 @@ export default {
         runtime_archive_mode: env.RUNTIME_ARCHIVE_MODE || "durable",
         runtime_storage_backend: env.RUNTIME_STORAGE_BACKEND || "durable",
         history_queue_backend: env.HISTORY_QUEUE_BACKEND || "durable",
+        cold_outbox:runtimeUsesSql(env) ? await coldOutboxStatus(env).catch(()=>({status:"unavailable"})) : null,
         r2_budget: await budgetView(env),
         history: historical,
       }, 200, corsHeaders(request, env));
@@ -1370,6 +1378,10 @@ export default {
       const access = ingestAccess(request, env);
       if (!access.ok) return json({ ok: false, error: access.error }, access.status, corsHeaders(request, env));
       try {
+        if (url.pathname === "/api/storage/outbox") {
+          if (!runtimeUsesSql(env) || !env.RADAR_ARCHIVE) return json({ok:false,error:"outbox_archive_not_configured"},503);
+          return await coldOutboxResponse(env,request);
+        }
         if (url.pathname === "/api/storage/r2-budget/bootstrap") {
           if (request.method !== "POST") return json({ok:false,error:"POST required"},405);
           const previous = await r2BudgetStatus(env);
@@ -1421,6 +1433,14 @@ export default {
           return json({ok:true,...await runHistoryMaintenance(env,{maxQueries:20,maxWrites:50}),
             retention:await runArchiveRetention(env)});
         }
+        if (url.pathname === "/api/runtime/checkpoint-parts") {
+          if (request.method !== "POST") return json({ok:false,error:"POST required"},405);
+          if (!runtimeUsesSql(env)) return json({ok:false,error:"checkpoint_parts_requires_sql"},503);
+          const kind = url.searchParams.get("kind") || "deep";
+          if (!["deep","discovery"].includes(kind)) return json({ok:false,error:"invalid_checkpoint_kind"},400);
+          const payload = await storageRequestJson(request,64*1024);
+          return json({ok:true,parts:await availableSqlRuntimeParts(env,`checkpoint:${kind}`,payload.ids)});
+        }
         if (url.pathname === "/api/runtime/checkpoint") {
           const kind = url.searchParams.get("kind") || "deep";
           if (!["deep", "discovery"].includes(kind)) return json({ok:false, error:"invalid_checkpoint_kind"}, 400);
@@ -1442,6 +1462,10 @@ export default {
         if (url.pathname === "/api/runtime/rpc-ledger") {
           if (!runtimeUsesSql(env)) return json({ok:false,error:"rpc_ledger_requires_sql_runtime"},503);
           return sqlRuntimeResponse(env,request,"rpc_ledger");
+        }
+        if (url.pathname === "/api/runtime/storage-recovery") {
+          if (!runtimeUsesSql(env)) return json({ok:false,error:"storage_recovery_requires_sql"},503);
+          return sqlRuntimeResponse(env,request,"storage_recovery");
         }
         if (url.pathname === "/api/runtime/history") {
           if (request.method !== "POST") return json({ok:false, error:"POST required"}, 405);

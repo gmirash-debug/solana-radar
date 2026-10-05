@@ -7,8 +7,9 @@ import json
 
 MAX_ENCODED_BYTES = 192 * 1024 * 1024
 MAX_DECODED_BYTES = 128 * 1024 * 1024
-INLINE_BYTES = 6 * 1024 * 1024
-PART_BYTES = 1024 * 1024
+INLINE_BYTES = 256 * 1024
+PART_BYTES = 256 * 1024
+MAX_PARTS = MAX_ENCODED_BYTES // PART_BYTES
 REBUILDABLE_KEYS = {"wallet_cache", "social_cache", "gmgn_cache", "enrichment_cache"}
 
 
@@ -64,7 +65,7 @@ def hydrate_checkpoint(payload, fetch_part):
     if payload.get("schema_version") != 2:
         return payload
     refs = payload.get("parts")
-    if payload.get("encoding") != "gzip+base64+parts" or not isinstance(refs, list) or not 1 <= len(refs) <= 192:
+    if payload.get("encoding") != "gzip+base64+parts" or not isinstance(refs, list) or not 1 <= len(refs) <= MAX_PARTS:
         raise ValueError("invalid checkpoint manifest")
     data = []
     total = 0
@@ -72,7 +73,7 @@ def hydrate_checkpoint(payload, fetch_part):
         part = fetch_part(ref["id"])
         encoded = part.get("data", "")
         if (part.get("encoding") != "gzip+base64-part" or not isinstance(encoded, str)
-                or not 0 < len(encoded) <= PART_BYTES or len(encoded) != ref.get("bytes")
+                or not 0 < len(encoded) <= 1024 * 1024 or len(encoded) != ref.get("bytes")
                 or part.get("encoded_bytes") != len(encoded)
                 or hashlib.sha256(encoded.encode("ascii")).hexdigest() != ref["id"]):
             raise ValueError("checkpoint part integrity mismatch")

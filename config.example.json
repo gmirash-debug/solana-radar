@@ -662,6 +662,8 @@
   "remote_discovery_hot_volume_5m_usd": 500,
   "remote_discovery_hot_txns_5m": 5,
   "remote_sync_required": false,
+  "remote_legacy_snapshot_enabled": false,
+  "remote_cold_outbox_enabled": true,
   "remote_sync_alert_history_limit": 40,
   "dashboard_fallback_alert_history_limit": 6,
   "remote_sync_timeout_seconds": 25,

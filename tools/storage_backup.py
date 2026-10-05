@@ -31,8 +31,10 @@ seconds, preserving setup/termination headroom. Runtime on the complete remote
 dataset must be measured before declaring the daily recovery path ready.
 Payload groups target 8 MiB; size planning reads at most 1000 upcoming keys,
 not a whole-table MAX. Its CPU time is still subject to the request timeout.
-Expired streams, transport errors and interrupted reads are not replayed or
-resumed into a different snapshot. Re-run the job from scratch after failure.
+Expired streams, transport errors and interrupted reads are never replayed in
+the old read transaction. Private publication may restart one transient failure
+from a completely new snapshot, within the original total deadline. Local
+output and non-transient failures still require a new run.
 Only checksum-verified replacements may rotate the seven retained recovery
 points. A verified draft after a publication failure remains recoverable;
 unverified/uncertain drafts never replace previous verified backups.
@@ -940,8 +942,19 @@ def main(argv=None):
             github.assert_private()
         with tempfile.TemporaryDirectory(prefix="radar-daily-backup-") as temporary:
             output = args.output or temporary
-            archive, manifest_path, manifest = create_backup(os.environ.get("TURSO_DATABASE_URL"),
-                os.environ.get("TURSO_BACKUP_AUTH_TOKEN") or os.environ.get("TURSO_AUTH_TOKEN"), output, deadline, progress=progress)
+            for attempt in range(2):
+                attempt_output = Path(output) if args.output else Path(output) / f"attempt-{attempt}"
+                try:
+                    archive, manifest_path, manifest = create_backup(os.environ.get("TURSO_DATABASE_URL"),
+                        os.environ.get("TURSO_BACKUP_AUTH_TOKEN") or os.environ.get("TURSO_AUTH_TOKEN"),
+                        attempt_output,deadline,progress=progress)
+                    break
+                except BackupError as error:
+                    retryable = str(error) in {"database request timed out; read snapshot discarded",
+                                              "database snapshot request failed; incomplete backup discarded"}
+                    if args.output or attempt or not retryable or deadline.end-deadline.clock()<120:
+                        raise
+                    print("Transient backup failure; restarting from a new read snapshot",flush=True)
             if github:
                 github.publish(archive, manifest_path, manifest, args.keep)
             print("Verified database backup " + ("stored in private GitHub Releases" if github else "created locally")

@@ -702,7 +702,11 @@ export async function enqueueDurableHistory(env, payload) {
     if (ENCODER.encode(JSON.stringify({events})).byteLength > HISTORY_QUEUE_LIMITS.requestBytes) {
       throw new QueueError("history_request_oversize", 413);
     }
-    return queue.enqueue(events);
+    const source = Date.parse(payload.generated_at);
+    const live = Number.isFinite(source) && source>=Date.now()-24*3600000 && source<=Date.now()+300000;
+    const priorities = Array.isArray(payload.priority_episodes) ? payload.priority_episodes : [];
+    if (priorities.length>25 || priorities.some(id=>typeof id!=="string" || id.length>240)) throw new QueueError("history_priority_invalid",400);
+    return queue.enqueue(events,Date.now(),live ? new Set(priorities) : new Set());
   }
   return queueRequest(env, "enqueue", { events });
 }
