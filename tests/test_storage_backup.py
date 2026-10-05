@@ -12,7 +12,7 @@ import ssl
 import struct
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import urllib.error
 import urllib.parse
 import zlib
@@ -108,6 +108,70 @@ def fill(connection):
         ANALYZE;
     """)
     connection.commit()
+
+
+class PersistentTransportTests(unittest.TestCase):
+    def fake_factory(self,status=200,failure=None):
+        created=[]
+        class Connection:
+            def __init__(self,host,timeout,context):
+                self.host,self.timeout,self.context=host,timeout,context
+                self.sock=Mock();self.calls=[];self.closed=0
+                created.append(self)
+            def request(self,*args,**kwargs):
+                self.calls.append((args,kwargs))
+                if failure:
+                    raise failure
+            def getresponse(self):
+                reply=Response(b"{}",status)
+                reply.headers={"Location":"https://outside.invalid"}
+                reply.close=Mock()
+                return reply
+            def close(self):
+                self.closed+=1
+        return Connection,created
+
+    def request(self,host="unit-test.turso.io"):
+        return urllib.request.Request("https://"+host+"/v3/pipeline",b"{}",{"Authorization":"Bearer "+TOKEN})
+
+    def test_reuses_verified_tls_connection_and_closes_it_on_sticky_host_change(self):
+        factory,created=self.fake_factory();context=object()
+        with patch.object(backup.http.client,"HTTPSConnection",factory), \
+             patch.object(backup.ssl,"create_default_context",return_value=context):
+            transport=backup.PersistentHTTPS()
+            transport.open(self.request(),20).read(100)
+            transport.open(self.request(),5).read(100)
+            self.assertEqual(len(created),1)
+            self.assertIs(created[0].context,context)
+            self.assertEqual(created[0].sock.settimeout.call_args.args,(5,))
+            self.assertEqual(created[0].calls[0][1]["headers"]["Authorization"],"Bearer "+TOKEN)
+            transport.open(self.request("unit-test.eu.turso.io"),3).read(100)
+            self.assertEqual(len(created),2);self.assertEqual(created[0].closed,1)
+            transport.close();self.assertEqual(created[1].closed,1)
+
+    def test_redirect_and_auth_failure_never_forward_or_retry(self):
+        for status,kind in ((302,backup.BackupError),(401,urllib.error.HTTPError)):
+            factory,created=self.fake_factory(status)
+            with patch.object(backup.http.client,"HTTPSConnection",factory):
+                transport=backup.PersistentHTTPS()
+                with self.assertRaises(kind) as error:
+                    transport.open(self.request(),20)
+                self.assertNotIn(TOKEN,str(error.exception))
+                self.assertEqual(len(created),1)
+                self.assertEqual(len(created[0].calls),1)
+                self.assertEqual(created[0].closed,1)
+
+    def test_network_failure_closes_connection_without_resuming_the_snapshot(self):
+        factory,created=self.fake_factory(failure=TimeoutError(TOKEN))
+        with patch.object(backup.http.client,"HTTPSConnection",factory):
+            client=backup.ReadSnapshot(URL,TOKEN)
+            with self.assertRaises(backup.BackupError) as error:
+                client.begin()
+            self.assertNotIn(TOKEN,str(error.exception));self.assertTrue(client.broken)
+            with self.assertRaises(backup.BackupError):
+                client.begin()
+            client.close()
+        self.assertEqual(len(created),1);self.assertEqual(created[0].closed,1)
 
 
 class SnapshotTests(unittest.TestCase):
