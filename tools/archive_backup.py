@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import struct
 import sys
 import tarfile
 import tempfile
@@ -31,6 +32,9 @@ MAX_OBJECT_BYTES = 64 * 1024 * 1024
 MAX_PAGE_BYTES = 2 * 1024 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 MAX_INVENTORY_PAGES = 1000
+MAX_BATCH_OBJECTS = 16
+MAX_BATCH_BYTES = 8 * 1024 * 1024
+MAX_FRAME_HEADER_BYTES = 8192
 SHARD_BYTES = 256 * 1024 * 1024
 PREFIX = "r2-backup-"
 MARKER = "Verified private R2 backup; format=r2-backup-v1"
@@ -143,16 +147,166 @@ def download(url, secret, row, directory, deadline, session=None, cancelled=None
             temporary.unlink(missing_ok=True)
 
 
-def download_all(url, secret, rows, directory, deadline, session=None):
+def download_groups(rows):
+    if not isinstance(rows, list) or len(rows) > MAX_OBJECTS:
+        raise BackupError("archive inventory exceeds bounded recovery capacity")
+    groups, current, total, seen = [], [], 0, set()
+    for value in rows:
+        row = normalized_row(value)
+        if row["key"] in seen:
+            raise BackupError("archive inventory contains duplicate objects")
+        seen.add(row["key"])
+        if current and (len(current) == MAX_BATCH_OBJECTS or total + row["bytes"] > MAX_BATCH_BYTES):
+            groups.append(current)
+            current, total = [], 0
+        if row["bytes"] > MAX_BATCH_BYTES:
+            groups.append([row])
+        else:
+            current.append(row)
+            total += row["bytes"]
+    if current:
+        groups.append(current)
+    return groups
+
+
+class FrameReader:
+    """Consume framed responses without buffering a whole batch or body."""
+    def __init__(self, response, deadline, cancelled):
+        self.blocks = iter(response.iter_content(65536))
+        self.deadline, self.cancelled = deadline, cancelled
+        self.buffer = memoryview(b"")
+        self.wire_bytes = 0
+
+    def next_block(self):
+        check(self.deadline, self.cancelled)
+        for block in self.blocks:
+            check(self.deadline, self.cancelled)
+            if not isinstance(block, bytes):
+                raise BackupError("archive batch body is invalid")
+            self.wire_bytes += len(block)
+            if block:
+                return memoryview(block)
+        return None
+
+    def pieces(self, size):
+        while size:
+            check(self.deadline, self.cancelled)
+            if not self.buffer:
+                self.buffer = self.next_block()
+                if self.buffer is None:
+                    raise BackupError("archive batch body is incomplete")
+            take = min(size, len(self.buffer))
+            block, self.buffer = self.buffer[:take], self.buffer[take:]
+            size -= take
+            yield block
+
+    def exact(self, size):
+        return b"".join(self.pieces(size))
+
+    def finish(self):
+        check(self.deadline, self.cancelled)
+        if self.buffer or self.next_block() is not None:
+            raise BackupError("archive batch contains trailing bytes")
+
+
+def unique_header(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise BackupError("archive batch header contains duplicate fields")
+        result[key] = value
+    return result
+
+
+def download_batch(url, secret, rows, directory, deadline, session=None, cancelled=None):
+    session = session or requests
+    groups = download_groups(rows)
+    if (len(groups) != 1 or not rows or len(rows) > MAX_BATCH_OBJECTS
+            or sum(row["bytes"] for row in groups[0]) > MAX_BATCH_BYTES):
+        raise BackupError("archive batch exceeds bounded capacity")
+    rows = groups[0]
+    directory = Path(directory)
+    paths, partials, completed, results = [], [], [], []
+    check(deadline, cancelled)
+    for row in rows:
+        destination = directory / hashlib.sha256(row["key"].encode()).hexdigest()
+        temporary = destination.with_suffix(".partial")
+        if (destination.exists() or destination.is_symlink()
+                or temporary.exists() or temporary.is_symlink()):
+            raise BackupError("archive recovery destination already exists")
+        paths.append((destination, temporary))
+    try:
+        with session.post(url.rstrip("/") + "/batch", json={"keys": [row["key"] for row in rows]},
+                headers={"x-radar-archive-backup-secret": secret, "Accept-Encoding": "identity",
+                         "Accept": "application/octet-stream"},
+                timeout=deadline.timeout(), allow_redirects=False, stream=True) as response:
+            response_ok(response)
+            if response.headers.get("x-radar-batch-count") != str(len(rows)):
+                raise BackupError("archive batch count differs from requested objects")
+            if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                raise BackupError("archive batch transfer encoding is unsupported")
+            length = response.headers.get("Content-Length")
+            if length is not None and (not re.fullmatch(r"[0-9]{1,9}", length)
+                    or int(length) > MAX_BATCH_BYTES + MAX_BATCH_OBJECTS * (4 + MAX_FRAME_HEADER_BYTES)):
+                raise BackupError("archive batch response exceeds bounded capacity")
+            stream = FrameReader(response, deadline, cancelled)
+            for row, (destination, temporary) in zip(rows, paths):
+                header_size = struct.unpack(">I", stream.exact(4))[0]
+                if not 1 <= header_size <= MAX_FRAME_HEADER_BYTES:
+                    raise BackupError("archive batch header exceeds bounded capacity")
+                header = json.loads(stream.exact(header_size).decode("utf-8"), object_pairs_hook=unique_header)
+                if (not isinstance(header, dict) or set(header) != {"key", "bytes", "etag"}
+                        or normalized_row(header) != row):
+                    raise BackupError("archive batch object changed or order differs from inventory")
+                digest = hashlib.sha256()
+                with temporary.open("xb") as handle:
+                    partials.append(temporary)
+                    os.chmod(temporary, 0o600)
+                    for block in stream.pieces(row["bytes"]):
+                        digest.update(block)
+                        handle.write(block)
+                results.append({**row, "sha256": digest.hexdigest(), "file": destination.name})
+            stream.finish()
+            if length is not None and stream.wire_bytes != int(length):
+                raise BackupError("archive batch response size differs from its header")
+        check(deadline, cancelled)
+        # Commit bodies only after the complete response has passed framing and
+        # inventory checks. Roll back owned files if promotion itself fails.
+        for destination, temporary in paths:
+            check(deadline, cancelled)
+            if destination.exists() or destination.is_symlink():
+                raise BackupError("archive recovery destination already exists")
+            temporary.rename(destination)
+            completed.append(destination)
+        return results
+    except Exception:
+        for destination in completed:
+            destination.unlink(missing_ok=True)
+        raise
+    finally:
+        for temporary in partials:
+            temporary.unlink(missing_ok=True)
+
+
+def download_group(url, secret, rows, directory, deadline, session=None, cancelled=None):
+    if len(rows) == 1 and rows[0]["bytes"] > MAX_BATCH_BYTES:
+        return [download(url, secret, rows[0], directory, deadline, session, cancelled)]
+    return download_batch(url, secret, rows, directory, deadline, session, cancelled)
+
+
+def download_all(url, secret, rows, directory, deadline, session=None, progress=None):
     """At most four pending requests; failure cancels queued and running reads."""
+    groups = download_groups(rows)
     cancelled = Event()
     executor = ThreadPoolExecutor(max_workers=4)
-    pending, results, index = {}, [None] * len(rows), 0
+    pending, results, index = {}, [None] * len(groups), 0
+    completed_objects, completed_bytes = 0, 0
+    total_bytes, last_progress = sum(row["bytes"] for row in rows), deadline.clock()
     try:
-        while pending or index < len(rows):
+        while pending or index < len(groups):
             check(deadline, cancelled)
-            while index < len(rows) and len(pending) < 4:
-                future = executor.submit(download, url, secret, rows[index], directory,
+            while index < len(groups) and len(pending) < 4:
+                future = executor.submit(download_group, url, secret, groups[index], directory,
                                          deadline, session, cancelled)
                 pending[future] = index
                 index += 1
@@ -160,9 +314,16 @@ def download_all(url, secret, rows, directory, deadline, session=None):
             # Resolve all completed futures before scheduling more: a successful
             # peer must not hide an already failed download in the same batch.
             for future in complete:
-                results[pending.pop(future)] = future.result()
+                group_index = pending.pop(future)
+                results[group_index] = future.result()
+                completed_objects += len(groups[group_index])
+                completed_bytes += sum(row["bytes"] for row in groups[group_index])
+            now = deadline.clock()
+            if progress and (now - last_progress >= 30 or completed_objects == len(rows)):
+                progress(completed_objects, len(rows), completed_bytes, total_bytes)
+                last_progress = now
         deadline.check()
-        return results
+        return [row for group in results for row in group]
     finally:
         cancelled.set()
         for future in pending:
@@ -442,9 +603,12 @@ def main(argv=None):
         url = base+"/api/storage/archive-backup"
         started = datetime.now(timezone.utc).isoformat()
         rows = inventory(url,secret,deadline)
+        print(f"R2 backup inventory: objects={len(rows)} bytes={sum(row['bytes'] for row in rows)}", flush=True)
+        def progress(completed, total, downloaded, total_bytes):
+            print(f"R2 backup download progress: objects={completed}/{total} bytes={downloaded}/{total_bytes}", flush=True)
         with tempfile.TemporaryDirectory(prefix="radar-r2-private-") as temporary:
             root=Path(temporary);os.chmod(root,0o700)
-            objects = download_all(url, secret, rows, root, deadline)
+            objects = download_all(url, secret, rows, root, deadline, progress=progress)
             shards=bundle(objects,root,deadline)
             path, manifest = write_manifest(objects, shards, root, started, deadline)
             publish(github, root, path, manifest, deadline)

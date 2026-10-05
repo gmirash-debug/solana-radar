@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import struct
 import tarfile
 import tempfile
 from threading import Event, Lock
@@ -25,10 +26,11 @@ def row(index=0, body=b"body"):
 
 
 class Response:
-    def __init__(self, data=b"", status=200, headers=None, hook=None):
+    def __init__(self, data=b"", status=200, headers=None, hook=None, chunk_size=None):
         self.data = data if isinstance(data, bytes) else json.dumps(data).encode()
         self.status_code, self.headers, self.hook = status, headers or {}, hook
         self.closed = False
+        self.chunk_size = chunk_size
 
     def __enter__(self):
         return self
@@ -41,6 +43,7 @@ class Response:
             raise requests.HTTPError(SECRET)
 
     def iter_content(self, size):
+        size = self.chunk_size or size
         for start in range(0, len(self.data), size):
             if self.hook:
                 self.hook()
@@ -55,6 +58,20 @@ class Session:
     def get(self, url, **kwargs):
         self.calls.append((url, kwargs))
         return next(self.responses)
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return next(self.responses)
+
+
+def frames(rows, bodies, headers=None):
+    output = bytearray()
+    for entry, body in zip(headers or rows, bodies):
+        header = json.dumps(entry, separators=(",", ":")).encode()
+        output.extend(struct.pack(">I", len(header)))
+        output.extend(header)
+        output.extend(body)
+    return bytes(output)
 
 
 class DownloadTests(unittest.TestCase):
@@ -165,7 +182,8 @@ class DownloadTests(unittest.TestCase):
     def test_four_way_failure_cancels_peers_and_never_submits_entire_inventory(self):
         calls, cancelled, lock = [], [], Lock()
         peers_started = Event()
-        def fake_download(url, secret, entry, directory, deadline, session, stop):
+        def fake_download(url, secret, entries, directory, deadline, session, stop):
+            entry = entries[0]
             with lock:
                 calls.append(entry["key"])
                 if len(calls) == 4:
@@ -176,15 +194,209 @@ class DownloadTests(unittest.TestCase):
             self.assertTrue(stop.wait(2))
             cancelled.append(entry["key"])
             raise backup.BackupError("archive downloads cancelled")
-        with patch.object(backup, "download", side_effect=fake_download), self.assertRaises(backup.BackupError):
+        with patch.object(backup, "download_group", side_effect=fake_download), self.assertRaises(backup.BackupError):
             backup.download_all(URL, SECRET, [row(index) for index in range(100)], self.root, self.deadline)
         self.assertEqual(len(calls), 4)
         self.assertEqual(len(cancelled), 3)
 
     def test_four_way_success_preserves_inventory_order(self):
         entries = [row(index) for index in range(20)]
-        with patch.object(backup, "download", side_effect=lambda u, s, r, d, t, session, stop: r):
+        with patch.object(backup, "download_group", side_effect=lambda u, s, r, d, t, session, stop: r):
             self.assertEqual(backup.download_all(URL, SECRET, entries, self.root, self.deadline), entries)
+
+
+class BatchTests(unittest.TestCase):
+    setUp = DownloadTests.setUp
+
+    def response(self, entries, bodies, **kwargs):
+        body = frames(entries, bodies)
+        headers = {"x-radar-batch-count": str(len(entries)), "Content-Length": str(len(body))}
+        return Response(body, headers=headers, **kwargs)
+
+    def test_grouping_preserves_order_and_exact_object_and_byte_boundaries(self):
+        entries = [row(index, b"") for index in range(33)]
+        groups = backup.download_groups(entries)
+        self.assertEqual([len(group) for group in groups], [16, 16, 1])
+        self.assertEqual([entry for group in groups for entry in group], entries)
+        entries = [{**row(index), "bytes": size} for index, size in enumerate([
+            backup.MAX_BATCH_BYTES // 2, backup.MAX_BATCH_BYTES // 2,
+            1, backup.MAX_BATCH_BYTES, backup.MAX_BATCH_BYTES + 1, 0, 1])]
+        groups = backup.download_groups(entries)
+        self.assertEqual([len(group) for group in groups], [2, 1, 1, 1, 2])
+        self.assertEqual([entry for group in groups for entry in group], entries)
+        for group in groups:
+            self.assertLessEqual(len(group), 16)
+            self.assertTrue(sum(entry["bytes"] for entry in group) <= backup.MAX_BATCH_BYTES
+                            or len(group) == 1)
+
+    def test_duplicate_overfull_and_oversized_batch_requests_fail_before_network(self):
+        variants = [[], [row(), row()], [row(index) for index in range(17)],
+                    [{**row(), "bytes": backup.MAX_BATCH_BYTES + 1}]]
+        for entries in variants:
+            session = Session([])
+            with self.subTest(entries=entries), self.assertRaises(backup.BackupError):
+                backup.download_batch(URL, SECRET, entries, self.root, self.deadline, session)
+            self.assertEqual(session.calls, [])
+        with self.assertRaises(backup.BackupError):
+            backup.download_groups([row(), row()])
+
+    def test_fragmented_frames_preserve_exact_binary_body_sha_and_private_modes(self):
+        bodies = [b"\x00\xff\x1f\x8bunaltered compressed bytes", b"", b"last body"]
+        entries = [row(index, body) for index, body in enumerate(bodies)]
+        response = self.response(entries, bodies, chunk_size=1)
+        session = Session([response])
+        objects = backup.download_batch(URL, SECRET, entries, self.root, self.deadline, session)
+        self.assertTrue(response.closed)
+        for entry, body in zip(objects, bodies):
+            path = self.root / entry["file"]
+            self.assertEqual(path.read_bytes(), body)
+            self.assertEqual(entry["sha256"], hashlib.sha256(body).hexdigest())
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        url, options = session.calls[0]
+        self.assertEqual(url, URL + "/batch")
+        self.assertEqual(options["json"], {"keys": [entry["key"] for entry in entries]})
+        self.assertFalse(options["allow_redirects"])
+        self.assertTrue(options["stream"])
+        self.assertEqual(options["headers"]["Accept-Encoding"], "identity")
+        self.assertLessEqual(options["timeout"], 20)
+
+    def test_eight_mib_body_uses_batch_but_larger_body_uses_individual_get(self):
+        body = b"x" * backup.MAX_BATCH_BYTES
+        entry = row(body=body)
+        session = Session([self.response([entry], [body])])
+        result = backup.download_group(URL, SECRET, [entry], self.root, self.deadline, session)
+        self.assertEqual(result[0]["sha256"], hashlib.sha256(body).hexdigest())
+        self.assertIn("json", session.calls[0][1])
+        large = {**row(1), "bytes": backup.MAX_BATCH_BYTES + 1}
+        with patch.object(backup, "download", return_value=large) as individual, \
+                patch.object(backup, "download_batch", side_effect=AssertionError("individual GET required")):
+            self.assertEqual(backup.download_group(URL, SECRET, [large], self.root, self.deadline, session), [large])
+            individual.assert_called_once_with(URL, SECRET, large, self.root, self.deadline, session, None)
+
+    def test_malformed_header_order_etag_size_duplicate_fields_and_truncation_rollback_all(self):
+        entries, bodies = [row(0), row(1)], [b"body", b"body"]
+        valid = frames(entries, bodies)
+        duplicate = b'{"key":"history/1.json.gz","key":"history/1.json.gz","bytes":4,"etag":"etag-1"}'
+        variants = [valid[:-1], valid[:2], valid + b"extra", valid + frames([row(2)], [b"body"]),
+            frames(entries, bodies, headers=[entries[0], {**entries[1], "etag": "changed"}]),
+            frames(entries, bodies, headers=[entries[0], {**entries[1], "bytes": 3}]),
+            frames(entries, bodies, headers=[entries[1], entries[0]]),
+            frames(entries, bodies, headers=[entries[0], {**entries[1], "unexpected": True}]),
+            frames([entries[0]], [b"body"]) + struct.pack(">I", len(duplicate)) + duplicate + b"body",
+            struct.pack(">I", 0), struct.pack(">I", backup.MAX_FRAME_HEADER_BYTES + 1),
+            struct.pack(">I", 1) + b"{", struct.pack(">I", 1) + b"\xff"]
+        for body in variants:
+            session = Session([Response(body, headers={"x-radar-batch-count": "2"}, chunk_size=7)])
+            with self.subTest(body=body[:20]), self.assertRaises((backup.BackupError, ValueError)):
+                backup.download_batch(URL, SECRET, entries, self.root, self.deadline, session)
+            self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_exact_maximum_header_size_is_valid(self):
+        entry = row()
+        header = json.dumps(entry).encode().ljust(backup.MAX_FRAME_HEADER_BYTES, b" ")
+        body = struct.pack(">I", len(header)) + header + b"body"
+        session = Session([Response(body, headers={"x-radar-batch-count": "1"}, chunk_size=3)])
+        objects = backup.download_batch(URL, SECRET, [entry], self.root, self.deadline, session)
+        self.assertEqual((self.root / objects[0]["file"]).read_bytes(), b"body")
+
+    def test_wrong_count_status_encoding_length_and_remote_errors_do_not_fallback(self):
+        body = frames([row()], [b"body"])
+        variants = [Response(body), Response(body, headers={"x-radar-batch-count": "2"}),
+            Response(body, headers={"x-radar-batch-count": "01"}),
+            Response(body, status=206, headers={"x-radar-batch-count": "1"}),
+            Response(body, status=302), Response(status=403), Response(status=503),
+            Response(body, headers={"x-radar-batch-count": "1", "Content-Encoding": "gzip"}),
+            Response(body, headers={"x-radar-batch-count": "1", "Content-Length": "invalid"}),
+            Response(body, headers={"x-radar-batch-count": "1", "Content-Length": str(len(body) - 1)})]
+        for response in variants:
+            session = Session([response])
+            with self.subTest(headers=response.headers, status=response.status_code), \
+                    patch.object(backup, "download", side_effect=AssertionError("must not fallback")), \
+                    self.assertRaises((backup.BackupError, requests.HTTPError)):
+                backup.download_group(URL, SECRET, [row()], self.root, self.deadline, session)
+            self.assertTrue(response.closed)
+            self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_deadline_and_cancellation_remove_all_created_partial_bodies(self):
+        entries, bodies = [row(0), row(1)], [b"body", b"body"]
+        for expire in (False, True):
+            now, reads, cancelled = [0], [0], Event()
+            deadline = backup.Deadline(10, clock=lambda: now[0])
+            def hook():
+                reads[0] += 1
+                if reads[0] == 2:
+                    if expire:
+                        now[0] = 10
+                    else:
+                        cancelled.set()
+            response = self.response(entries, bodies, chunk_size=len(frames([entries[0]], [b"body"])), hook=hook)
+            with self.subTest(expire=expire), self.assertRaises(backup.BackupError):
+                backup.download_batch(URL, SECRET, entries, self.root, deadline, Session([response]), cancelled)
+            self.assertEqual(list(self.root.iterdir()), [])
+            self.assertTrue(response.closed)
+
+    def test_preexisting_destination_is_preserved_and_promotion_failure_rolls_back_batch(self):
+        entries, bodies = [row(0), row(1)], [b"body", b"body"]
+        existing = self.root / (hashlib.sha256(entries[0]["key"].encode()).hexdigest() + ".partial")
+        existing.write_bytes(b"preserve")
+        session = Session([])
+        with self.assertRaises(backup.BackupError):
+            backup.download_batch(URL, SECRET, entries, self.root, self.deadline, session)
+        self.assertEqual(session.calls, [])
+        self.assertEqual(existing.read_bytes(), b"preserve")
+        existing.unlink()
+        original, calls = Path.rename, []
+        def promote(source, destination):
+            calls.append(source)
+            if len(calls) == 2:
+                raise OSError("synthetic promotion failure")
+            return original(source, destination)
+        with patch.object(Path, "rename", promote), self.assertRaises(OSError):
+            backup.download_batch(URL, SECRET, entries, self.root, self.deadline,
+                                  Session([self.response(entries, bodies)]))
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_four_way_batch_pipeline_keeps_source_sha_and_offline_restore_complete(self):
+        bodies = {row(index)["key"]: f"source-{index}".encode() for index in range(33)}
+        entries = [row(index, bodies[row(index)["key"]]) for index in range(33)]
+        class Source:
+            calls = []
+            def post(inner, url, **options):
+                keys = options["json"]["keys"]
+                inner.calls.append(keys)
+                selected = [next(entry for entry in entries if entry["key"] == key) for key in keys]
+                return self.response(selected, [bodies[key] for key in keys], chunk_size=11)
+        source = Source()
+        objects = backup.download_all(URL, SECRET, entries, self.root, self.deadline, source)
+        self.assertEqual(sorted(len(call) for call in source.calls), [1, 16, 16])
+        self.assertEqual([entry["key"] for entry in objects], [entry["key"] for entry in entries])
+        for entry in objects:
+            self.assertEqual(entry["sha256"], hashlib.sha256(bodies[entry["key"]]).hexdigest())
+        shards = backup.bundle(objects, self.root, self.deadline)
+        backup.write_manifest(objects, shards, self.root, "offline test", self.deadline)
+        for entry in objects:
+            (self.root / entry["file"]).unlink()
+        self.assertTrue(backup.verify_backup(self.root))
+
+    def test_progress_is_numeric_throttled_to_thirty_seconds_and_final_completion(self):
+        now, logs, pending_counts = [0], [], []
+        deadline = backup.Deadline(1000, clock=lambda: now[0])
+        def one_complete(pending, **options):
+            pending_counts.append(len(pending))
+            future = next(iter(pending))
+            future.result()
+            now[0] += 15
+            return {future}, set(pending) - {future}
+        def progress(*values):
+            logs.append((now[0], values))
+        with patch.object(backup, "wait", side_effect=one_complete), \
+                patch.object(backup, "download_group", side_effect=lambda u, s, r, d, t, session, stop: r):
+            backup.download_all(URL, SECRET, [row(index) for index in range(80)], self.root,
+                                deadline, progress=progress)
+        self.assertEqual([time for time, values in logs], [30, 60, 75])
+        self.assertEqual(logs[-1][1], (80, 80, 320, 320))
+        self.assertTrue(all(type(value) is int for time, values in logs for value in values))
+        self.assertLessEqual(max(pending_counts), 4)
 
 
 class BundleTests(unittest.TestCase):
@@ -457,6 +669,26 @@ class PublishTests(unittest.TestCase):
 
 
 class CLITests(unittest.TestCase):
+    def test_inventory_and_download_logs_contain_only_safe_numeric_progress(self):
+        out, err, rows = io.StringIO(), io.StringIO(), [row(0), row(1)]
+        def download(url, secret, entries, root, deadline, **kwargs):
+            kwargs["progress"](1, 2, 4, 8)
+            return entries
+        with patch.dict(backup.os.environ, {"RADAR_DATA_API_URL": "https://unit.example",
+                "RADAR_ARCHIVE_BACKUP_SECRET": SECRET}, clear=True), \
+                patch.object(backup, "GitHub", return_value=FakeGitHub()), \
+                patch.object(backup, "inventory", return_value=rows), \
+                patch.object(backup, "download_all", side_effect=download), \
+                patch.object(backup, "bundle", return_value=[]), \
+                patch.object(backup, "write_manifest", return_value=(Path("offline"), {})), \
+                patch.object(backup, "publish"), redirect_stdout(out), redirect_stderr(err):
+            self.assertEqual(backup.main([]), 0, err.getvalue())
+        self.assertIn("R2 backup inventory: objects=2 bytes=8", out.getvalue())
+        self.assertIn("R2 backup download progress: objects=1/2 bytes=4/8", out.getvalue())
+        self.assertNotIn(SECRET, out.getvalue() + err.getvalue())
+        self.assertNotIn("history/", out.getvalue())
+        self.assertNotIn("etag-", out.getvalue())
+
     def test_invalid_url_is_refused_and_failure_does_not_log_secrets(self):
         for url in ("https://", "http://unit.example", "https://user:pass@unit.example", "https://unit.example/x",
                     "https://unit.example?secret=x", "https://unit.example\n", "https://unit.example:99"):

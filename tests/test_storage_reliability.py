@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import scanner
+from tools import recover_storage
 from cold_outbox import archive_snapshot, decode_snapshot
 from runtime_checkpoint import build_checkpoint, checkpoint_documents
 
@@ -34,6 +35,9 @@ class StorageReliabilityTests(unittest.TestCase):
              patch.object(scanner,"remote_api_call",side_effect=remote),patch.object(scanner.time,"sleep"):
             result=scanner.sync_runtime_checkpoint(state,{},"deep")
         self.assertTrue(result["accepted"])
+        self.assertEqual(result["parts_total"],len(parts))
+        self.assertEqual(result["parts_reused"],1)
+        self.assertEqual(result["parts_uploaded"],len(parts)-1)
         self.assertNotIn(("/api/runtime/checkpoint",{"kind":"deep","part":parts[0]["sha256"]}),calls)
         self.assertEqual(calls[-1],("/api/runtime/checkpoint",{"kind":"deep"}))
 
@@ -55,6 +59,29 @@ class StorageReliabilityTests(unittest.TestCase):
         with patch.object(scanner,"remote_api_call") as api:
             self.assertFalse(scanner.send_remote_snapshot(body,{"remote_legacy_snapshot_enabled":False}))
         api.assert_not_called()
+
+    def test_malformed_legacy_rows_do_not_block_fresh_history_or_escape_quarantine(self):
+        valid={"episode":{"episode_id":"episode","token_address":"token","caught_at":"2026-10-05T10:00:00Z"},
+               "event":{"event_type":"signal","observed_at":"2026-10-05T12:00:00Z"}}
+        malformed=["bad",{"episode":"bad","event":{}},{"episode":{},"event":[]}]
+        body={"report":{"generated_at":"2026-10-05T12:00:00Z"},
+              "history_ledger":{"events":[*malformed,valid]},"_sync_progress":{"source_archive":1}}
+        with patch.object(scanner,"remote_api_call",return_value={"ok":True}) as api:
+            self.assertTrue(scanner.send_remote_snapshot(body,{"remote_legacy_snapshot_enabled":False}))
+        self.assertEqual(api.call_count,1)
+        sent=api.call_args.args[3]
+        self.assertEqual(sent["history_ledger"]["events"],[valid])
+        self.assertEqual(sent["priority_episodes"],["episode"])
+        self.assertEqual(len(body["_sync_rejected_history"]),3)
+        self.assertEqual(body["history_ledger"]["events"][1:],malformed)
+
+    def test_recovery_reports_unacknowledged_checkpoint_as_failure(self):
+        for saved,status,exit_code in ((False,"checkpoint_pending",1),(True,"partial",0)):
+            result={"checkpoint_saved":saved,"deferred":1,"archived":1,"replayed":0,"rpc_calls":0}
+            with patch.object(recover_storage,"recover",return_value=result), \
+                 patch("sys.argv",["recover_storage"]),patch("builtins.print") as output:
+                self.assertEqual(recover_storage.main(),exit_code)
+            self.assertEqual(json.loads(output.call_args.args[0])["status"],status)
 
     def test_archive_identity_is_stable_across_progress_and_progress_needs_ack(self):
         body={"report":{"generated_at":"2026-10-05T12:00:00Z"},"original":{"caught":"2026-09-02T00:00:00Z"},

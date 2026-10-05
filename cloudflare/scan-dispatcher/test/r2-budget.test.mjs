@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {R2Budget,guardR2Env,r2BudgetCall,dispatchR2BudgetNotice} from "../src/r2-budget.js";
 import worker from "../src/index.js";
+import {archiveBackupResponse} from "../src/archive-backup.js";
 
 function fixture(t, baseline = {}) {
   let now = Date.parse("2026-10-03T12:00:00Z");
@@ -29,6 +30,21 @@ test("uninitialized guard fails closed without touching R2",async t=>{
   const f=fixture(t), env=guardR2Env(f.env);
   for(const method of ["head","get","put","list"]) await assert.rejects(env.RADAR_ARCHIVE[method]("key","x"),/baseline_required/);
   assert.equal(f.calls.length,0);assert.equal((await f.call("status")).paused,true);
+});
+
+test("archive batch charges every read with one control write and fails closed at the quota",async t=>{
+  const f=fixture(t);await f.seed();
+  const keys=Array.from({length:16},(_,i)=>`runtime/v1/${i}`);
+  f.raw.get=async key=>{f.calls.push({method:"get",key});return {size:1,etag:"e",arrayBuffer:async()=>new Uint8Array([1]).buffer};};
+  f.env.RADAR_ARCHIVE_BACKUP_SECRET="read-only";
+  const request=()=>new Request("https://worker/api/storage/archive-backup/batch",{method:"POST",
+    headers:{"x-radar-archive-backup-secret":"read-only"},body:JSON.stringify({keys})});
+  const before=f.writes,response=await archiveBackupResponse(f.env,request());
+  assert.equal(response.status,200);assert.equal(f.writes-before,1);
+  assert.equal(f.calls.length,16);assert.equal((await f.call("status")).usage.class_b,16);
+  f.values.get("budget:v1").class_b=8999990;
+  await assert.rejects(archiveBackupResponse(f.env,request()),/monthly_budget_paused/);
+  assert.equal(f.calls.length,16);
 });
 
 test("every HEAD, GET, PUT and LIST is charged before native I/O",async t=>{
