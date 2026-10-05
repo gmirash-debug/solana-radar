@@ -220,6 +220,27 @@ class AttentionTests(unittest.TestCase):
         self.assertEqual(len(pools),1)
         self.assertEqual(pools[0].source,"signal_thesis_monitor")
 
+    def test_compaction_keeps_long_window_and_expires_unneeded_signature_cache(self):
+        state = {"candidate_history_hours":24,"candidate_processed_signatures":{"expired":NOW-90000,"recent":NOW},
+            "reactivation_wave_swaps":[{"signature":"old-buy","kind":"buy","block_time":NOW-12*3600}]}
+        s.compact_pool_swap_buffers({"pool":state},{"discovery_source_mode":"gmgn_attention",
+            "reactivation_wave_enabled":True,"state_swap_buffer_retention_hours":6},NOW)
+        self.assertEqual(len(state["reactivation_wave_swaps"]),1)
+        self.assertEqual(state["candidate_processed_signatures"],{"recent":NOW})
+
+    def test_truncated_buffer_stays_incomplete_until_omitted_trades_leave_window(self):
+        config = {"discovery_source_mode":"gmgn_attention","reactivation_wave_enabled":True,
+            "lane":"reactivation",
+            "alert_window_minutes":360,"reactivation_wave_buffer_minutes":360,"reactivation_wave_buffer_max_swaps":2,
+            "state_swap_buffer_max_swaps":1}
+        state = {}
+        swaps = [{"signature":f"buy-{i}","kind":"buy","block_time":NOW-10+i} for i in range(3)]
+        with patch.object(s.time,"time",return_value=NOW):
+            s.merge_reactivation_wave_swaps(state,swaps,config)
+            s.compact_pool_swap_buffers({"pool":state},config,NOW)
+            s.merge_reactivation_wave_swaps(state,[],config)
+        self.assertTrue(state["reactivation_wave_buffer_truncated"])
+
 
 if __name__ == "__main__":
     unittest.main()

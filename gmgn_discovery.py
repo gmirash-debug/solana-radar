@@ -247,6 +247,11 @@ def remember_transactions(transactions, pool_state, now):
         signature = next(iter((tx.get("transaction") or {}).get("signatures") or []), "")
         if signature:
             known[signature] = int(tx.get("blockTime") or now)
+    prune_processed_signatures(pool_state, now)
+
+
+def prune_processed_signatures(pool_state, now):
+    known = pool_state.get("candidate_processed_signatures") or {}
     pool_state["candidate_processed_signatures"] = dict(sorted(
         ((signature, at) for signature, at in known.items() if at >= now - 86400),
-        key=lambda item: item[1], reverse=True)[:3000])
+        key=lambda item: item[1], reverse=True)[:600])

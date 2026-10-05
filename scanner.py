@@ -24,7 +24,7 @@ import requests
 from gmgn_context import token_ath, VERSION as GMGN_VERSION
 from gmgn_discovery import (attention_mode, fetch_attention, merge_candidates,
     current_candidates, history_plan, record_history_check, collect_signature_ranges, initial_history_hours,
-    unprocessed_transactions, remember_transactions)
+    unprocessed_transactions, remember_transactions, prune_processed_signatures)
 from coordinated_activity import analyze_coordinated_activity, compact_coordinated_activity
 from wallet_links import SERVICE_KINDS, infrastructure_sources, normalize_link as normalize_wallet_link, source_kind
 from solana_position_lineage import annotate_pool_activity, freeze_receipt_seeds
@@ -6850,7 +6850,13 @@ def merge_reactivation_wave_swaps(pool_state, swaps, config):
     merged = sorted(by_signature.values(), key=lambda item: (item.get("block_time") or 0, item.get("signature") or ""))
     buffer_truncated = bool(max_swaps > 0 and len(merged) > max_swaps)
     if buffer_truncated:
+        if attention_mode(config):
+            pool_state["candidate_swap_omitted_through"] = max(int(pool_state.get("candidate_swap_omitted_through") or 0),
+                max(int(item.get("block_time") or 0) for item in merged[:-max_swaps]))
         merged = merged[-max_swaps:]
+    if attention_mode(config):
+        omitted = int(pool_state.get("candidate_swap_omitted_through") or 0)
+        buffer_truncated = buffer_truncated or bool(omitted and omitted >= cutoff)
     pool_state["reactivation_wave_swaps"] = merged
     pool_state["reactivation_wave_buffer_truncated"] = buffer_truncated
     return merged
@@ -13279,6 +13285,12 @@ def compact_pool_swap_buffers(pools_state, config, now):
     for pool_state in pools_state.values():
         if not isinstance(pool_state, dict):
             continue
+        pool_cutoff = cutoff
+        if attention_mode(config):
+            if "candidate_processed_signatures" in pool_state:
+                prune_processed_signatures(pool_state, now)
+            if pool_state.get("candidate_history_hours"):
+                pool_cutoff = now - int(min(24, max(retention_hours, float(pool_state["candidate_history_hours"]))) * 3600)
         pool_has_buffer = False
         for key in ("sticky_accumulation_swaps", "reactivation_wave_swaps"):
             raw = pool_state.get(key)
@@ -13297,13 +13309,17 @@ def compact_pool_swap_buffers(pools_state, config, now):
                 if not isinstance(item, dict):
                     continue
                 block_time = int(to_float(item.get("block_time")) or parse_timestamp(item.get("time")))
-                if not block_time or (cutoff and block_time < cutoff):
+                if not block_time or (pool_cutoff and block_time < pool_cutoff):
                     continue
                 item = compact_wave_swap(item)
                 if item:
                     compacted.append(item)
             compacted.sort(key=lambda item: (int(item.get("block_time") or 0), item.get("signature") or ""))
             if max_swaps and len(compacted) > max_swaps:
+                if attention_mode(config) and key == "reactivation_wave_swaps":
+                    pool_state["reactivation_wave_buffer_truncated"] = True
+                    pool_state["candidate_swap_omitted_through"] = max(int(pool_state.get("candidate_swap_omitted_through") or 0),
+                        max(int(item.get("block_time") or 0) for item in compacted[:-max_swaps]))
                 compacted = compacted[-max_swaps:]
             if compacted:
                 pool_state[key] = compacted
@@ -14726,10 +14742,10 @@ def run_discovery_once(config):
         "gmgn_status": "error" if lane_config.get("_gmgn_error") else "ok",
         "gmgn_attention": lane_config.get("_gmgn_attention_health", {}),
     }
-    status = write_discovery_status("ok", payload)
-    sync_remote_discovery_status(status, lane_config)
     if attention_mode(lane_config) and lane_config.get("_gmgn_attention_health", {}).get("status") == "unavailable":
         raise RuntimeError("GMGN attention discovery unavailable; no alternate candidate sources admitted")
+    status = write_discovery_status("ok", payload)
+    sync_remote_discovery_status(status, lane_config)
     print(
         "Discovery pulse: "
         f"{len(discovered)} live, {len(registry)} registry, "
