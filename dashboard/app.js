@@ -1,11 +1,11 @@
-import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261004-wallet-activity-v4";
-import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261004-wallet-activity-v4";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261004-wallet-activity-v4";
-import { installTerminology } from "./terminology.js?v=20261004-wallet-activity-v4";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261004-wallet-activity-v4";
-import { loadTokenDetail } from "./static-detail.js?v=20261004-wallet-activity-v4";
-import { r2BudgetView } from "./r2-budget-view.js?v=20261004-wallet-activity-v4";
-import { walletActivityView } from "./wallet-activity-view.js?v=20261004-wallet-activity-v4";
+import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261005-gmgn-incremental-v1";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261005-gmgn-incremental-v1";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261005-gmgn-incremental-v1";
+import { installTerminology } from "./terminology.js?v=20261005-gmgn-incremental-v1";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261005-gmgn-incremental-v1";
+import { loadTokenDetail } from "./static-detail.js?v=20261005-gmgn-incremental-v1";
+import { r2BudgetView } from "./r2-budget-view.js?v=20261005-gmgn-incremental-v1";
+import { walletActivityView } from "./wallet-activity-view.js?v=20261005-gmgn-incremental-v1";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -16,12 +16,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261004-wallet-activity-v4";
+} from "./token-state.js?v=20261005-gmgn-incremental-v1";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261004-wallet-activity-v4";
+} from "./filter-scope.js?v=20261005-gmgn-incremental-v1";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const PENDING_TOKEN_ACTIONS_KEY = "solana-radar:pending-token-actions:v1";
@@ -459,6 +459,10 @@ function athStatusLabel(status, error = "") {
 }
 
 function filterMeta(name = "legacy") {
+  if (name === "reactivation" && state.report?.config?.discovery_source_mode === "gmgn_attention") {
+    return {label: "GMGN attention", criteria: "Trending + Hot Searches / all ages / incremental on-chain checks",
+      thesis: "GMGN attention selects candidates; retained net buying and verified wallet evidence determine signal quality."};
+  }
   return FILTER_META[name] || {
     label: name,
     criteria: "custom scanner filter",
@@ -632,6 +636,7 @@ function activeDexAllowlist() {
 }
 
 function isPumpfunPool(pool = {}) {
+  if (state.report?.config?.discovery_source_mode === "gmgn_attention") return Boolean(pool.token_address);
   return activeDexAllowlist().has(normalizeDex(pool.dex));
 }
 
@@ -758,6 +763,8 @@ function mergeMarketMeta(pool = {}, meta = null) {
     "market_snapshot_error",
     "market_snapshot_checked_at",
     "current_market_verified_at",
+    "gmgn_attention",
+    "candidate_analysis",
     "market_source",
     "ath_latest_checked_at",
     "ath_verified_at",
@@ -3261,11 +3268,18 @@ function renderSocialTab(token) {
 }
 
 function renderEvidenceTab(token, gmgnUrl, sourceLinks) {
+  const attention = token.latestPool?.gmgn_attention || token.market?.gmgn_attention;
+  const memberships = Array.isArray(attention?.memberships) ? attention.memberships : [];
+  const attentionLabel = memberships.map(item => `${item.source === "trending" ? "Trending" : "Hot Searches"} ${item.interval} #${item.rank}`).join(" / ");
+  const analysis = token.latestPool?.candidate_analysis || token.market?.candidate_analysis;
+  const ranges = (analysis?.covered_ranges || []).map(([from, to]) => `${dateLabel(from * 1000)} - ${dateLabel(to * 1000)}`).join(" / ");
   return `
     <section class="detail-block">
       <div class="detail-block-title">Signal evidence</div>
       <div class="kv"><span>Quality</span><span>${renderSignalQuality(token)}</span></div>
       <div class="kv"><span>Scanner rule</span><span>${renderFilterLine(token)}</span></div>
+      ${attention ? `<div class="kv"><span>GMGN lists</span><span>${esc(attentionLabel)}</span></div><div class="kv"><span>First seen in GMGN</span><span>${esc(dateLabel(attention.first_seen_at))}</span></div><div class="kv"><span>Last seen in GMGN</span><span>${esc(dateLabel(attention.last_seen_at))}</span></div>` : ""}
+      ${analysis ? `<div class="kv"><span>Initial history window</span><span>${esc(analysis.initial_hours ?? "-")}h</span></div><div class="kv"><span>History coverage</span><span>${analysis.pending ? "Incomplete / retry pending" : "Checked"}${ranges ? ` / ${esc(ranges)}` : ""}</span></div><div class="kv"><span>Last history check</span><span>${esc(dateLabel(analysis.checked_at))} / ${esc(analysis.scope || "unknown")}</span></div>` : ""}
       <div class="kv"><span>Risk flags</span><span>${renderRiskFlags(token)}</span></div>
       ${renderWaveLine(token)}
     </section>
@@ -3597,7 +3611,8 @@ function renderFilters() {
   const all = buildTokenSignals().filter(tokenMatchesBaseFilters);
   const minAge = state.report?.config?.age_min_hours;
   const maxAge = state.report?.config?.age_max_hours;
-  const ageScope = minAge != null && maxAge != null ? `${durationLabel(minAge)}–${durationLabel(maxAge)}` : "age scope unavailable";
+  const attentionMode = state.report?.config?.discovery_source_mode === "gmgn_attention";
+  const ageScope = attentionMode ? "All ages" : minAge != null && maxAge != null ? `${durationLabel(minAge)}–${durationLabel(maxAge)}` : "age scope unavailable";
   renderMetrics(all);
   const tokens = all.filter((token) => matchesReviewQueue(token.decision, state.reviewQueue));
   const queues = REVIEW_QUEUES.map((meta) => ({ ...meta,
@@ -3614,7 +3629,7 @@ function renderFilters() {
       ${open ? `<p class="queue-description">${esc(queue.note)}</p>${queue.tokens.map(renderReviewRow).join("")}` : ""}</section>`;
   }).join("");
   els.content.innerHTML = `
-    <div class="radar-heading"><div><h2>Accumulation radar</h2><p>Migrated pump.fun · ${esc(ageScope)} · ${all.filter((item) => item.decision.queue !== "inactive").length} open positions</p></div><label class="sort-control">Sort within groups<select id="reviewSort" aria-label="Sort within groups"><option value="caught" ${state.reviewSort === "caught" ? "selected" : ""}>Newest catch</option><option value="retained" ${state.reviewSort === "retained" ? "selected" : ""}>Most retained</option></select></label></div>
+    <div class="radar-heading"><div><h2>Accumulation radar</h2><p>${attentionMode ? "GMGN Trending + Hot Searches" : "Migrated pump.fun"} · ${esc(ageScope)} · ${all.filter((item) => item.decision.queue !== "inactive").length} open positions</p></div><label class="sort-control">Sort within groups<select id="reviewSort" aria-label="Sort within groups"><option value="caught" ${state.reviewSort === "caught" ? "selected" : ""}>Newest catch</option><option value="retained" ${state.reviewSort === "retained" ? "selected" : ""}>Most retained</option></select></label></div>
     <div class="queue-nav" role="group" aria-label="Position views">
       <button type="button" data-review-queue="overview" aria-pressed="${state.reviewQueue === "overview"}">Overview</button>
       ${queues.map((queue) => `<button type="button" data-review-queue="${queue.id}" aria-pressed="${state.reviewQueue === queue.id}">${queue.label}<span>${queue.count}</span></button>`).join("")}

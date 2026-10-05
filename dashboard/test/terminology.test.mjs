@@ -157,5 +157,5 @@ test("shared glossary and versioned stylesheet are wired into both network rende
     assert.match(source, /terminology\.dismiss\(/);
   }
   const html = readFileSync(new URL("../index.html",import.meta.url), "utf8");
-  assert.match(html, /terminology\.css\?v=20261004-wallet-activity-v4/);
+  assert.match(html, /terminology\.css\?v=20261005-gmgn-incremental-v1/);
 });

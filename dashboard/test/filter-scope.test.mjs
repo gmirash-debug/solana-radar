@@ -10,6 +10,20 @@ import {
   marketWithCurrentFilterCatch,
 } from "../filter-scope.js";
 
+test("GMGN attention admits old and unknown-age tokens without changing catch timestamps", () => {
+  const report = {config: {discovery_source_mode: "gmgn_attention", age_min_hours: null, age_max_hours: null}};
+  assert.equal(isCurrentFilterPool({age_hours: 24000}, report), true);
+  assert.equal(isCurrentFilterPool({}, report), true);
+  const market = {first_signal_at: "2026-10-04T10:00:00Z", first_obs_mcap_usd: 500};
+  assert.deepEqual(marketWithCurrentFilterCatch(market, report), market);
+});
+
+test("null age limits mean unrestricted, not zero hours", () => {
+  assert.equal(isCurrentFilterPool({age_hours: 24000}, {config: {age_min_hours: null, age_max_hours: null}}), true);
+  assert.equal(isCurrentFilterPool({}, {config: {age_min_hours: null, age_max_hours: null}}), true);
+  assert.equal(isCurrentFilterPool({age_hours: 24}, {config: {age_min_hours: 0, age_max_hours: 0}}), false);
+});
+
 test("the current filter scope excludes historical alerts and theses", () => {
   const report = {};
 

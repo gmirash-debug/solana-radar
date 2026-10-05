@@ -36,10 +36,10 @@ function fixture(t, overrides = {}, {migrate = true} = {}) {
   const condition = (cond, results) => !cond ? true : cond.type === "ok" ? results[cond.step]!==null
     : cond.type === "not" ? !condition(cond.cond,results)
     : cond.type === "and" ? cond.conds.every(child => condition(child,results)) : assert.fail("Hrana condition");
-  const oldFetch = globalThis.fetch, oldNow = Date.now;
+  const oldFetch = globalThis.fetch;
   let clock = NOW;
-  Date.now = () => clock;
-  t.after(() => { globalThis.fetch=oldFetch; Date.now=oldNow; });
+  t.mock.timers.enable({apis:["Date"],now:clock});
+  t.after(() => { globalThis.fetch=oldFetch; });
   globalThis.fetch = async (_,options) => {
     const body = JSON.parse(options.body), steps = body.requests[0].batch.steps;
     f.calls.push(body);
@@ -70,7 +70,7 @@ function fixture(t, overrides = {}, {migrate = true} = {}) {
   const poison = {prepare() {assert.fail("D1 fallback must not be accessed");}};
   f.env = {...credentials,STORAGE_SQL_BACKEND:"turso",HISTORY_QUEUE_BACKEND:"turso_sql",HISTORY_DERIVED_MODE:"daily",
     RADAR_DB:poison,RADAR_HISTORY_DB:poison,...overrides};
-  f.advance = ms => {clock+=ms;};
+  f.advance = ms => {clock+=ms;t.mock.timers.tick(ms);};
   f.rows = () => sqlite.prepare("SELECT * FROM history_sql_queue_events ORDER BY source_at,event_id").all();
   f.meta = () => sqlite.prepare("SELECT * FROM history_sql_queue_meta WHERE id=1").get();
   return f;

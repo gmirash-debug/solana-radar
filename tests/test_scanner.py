@@ -1144,8 +1144,9 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(payload["config"]["mcap_min_usd"], effective["mcap_min_usd"])
         self.assertEqual(payload["config"]["mcap_max_usd"], effective["mcap_max_usd"])
         self.assertEqual(payload["config"]["liquidity_min_usd"], effective["liquidity_min_usd"])
-        self.assertEqual(payload["config"]["age_min_hours"], 0.5)
-        self.assertEqual(payload["config"]["age_max_hours"], 360)
+        self.assertIsNone(payload["config"]["age_min_hours"])
+        self.assertIsNone(payload["config"]["age_max_hours"])
+        self.assertEqual(payload["config"]["discovery_source_mode"], "gmgn_attention")
         self.assertEqual(
             payload["config"]["dashboard_signal_epoch"],
             "2026-08-13T01:01:00Z",
@@ -3501,6 +3502,7 @@ class ScannerCoreTests(unittest.TestCase):
             scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {}),
             "reactivation",
         )
+        config.update(discovery_source_mode="composite", age_min_hours=0.5, age_max_hours=360)
         now = 1_750_000_000
         at_minimum_age_pool = scanner.Pool(
             pool_address="at-minimum-age",
