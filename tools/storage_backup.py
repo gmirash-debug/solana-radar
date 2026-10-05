@@ -381,16 +381,23 @@ class ReadSnapshot:
         return schema
 
     def query(self, sql, args=()):
+        return self.queries([(sql,args)])[0]
+
+    def queries(self, queries):
         if not self.active:
             raise BackupError("read snapshot has not started")
-        # The only externally callable remote SQL is a SELECT or read PRAGMA.
-        if not (sql.startswith("SELECT ") or re.fullmatch(r"PRAGMA (?:table_xinfo|index_list|index_xinfo)\(.+\)", sql)):
-            raise BackupError("backup refused a non-read SQL statement")
-        responses = self._request([{ "type":"get_autocommit"}, self._statement(sql, args), {"type":"get_autocommit"}])
-        if any(responses[index].get("is_autocommit") is not False for index in (0, 2)):
+        if not isinstance(queries,list) or not 1<=len(queries)<=2:
+            raise BackupError("invalid backup query batch")
+        requests=[]
+        for sql,args in queries:
+            if not (sql.startswith("SELECT ") or re.fullmatch(r"PRAGMA (?:table_xinfo|index_list|index_xinfo)\(.+\)", sql)):
+                raise BackupError("backup refused a non-read SQL statement")
+            requests.extend([{"type":"get_autocommit"},self._statement(sql,args),{"type":"get_autocommit"}])
+        responses = self._request(requests)
+        if any(responses[index].get("is_autocommit") is not False for index in range(len(responses)) if index%3!=1):
             self.broken = True
             raise BackupError("read transaction expired; incomplete backup discarded")
-        return parse_result(responses[1]["result"])
+        return [parse_result(responses[index]["result"]) for index in range(1,len(responses),3)]
 
     def close(self):
         if self.baton is not None and not self.broken:
@@ -486,11 +493,15 @@ class TablePlan:
     def bounded_pages(self, reader, page_size, deadline):
         """Size only the next keys, then fetch byte-bounded verified key ranges."""
         after = None
+        prefetched = None
         projection = ",".join(quote(key) for key in self.keys) + "," + self.wire_bytes_sql() + ' AS "__backup_wire_bytes"'
         while True:
             deadline.check()
             sql, args = self.select(after, page_size, projection=projection)
-            _, metadata = reader.query(sql, args)
+            if prefetched is None:
+                _, metadata = reader.query(sql, args)
+            else:
+                metadata,prefetched=prefetched,None
             if not metadata:
                 break
             if (len(metadata) > page_size or any(len(row) != len(self.keys) + 1
@@ -502,18 +513,24 @@ class TablePlan:
                 if row[-1] > MAX_RESPONSE_BYTES - MAX_SCHEMA_BYTES:
                     raise BackupError("single database row exceeds bounded export capacity")
                 if group and group_bytes + row[-1] > MAX_PAGE_BYTES:
-                    groups.append(group)
+                    groups.append((group,group_bytes))
                     group, group_bytes = [], 0
                 group.append(tuple(row[:-1]))
                 group_bytes += row[-1]
             if group:
-                groups.append(group)
-            for keys in groups:
+                groups.append((group,group_bytes))
+            for index,(keys,estimated_bytes) in enumerate(groups):
                 deadline.check()
                 if keys[-1] == after:
                     raise BackupError("database pagination did not advance")
                 sql, args = self.select(after, len(keys), through=keys[-1])
-                _, rows = reader.query(sql, args)
+                # Piggyback only a small payload's next key window on the same
+                # read transaction. Large payloads keep isolated request bounds.
+                if index==len(groups)-1 and estimated_bytes<=1024*1024 and callable(getattr(reader,"queries",None)):
+                    next_sql,next_args=self.select(keys[-1],page_size,projection=projection)
+                    (_,rows),(_,prefetched)=reader.queries([(sql,args),(next_sql,next_args)])
+                else:
+                    _, rows = reader.query(sql, args)
                 if (len(rows) != len(keys) or any(len(row) != len(self.names) for row in rows)
                         or [tuple(row[index] for index in self.key_indices) for row in rows] != keys):
                     raise BackupError("payload rows differ from the byte-budgeted keys")

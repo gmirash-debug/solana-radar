@@ -194,6 +194,52 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(len(self.server.calls), before)
         client.close()
 
+    def test_small_page_prefetch_halves_round_trips_without_changing_rows(self):
+        self.source.execute("CREATE TABLE narrow_prefetch(value TEXT)")
+        self.source.executemany("INSERT INTO narrow_prefetch VALUES(?)",[("small",)]*2500)
+        self.source.commit()
+        client=self.client();schema=client.begin()
+        plan=backup.TablePlan(client,next(row for row in schema if row["name"]=="narrow_prefetch"))
+        before=len(self.server.calls)
+        pages=list(plan.bounded_pages(client,1000,client.deadline))
+        self.assertEqual([len(page) for page in pages],[1000,1000,500])
+        self.assertEqual(len(self.server.calls)-before,4)
+        self.assertEqual(backup.rows_digest(row for page in pages for row in page),
+            backup.rows_digest(self.source.execute("SELECT rowid,value FROM narrow_prefetch ORDER BY rowid")))
+        client.close()
+
+    def test_batched_reads_keep_every_autocommit_guard_and_refuse_mutations(self):
+        client=self.client();client.begin()
+        before=len(self.server.calls)
+        for queries in ([],[("SELECT 1",())]*3,[("SELECT 1",()),("DELETE FROM parent",())]):
+            with self.assertRaises(backup.BackupError):
+                client.queries(queries)
+        self.assertEqual(len(self.server.calls),before)
+        rows=client.queries([("SELECT 1",()),("SELECT 2",())])
+        self.assertEqual([result[1] for result in rows],[[(1,)],[(2,)]])
+        self.assertEqual(len(self.server.calls)-before,1)
+        actions=self.server.calls[-1][1]["requests"]
+        self.assertEqual([item["type"] for item in actions],
+            ["get_autocommit","execute","get_autocommit"]*2)
+        def expire(result):
+            result["results"][3]["response"]["is_autocommit"]=True
+            return result
+        self.server.mutate_response=expire
+        with self.assertRaisesRegex(backup.BackupError,"transaction expired"):
+            client.queries([("SELECT 1",()),("SELECT 2",())])
+        self.assertTrue(client.broken)
+
+    def test_failed_prefetched_query_discards_entire_snapshot(self):
+        def fail_prefetch(result):
+            if len(result["results"])==6:
+                result["results"][4]={"type":"error","error":{"message":TOKEN}}
+            return result
+        self.server.mutate_response=fail_prefetch
+        with self.assertRaises(backup.BackupError) as error:
+            backup.build_snapshot(self.client(),self.path/"incomplete.sqlite")
+        self.assertNotIn(TOKEN,str(error.exception))
+        self.assertFalse((self.path/"incomplete.sqlite").exists())
+
     def test_adaptive_page_bound_for_large_raw_records(self):
         self.source.execute("CREATE TABLE large_records(raw TEXT)")
         self.source.executemany("INSERT INTO large_records VALUES(?)", [("\\\"" * 65000,)] * 20)
