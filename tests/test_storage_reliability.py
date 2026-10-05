@@ -88,9 +88,10 @@ class StorageReliabilityTests(unittest.TestCase):
 
     def test_checkpoint_identity_survives_sorted_state_round_trip(self):
         state={"z":{"last":1,"first":2},"a":[{"y":3,"x":4}],
-               "_runtime":{"revision":3,"updated_at":"2026-10-05T12:00:00Z"}}
+               "_runtime":{"writer":"test","updated_at":"2026-10-05T12:00:00Z","revision":3}}
         reloaded=json.loads(json.dumps(state,sort_keys=True))
         self.assertEqual(build_checkpoint(state),build_checkpoint(reloaded))
+        self.assertEqual(json.dumps(build_checkpoint(state)),json.dumps(build_checkpoint(reloaded)))
 
     def test_verified_legacy_order_migration_keeps_source_dates_and_advances_only_private_revision(self):
         remote_state={"pools":{"token":{"cohort":[{"owner":"holder","caught_at":"2026-09-02T00:00:00Z"}]}},
