@@ -30,40 +30,53 @@ can postpone a pass. These crons are not a guaranteed fifteen-minute SLA.
 
 ## Durable operational state
 
-`RuntimeSnapshots` is a SQLite-backed Durable Object, separate from D1 quotas.
-It stores a ready dashboard and private deep/discovery checkpoints. Checkpoints
+With `RUNTIME_STORAGE_BACKEND=turso_sql`, Turso stores the ready dashboard and
+private deep/discovery checkpoints. Legacy Durable Objects and D1 remain read
+fallbacks, not the primary write path. Checkpoints
 retain buffers, provider-bound cursors, original cohorts, evaluation observations
 and the shared monthly RPC ledger. Rebuildable top-level caches are omitted.
 Atomic writes reject stale source times/revisions and never truncate a document.
-Individual documents are bounded to 8 MiB. Checkpoints above 6 MiB encoded are
-split into immutable 1 MiB pieces with content digests, then an atomic manifest
+Individual documents are bounded to 8 MiB. Checkpoints above 256 KiB encoded are
+split into immutable 256 KiB pieces with content digests, then an atomic manifest
 is committed only after all pieces are present. Decoding remains bounded to
 128 MiB (192 MiB encoded). A failed upload never replaces the previous complete
 checkpoint, and a corrupt or missing part never partially restores state.
 Dashboard lists and full per-token details are separate documents; the ready
 list references exact immutable detail versions, so source generations and
 cohorts cannot mix. Per-token details are bounded to 6 MiB and 1,024 references.
-Old unreferenced parts are collected in bounded batches after a one-hour staging
-grace period; content-addressed unchanged parts are not rewritten. The limits
+Old unreferenced SQL parts are collected in bounded batches after a 48-hour
+restore grace period; content-addressed unchanged parts are not rewritten. The limits
 are explicit safety bounds, not an unlimited free storage promise.
 
-Public dashboard projections and token details are produced inside the object
-and streamed through the Worker. Health reads metadata, not the whole snapshot.
+Public dashboard projections and token details are read from SQL through the
+Worker. Health reads metadata, not the whole snapshot. New checkpoint writes
+and dashboard reads do not require R2 or a writable Durable Object.
 Private checkpoint/history ingestion requires the existing server ingest secret.
 GitHub Actions cache is a backup/performance layer, not the only durable copy.
 Graceful SIGTERM interruption follows the failed-attempt checkpoint path; an
 abrupt machine failure or forced kill before that write cannot preserve new work.
 When a snapshot is absent, the previous D1/static fallback remains available.
 
+Checkpoint data and its runtime envelope use canonical sorted JSON. Saving and
+reloading the same state must preserve both the decoded digest and wire envelope.
+Legacy format repair verifies the complete old checksum and canonical contents
+first; it cannot promote a true same-version evidence conflict. A verified
+format migration advances only the private revision, preserving observed/caught
+dates and RPC counters. Storage recovery has a bounded 420-second workflow window,
+performs no RPC calls, and reports failure when the root is unacknowledged.
+Successful checkpoint recovery can still leave historical replay partial.
+
 ## Historical event outbox
 
 The scanner first queues complete, idempotently identified historical events in
-`HistoryQueue`, then attempts operational D1 publication. D1 quota exhaustion
-therefore does not erase newly acknowledged event payloads. Every five minutes
-a bounded flush writes to `RADAR_HISTORY_DB` and refreshes derived rows before
-acknowledging the events. Failed/poison items back off; newer work can proceed.
+the Turso SQL history queue. Hourly and post-publication bounded flushes refresh
+historical and derived SQL rows before acknowledging events. Failed/poison items
+back off. Current episodes have 512 additional reserved slots above the 2,048
+cold ceiling and 90,000 of the existing 180,000 daily history work units reserved
+for live work. This does not increase the daily allowance or remove the shared
+byte limit. Earlier episode prerequisites remain ordered before recent observations.
 New events use only this durable queue, not a second duplicate operational D1
-outbox write. The pre-existing legacy D1 backlog continues draining separately.
+outbox write. The pre-existing legacy backlog continues draining separately.
 
 The queue has explicit byte/row/write limits. Full or oversize batches are
 rejected, not silently dropped. The existing local compressed outbox preserves
@@ -77,7 +90,25 @@ responses, to retain headroom for current passes. A deferred old batch is not
 acknowledged, removed or classified as a scanner failure. The legacy archive
 is not claimed to have been fully migrated. D1's free daily quotas are
 account-wide: another D1 database does not create a new independent quota.
-The Durable Object queue itself also uses bounded, estimated free-tier writes.
+The active queue's data and control writes use Turso, not Durable Object storage.
+
+## Cold originals and independent backups
+
+An unacknowledged local snapshot can move to immutable, deterministic gzip in R2.
+The local original is removed only after R2 confirmation and a Turso manifest/
+progress acknowledgement. Source dates remain immutable; replay cursors are
+monotonic. Invalid event rows remain in the original archive even when excluded
+from analytics. Successful runtime publication disables the duplicate legacy
+snapshot upload; history delivery remains independent.
+
+The private backup repository retains seven verified full SQL recovery points
+and two verified R2 body recovery points. SQL backups verify schema and typed
+row digests from one guarded read transaction and check a restored SQLite copy.
+R2 backups copy and verify actual bodies, not only manifests, using up to four
+concurrent read-only batches of sixteen objects / 8 MiB; larger bodies use an
+individual bounded read. Every body, shard and uploaded asset is checked.
+Both backups retain prior good copies on failure. They are separate snapshots,
+not one atomic cross-service backup, and R2 reads still consume guarded quotas.
 
 ## RPC budgets and historical evidence
 
