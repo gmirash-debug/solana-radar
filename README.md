@@ -374,6 +374,9 @@ share of each provider's remaining per-scan allowance, without increasing the
 monthly limits. Cursor changes are staged until parsing succeeds. Diagnostics
 separate full-universe, selected, head-read and analyzed counts, and distinguish
 per-scan caps, monthly safety caps, temporary cooldowns and ledger failures.
+Even a clean probe advances an unfinished tail by one bounded page; otherwise a
+candidate with no immediate buy-wave could remain permanently pending. This
+repair reuses the just-read head and stays inside the same fair per-pool budget.
 An unavailable balance/supply verification does not discard already parsed
 history or emit a confirmed signal. History coverage and wallet-evidence retry
 are recorded separately, so the next pass can reuse trades and retry evidence.

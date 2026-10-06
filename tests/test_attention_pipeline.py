@@ -169,6 +169,31 @@ class AttentionPipelineTests(unittest.TestCase):
         probe.assert_not_called()
         self.assertEqual(summary["transactions_scanned"], 0)
 
+    def test_clean_probe_still_advances_pending_history_by_one_page_without_rereading_head(self):
+        pool,config=self.pool(),self.config()
+        config.update(classic_alerts_enabled=False,_prepared_probe={"transactions":[],
+            "stats":{"source":"enhanced_transactions","live_truncated":True,"live_from":NOW-100,
+                "observed_to":NOW,"rolling_gap_pending":True},
+            "history_state":{"candidate_history_context_version":1,"helius_rolling_backlogs":[
+                {"cursor":"pending","provider":"helius","from":NOW-100}]}})
+        def repair(rpc,pool,cfg,history,phase):
+            self.assertTrue(cfg["_reuse_probe_head"])
+            self.assertEqual(cfg["helius_deep_rolling_backlog_pages"],1)
+            self.assertEqual(phase,"deep")
+            history.pop("helius_rolling_backlogs",None)
+            return [],{"source":"enhanced_transactions","live_truncated":False,"live_from":NOW-100,
+                "observed_to":NOW,"rolling_backlog_segments_after":0}
+        with patch.object(s,"should_deep_scan",return_value=(False,"probe_clean")), \
+                patch.object(s,"fetch_helius_pool_transactions",side_effect=repair) as fetch, \
+                patch.object(s,"parse_helius_swaps",return_value=([],0)), \
+                patch.object(s,"build_reactivation_wave_alerts",return_value=[]), \
+                patch.object(s,"build_sticky_accumulation_alerts",return_value=[]), \
+                patch.object(s,"refresh_signal_thesis",return_value={}):
+            _,summary=s.scan_pool(Mock(),pool,config,{}, {"remaining":0})
+        fetch.assert_called_once()
+        self.assertEqual(summary["trade_fetch"]["deep_reason"],"bounded_gap_repair")
+        self.assertFalse(summary["trade_fetch"]["live_truncated"])
+
     def test_cached_cursor_is_rolled_back_if_parser_fails(self):
         pool = self.pool()
         original = {"latest_signature": "old", "helius_rolling_backlogs": [{"cursor": "old"}]}
