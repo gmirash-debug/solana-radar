@@ -15,8 +15,42 @@ class AttentionPipelineTests(unittest.TestCase):
         return s.apply_lane(s.load_json(s.DEFAULT_CONFIG_PATH, {}), "reactivation")
 
     def pool(self, name="one"):
-        return s.Pool(name, token_address=TOKEN, symbol=name, source="gmgn_attention",
+        return s.Pool(name, token_address=TOKEN, symbol=name, source="gmgn_attention", mcap_usd=50_000,
             gmgn_attention={"sources": ["trending"], "memberships": [{"source": "trending", "interval": "5m"}]})
+
+    def test_attention_cap_range_is_inclusive_and_applied_without_other_legacy_gates(self):
+        config = self.config()
+        pool = self.pool()
+        pool.dex = "raydium"
+        pool.pair_created_at = 1
+        pool.liquidity_usd = 0
+        for mcap, eligible in ((29_999.99, False), (30_000, True), (50_000, True),
+                (500_000, True), (500_000.01, False), (None, False), (0, False), (float("nan"), False), (float("inf"), False)):
+            with self.subTest(mcap=mcap):
+                pool.mcap_usd = mcap
+                self.assertEqual(s.pool_matches_config(pool, config), eligible)
+        pool.mcap_usd = 100_000
+        pool.market_snapshot_stale = True
+        self.assertFalse(s.pool_matches_config(pool, config))
+
+    def test_attention_current_market_outside_cap_cannot_use_old_cheaper_pool(self):
+        config = self.config()
+        older, newer = self.pool("old"), self.pool("new")
+        older.market_snapshot_at, newer.market_snapshot_at = NOW - 60, NOW
+        newer.mcap_usd = 600_000
+        self.assertEqual(s.filter_universe_pools([older, newer], config), [])
+        newer.mcap_usd = 300_000
+        self.assertEqual(s.filter_universe_pools([older, newer], config), [newer])
+
+    def test_attention_cap_filter_counts_only_resolved_eligible_tokens(self):
+        config = self.config()
+        config["_gmgn_attention_health"] = {}
+        low, high = self.pool("low"), self.pool("high")
+        high.token_address = "So11111111111111111111111111111111111111112"
+        high.mcap_usd = 500_001
+        self.assertEqual(s.filter_universe_pools([low, high], config), [low])
+        self.assertEqual(config["_gmgn_attention_health"]["mcap_filter"], {
+            "min_usd": 30_000, "max_usd": 500_000, "eligible_tokens": 1, "excluded_resolved_tokens": 1})
 
     def test_successful_snapshot_removes_old_membership_immediately(self):
         record = {"last_seen_at": g.iso(NOW), "memberships": [{"source": "trending", "interval": "5m"}]}

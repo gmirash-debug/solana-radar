@@ -3979,7 +3979,16 @@ def pool_matches_config(pool, config):
     if not pool.pool_address:
         return False
     if attention_mode(config):
-        return bool(clean_solana_address(pool.token_address) and pool.gmgn_attention)
+        if not clean_solana_address(pool.token_address) or not pool.gmgn_attention:
+            return False
+        minimum = config.get("mcap_min_usd")
+        maximum = config.get("mcap_max_usd")
+        if minimum is None and maximum is None:
+            return True
+        mcap = float(pool.mcap_usd or 0)
+        return bool(not pool.market_snapshot_stale and math.isfinite(mcap) and mcap > 0
+            and (minimum is None or mcap >= float(minimum))
+            and (maximum is None or mcap <= float(maximum)))
     if not pool_dex_allowed(pool, config):
         return False
     is_manual = pool.source in ("manual_pool", "manual_token")
@@ -4536,9 +4545,12 @@ def pool_priority_sort_key(pool, config):
 
 
 def filter_universe_pools(pools, config):
+    attention = attention_mode(config)
+    # Select the current canonical market before cap filtering; an older cheap pool must not bypass the ceiling.
+    identity_config = {**config, "mcap_min_usd": None, "mcap_max_usd": None} if attention else config
     filtered = []
     for pool in pools:
-        if pool_matches_config(pool, config):
+        if pool_matches_config(pool, identity_config):
             filtered.append(pool)
 
     by_token = {}
@@ -4562,8 +4574,15 @@ def filter_universe_pools(pools, config):
             by_token[key] = pool
 
     filtered = list(by_token.values())
+    if attention:
+        filtered = [pool for pool in filtered if pool_matches_config(pool, config)]
+        health = config.get("_gmgn_attention_health")
+        if isinstance(health, dict):
+            health["mcap_filter"] = {"min_usd": config.get("mcap_min_usd"),
+                "max_usd": config.get("mcap_max_usd"), "eligible_tokens": len(filtered),
+                "excluded_resolved_tokens": len(by_token) - len(filtered)}
     filtered.sort(key=lambda pool: pool_priority_sort_key(pool, config), reverse=True)
-    if attention_mode(config):
+    if attention:
         return filtered
     return filtered[: int(config["light_pool_limit"])]
 

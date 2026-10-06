@@ -118,6 +118,18 @@ test("the radar and token criteria display the thirty-minute age minimum", t => 
   assert.match(api.filterMeta("reactivation").criteria, /^30m-15d/);
 });
 
+test("GMGN radar exposes the configured cap range while keeping original tracked positions", t => {
+  const api = fixture(t, {signalThesis:thesis({...pool, mcap_usd:900_000})});
+  api.state.report.config = {discovery_source_mode:"gmgn_attention", age_min_hours:null,
+    age_max_hours:null, mcap_min_usd:30_000, mcap_max_usd:500_000};
+  api.state.report.stats = {gmgn_discovery:{tokens:100, mcap_filter:{eligible_tokens:25}}};
+  api.renderFilters();
+  assert.match(api.dom.window.document.querySelector(".radar-heading").textContent, /\$30k–\$500k mcap/);
+  assert.match(api.filterMeta("reactivation").criteria, /\$30k–\$500k mcap/);
+  assert.match(api.dom.window.document.querySelector("#metrics").textContent, /In cap range\s+25/);
+  assert.equal(api.buildTokenSignals().length, 1);
+});
+
 test("GMGN discovery shows old non-pump tokens and escaped list membership with dated coverage", t => {
   const p = {...pool, dex:"raydium", age_hours:5000, gmgn_attention:{first_seen_at:start, last_seen_at:end,
     memberships:[{source:"trending", interval:"24h", rank:3},{source:"hot_searches", interval:"<script>", rank:4}]},
@@ -413,11 +425,11 @@ test("partial movement note needs actual observations and never renders raw amou
 
 test("HTML entrypoint and every dashboard JS import use the same evidence cache tag", () => {
   const html = readFileSync(new URL("../index.html",import.meta.url),"utf8");
-  assert.match(html, /src="radar-bootstrap\.js\?v=20261006-gmgn-fair-v3"/);
+  assert.match(html, /src="radar-bootstrap\.js\?v=20261006-gmgn-cap-v4"/);
   for (const file of readdirSync(new URL("../",import.meta.url)).filter(file => file.endsWith(".js"))) {
     const source = readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
     for (const match of source.matchAll(/(?:from\s+|import\()"(\.\/[^"?]+\.js\?v=([^"]+))"/g)) {
-      assert.equal(match[2],"20261006-gmgn-fair-v3",`${file}: ${match[1]}`);
+      assert.equal(match[2],"20261006-gmgn-cap-v4",`${file}: ${match[1]}`);
     }
   }
 });

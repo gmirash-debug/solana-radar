@@ -1,4 +1,4 @@
-import {formatSupplyPercent} from "./robinhood-state.js?v=20261006-gmgn-fair-v3";
+import {formatSupplyPercent} from "./robinhood-state.js?v=20261006-gmgn-cap-v4";
 
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[c]));
 const fact = (label, value) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;

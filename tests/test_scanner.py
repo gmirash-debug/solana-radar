@@ -3476,10 +3476,11 @@ class ScannerCoreTests(unittest.TestCase):
             4.2,
         )
 
-    def test_reactivation_stages_remove_mcap_floor_and_scale_thresholds(self):
+    def test_reactivation_stages_keep_attention_mcap_scope_and_scale_thresholds(self):
         config = scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {})
         lane = scanner.apply_lane(config, "reactivation")
-        self.assertEqual(lane["mcap_min_usd"], 0)
+        self.assertEqual(lane["mcap_min_usd"], 30_000)
+        self.assertEqual(lane["mcap_max_usd"], 500_000)
         self.assertEqual(lane["liquidity_min_usd"], 3_000)
         self.assertIsNone(lane["ath_max_current_ratio"])
 
@@ -3497,12 +3498,13 @@ class ScannerCoreTests(unittest.TestCase):
         self.assertEqual(early["reactivation_wave_min_buy_sol"], 35)
         self.assertEqual(early["volume_1h_to_mcap_max_watch"], 1.2)
 
-    def test_reactivation_universe_accepts_low_cap_token_from_thirty_minutes_to_fifteen_days(self):
+    def test_legacy_reactivation_universe_accepts_low_cap_token_from_thirty_minutes_to_fifteen_days(self):
         config = scanner.apply_lane(
             scanner.load_json(scanner.DEFAULT_CONFIG_PATH, {}),
             "reactivation",
         )
-        config.update(discovery_source_mode="composite", age_min_hours=0.5, age_max_hours=360)
+        config.update(discovery_source_mode="composite", age_min_hours=0.5, age_max_hours=360,
+            mcap_min_usd=0, mcap_max_usd=5_000_000)
         now = 1_750_000_000
         at_minimum_age_pool = scanner.Pool(
             pool_address="at-minimum-age",
