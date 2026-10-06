@@ -185,6 +185,53 @@ class AttentionPipelineTests(unittest.TestCase):
         self.assertEqual(state["pools"][pool.pool_address]["latest_signature"], "old")
         self.assertEqual(state["pools"][pool.pool_address]["helius_rolling_backlogs"], original["helius_rolling_backlogs"])
 
+    def test_missing_wallet_evidence_keeps_successful_history_without_a_signal(self):
+        pool, rpc, state = self.pool(), Mock(), {}
+        tx = {"blockTime": NOW, "transaction": {"signatures": ["cached"]}}
+        config = self.config()
+        config.update(classic_alerts_enabled=False, _prepared_probe={"transactions": [tx], "stats": {
+            "source": "enhanced_transactions", "live_from": NOW - 100, "observed_to": NOW}, "history_state": {}})
+        with patch.object(s, "fetch_helius_pool_transactions") as fetch, \
+                patch.object(s, "parse_helius_swaps", return_value=([], 0)), \
+                patch.object(s, "should_deep_scan", return_value=(False, "no_evidence")), \
+                patch.object(s, "build_reactivation_wave_alerts", side_effect=s.WaveDataUnavailable("balance read deferred")), \
+                patch.object(s, "build_sticky_accumulation_alerts", return_value=[]), \
+                patch.object(s, "refresh_signal_thesis", return_value={}), patch.object(s.time, "time", return_value=NOW):
+            alerts, summary = s.scan_pool(rpc, pool, config, state, {"remaining": 0})
+        fetch.assert_not_called()
+        self.assertEqual(alerts, [])
+        history = state["pools"][pool.pool_address]
+        self.assertEqual(history["latest_signature"], "cached")
+        self.assertIn("cached", history["candidate_processed_signatures"])
+        self.assertEqual(summary["trade_fetch"]["evidence_pending"], ["balance read deferred"])
+        g.record_history_check(history, summary, config, NOW)
+        self.assertTrue(history["candidate_evidence_pending"])
+        self.assertTrue(history["candidate_history_pending"])
+        self.assertEqual(history["candidate_history_complete_to"], NOW)
+
+    def test_pending_wallet_evidence_is_not_a_confirmed_alert_or_a_failed_history_read(self):
+        alert = {"lane": "reactivation", "action_tier": "hot_reactivation", "signal_family": "reactivation_wave",
+            "wave": {"balance_coverage_pct":100,"owner_resolution_coverage_pct":100,"min_hold_minutes":30,"hold_age_minutes":60},
+            "reactivation_baseline":{"version":2,"status":"ready","reactivation_confirmed":True},
+            "wallet_graph":{"checked_flow_coverage_pct":100,"verified_effective_wallets":10}}
+        stats = {"source":"enhanced_transactions","evidence_pending":["balances unavailable"]}
+        s.apply_alert_data_quality([alert],stats,0,0,0,self.config())
+        self.assertEqual(alert["signal_confirmation"]["status"],"candidate")
+        self.assertNotEqual(alert["action_tier"],"hot_reactivation")
+        health=s.build_scan_health([{"trade_fetch":stats}]*5,
+            {"reactivation":{"universe_pools":40,"selection":{"selected":5}}},self.config())
+        self.assertEqual(health["failed_pools"],0)
+        self.assertEqual(health["evidence_pending_pools"],5)
+        self.assertEqual(health["status"],"degraded")
+
+    def test_programming_errors_still_fail_and_legacy_mode_keeps_its_failure_contract(self):
+        with patch.object(s,"build_reactivation_wave_alerts",side_effect=ValueError("bug")):
+            with self.assertRaisesRegex(ValueError,"bug"):
+                s.accumulation_alerts_with_available_evidence(self.pool(),[],[],self.config(),Mock(),{})
+        with patch.object(s,"build_reactivation_wave_alerts",side_effect=s.WaveDataUnavailable("missing")):
+            with self.assertRaises(s.WaveDataUnavailable):
+                s.accumulation_alerts_with_available_evidence(self.pool(),[],[],{"discovery_source_mode":"composite"},Mock(),{})
+
     def test_prepared_standard_head_is_not_downloaded_twice_or_dated_later(self):
         rpc = Mock()
         config = {"_candidate_signature_head": [], "_candidate_head_observed_at": NOW - 60}

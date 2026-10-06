@@ -11166,6 +11166,8 @@ def apply_alert_data_quality(
 ):
     fetch_stats = fetch_stats or {}
     partial_reasons = []
+    if fetch_stats.get("evidence_pending"):
+        partial_reasons.append("wallet verification pending")
     if fetch_stats.get("live_truncated"):
         partial_reasons.append("partial live transaction window")
     if int(fetch_stats.get("transaction_errors") or 0):
@@ -11379,6 +11381,22 @@ def pool_has_new_activity(rpc, pool, pool_state, config):
     }
 
 
+def accumulation_alerts_with_available_evidence(pool, wave_swaps, sticky_swaps, config, rpc, state):
+    results, pending = [], []
+    for builder, arguments in (
+        (build_reactivation_wave_alerts, (pool, wave_swaps, config, rpc, state)),
+        (build_sticky_accumulation_alerts, (pool, sticky_swaps, config, rpc)),
+    ):
+        try:
+            results.append(builder(*arguments))
+        except WaveDataUnavailable as exc:
+            if not attention_mode(config):
+                raise
+            results.append([])
+            pending.append(str(exc)[:500])
+    return *results, pending
+
+
 def scan_pool_helius_transactions(rpc, pool, config, state, classification_budget):
     pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
     prepared = config.get("_prepared_probe")
@@ -11563,14 +11581,9 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
         or pool_state.get("sticky_accumulation_buffer_truncated")
     )
     classic_alerts = build_alerts(pool, events, config) if config.get("classic_alerts_enabled", True) else []
-    wave_alerts = build_reactivation_wave_alerts(
-        pool,
-        wave_swaps,
-        config,
-        rpc,
-        state,
-    )
-    sticky_alerts = build_sticky_accumulation_alerts(pool, sticky_swaps, config, rpc)
+    wave_alerts, sticky_alerts, pending = accumulation_alerts_with_available_evidence(
+        pool, wave_swaps, sticky_swaps, config, rpc, state)
+    fetch_stats["evidence_pending"] = pending
     alerts = dedupe_pool_alerts([*classic_alerts, *wave_alerts, *sticky_alerts])
     alerts = apply_alert_data_quality(
         alerts,
@@ -11780,16 +11793,11 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
     wave_swaps = merge_reactivation_wave_swaps(pool_state, swaps, config)
     sticky_swaps = merge_sticky_accumulation_swaps(pool_state, swaps, config)
     classic_alerts = build_alerts(pool, events, config) if classify_wallets else []
-    wave_alerts = build_reactivation_wave_alerts(
-        pool,
-        wave_swaps,
-        config,
-        rpc,
-        state,
-    )
-    sticky_alerts = build_sticky_accumulation_alerts(pool, sticky_swaps, config, rpc)
+    wave_alerts, sticky_alerts, pending = accumulation_alerts_with_available_evidence(
+        pool, wave_swaps, sticky_swaps, config, rpc, state)
     fetch_stats = {
         "source": "pool_signatures",
+        "evidence_pending": pending,
         "phase": "standard_incremental",
         "pages": 1,
         "transactions_requested": len(new_signatures),
@@ -12787,6 +12795,8 @@ def record_market_observations(state, pools, observed_at):
             entry["candidate_analysis"] = {"initial_hours": history.get("candidate_history_hours"),
                 "checked_at": history.get("candidate_checked_at"), "scope": history.get("candidate_check_scope"),
                 "pending": bool(history.get("candidate_history_pending")),
+                "history_pending": bool(history.get("candidate_history_gap_pending", history.get("candidate_history_pending"))),
+                "evidence_pending": bool(history.get("candidate_evidence_pending")),
                 "covered_ranges": copy.deepcopy(history.get("candidate_covered_ranges") or [])}
         previous_pool = entry.get("pool_address")
         snapshot_at = int(pool.market_snapshot_at or 0)
@@ -13812,6 +13822,7 @@ def build_scan_health(summaries, lane_stats, config):
         if fetch.get("source") in ("enhanced_transactions", "helius_transactions")
     ]
     live_fetches = [fetch for _item, fetch in coverage_fetch_items]
+    evidence_pending = sum(bool(fetch.get("evidence_pending")) for fetch in live_fetches)
     live_truncated = sum(1 for fetch in live_fetches if fetch.get("live_truncated"))
     backfill_pending = sum(1 for fetch in live_fetches if fetch.get("backfill_pending"))
     rolling_gap_pending = sum(
@@ -13908,6 +13919,9 @@ def build_scan_health(summaries, lane_stats, config):
         reasons.append(f"pool failure ratio {failed_ratio:.0%} exceeds {max_failed_ratio:.0%}")
 
     if status != "unhealthy":
+        if evidence_pending:
+            status = "degraded"
+            reasons.append(f"wallet evidence pending for {evidence_pending} analyzed pools")
         if live_fetch_count and stale_live_ratio > max_stale_live_ratio:
             status = "degraded"
             reasons.append(f"live transaction head is stale for {stale_live_ratio:.0%} of active pools")
@@ -13948,6 +13962,7 @@ def build_scan_health(summaries, lane_stats, config):
         "reasons": reasons,
         "candidate_pools": candidate_pools,
         "selected_pools": selected_pools,
+        "evidence_pending_pools": evidence_pending,
         "history_route_diagnostics": route_diagnostics,
         "head_sweep": {lane: item["selection"]["head_sweep"] for lane, item in lane_stats.items()
             if (item.get("selection") or {}).get("head_sweep")},
