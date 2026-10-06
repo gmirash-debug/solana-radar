@@ -78,7 +78,7 @@ Open `http://127.0.0.1:8765`.
 
 The local dashboard reads the scanner's local runtime files, shows recent alert
 history, and auto-runs the lane scanner. The published GitHub Pages dashboard
-reads the current snapshot from the Cloudflare Worker backed by D1; it falls
+reads the current snapshot from the Cloudflare Worker backed by Turso; it falls
 back to a compact static snapshot if the Worker is temporarily unavailable.
 The scan button is only a force-refresh. Each scan also refreshes current
 market snapshots for already caught tokens when their dashboard market data is
@@ -141,7 +141,7 @@ python3 solana-radar/scanner.py --watch --lane reactivation
 The repository includes `.github/workflows/scan-and-pages.yml`.
 
 It runs the scanner at most once per hour, keeps its private runtime state in
-GitHub Actions Cache, writes the current dashboard payload to Cloudflare D1,
+GitHub Actions Cache, writes the current dashboard payload through the Worker to Turso,
 and deploys a compact fallback snapshot to GitHub Pages. Hourly triggers share a
 50-minute freshness guard: fresh reports are skipped before paid API work, while
 stale reports trigger the full scan. Already running scans are not cancelled.
@@ -174,15 +174,16 @@ supported as an alternative to the full Alchemy endpoint. Verify that the dRPC
 key's plan includes Solana before setting either dRPC variable; otherwise leave
 both unset and the scanner will use the remaining providers.
 
-`GMGN_API_KEY` is strongly recommended. It supplies migrated Pump.fun Trenches,
-multi-window trending discovery, token metadata, and ATH market cap/date.
+`GMGN_API_KEY` is required for the production attention discovery mode. It supplies
+Trending and Hot Searches across all configured windows, token metadata, and
+ATH market cap/date. There is no unrelated-pool fallback when these lists fail.
 `BRIGHTDATA_API_KEY` can be empty if social enrichment should be disabled.
 
 Production uses two scan layers:
 
 - `Reactivation discovery pulse` runs every 5 minutes without Solana RPC calls.
-  It uses a narrow low-cost GMGN set (`1m`/`5m` volume and swaps plus two
-  Trenches rankings), updates current market snapshots, quiet-regime baselines,
+  It refreshes both GMGN Trending and Hot Searches for `1m`, `5m`, `1h`, `6h`,
+  and `24h`, then updates current market snapshots, quiet-regime baselines,
   and the priority queue through the Worker into Turso.
 - `Scan and deploy dashboard` runs the deep onchain pass hourly. It restores raw
   cursors and swap buffers from GitHub Actions Cache, loads the latest discovery
@@ -223,10 +224,12 @@ Cloudflare production setup:
 RADAR_INGEST_SECRET=...
 ```
 
-Apply `cloudflare/scan-dispatcher/migrations/0001_radar_data.sql` to the bound
-`solana-radar` D1 database, then deploy the worker. The scanner syncs a compact
-report, alert history, token market rows, discovery baselines, queues, and signal
-outcomes through the protected Worker ingestion API.
+Production uses the Worker's Turso SQL backend. See
+`INFRASTRUCTURE_CAPACITY_PLAN_2026-10-04.md` for backend configuration and recovery.
+The scanner syncs a compact report, alert history, token market rows, discovery
+baselines, queues, and signal outcomes through the protected Worker ingestion API.
+`cloudflare/scan-dispatcher/migrations/0001_radar_data.sql` belongs to the retained
+legacy D1 backend; applying it alone does not configure production Turso storage.
 
 The Cloudflare delete worker writes Delete/Restore actions to GitHub and mirrors
 the deletion index to D1.
@@ -262,7 +265,7 @@ Signal quality:
   same connected cohort cluster; missing owner or pool-reserve data is shown as
   unverified instead of being guessed.
 - Full holder and linkage evidence is stored in the token detail document in
-  D1. The main dashboard payload keeps only the compact decision fields, and up
+  Turso. The main dashboard payload keeps only the compact decision fields, and up
   to 56 point-in-time snapshots preserve roughly one week of three-hour checks.
 - A ready, continuous quiet-regime baseline with a confirmed activity break is
   required for confirmed Reactivation. Version-1 quiet periods are not trusted;
@@ -315,7 +318,7 @@ Persistence and outcome integrity:
   `Cloud save pending` is separate from successful scanning. GitHub cache is a
   recovery mechanism, not a permanent archive; sustained outages still need
   operator attention. No paid-plan change is made automatically.
-- D1 history delivery uses the existing pending-status index and recalculates
+- SQL history delivery uses the existing pending-status index and recalculates
   baselines once per batch, not once per event. Derived-write failures leave
   events pending. A stale snapshot can still deliver historical ledger events.
 - Endpoint outcomes more than one hour late are excluded from horizon metrics
@@ -342,9 +345,9 @@ in the candidate registry and are retried rather than replaced by random pools.
 - `solana-radar/data/state.json` - private scanner runtime state. It is cached
   in GitHub Actions and never published.
 - `solana-radar/data/alerts.jsonl` and `latest_report.*` - private local scan
-  artifacts. D1 is the production source for the dashboard.
+  artifacts. Turso is the production source for the dashboard.
 - `solana-radar/data/dashboard_fallback.json` - compact public fallback for
-  Pages. It has a short raw-alert window; the full dashboard history remains in D1.
+  Pages. It has a short raw-alert window; the full dashboard history remains in Turso.
 - `solana-radar/data/deleted_tokens.json` - small scanner blacklist for false
   catches deleted from the dashboard.
 
