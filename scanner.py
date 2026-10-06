@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,9 @@ from urllib.parse import urlparse, parse_qs
 
 import requests
 from gmgn_context import token_ath, VERSION as GMGN_VERSION
+from gmgn_discovery import (attention_mode, fetch_attention, merge_candidates,
+    current_candidates, history_plan, record_history_check, collect_signature_ranges, initial_history_hours,
+    unprocessed_transactions, remember_transactions, prune_processed_signatures)
 from coordinated_activity import analyze_coordinated_activity, compact_coordinated_activity
 from wallet_links import SERVICE_KINDS, infrastructure_sources, normalize_link as normalize_wallet_link, source_kind
 from solana_position_lineage import annotate_pool_activity, freeze_receipt_seeds
@@ -404,6 +408,8 @@ def discovery_state_from(state):
         "market": copy.deepcopy(state.get("market") or {}),
         "activity_baselines": copy.deepcopy(state.get("activity_baselines") or {}),
         "discovery_queue": copy.deepcopy(state.get("discovery_queue") or []),
+        "gmgn_candidates": copy.deepcopy(state.get("gmgn_candidates") or {}),
+        "gmgn_discovery_health": copy.deepcopy(state.get("gmgn_discovery_health") or {}),
         "remote_discovery_updated_at": copy.deepcopy(
             state.get("remote_discovery_updated_at") or {}
         ),
@@ -437,6 +443,13 @@ def merge_discovery_state(state, discovery_state):
     """Merge only newer discovery-owned records into a deep-scan state snapshot."""
     if not isinstance(state, dict) or not isinstance(discovery_state, dict):
         return {"market": 0, "baselines": 0, "queue": 0}
+    candidates = state.setdefault("gmgn_candidates", {})
+    for token, incoming in (discovery_state.get("gmgn_candidates") or {}).items():
+        if isinstance(incoming, dict) and parse_timestamp(incoming.get("last_seen_at")) >= parse_timestamp((candidates.get(token) or {}).get("last_seen_at")):
+            candidates[token] = copy.deepcopy(incoming)
+    incoming_health = discovery_state.get("gmgn_discovery_health") or {}
+    if parse_timestamp(incoming_health.get("observed_at")) >= parse_timestamp((state.get("gmgn_discovery_health") or {}).get("observed_at")):
+        state["gmgn_discovery_health"] = copy.deepcopy(incoming_health)
     market = state.setdefault("market", {})
     baselines = state.setdefault("activity_baselines", {})
     merged_market = 0
@@ -451,6 +464,8 @@ def merge_discovery_state(state, discovery_state):
             current_fields = {
                 "token_address", "pool_address", "symbol", "name", "dex", "url",
                 "pair_created_at", "pair_created_at_iso", "market_source", "current_market_verified_at",
+                "gmgn_attention",
+                "candidate_analysis",
             }
             discovery_fields = {key: copy.deepcopy(value) for key, value in incoming.items()
                                 if key in current_fields or key.startswith(("latest_", "market_snapshot_", "scan_"))}
@@ -784,6 +799,8 @@ def dashboard_snapshot_token_keys(report, history):
 def compact_market_for_dashboard(entry):
     """Expose market facts only; runtime cursors and wallet caches stay private."""
     market_fields = {
+        "gmgn_attention",
+        "candidate_analysis",
         "token_address",
         "pool_address",
         "symbol",
@@ -1951,6 +1968,7 @@ class Pool:
     pair_created_at: int = 0
     market_snapshot_at: int = 0
     market_snapshot_stale: bool = False
+    gmgn_attention: dict | None = None
 
     def key(self):
         return self.pool_address
@@ -1988,6 +2006,8 @@ class Pool:
         baseline = getattr(self, "reactivation_baseline", None)
         if baseline:
             payload["reactivation_baseline"] = baseline
+        if self.gmgn_attention:
+            payload["gmgn_attention"] = self.gmgn_attention
         return payload
 
 
@@ -2728,6 +2748,37 @@ class RoutedSolanaRpc:
             return "standard"
         return None
 
+    def history_route_status(self):
+        routes = {}
+        for method, order in (("getTransactionsForAddress", self.enhanced_order),
+                              ("getSignaturesForAddress", self.standard_order),
+                              ("getTransaction", self.standard_order)):
+            methods = {}
+            for name in order:
+                provider = self.providers[name]
+                if method == "getTransactionsForAddress" and not provider.enhanced_history:
+                    reason = "unsupported"
+                elif name in self.blocked_providers or provider.circuit_open_reason:
+                    reason = "provider_blocked"
+                else:
+                    allowed = provider.can_call(method)
+                    budget = provider.monthly_budget
+                    if method in self.unsupported_methods.get(name, set()) or method in provider.unsupported_methods:
+                        reason = "unsupported"
+                    elif getattr(budget, "persistence_failed", False):
+                        reason = "budget_ledger_unavailable"
+                    elif method in provider.method_cooldowns or method in provider.method_circuit_open_reasons:
+                        reason = "temporary_cooldown"
+                    elif budget and not budget.allows(request_reservation(provider, method, None)):
+                        reason = "monthly_safety_budget"
+                    elif not allowed:
+                        reason = "per_scan_budget"
+                    else:
+                        reason = "available"
+                methods[name] = reason
+            routes[method] = methods
+        return routes
+
     def _record_provider_error(self, provider_name, method, exc):
         category = getattr(exc, "category", "")
         if category == "unsupported":
@@ -2987,7 +3038,9 @@ class RoutedSolanaRpc:
         stats = {}
         for name, provider in self.providers.items():
             health = self.health_results.get(name) or {}
-            if name in self.blocked_providers or provider.circuit_open_reason:
+            if getattr(provider.monthly_budget, "persistence_failed", False):
+                status = "budget_ledger_unavailable"
+            elif name in self.blocked_providers or provider.circuit_open_reason:
                 status = "blocked"
             elif provider.method_circuit_open_reasons or provider.method_cooldowns:
                 status = "degraded"
@@ -3692,6 +3745,9 @@ def known_market_pools(state, config, observed_at=None):
         )
         if not pool:
             continue
+        if attention_mode(config):
+            pools.append(pool)
+            continue
         if pool.dex:
             if not pool_dex_allowed(pool, config):
                 continue
@@ -3714,6 +3770,15 @@ def merge_market_pools(registry_pools, discovered_pools):
 
 def refresh_known_market_pools(http, state, config):
     registry = known_market_pools(state, config)
+    if attention_mode(config):
+        allowed = current_candidates(state, config, int(time.time()))
+        registry = [pool for pool in registry if pool.token_address in allowed]
+        for pool in registry:
+            pool.gmgn_attention = copy.deepcopy(allowed[pool.token_address])
+        if config.get("_gmgn_market_resolved"):
+            return registry, {"stored_pools": len(registry), "requested_tokens": 0,
+                "refreshed_tokens": 0, "refreshed_pools": 0, "merged_pools": len(registry),
+                "reused_current_resolution": True}
     limit = max(0, int(config.get("registry_refresh_max_tokens", 1000)))
     market = state.get("market") if isinstance(state, dict) else {}
     registry.sort(
@@ -3729,6 +3794,9 @@ def refresh_known_market_pools(http, state, config):
         if limit and len(tokens) >= limit:
             break
     refreshed = fetch_dex_pairs_for_tokens(http, tokens, "registry_refresh") if tokens else {}
+    if attention_mode(config):
+        for pool in refreshed.values():
+            pool.gmgn_attention = copy.deepcopy(allowed.get(pool.token_address))
     refreshed_tokens = {pool.token_address for pool in refreshed.values() if pool.token_address}
     refreshed_at = utc_now().isoformat().replace("+00:00", "Z")
     for token in tokens:
@@ -3747,7 +3815,98 @@ def refresh_known_market_pools(http, state, config):
     }
 
 
+def gmgn_attention_pool(data, token, observed_at):
+    if not isinstance(data, dict) or data.get("address") != token:
+        return None
+    market = data.get("pool") or {}
+    address = clean_solana_address(market.get("pool_address"))
+    if not address or market.get("base_address", token) != token:
+        return None
+    price = data.get("price") or {}
+    if price.get("address", token) != token:
+        return None
+    unit_price = nullable_market_number(price.get("price"))
+    supply = nullable_market_number(data.get("circulating_supply") or data.get("total_supply"))
+    exchange = clean_social_text(market.get("exchange"))
+    return Pool(address, token_address=token, symbol=clean_social_text(data.get("symbol")),
+        name=clean_social_text(data.get("name")), dex="pumpfun-amm" if exchange == "pump_amm" else exchange,
+        source="gmgn_attention_info", url=f"https://gmgn.ai/sol/token/{token}",
+        price_usd=unit_price, mcap_usd=unit_price * supply if unit_price and supply else 0.0,
+        liquidity_usd=to_float(market.get("liquidity")),
+        volume_5m_usd=to_float(price.get("volume_5m")), volume_1h_usd=to_float(price.get("volume_1h")),
+        volume_24h_usd=to_float(price.get("volume_24h")),
+        txns_5m=int(to_float(price.get("buys_5m")) + to_float(price.get("sells_5m"))),
+        txns_1h=int(to_float(price.get("buys_1h")) + to_float(price.get("sells_1h"))),
+        pair_created_at=parse_timestamp(market.get("creation_timestamp")), market_snapshot_at=observed_at)
+
+
+def resolve_missing_attention_pools(records, resolved, config):
+    found = {pool.token_address for pool in resolved.values()}
+    now = int(time.time())
+    pending = [(token, record) for token, record in records.items() if token not in found]
+    pending.sort(key=lambda item: (parse_timestamp(item[1].get("market_resolution_attempt_at")),
+        not item[1].get("in_both"), min((int(m.get("rank") or 1000) for m in item[1].get("memberships", [])), default=1000)))
+    limit = max(0, int(config.get("gmgn_attention_resolve_limit", 0)))
+    if config.get("_scan_profile") == "targeted":
+        limit = min(limit, 2)
+    elif config.get("_scan_profile") == "discovery":
+        limit = min(limit, 4)
+    attempts, added = 0, 0
+    for token, record in pending:
+        cached = record.get("market_pool")
+        if isinstance(cached, dict) and cached.get("token_address") == token and clean_solana_address(cached.get("pool_address")):
+            pool = registry_pool_from_market_entry(cached, now=now,
+                activity_max_age_seconds=int(config.get("registry_activity_max_age_minutes", 90) * 60))
+            if pool:
+                resolved[pool.pool_address] = pool
+        age = now - parse_timestamp(record.get("market_resolution_attempt_at"))
+        if attempts >= limit or age < int(config.get("gmgn_attention_resolve_retry_minutes", 15)) * 60:
+            continue
+        if config.get("_gmgn_circuit_open"):
+            break
+        attempts += 1
+        record["market_resolution_attempt_at"] = iso(now)
+        try:
+            pool = gmgn_attention_pool(fetch_gmgn_raw_token_info(config, token), token, now)
+        except Exception as exc:
+            print(f"warn: GMGN pool resolution failed for {token}: {exc}", file=sys.stderr, flush=True)
+            continue
+        if pool:
+            record["market_pool"] = pool.as_dict()
+            resolved[pool.pool_address] = pool
+            added += 1
+    return {"requested": attempts, "resolved": added,
+        "pending": len(set(records) - {pool.token_address for pool in resolved.values()})}
+
+
 def discover_market_pools(http, config):
+    if attention_mode(config):
+        state = config.get("_active_runtime_state")
+        if not isinstance(state, dict):
+            state = {}
+        health = state.get("gmgn_discovery_health") or {}
+        age = int(time.time()) - parse_timestamp(health.get("observed_at"))
+        reuse = config.get("_scan_profile") != "discovery" and health.get("status") == "ok" and 0 <= age < int(config.get("gmgn_discovery_reuse_minutes", 10)) * 60
+        if not reuse:
+            if not config.get("gmgn_enabled", True) or not os.environ.get("GMGN_API_KEY"):
+                records, health = {}, {"status": "unavailable", "observed_at": iso(int(time.time())),
+                    "errors": [{"error": "missing_gmgn_api_key"}], "successful_lists": []}
+            else:
+                records, health = fetch_attention(config, run_gmgn_cli)
+            merge_candidates(state, records, health, config)
+        config["_gmgn_attention_health"] = health
+        if health.get("status") != "ok":
+            config["_gmgn_error"] = str(health.get("errors") or "GMGN discovery incomplete")[:500]
+        records = current_candidates(state, config, int(time.time()))
+        resolved = fetch_dex_pairs_for_tokens(http, records, "gmgn_attention")
+        resolved = {key: pool for key, pool in resolved.items() if pool.token_address in records}
+        health["pool_resolution"] = resolve_missing_attention_pools(records, resolved, config)
+        config["_gmgn_market_resolved"] = True
+        for pool in resolved.values():
+            pool.gmgn_attention = copy.deepcopy(records.get(pool.token_address))
+        health["resolved_tokens"] = len({pool.token_address for pool in resolved.values()})
+        health["unresolved_tokens"] = len(set(records) - {pool.token_address for pool in resolved.values()})
+        return list(resolved.values())
     pools = fetch_gmgn_trenches_universe(config)
     trenches_tokens = {
         pool.token_address for pool in pools.values() if pool.token_address
@@ -3795,6 +3954,8 @@ def pool_age_matches_config(pool, config):
 def pool_matches_config(pool, config):
     if not pool.pool_address:
         return False
+    if attention_mode(config):
+        return bool(clean_solana_address(pool.token_address) and pool.gmgn_attention)
     if not pool_dex_allowed(pool, config):
         return False
     is_manual = pool.source in ("manual_pool", "manual_token")
@@ -4327,6 +4488,12 @@ def market_activity_priority_suppressed(pool, state, config, now=None):
 
 
 def pool_priority_sort_key(pool, config):
+    if attention_mode(config):
+        attention = pool.gmgn_attention or {}
+        return (0 if pool.market_snapshot_stale else 1, int(bool(attention.get("in_both"))),
+            reactivation_activity_score(pool), -min((int(item.get("rank") or 1000)
+                for item in attention.get("memberships", [])), default=1000),
+            float(pool.volume_1h_usd or 0), float(pool.liquidity_usd or 0))
     if (config.get("lane") or config.get("mode")) == "reactivation":
         return (
             0 if pool.market_snapshot_stale else 1,
@@ -4372,6 +4539,8 @@ def filter_universe_pools(pools, config):
 
     filtered = list(by_token.values())
     filtered.sort(key=lambda pool: pool_priority_sort_key(pool, config), reverse=True)
+    if attention_mode(config):
+        return filtered
     return filtered[: int(config["light_pool_limit"])]
 
 
@@ -4542,8 +4711,8 @@ def due_signal_thesis_monitor_pools(state, config, now=None):
         if (
             not pool.pool_address
             or not pool.token_address
-            or not pool_dex_allowed(pool, config)
-            or not pool_age_matches_config(pool, config)
+            or (not attention_mode(config) and not pool_dex_allowed(pool, config))
+            or (not attention_mode(config) and not pool_age_matches_config(pool, config))
         ):
             continue
         pool.source = "signal_thesis_monitor"
@@ -4552,9 +4721,22 @@ def due_signal_thesis_monitor_pools(state, config, now=None):
 
 
 def select_scan_targets(universe, state, config):
+    attention_stats = {}
+    if attention_mode(config):
+        eligible = []
+        reasons = Counter()
+        for pool in universe:
+            plan = history_plan((state.get("pools") or {}).get(pool.pool_address) or {}, config, int(time.time()))
+            reasons[plan["reason"]] += 1
+            if plan["scan"]:
+                eligible.append(pool)
+        attention_stats = {"attention_candidates": len(universe), "incremental_eligible": len(eligible),
+            "incremental_skipped": len(universe) - len(eligible), "incremental_reasons": dict(reasons)}
+        universe = eligible
     limit = max(0, int(config.get("active_pool_limit", 0)))
     if not limit or not universe:
         return [], {
+            **attention_stats,
             "candidates": len(universe),
             "priority": 0,
             "rotation": 0,
@@ -4571,6 +4753,7 @@ def select_scan_targets(universe, state, config):
     if len(universe) <= limit:
         never_scanned = sum(1 for pool in universe if not pool_last_scanned_at(state, pool))
         return list(universe), {
+            **attention_stats,
             "candidates": len(universe),
             "priority": len(universe),
             "rotation": 0,
@@ -4623,6 +4806,12 @@ def select_scan_targets(universe, state, config):
         return True
 
     pulse_selected = 0
+    if attention_mode(config):
+        for pool in universe:
+            if pulse_selected >= discovery_limit:
+                break
+            if not (state.get("pools", {}).get(pool.pool_address) or {}).get("candidate_checked_at") and select(pool, "new_gmgn_candidate"):
+                pulse_selected += 1
     for item in state.get("discovery_queue", []) or []:
         if pulse_selected >= discovery_limit or len(priority) >= priority_count:
             break
@@ -4676,7 +4865,7 @@ def select_scan_targets(universe, state, config):
             continue
         pool_state = pools_state.get(pool.pool_address) or {}
         backlogs = pool_state.get("helius_rolling_backlogs") or []
-        if not backlogs and not pool_state.get("force_enhanced_next_scan"):
+        if not backlogs and not pool_state.get("force_enhanced_next_scan") and not pool_state.get("candidate_signature_gaps"):
             continue
         oldest_gap = min(
             (
@@ -4742,6 +4931,7 @@ def select_scan_targets(universe, state, config):
         pool_state["last_selected_at"] = selected_at
     selected = [*priority, *rotation]
     return selected, {
+        **attention_stats,
         "candidates": len(universe),
         "priority": len(priority),
         "signal_monitor": due_selected + recent_monitor_selected,
@@ -6828,7 +7018,13 @@ def merge_reactivation_wave_swaps(pool_state, swaps, config):
     merged = sorted(by_signature.values(), key=lambda item: (item.get("block_time") or 0, item.get("signature") or ""))
     buffer_truncated = bool(max_swaps > 0 and len(merged) > max_swaps)
     if buffer_truncated:
+        if attention_mode(config):
+            pool_state["candidate_swap_omitted_through"] = max(int(pool_state.get("candidate_swap_omitted_through") or 0),
+                max(int(item.get("block_time") or 0) for item in merged[:-max_swaps]))
         merged = merged[-max_swaps:]
+    if attention_mode(config):
+        omitted = int(pool_state.get("candidate_swap_omitted_through") or 0)
+        buffer_truncated = buffer_truncated or bool(omitted and omitted >= cutoff)
     pool_state["reactivation_wave_swaps"] = merged
     pool_state["reactivation_wave_buffer_truncated"] = buffer_truncated
     return merged
@@ -10093,6 +10289,19 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         or pool_state.get("helius_latest_block_time")
         or 0
     )
+    if attention_mode(config):
+        previous_time = max(previous_time, int(pool_state.get("candidate_history_complete_to") or 0))
+        # The first history range is anchored, so retries cannot slide past its gaps.
+        anchor = int(pool_state.setdefault("candidate_history_start", recent_from))
+        if not previous_time:
+            recent_from = anchor
+        else:
+            previous_time = max(previous_time, anchor)
+        signature_gaps = pool_state.get("candidate_signature_gaps") or []
+        if signature_gaps:
+            gap_start = min(int(item["stop_time"]) for item in signature_gaps)
+            recent_from = min(recent_from, gap_start)
+            previous_time = min(previous_time or recent_from, gap_start)
     live_lookback_minutes = int(config.get("helius_live_lookback_minutes", min(lookback_minutes, 90)))
     if previous_time:
         recovery_hours = max(
@@ -10163,6 +10372,7 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         "backfill_pending": False,
         "had_previous_state": bool(previous_time),
         "live_from": live_from,
+        "observed_to": now,
         "live_resumed": had_rolling_backlog,
         "live_cursor_reset": False,
         "live_head_refreshed": had_rolling_backlog,
@@ -10322,6 +10532,8 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         live_budget_kind,
         phase=phase,
     )
+    if attention_mode(config) and config.get("_reuse_probe_head"):
+        head_page_budget = 0
     if rolling_backlogs:
         head_page_budget = min(
             head_page_budget,
@@ -10339,7 +10551,7 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         "live_head",
         "desc",
         head_page_budget,
-        block_time={"gte": live_from},
+        block_time={"gte": live_from, **({"lte": now} if attention_mode(config) else {})},
         target_from=live_from,
     )
     newest_head = (
@@ -10389,7 +10601,7 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         }
         rolling_backlogs = []
 
-    if had_rolling_backlog and rolling_backlogs:
+    if had_rolling_backlog and rolling_backlogs and not config.get("_candidate_head_only"):
         backlog = rolling_backlogs[0]
         backlog_pages = max(
             1,
@@ -10454,7 +10666,7 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
     stats["rolling_gap_pending"] = bool(rolling_backlogs)
     stats["live_truncated"] = bool(rolling_backlogs)
     stats["live_oldest_block_time"] = min(pass_oldest) if pass_oldest else None
-    stats["live_newest_block_time"] = max(pass_newest) if pass_newest else pending_block_time
+    stats["live_newest_block_time"] = max([*pass_newest, pending_block_time, int(config.get("_probe_head_block_time") or 0)])
     if stats.get("live_newest_block_time"):
         stats["live_head_lag_seconds"] = max(0, now - int(stats["live_newest_block_time"]))
     if completed_checkpoint:
@@ -10538,7 +10750,8 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
     initial_max_age = float(config.get("helius_initial_backfill_max_age_hours", 96))
     retention_hours = float(config.get("state_swap_buffer_retention_hours", 24))
     should_backfill = (
-        config.get("helius_initial_backfill_enabled", True)
+        not attention_mode(config)
+        and config.get("helius_initial_backfill_enabled", True)
         and phase != "probe"
         and pool.pair_created_at
         and age_hours is not None
@@ -10575,7 +10788,7 @@ def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
         )
         stats["backfill_pending"] = bool(backfill_pass.get("truncated"))
 
-    if int(pool.txns_1h or 0) >= int(config.get("helius_high_txn_threshold", 10_000)):
+    if not attention_mode(config) and int(pool.txns_1h or 0) >= int(config.get("helius_high_txn_threshold", 10_000)):
         tail_pages_key = f"helius_{phase}_high_tx_tail_pages" if phase else "helius_high_tx_tail_pages"
         run_pass(
             "high_tx_tail",
@@ -10855,6 +11068,12 @@ def combine_fetch_stats(probe_stats, deep_stats):
     combined["phase"] = "probe_plus_deep"
     combined["pages"] = int(probe_stats.get("pages", 0)) + int(deep_stats.get("pages", 0))
     combined["transactions"] = int(probe_stats.get("transactions", 0)) + int(deep_stats.get("transactions", 0))
+    observed_to = [int(item["observed_to"]) for item in (probe_stats, deep_stats) if item.get("observed_to")]
+    if observed_to:
+        combined["observed_to"] = min(observed_to)
+    live_from = [int(item["live_from"]) for item in (probe_stats, deep_stats) if item.get("live_from")]
+    if live_from:
+        combined["live_from"] = min(live_from)
     for key in ("transaction_errors", "parse_errors"):
         combined[key] = int(probe_stats.get(key) or 0) + int(deep_stats.get(key) or 0)
     combined["passes"] = [*(probe_stats.get("passes") or []), *(deep_stats.get("passes") or [])]
@@ -11110,6 +11329,8 @@ def pool_backfill_pending(pool, pool_state, config):
 
 
 def pool_has_new_activity(rpc, pool, pool_state, config):
+    if attention_mode(config) and (pool_state.get("candidate_history_pending") or pool_state.get("candidate_signature_gaps")):
+        return True, {"reason": "history_gap_repair"}
     if pool_state.get("helius_rolling_backlogs") or pool_state.get("helius_live_cursor"):
         return True, {"reason": "history_gap_repair"}
     recheck_due = parse_timestamp(pool_state.get("signal_recheck_due_at"))
@@ -11127,7 +11348,7 @@ def pool_has_new_activity(rpc, pool, pool_state, config):
         0,
         int(config.get("helius_activity_probe_market_active_txns_1h", 5)),
     )
-    if market_active_threshold and int(pool.txns_1h or 0) >= market_active_threshold:
+    if not attention_mode(config) and market_active_threshold and int(pool.txns_1h or 0) >= market_active_threshold:
         return True, {
             "reason": "market_activity",
             "txns_1h": int(pool.txns_1h or 0),
@@ -11160,7 +11381,13 @@ def pool_has_new_activity(rpc, pool, pool_state, config):
 
 def scan_pool_helius_transactions(rpc, pool, config, state, classification_budget):
     pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
-    has_new_activity, activity_probe = pool_has_new_activity(rpc, pool, pool_state, config)
+    prepared = config.get("_prepared_probe")
+    if prepared:
+        has_new_activity = not prepared.get("unchanged")
+        activity_probe = prepared.get("activity_probe") or {"reason": "shared_head_sweep"}
+        restore_history_state(pool_state, prepared["history_state"])
+    else:
+        has_new_activity, activity_probe = pool_has_new_activity(rpc, pool, pool_state, config)
     if not has_new_activity:
         signal_thesis = refresh_signal_thesis(
             rpc,
@@ -11195,6 +11422,8 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
                 "passes": [],
                 "truncated": False,
                 "activity_unchanged": True,
+                **({"live_from": int(pool_state.get("candidate_history_complete_to") or 0),
+                    "observed_to": int(time.time())} if attention_mode(config) else {}),
             },
         }
     preclassified = False
@@ -11207,7 +11436,11 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
     classification_errors = 0
     try:
         if config.get("helius_probe_enabled", True):
-            probe_txs, probe_fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="probe")
+            if prepared:
+                probe_txs = prepared["transactions"]
+                probe_fetch_stats = copy.deepcopy(prepared["stats"])
+            else:
+                probe_txs, probe_fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="probe")
             if probe_fetch_stats.get("market_activity_stale"):
                 signal_thesis = refresh_signal_thesis(
                     rpc,
@@ -11236,6 +11469,8 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
                     "market_snapshot_suppressed": True,
                     "trade_fetch": probe_fetch_stats,
                 }
+            if attention_mode(config):
+                probe_txs = unprocessed_transactions(probe_txs, pool_state)
             probe_swaps, probe_parse_errors = parse_helius_swaps(probe_txs, pool)
             if classify_wallets:
                 probe_config = probe_classification_config(config)
@@ -11268,9 +11503,16 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
                 swaps=probe_signal_swaps,
             )
             if deepen:
-                deep_txs, deep_fetch_stats = fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase="deep")
+                if attention_mode(config) and not probe_fetch_stats.get("live_truncated"):
+                    deep_txs, deep_fetch_stats = [], probe_fetch_stats
+                    fetch_stats = dict(probe_fetch_stats)
+                    fetch_stats["reused_probe_history"] = True
+                else:
+                    deep_config = {**config, "_reuse_probe_head": attention_mode(config),
+                        "_probe_head_block_time": probe_fetch_stats.get("live_newest_block_time")}
+                    deep_txs, deep_fetch_stats = fetch_helius_pool_transactions(rpc, pool, deep_config, pool_state, phase="deep")
+                    fetch_stats = combine_fetch_stats(probe_fetch_stats, deep_fetch_stats)
                 txs = merge_transactions(probe_txs, deep_txs)
-                fetch_stats = combine_fetch_stats(probe_fetch_stats, deep_fetch_stats)
                 fetch_stats["deep_reason"] = deep_reason
                 pool_state["helius_deep_scanned_at"] = utc_now().isoformat().replace("+00:00", "Z")
                 seed_events = probe_events
@@ -11293,6 +11535,8 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
         return scan_pool_signatures(rpc, pool, config, state, classification_budget, fallback_error=str(exc))
 
     if not preclassified:
+        if attention_mode(config):
+            txs = unprocessed_transactions(txs, pool_state)
         swaps, parse_errors = parse_helius_swaps(txs, pool)
         if classify_wallets:
             classified_events, candidate_buys, classification_errors = classify_buy_swaps(
@@ -11339,6 +11583,11 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
     if parse_errors:
         pool_state["force_enhanced_next_scan"] = True
     else:
+        if attention_mode(config):
+            remember_transactions(txs, pool_state, int(time.time()))
+            gaps = pool_state.get("candidate_signature_gaps") or []
+            if gaps and not fetch_stats.get("live_truncated") and int(fetch_stats.get("live_from") or 0) <= min(int(item["stop_time"]) for item in gaps):
+                pool_state["candidate_signature_gaps"] = []
         live_checkpoint = fetch_stats.get("live_checkpoint")
         if live_checkpoint:
             update_pool_transaction_state(pool_state, pool, txs, checkpoint=live_checkpoint)
@@ -11390,8 +11639,12 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
         else int(config["initial_backfill_signatures"])
     )
 
+    candidate_ranges = None
     try:
-        signatures = rpc.signatures_for_address(pool.pool_address, limit=limit)
+        if attention_mode(config):
+            signatures, candidate_ranges = collect_signature_ranges(rpc, pool.pool_address, pool_state, config, int(time.time()))
+        else:
+            signatures = rpc.signatures_for_address(pool.pool_address, limit=limit)
     except Exception as exc:
         error = str(exc)
         if fallback_error:
@@ -11467,6 +11720,22 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
             continue
         new_signatures.append(item["signature"])
     live_truncated = bool(previous_latest and not previous_found and len(signatures) >= limit)
+    if candidate_ranges:
+        live_truncated = not candidate_ranges["complete"]
+        known = pool_state.get("candidate_processed_signatures") or {}
+        new_signatures = [item["signature"] for item in signatures if item["signature"] not in known
+            and item["signature"] != previous_latest]
+        if not new_signatures and not live_truncated:
+            pool_state["candidate_signature_gaps"] = []
+            signal_thesis = refresh_signal_thesis(rpc, pool, pool_state, [], config)
+            return [], {"pool": pool.as_dict(), "lane": config.get("lane") or config.get("mode"),
+                "trade_source": "pool_signatures", "new_signatures": 0, "transactions_scanned": 0,
+                "parsed_swaps": 0, "candidate_buys": 0, "classified_buys": 0, "classes": {},
+                "buy_sol": 0, "signal_thesis": signal_thesis,
+                "trade_fetch": {"source": "pool_signatures", "phase": "probe_only", "pages": candidate_ranges["pages"],
+                    "live_from": candidate_ranges["live_from"], "transactions": 0, "truncated": False,
+                    "observed_to": candidate_ranges["observed_to"], "timestamp_missing": candidate_ranges["timestamp_missing"],
+                    "activity_unchanged": True}}
     swaps = []
     fetched_transactions = []
     transaction_errors = 0
@@ -11483,6 +11752,9 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
             continue
         if isinstance(tx, dict):
             fetched_transactions.append(tx)
+        elif attention_mode(config):
+            transaction_errors += 1
+            continue
         try:
             swap = parse_pool_swap(tx, pool)
         except Exception:
@@ -11532,6 +11804,14 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
         ),
         "history_gap_seconds": 0,
     }
+    if candidate_ranges:
+        fetch_stats.update(pages=candidate_ranges["pages"], live_from=candidate_ranges["live_from"],
+            observed_to=candidate_ranges["observed_to"], timestamp_missing=candidate_ranges["timestamp_missing"],
+            rolling_gap_pending=bool(candidate_ranges["gaps"]), initial_window_complete=candidate_ranges["complete"])
+        if not transaction_errors and not parse_errors:
+            pool_state["candidate_history_start"] = candidate_ranges["start"]
+            pool_state["candidate_signature_gaps"] = candidate_ranges["gaps"]
+            remember_transactions(fetched_transactions, pool_state, int(time.time()))
     if market_head:
         fetch_stats["market_activity_probe"] = market_head
     alerts = dedupe_pool_alerts([*classic_alerts, *wave_alerts, *sticky_alerts])
@@ -11612,7 +11892,43 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
     return alerts, summary
 
 
+def history_state_snapshot(pool_state):
+    return {key: copy.deepcopy(value) for key, value in pool_state.items()
+        if key.startswith(("helius_live_", "helius_rolling_", "rpc_latest_"))
+        or key in {"latest_signature", "latest_time", "helius_latest_signature", "helius_latest_time",
+            "helius_latest_block_time", "candidate_signature_gaps", "candidate_processed_signatures",
+            "last_activity_signature", "last_activity_probe_at"}}
+
+
+def restore_history_state(pool_state, snapshot):
+    for key in history_state_snapshot(pool_state):
+        pool_state.pop(key, None)
+    pool_state.update(copy.deepcopy(snapshot))
+
+
 def scan_pool(rpc, pool, config, state, classification_budget):
+    if not attention_mode(config):
+        return scan_pool_history(rpc, pool, config, state, classification_budget)
+    pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
+    snapshot = history_state_snapshot(pool_state)
+
+    def restore():
+        restore_history_state(pool_state, snapshot)
+        pool_state["force_enhanced_next_scan"] = True
+
+    try:
+        result = scan_pool_history(rpc, pool, config, state, classification_budget)
+    except Exception:
+        restore()
+        raise
+    summary = result[1]
+    trade = summary.get("trade_fetch") or {}
+    if summary.get("error") or summary.get("scan_failed") or summary.get("parse_errors") or trade.get("transaction_errors") or trade.get("timestamp_missing"):
+        restore()
+    return result
+
+
+def scan_pool_history(rpc, pool, config, state, classification_budget):
     if config.get("helius_transactions_enabled", True):
         pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
         standard_threshold = int(config.get("helius_standard_incremental_max_txns_1h", 30))
@@ -12464,6 +12780,14 @@ def record_market_observations(state, pools, observed_at):
         if not key:
             continue
         entry = market.setdefault(key, {})
+        if pool.gmgn_attention:
+            entry["gmgn_attention"] = copy.deepcopy(pool.gmgn_attention)
+        history = (state.get("pools") or {}).get(pool.pool_address) or {}
+        if history.get("candidate_checked_at"):
+            entry["candidate_analysis"] = {"initial_hours": history.get("candidate_history_hours"),
+                "checked_at": history.get("candidate_checked_at"), "scope": history.get("candidate_check_scope"),
+                "pending": bool(history.get("candidate_history_pending")),
+                "covered_ranges": copy.deepcopy(history.get("candidate_covered_ranges") or [])}
         previous_pool = entry.get("pool_address")
         snapshot_at = int(pool.market_snapshot_at or 0)
         snapshot_stale = bool(pool.market_snapshot_stale or not snapshot_at
@@ -12513,7 +12837,7 @@ def best_pool_per_token(pools, config):
     by_token = {}
     for pool in pools or []:
         token = pool.token_address
-        if not token or not pool_dex_allowed(pool, config):
+        if not token or (not attention_mode(config) and not pool_dex_allowed(pool, config)):
             continue
         current = by_token.get(token)
         if not current or (pool.liquidity_usd, pool.volume_1h_usd, pool.mcap_usd) > (
@@ -13145,6 +13469,12 @@ def compact_pool_swap_buffers(pools_state, config, now):
     for pool_state in pools_state.values():
         if not isinstance(pool_state, dict):
             continue
+        pool_cutoff = cutoff
+        if attention_mode(config):
+            if "candidate_processed_signatures" in pool_state:
+                prune_processed_signatures(pool_state, now)
+            if pool_state.get("candidate_history_hours"):
+                pool_cutoff = now - int(min(24, max(retention_hours, float(pool_state["candidate_history_hours"]))) * 3600)
         pool_has_buffer = False
         for key in ("sticky_accumulation_swaps", "reactivation_wave_swaps"):
             raw = pool_state.get(key)
@@ -13163,13 +13493,17 @@ def compact_pool_swap_buffers(pools_state, config, now):
                 if not isinstance(item, dict):
                     continue
                 block_time = int(to_float(item.get("block_time")) or parse_timestamp(item.get("time")))
-                if not block_time or (cutoff and block_time < cutoff):
+                if not block_time or (pool_cutoff and block_time < pool_cutoff):
                     continue
                 item = compact_wave_swap(item)
                 if item:
                     compacted.append(item)
             compacted.sort(key=lambda item: (int(item.get("block_time") or 0), item.get("signature") or ""))
             if max_swaps and len(compacted) > max_swaps:
+                if attention_mode(config) and key == "reactivation_wave_swaps":
+                    pool_state["reactivation_wave_buffer_truncated"] = True
+                    pool_state["candidate_swap_omitted_through"] = max(int(pool_state.get("candidate_swap_omitted_through") or 0),
+                        max(int(item.get("block_time") or 0) for item in compacted[:-max_swaps]))
                 compacted = compacted[-max_swaps:]
             if compacted:
                 pool_state[key] = compacted
@@ -13382,6 +13716,8 @@ def apply_market_meta(pool_dict, state):
         return pool_dict
     enriched = dict(pool_dict)
     for key in (
+        "gmgn_attention",
+        "candidate_analysis",
         "ath_mcap_usd",
         "ath_mcap_at",
         "ath_price_usd",
@@ -13454,6 +13790,10 @@ def apply_market_meta_to_alert(alert, state):
 def build_scan_health(summaries, lane_stats, config):
     scanned = len(summaries)
     candidate_pools = sum(int(item.get("universe_pools") or 0) for item in lane_stats.values())
+    selected_pools = sum(int((item.get("selection") or {}).get("selected",
+        item.get("universe_pools") or 0)) for item in lane_stats.values())
+    route_diagnostics = {lane: item["selection"]["history_routes_unavailable"]
+        for lane, item in lane_stats.items() if (item.get("selection") or {}).get("history_routes_unavailable")}
     budget_deferred = sum(
         int((item.get("selection") or {}).get("rpc_budget_deferred") or 0)
         for item in lane_stats.values()
@@ -13556,9 +13896,10 @@ def build_scan_health(summaries, lane_stats, config):
 
     discovery = config.get("_discovery_stats") or {}
     live_discovered = int(discovery.get("discovered_pools") or 0)
-    if candidate_pools >= min_scanned and scanned < min_scanned:
+    expected_minimum = min(min_scanned, selected_pools)
+    if selected_pools and scanned < expected_minimum:
         status = "unhealthy"
-        reasons.append(f"only {scanned}/{candidate_pools} candidate pools were scanned")
+        reasons.append(f"only {scanned}/{selected_pools} selected pools were scanned (universe {candidate_pools})")
     elif scanned == 0 and live_discovered == 0:
         status = "unhealthy"
         reasons.append("market discovery and scan both returned zero pools")
@@ -13594,17 +13935,22 @@ def build_scan_health(summaries, lane_stats, config):
             reasons.append(f"{parse_errors} transactions could not be parsed")
         if config.get("_gmgn_error"):
             status = "degraded"
-            reasons.append("GMGN unavailable; registry/fallback discovery and cached ATH only")
+            reasons.append("GMGN rankings incomplete; no alternative discovery admitted" if attention_mode(config)
+                else "GMGN unavailable; registry/fallback discovery and cached ATH only")
         if budget_deferred:
             status = "degraded"
             reasons.append(
-                f"{budget_deferred} pools deferred after the hourly RPC budget was exhausted"
+                f"{budget_deferred} pools deferred because transaction-history routes were unavailable"
             )
 
     return {
         "status": status,
         "reasons": reasons,
         "candidate_pools": candidate_pools,
+        "selected_pools": selected_pools,
+        "history_route_diagnostics": route_diagnostics,
+        "head_sweep": {lane: item["selection"]["head_sweep"] for lane, item in lane_stats.items()
+            if (item.get("selection") or {}).get("head_sweep")},
         "scanned_pools": scanned,
         "failed_pools": failed,
         "failed_ratio": failed_ratio,
@@ -13658,6 +14004,10 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
         "lane": config.get("lane"),
         "profile": config.get("lane") or config.get("mode"),
         "config": {
+            "discovery_source_mode": config.get("discovery_source_mode", "composite"),
+            "candidate_initial_history_hours": config.get("candidate_initial_history_hours", 6),
+            "candidate_extended_history_hours": config.get("candidate_extended_history_hours", 24),
+            "candidate_history_check_minutes": config.get("candidate_history_check_minutes", 15),
             "config_version": effective_config_version(config),
             "dashboard_signal_epoch": config.get("dashboard_signal_epoch"),
             "mcap_min_usd": config["mcap_min_usd"],
@@ -13722,7 +14072,7 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "scan_health": config.get("_scan_health", {}),
             "discovery": config.get("_discovery_stats", {}),
             "gmgn_ath": (state.get("maintenance") or {}).get("gmgn_ath", {}),
-            "gmgn_discovery": config.get("_gmgn_trenches_requests", {}),
+            "gmgn_discovery": config.get("_gmgn_attention_health") or config.get("_gmgn_trenches_requests", {}),
             "caught_market_refresh": (state.get("maintenance") or {}).get("caught_market_refresh", {}),
             "signal_outcomes": (state.get("maintenance") or {}).get("signal_outcomes", {}),
             "supply_integrity": (
@@ -13925,7 +14275,78 @@ def monitor_due_cohorts(rpc, universe, state, config, observed_at):
     return {"due": len(due), "checked": checked, "balance_requests": used, "deferred": len(due) - checked}
 
 
+def attention_pool_config(pool, pool_state, config):
+    result = dict(reactivation_stage_config(pool, config))
+    hours = pool_state.setdefault("candidate_history_hours", initial_history_hours(pool.gmgn_attention, config))
+    result.update(helius_recent_lookback_minutes=int(hours * 60),
+        reactivation_wave_buffer_minutes=int(hours * 60), alert_window_minutes=int(hours * 60),
+        helius_initial_backfill_enabled=False)
+    pool_state.setdefault("candidate_history_start", int(time.time()) - int(hours * 3600))
+    return result
+
+
+@contextmanager
+def fair_pool_rpc_budget(rpc, remaining_pools, enabled=True):
+    limits = []
+    if enabled and isinstance(rpc, RoutedSolanaRpc):
+        for provider in rpc.providers.values():
+            original = provider.credit_budget
+            if original:
+                used = max(provider.estimated_credits, provider.attempted_credits)
+                allowance = max(1, max(0, original - used) // max(1, remaining_pools))
+                limits.append((provider, original))
+                provider.credit_budget = min(original, used + allowance)
+    try:
+        yield
+    finally:
+        for provider, original in limits:
+            provider.credit_budget = original
+
+
+def prepare_attention_history(rpc, targets, state, config):
+    prepared, stats = {}, {"selected": len(targets), "attempted": 0, "prepared": 0,
+        "unchanged": 0, "failed": 0, "order": "all_heads_before_wallet_analysis"}
+    for index, pool in enumerate(targets):
+        pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
+        pool_config = attention_pool_config(pool, pool_state, config)
+        mode = rpc.available_history_mode()
+        if not mode:
+            stats["routes_unavailable"] = rpc.history_route_status() if isinstance(rpc, RoutedSolanaRpc) else {}
+            break
+        stats["attempted"] += 1
+        try:
+            with fair_pool_rpc_budget(rpc, len(targets) - index):
+                if mode == "standard":
+                    limit = min(1000, max(10, int(config.get("candidate_signature_page_size", 100))))
+                    observed_to = int(time.time())
+                    head = rpc.signatures_for_address(pool.pool_address, limit=limit)
+                    prepared[pool.pool_address] = {"mode": mode, "head": head, "observed_to": observed_to}
+                else:
+                    working = copy.deepcopy(pool_state)
+                    changed, activity = pool_has_new_activity(rpc, pool, working, pool_config)
+                    transactions, fetch_stats = [], {}
+                    if changed:
+                        head_config = {**pool_config, "_candidate_head_only": True,
+                            "helius_probe_max_pages": 1, "helius_probe_dynamic_max_pages": 1}
+                        transactions, fetch_stats = fetch_helius_pool_transactions(
+                            rpc, pool, head_config, working, phase="probe")
+                    else:
+                        stats["unchanged"] += 1
+                    prepared[pool.pool_address] = {"mode": mode, "transactions": transactions,
+                        "stats": fetch_stats, "history_state": history_state_snapshot(working),
+                        "unchanged": not changed, "activity_probe": activity}
+            stats["prepared"] += 1
+        except Exception as exc:
+            if isinstance(exc, (AssertionError, KeyError, TypeError, AttributeError)):
+                raise
+            stats["failed"] += 1
+            print(f"warn: GMGN head sweep failed for {pool.symbol or pool.pool_address}: {exc}",
+                file=sys.stderr, flush=True)
+    return prepared, stats
+
+
 def scan_with_config(http, rpc, state, config, base_universe=None):
+    config["_active_runtime_state"] = state
     label = config.get("lane") or config.get("mode") or "scan"
     if base_universe is None:
         print(f"Building market universe for {label}...", flush=True)
@@ -13988,9 +14409,16 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
             observed_at,
         )
         universe.extend(thesis_monitor_pools)
-    cohort_monitor = monitor_due_cohorts(rpc, universe, state, config, observed_at)
-    candidates = fast_candidate_pools(universe, state, int(time.time())) if config.get("_scan_profile") == "targeted" else universe
+    candidates = (fast_candidate_pools(universe, state, int(time.time()))
+        if config.get("_scan_profile") == "targeted" and not attention_mode(config) else universe)
+    if attention_mode(config):
+        candidates = [pool for pool in candidates if pool.source != "signal_thesis_monitor" and pool.gmgn_attention]
     scan_targets, selection_stats = select_scan_targets(candidates, state, config)
+    prepared = {}
+    if attention_mode(config):
+        prepared, selection_stats["head_sweep"] = prepare_attention_history(rpc, scan_targets, state, config)
+    cohort_monitor = monitor_due_cohorts(rpc, universe, state, config, observed_at)
+    selection_stats["selected"] = len(scan_targets)
     if config.get("_scan_profile") == "targeted" and "_ath_budget" in config:
         targets = config["_ath_budget"].setdefault("target_tokens", [])
         for pool in scan_targets:
@@ -14018,8 +14446,9 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
     all_alerts = []
     summaries = []
     for index, pool in enumerate(scan_targets, start=1):
-        history_mode = rpc.available_history_mode()
-        if not history_mode:
+        cached = prepared.get(pool.pool_address)
+        history_mode = cached["mode"] if cached else rpc.available_history_mode()
+        if not history_mode and not cached:
             deferred_pools = scan_targets[index - 1 :]
             retry_minutes = max(
                 5.0,
@@ -14035,15 +14464,25 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
                 deferred_state["rpc_budget_deferred_at"] = observed_at
                 deferred_state["force_enhanced_next_scan"] = True
             selection_stats["rpc_budget_deferred"] = len(deferred_pools)
+            selection_stats["history_routes_unavailable"] = rpc.history_route_status() if isinstance(rpc, RoutedSolanaRpc) else {}
             print(
-                f"warn: {label}: deferred {len(deferred_pools)} pools after all "
-                "transaction-history routes reached their scan budget",
+                f"warn: {label}: deferred {len(deferred_pools)} pools: transaction-history routes unavailable; "
+                f"{json.dumps(selection_stats['history_routes_unavailable'], sort_keys=True)}",
                 file=sys.stderr,
                 flush=True,
             )
             break
 
+        pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
         pool_config = dict(reactivation_stage_config(pool, config))
+        if attention_mode(config):
+            pool_config = attention_pool_config(pool, pool_state, config)
+            if cached and history_mode == "enhanced":
+                pool_config["_prepared_probe"] = cached
+                pool_config["helius_probe_enabled"] = True
+            elif cached:
+                pool_config["_candidate_signature_head"] = cached["head"]
+                pool_config["_candidate_head_observed_at"] = cached["observed_to"]
         if history_mode == "standard":
             pool_config["helius_transactions_enabled"] = False
         stage = pool_config.get("reactivation_stage")
@@ -14052,15 +14491,9 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
             f"{label}: scanning {index}/{len(scan_targets)} {pool.symbol}{stage_label}",
             flush=True,
         )
-        pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
         try:
-            alerts, summary = scan_pool(
-                rpc,
-                pool,
-                pool_config,
-                state,
-                classification_budget,
-            )
+            with fair_pool_rpc_budget(rpc, len(scan_targets) - index + 1, attention_mode(config)):
+                alerts, summary = scan_pool(rpc, pool, pool_config, state, classification_budget)
         except Exception as exc:
             print(
                 f"warn: {label}: pool scan failed for {pool.symbol} "
@@ -14093,6 +14526,14 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
                 summary["data_unavailable"] = True
         if stage:
             summary["reactivation_stage"] = stage
+        if attention_mode(config):
+            record_history_check(pool_state, summary, pool_config, int(time.time()))
+            summary["incremental_analysis"] = {
+                "scope": pool_state.get("candidate_check_scope"),
+                "checked_at": pool_state.get("candidate_checked_at"),
+                "history_pending": pool_state.get("candidate_history_pending"),
+                "covered_ranges": pool_state.get("candidate_covered_ranges", []),
+            }
         if summary.get("error") or summary.get("scan_failed"):
             pool_state["last_scan_failed_at"] = observed_at
             pool_state["last_scan_error"] = str(summary.get("error") or "pool scan failed")[:500]
@@ -14338,7 +14779,7 @@ def run_once(config, lane_name=None):
         # sync so the top-level report exposes those diagnostics too.
         lane_configs[lane_key] = dict(lane_config)
         all_alerts.extend(lane_alerts)
-        for key in ("_gmgn_error", "_discovery_stats"):
+        for key in ("_gmgn_error", "_discovery_stats", "_gmgn_attention_health"):
             if lane_config.get(key):
                 config[key] = lane_config[key]
         summaries.extend(lane_summaries)
@@ -14369,7 +14810,9 @@ def run_once(config, lane_name=None):
     config["_rpc_failures"] = dict(rpc.failures)
     config["_rpc_failovers"] = dict(rpc.route_failovers)
     config["_rpc_estimated_credits"] = int(rpc.estimated_credits)
-    if config.get("_scan_profile") == "targeted" and not summaries:
+    if attention_mode(config) and not universe and config.get("_gmgn_attention_health", {}).get("status") == "unavailable":
+        raise RuntimeError("GMGN candidate discovery unavailable; no alternative discovery source was used")
+    if (config.get("_scan_profile") == "targeted" or attention_mode(config)) and not summaries:
         config["_wallet_activity_stats"] = run_wallet_activity_tasks(rpc, universe, state, config,
             utc_now().isoformat().replace("+00:00", "Z"))
         checks = sum(int(((lane.get("selection") or {}).get("cohort_monitor") or {}).get("checked") or 0)
@@ -14503,6 +14946,8 @@ def discovery_pulse_config(config):
             {"order_by": "swaps", "intervals": ["1m", "5m"]},
         ],
     )
+    if attention_mode(config):
+        lane_config["_scan_profile"] = "discovery"
     return lane_config
 
 
@@ -14513,6 +14958,7 @@ def run_discovery_once(config):
     if not config.get("_runtime_discovery_recovered"):
         load_remote_discovery_state(state, config)
     lane_config = discovery_pulse_config(config)
+    lane_config["_active_runtime_state"] = state
     observed_at = utc_now().isoformat().replace("+00:00", "Z")
     discovered = discover_market_pools(http, lane_config)
     registry, registry_stats = refresh_known_market_pools(
@@ -14563,7 +15009,10 @@ def run_discovery_once(config):
         "baselines": baseline_stats,
         "remote": remote_stats,
         "gmgn_status": "error" if lane_config.get("_gmgn_error") else "ok",
+        "gmgn_attention": lane_config.get("_gmgn_attention_health", {}),
     }
+    if attention_mode(lane_config) and lane_config.get("_gmgn_attention_health", {}).get("status") == "unavailable":
+        raise RuntimeError("GMGN attention discovery unavailable; no alternate candidate sources admitted")
     status = write_discovery_status("ok", payload)
     sync_remote_discovery_status(status, lane_config)
     print(

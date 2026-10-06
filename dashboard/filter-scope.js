@@ -1,4 +1,4 @@
-import { timestampMs } from "./token-state.js?v=20261004-wallet-activity-v4";
+import { timestampMs } from "./token-state.js?v=20261006-gmgn-fair-v2";
 
 // The dashboard keeps historical data for Wallet Edge, but operational lists
 // start from the first completed scan that used the 1d-15d Reactivation rule.
@@ -94,8 +94,9 @@ function recordAgeHours(record = {}) {
 }
 
 export function isCurrentFilterPool(record = {}, report = {}) {
-  const minAgeHours = Number(report?.config?.age_min_hours);
-  const maxAgeHours = Number(report?.config?.age_max_hours);
+  if (report?.config?.discovery_source_mode === "gmgn_attention") return true;
+  const minAgeHours = report?.config?.age_min_hours == null ? NaN : Number(report.config.age_min_hours);
+  const maxAgeHours = report?.config?.age_max_hours == null ? NaN : Number(report.config.age_max_hours);
   const hasMin = Number.isFinite(minAgeHours);
   const hasMax = Number.isFinite(maxAgeHours);
   if (!hasMin && !hasMax) return true;
