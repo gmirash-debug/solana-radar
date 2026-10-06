@@ -11548,6 +11548,9 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
                 classification_budget,
                 swaps=probe_signal_swaps,
             )
+            bounded_repair = attention_mode(config) and not deepen and bool(probe_fetch_stats.get("live_truncated"))
+            if bounded_repair:
+                deepen, deep_reason = True, "bounded_gap_repair"
             if deepen:
                 if attention_mode(config) and not probe_fetch_stats.get("live_truncated"):
                     deep_txs, deep_fetch_stats = [], probe_fetch_stats
@@ -11556,6 +11559,8 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
                 else:
                     deep_config = {**config, "_reuse_probe_head": attention_mode(config),
                         "_probe_head_block_time": probe_fetch_stats.get("live_newest_block_time")}
+                    if bounded_repair:
+                        deep_config["helius_deep_rolling_backlog_pages"] = 1
                     deep_txs, deep_fetch_stats = fetch_helius_pool_transactions(rpc, pool, deep_config, pool_state, phase="deep")
                     fetch_stats = combine_fetch_stats(probe_fetch_stats, deep_fetch_stats)
                 txs = merge_transactions(probe_txs, deep_txs)
