@@ -374,6 +374,10 @@ share of each provider's remaining per-scan allowance, without increasing the
 monthly limits. Cursor changes are staged until parsing succeeds. Diagnostics
 separate full-universe, selected, head-read and analyzed counts, and distinguish
 per-scan caps, monthly safety caps, temporary cooldowns and ledger failures.
+An unavailable balance/supply verification does not discard already parsed
+history or emit a confirmed signal. History coverage and wallet-evidence retry
+are recorded separately, so the next pass can reuse trades and retry evidence.
+Decode errors still roll back cursors, and programming errors still fail loudly.
 
 First analysis is anchored to six hours, or 24 hours for tokens present only
 in the long (`6h`/`24h`) rankings. Retries keep the original lower boundary.

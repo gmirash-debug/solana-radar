@@ -1,11 +1,11 @@
-import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261006-gmgn-fair-v2";
-import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261006-gmgn-fair-v2";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261006-gmgn-fair-v2";
-import { installTerminology } from "./terminology.js?v=20261006-gmgn-fair-v2";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261006-gmgn-fair-v2";
-import { loadTokenDetail } from "./static-detail.js?v=20261006-gmgn-fair-v2";
-import { r2BudgetView } from "./r2-budget-view.js?v=20261006-gmgn-fair-v2";
-import { walletActivityView } from "./wallet-activity-view.js?v=20261006-gmgn-fair-v2";
+import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261006-gmgn-fair-v3";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261006-gmgn-fair-v3";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261006-gmgn-fair-v3";
+import { installTerminology } from "./terminology.js?v=20261006-gmgn-fair-v3";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261006-gmgn-fair-v3";
+import { loadTokenDetail } from "./static-detail.js?v=20261006-gmgn-fair-v3";
+import { r2BudgetView } from "./r2-budget-view.js?v=20261006-gmgn-fair-v3";
+import { walletActivityView } from "./wallet-activity-view.js?v=20261006-gmgn-fair-v3";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -16,12 +16,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261006-gmgn-fair-v2";
+} from "./token-state.js?v=20261006-gmgn-fair-v3";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261006-gmgn-fair-v2";
+} from "./filter-scope.js?v=20261006-gmgn-fair-v3";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const PENDING_TOKEN_ACTIONS_KEY = "solana-radar:pending-token-actions:v1";
@@ -3288,7 +3288,7 @@ function renderEvidenceTab(token, gmgnUrl, sourceLinks) {
       <div class="kv"><span>Quality</span><span>${renderSignalQuality(token)}</span></div>
       <div class="kv"><span>Scanner rule</span><span>${renderFilterLine(token)}</span></div>
       ${attention ? `<div class="kv"><span>GMGN lists</span><span>${esc(attentionLabel)}</span></div><div class="kv"><span>First seen in GMGN</span><span>${esc(dateLabel(attention.first_seen_at))}</span></div><div class="kv"><span>Last seen in GMGN</span><span>${esc(dateLabel(attention.last_seen_at))}</span></div>` : ""}
-      ${analysis ? `<div class="kv"><span>Initial history window</span><span>${esc(analysis.initial_hours ?? "-")}h</span></div><div class="kv"><span>History coverage</span><span>${analysis.pending ? "Incomplete / retry pending" : "Checked"}${ranges ? ` / ${esc(ranges)}` : ""}</span></div><div class="kv"><span>Last history check</span><span>${esc(dateLabel(analysis.checked_at))} / ${esc(analysis.scope || "unknown")}</span></div>` : ""}
+      ${analysis ? `<div class="kv"><span>Initial history window</span><span>${esc(analysis.initial_hours ?? "-")}h</span></div><div class="kv"><span>History coverage</span><span>${(analysis.history_pending ?? analysis.pending) ? "Incomplete / retry pending" : "Checked"}${ranges ? ` / ${esc(ranges)}` : ""}</span></div>${analysis.evidence_pending ? `<div class="kv"><span>Wallet verification</span><span>Pending / parsed trading history retained</span></div>` : ""}<div class="kv"><span>Last history check</span><span>${esc(dateLabel(analysis.checked_at))} / ${esc(analysis.scope || "unknown")}</span></div>` : ""}
       <div class="kv"><span>Risk flags</span><span>${renderRiskFlags(token)}</span></div>
       ${renderWaveLine(token)}
     </section>

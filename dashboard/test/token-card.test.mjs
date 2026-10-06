@@ -168,6 +168,17 @@ test("GMGN metrics separate candidates, selected pools, read heads and analysis"
   assert.match(text,/Analyzed pools\s*4/);
 });
 
+test("complete trading history remains distinct from pending wallet verification", t => {
+  const p = {...pool,candidate_analysis:{initial_hours:6,checked_at:checked,pending:true,
+    history_pending:false,evidence_pending:true,covered_ranges:[],scope:"probe"}};
+  const api = fixture(t,{signalThesis:thesis({...p}),alerts:[alert({pool:p})]});
+  const html = api.renderEvidenceTab(api.buildTokenSignals()[0],"","");
+  assert.match(html,/History coverage<\/span><span>Checked/);
+  assert.match(html,/Wallet verification/);
+  assert.match(html,/Pending \/ parsed trading history retained/);
+  assert.doesNotMatch(html,/Incomplete \/ retry pending/);
+});
+
 test("failed RPC usage tracking is visible without claiming its quota was spent", t => {
   const api = fixture(t);
   api.state.report.stats = {rpc_providers:{helius:{status:"budget_ledger_unavailable",calls:{getHealth:1}}}};
@@ -402,11 +413,11 @@ test("partial movement note needs actual observations and never renders raw amou
 
 test("HTML entrypoint and every dashboard JS import use the same evidence cache tag", () => {
   const html = readFileSync(new URL("../index.html",import.meta.url),"utf8");
-  assert.match(html, /src="radar-bootstrap\.js\?v=20261006-gmgn-fair-v2"/);
+  assert.match(html, /src="radar-bootstrap\.js\?v=20261006-gmgn-fair-v3"/);
   for (const file of readdirSync(new URL("../",import.meta.url)).filter(file => file.endsWith(".js"))) {
     const source = readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
     for (const match of source.matchAll(/(?:from\s+|import\()"(\.\/[^"?]+\.js\?v=([^"]+))"/g)) {
-      assert.equal(match[2],"20261006-gmgn-fair-v2",`${file}: ${match[1]}`);
+      assert.equal(match[2],"20261006-gmgn-fair-v3",`${file}: ${match[1]}`);
     }
   }
 });

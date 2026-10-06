@@ -176,20 +176,24 @@ def initial_history_hours(attention, config):
 def record_history_check(pool_state, summary, config, now):
     trade = summary.get("trade_fetch") or {}
     failed = bool(summary.get("scan_failed") or summary.get("error") or summary.get("parse_errors")
-        or summary.get("classification_errors") or trade.get("transaction_errors") or trade.get("market_activity_stale")
+        or trade.get("transaction_errors") or trade.get("market_activity_stale")
         or trade.get("market_activity_unverified") or trade.get("timestamp_missing"))
-    pending = failed or bool(trade.get("live_truncated", trade.get("truncated"))
+    history_pending = failed or bool(trade.get("live_truncated", trade.get("truncated"))
         or trade.get("rolling_gap_pending") or trade.get("history_gap_seconds") or pool_state.get("helius_rolling_backlogs")
         or pool_state.get("candidate_signature_gaps"))
+    evidence_pending = bool(trade.get("evidence_pending") or summary.get("classification_errors"))
+    pending = history_pending or evidence_pending
     pool_state["candidate_checked_at"] = iso(now)
     pool_state["candidate_history_pending"] = pending
+    pool_state["candidate_history_gap_pending"] = history_pending
+    pool_state["candidate_evidence_pending"] = evidence_pending
     if failed:
         pool_state["candidate_retry_at"] = iso(now + max(1, int(config.get("candidate_history_retry_minutes", 5))) * 60)
     else:
         pool_state.pop("candidate_retry_at", None)
     start = int(trade.get("live_from") or 0)
     end = min(now, int(trade.get("observed_to") or now))
-    if not pending and start and end >= start:
+    if not history_pending and start and end >= start:
         pool_state["candidate_history_complete_to"] = end
         ranges = pool_state.setdefault("candidate_covered_ranges", [])
         ranges.append([start, end])
