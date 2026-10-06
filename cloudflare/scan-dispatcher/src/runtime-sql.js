@@ -129,9 +129,9 @@ export async function writeSqlRuntime(env, name, value, updatedAt, revision = 0)
       OR (runtime_sql_documents.content_id IS NULL AND
       (excluded.source_ms>runtime_sql_documents.source_ms OR
        (excluded.source_ms=runtime_sql_documents.source_ms AND excluded.revision>runtime_sql_documents.revision)
-       ${representationUpgrade}))`).bind(...args);
+       ${representationUpgrade}))${name === "rpc_ledger" ? " RETURNING updated_at,revision,bytes,payload_sha256" : ""}`).bind(...args);
   const statements = [write];
-  if (!blob) {
+  if (!blob && name !== "rpc_ledger") {
     // A restore that fetched the superseded manifest keeps its parts for 48h.
     statements.push(db.prepare(`UPDATE runtime_sql_documents SET touched_at=?3 WHERE name IN
       (SELECT part FROM runtime_sql_references WHERE root=?1) AND EXISTS
@@ -148,7 +148,8 @@ export async function writeSqlRuntime(env, name, value, updatedAt, revision = 0)
     }
   }
   const results = await db.batch(statements);
-  const current = await db.prepare("SELECT updated_at,revision,bytes,payload_sha256 FROM runtime_sql_documents WHERE name=?1").bind(name).first();
+  const current = (name === "rpc_ledger" && results[0]?.results?.[0])
+    || await db.prepare("SELECT updated_at,revision,bytes,payload_sha256 FROM runtime_sql_documents WHERE name=?1").bind(name).first();
   if (!current) throw new Error("runtime_manifest_part_missing_or_mismatched");
   const accepted = current.payload_sha256 === digest;
   // Missing parts of a newer manifest are errors, not a successful stale ack.
