@@ -383,6 +383,12 @@ legacy checkpoint is retained under `candidate_previous_history_checkpoint`,
 while the active read starts at the anchored GMGN window. Already parsed swaps
 seed deduplication, and the one-time transition never changes the original
 cohort or caught dates. Decode failure restores the previous context.
+RPC reservations use unique allocation IDs: a lost write response can be
+recovered only by reading back that exact grant, counters and source version.
+At most one transient retry sends the identical reservation, never a new charge.
+Small grants are now 250 Helius credits, 2,000 Alchemy CU and 500 Chainstack RU,
+reducing SQL acknowledgement round trips. Unused reservations remain charged
+conservatively; monthly limits are unchanged, and unverified grants stay blocked.
 
 First analysis is anchored to six hours, or 24 hours for tokens present only
 in the long (`6h`/`24h`) rankings. Retries keep the original lower boundary.
