@@ -15,16 +15,20 @@ function fixture(t) {
   const sql = new DatabaseSync(":memory:"); t.after(()=>sql.close());
   sql.exec("PRAGMA foreign_keys=ON");
   sql.exec(readFileSync(new URL("../migrations-storage/0002_runtime_sql.sql",import.meta.url),"utf8"));
-  let writes = 0;
+  let writes = 0, reads = 0, batches = 0;
   const db = {prepare(text) {let args=[];return {bind(...values){args=values;return this;},
-    async first(field){const row=sql.prepare(text).get(...args);return field ? row?.[field] : row || null;},
+    async first(field){reads++;const row=sql.prepare(text).get(...args);return field ? row?.[field] : row || null;},
     async all(){return {results:sql.prepare(text).all(...args)};},
-    async run(){const result=sql.prepare(text).run(...args);writes+=Number(result.changes);return {meta:{changes:Number(result.changes)}};}};},
-    async batch(statements){sql.exec("BEGIN IMMEDIATE");try {const rows=[];for(const stmt of statements)rows.push(await stmt.run());sql.exec("COMMIT");return rows;}
+    async run(){const statement=sql.prepare(text);if (/\bRETURNING\b/i.test(text)) {
+      const results=statement.all(...args),changes=Number(sql.prepare("SELECT changes() n").get().n);
+      writes+=changes;return {results,meta:{changes}};
+    }const result=statement.run(...args);writes+=Number(result.changes);return {meta:{changes:Number(result.changes)}};}};},
+    async batch(statements){batches++;sql.exec("BEGIN IMMEDIATE");try {const rows=[];for(const stmt of statements)rows.push(await stmt.run());sql.exec("COMMIT");return rows;}
       catch(error){sql.exec("ROLLBACK");throw error;}}};
   const forbidden = {idFromName(){assert.fail("SQL runtime must not call a DO");}};
   return {sql,env:{RADAR_DB:db,STORAGE_SQL_BACKEND:"turso",RUNTIME_STORAGE_BACKEND:"turso_sql",
-    RUNTIME_SNAPSHOTS:forbidden,RADAR_ARCHIVE:{get(){assert.fail("SQL runtime must not use R2");}},R2_BUDGET:forbidden},get writes(){return writes;}};
+    RUNTIME_SNAPSHOTS:forbidden,RADAR_ARCHIVE:{get(){assert.fail("SQL runtime must not use R2");}},R2_BUDGET:forbidden},
+    get writes(){return writes;},get reads(){return reads;},get batches(){return batches;}};
 }
 async function blob(data,encoding="gzip+base64-part") {
   const sha256=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(data))),n=>n.toString(16).padStart(2,"0")).join("");
@@ -55,6 +59,21 @@ test("RPC ledger cannot lower usage, drop a provider or discard an older period"
   const next=structuredClone(value);next.ledger['2026-10'].alchemy.estimated_units=150;
   assert.equal((await writeSqlRuntime(f.env,"rpc_ledger",next,AT,1)).accepted,true);
   assert.equal((await readSqlRuntime(f.env,"rpc_ledger")).value.ledger['2026-10'].alchemy.estimated_units,150);
+});
+
+test("RPC reservation acknowledges the committed RETURNING row without a third SQL request",async t=>{
+  const f=fixture(t),value={version:1,allocation_id:"unique-grant",ledger:{"2026-10":{helius:{estimated_units:250}}}};
+  const result=await writeSqlRuntime(f.env,"rpc_ledger",value,AT,1);
+  assert.equal(result.accepted,true);
+  assert.equal(f.reads,1);
+  assert.equal(f.batches,1);
+  assert.equal((await readSqlRuntime(f.env,"rpc_ledger")).value.allocation_id,"unique-grant");
+  const before=f.writes;
+  assert.equal((await writeSqlRuntime(f.env,"rpc_ledger",value,AT,1)).unchanged,true);
+  assert.equal(f.writes,before);
+  const stale={...value,allocation_id:"stale-grant"};
+  assert.equal((await writeSqlRuntime(f.env,"rpc_ledger",stale,"2026-10-03T12:00:00Z",90)).accepted,false);
+  assert.equal((await readSqlRuntime(f.env,"rpc_ledger")).value.allocation_id,"unique-grant");
 });
 
 test("SQL checkpoint rejects missing or corrupted parts, publishes atomically, and restores",async t=>{
