@@ -236,7 +236,7 @@ the deletion index to D1.
 
 Production lane:
 
-- `reactivation`: GMGN attention candidates, all ages. Discovery does not exclude tokens by migration, mcap, or liquidity; these remain entry-risk and signal-quality context. A signal still requires distributed net buying and current holder retention. ATH is context, not a discovery gate.
+- `reactivation`: GMGN attention candidates, all ages, with current market cap from $30,000 through $500,000 inclusive. Unknown or stale market cap is not eligible for new onchain analysis. Discovery does not exclude tokens by migration or liquidity; these remain entry-risk and signal-quality context. A signal still requires distributed net buying and current holder retention. ATH is context, not a discovery gate.
 
 RPC roles and safeguards:
 
@@ -365,6 +365,12 @@ a 60-minute grace period for failed list reads. Successful snapshots remove
 absent memberships immediately; previously caught positions keep independent
 holding checks, but cannot produce new off-list signals. The old 1,000-pool
 light-universe cutoff does not truncate GMGN candidates.
+Only candidates whose current canonical market has verified non-stale cap in
+the configured $30k-$500k inclusive range reach onchain selection. A cheaper
+older alternate pool cannot bypass this gate. Off-range candidates retain their
+GMGN registry membership and can become eligible after a later market refresh;
+already caught positions keep independent holding checks without new off-range
+signals. Diagnostics separate all GMGN candidates from resolved in-range tokens.
 Discovery-state merges compare the list snapshot's observation time, not the
 last positive token sighting. Newer removal records win, and older snapshots
 cannot reactivate dropped candidates. Local market resolution and deep cursors

@@ -1,4 +1,4 @@
-import {numeric} from "./decision-view.js?v=20261006-gmgn-fair-v3";
+import {numeric} from "./decision-view.js?v=20261006-gmgn-cap-v4";
 
 export const CHAIN_ID = 4663;
 export function ageFilterLabel(config) {
