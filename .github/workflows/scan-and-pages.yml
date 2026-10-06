@@ -25,6 +25,7 @@ on:
       - "robinhood.py"
       - "robinhood_store.py"
       - "gmgn_context.py"
+      - "gmgn_discovery.py"
       - "relay_context.py"
       - "position_evidence.py"
       - "solana_position_lineage.py"

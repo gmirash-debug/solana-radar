@@ -4,12 +4,12 @@ Local BBB-lite scanner for Solana meme pools.
 
 Boundary: this project is a market/onchain alert scanner, not the primary narrative-discovery workflow. It may start from DEX/Helius/GMGN because it is looking for caught tokens. For any open-ended narrative scan, start from the top-level universal source-first router before using Solana Radar outputs.
 
-It uses free DEX data for market discovery and a routed Solana RPC layer for
+It uses GMGN Trending and Hot Searches for candidate discovery, free DEX data for market resolution, and a routed Solana RPC layer for
 onchain work:
 
 - focus the production pipeline on one signal family: token reactivation;
 - keep only migrated pump.fun ecosystem pools by default: `pumpfun-amm`, `pumpswap`;
-- retain a rolling registry of known pools and refresh it through free market APIs, so discovery is not limited to current trending pages;
+- retain GMGN memberships and per-pool history checkpoints, while continuing to monitor already caught positions independently;
 - rotate scan capacity between high-activity pools and pools that have gone longest without an onchain check;
 - use Chainstack first for recent transaction details and token supply;
 - use PublicNode for address signatures and token balances, and as the no-key
@@ -233,7 +233,7 @@ the deletion index to D1.
 
 Production lane:
 
-- `reactivation`: `1d-15d`, any positive mcap up to `$5m`, `liq >=3k`, and at least `$100` of reported hourly volume. The market rank combines 5-minute burst velocity with 1-hour activity. Stage-balanced scan capacity prevents `ignition` and `early` pools from being crowded out by larger tokens. A signal still requires distributed net buying and current holder retention. ATH is entry-risk context, not a discovery gate.
+- `reactivation`: GMGN attention candidates, all ages. Discovery does not exclude tokens by migration, mcap, or liquidity; these remain entry-risk and signal-quality context. A signal still requires distributed net buying and current holder retention. ATH is context, not a discovery gate.
 
 RPC roles and safeguards:
 
@@ -324,18 +324,18 @@ Persistence and outcome integrity:
 - Method-specific RPC plan restrictions disable only that method on that
   provider; real authentication/quota errors still block the provider route.
 
-Run `npm test` for regression coverage of these contracts. The age window,
-pool migration requirement, hourly deep scan and five-minute discovery cadence
-remain unchanged. Fewer confirmed results immediately after rollout are
+Run `npm test` for regression coverage of these contracts. Hourly deep scans
+and five-minute discovery retain their existing cadence. Fewer confirmed results immediately after rollout are
 expected while fresh baseline and cohort evidence accumulates.
 
 Disabled filters: `micro_sticky`, `cheap_sticky`, `breakout`, `incubation`, and
 `young` are not scanned or shown in the production dashboard. Their old alert
 records remain in Git history but cannot consume Reactivation monitor capacity.
 
-The production lane scans only migrated pump.fun ecosystem pools through
-`dex_allowlist` in `config.example.json`. Pre-migration `pumpfun` bonding-curve
-pools are excluded before onchain analysis.
+The production lane uses `discovery_source_mode: gmgn_attention`. The legacy
+`dex_allowlist` does not exclude GMGN candidates or their subsequent holding
+checks. A token still needs a resolvable Solana market; unresolved tokens stay
+in the candidate registry and are retried rather than replaced by random pools.
 
 ## Outputs
 
@@ -350,11 +350,42 @@ pools are excluded before onchain analysis.
 
 ## Notes
 
-The market universe is intentionally composite. GMGN Trenches supplies completed
-Pump.fun launches, GMGN Trending covers `1m`, `5m`, `1h`, `6h`, and `24h`
-activity, the persistent registry keeps older candidates visible, and
-DexScreener/GeckoTerminal refresh pool market data. No single trending endpoint
-is treated as a complete market census.
+The market universe is the union of GMGN Trending and Hot Searches across
+`1m`, `5m`, `1h`, `6h`, and `24h`. Presence in either list is sufficient; presence
+in both raises priority. Trending uses GMGN's default ranking (top 100 per window);
+Hot Searches requests up to 500 per window. These are bounded API rankings,
+including GMGN's server-side defaults, not a complete market census or a
+guarantee of exact website membership. DexScreener resolves pools and refreshes
+prices, but does not introduce unrelated candidates. A missing GMGN list is
+reported as partial/unavailable, never a healthy empty result. Membership has
+a 60-minute grace period for failed list reads. Successful snapshots remove
+absent memberships immediately; previously caught positions keep independent
+holding checks, but cannot produce new off-list signals. The old 1,000-pool
+light-universe cutoff does not truncate GMGN candidates.
+If DexScreener cannot resolve an admitted token, GMGN Token Info supplies a
+token-identity-checked pool. This queue uses at most 12 lookups per deep scan,
+two per targeted check or four per discovery pulse, caches the pool and retries
+missing data after 15 minutes. It cannot introduce an off-list token.
+
+Every selected batch first reads one bounded current history head per pool
+before cohort monitoring or buyer analysis. Those exact reads are reused by the
+detector. Initial-window tails remain resumable; expensive analysis gets a fair
+share of each provider's remaining per-scan allowance, without increasing the
+monthly limits. Cursor changes are staged until parsing succeeds. Diagnostics
+separate full-universe, selected, head-read and analyzed counts, and distinguish
+per-scan caps, monthly safety caps, temporary cooldowns and ledger failures.
+
+First analysis is anchored to six hours, or 24 hours for tokens present only
+in the long (`6h`/`24h`) rankings. Retries keep the original lower boundary.
+Afterwards, only new trades since the committed checkpoint (with a small
+deduplicated overlap) and unfinished history pages are requested. An unchanged
+ranking does not trigger transaction-detail replay. Checks are spaced at least
+15 minutes apart; pending history retries use five minutes. Existing holding
+checks remain independent of these history checks. Provider quotas and bounded
+page budgets remain in force, so partial coverage stays explicitly unconfirmed.
+Parser failures never advance the history checkpoint. The private runtime
+checkpoint persists memberships, covered time ranges, pending cursors, and
+recently parsed signatures; the dashboard exposes list/window membership.
 
 GMGN token info supplies ATH market cap. The scanner locates its timestamp with
 a bounded `1d -> 1h -> 5m` K-line search. Reactivation does not wait for ATH
@@ -397,9 +428,9 @@ Each hourly run checks the newest edge of the market first, with a rolling
 overlap that feeds the retained swap buffer. A shallow probe is evaluated
 together with that buffer; a deeper scan is triggered only by suspicious wallet
 classes, linked wallets, material flow, a sticky/wave precheck, an alert-level
-score, or a scheduled audit slot. Launch backfill has its own provider-aware
-cursor, runs at most one page per scan, and stops once the launch is older than
-the retained 24-hour signal window.
+score, or a scheduled audit slot. In GMGN attention mode, a complete probe is
+reused and a deeper fetch continues its unfinished pages rather than fetching
+the same head again. Legacy composite mode retains launch backfill separately.
 
 Already caught tokens get a separate hourly market refresh through DexScreener.
 That pass updates dashboard `Market now` fields without re-running expensive

@@ -50,7 +50,7 @@ function fixture(t, {signalThesis = thesis(), alerts = [], overrides = {}} = {})
   const api = vm.runInContext(`({state, buildTokenSignals, renderWalletRows, walletHeldLabel,
     renderReviewRow, renderThesisSummary, renderSupplyLinkageGroups, supplyPct,
     mergeTokenAlertDetails, ensureTokenDetail, applyDashboardPayload, detailLoadMessage,
-    renderObservedPositionActivity, renderWalletActivity, renderOverviewTab, renderStatus, renderFilters, filterMeta})`, context);
+    renderObservedPositionActivity, renderWalletActivity, renderOverviewTab, renderStatus, renderFilters, filterMeta, renderEvidenceTab})`, context);
   api.state.report = {generated_at:checked, alerts, signal_theses:signalThesis ? [signalThesis] : [], config:{}};
   api.state.history = [];
   t.after(() => dom.window.close());
@@ -118,6 +118,25 @@ test("the radar and token criteria display the thirty-minute age minimum", t => 
   assert.match(api.filterMeta("reactivation").criteria, /^30m-15d/);
 });
 
+test("GMGN discovery shows old non-pump tokens and escaped list membership with dated coverage", t => {
+  const p = {...pool, dex:"raydium", age_hours:5000, gmgn_attention:{first_seen_at:start, last_seen_at:end,
+    memberships:[{source:"trending", interval:"24h", rank:3},{source:"hot_searches", interval:"<script>", rank:4}]},
+    candidate_analysis:{initial_hours:24, checked_at:checked, pending:true, scope:"standard_incremental",
+      covered_ranges:[[Date.parse(start)/1000,Date.parse(end)/1000]]}};
+  const api = fixture(t,{signalThesis:thesis({...p}),alerts:[alert({pool:p})]});
+  api.state.report.config = {discovery_source_mode:"gmgn_attention",age_min_hours:null,age_max_hours:null};
+  const tokens = api.buildTokenSignals();
+  assert.equal(tokens.length,1);
+  api.renderFilters();
+  assert.match(api.dom.window.document.querySelector(".radar-heading").textContent,/GMGN Trending \+ Hot Searches/);
+  const html = api.renderEvidenceTab(tokens[0],"","");
+  assert.match(html,/Trending 24h #3/);
+  assert.match(html,/Hot Searches &lt;script&gt; #4/);
+  assert.match(html,/24h/);
+  assert.match(html,/Incomplete \/ retry pending/);
+  assert.ok(!html.includes("<script>"));
+});
+
 test("targeted checks retain a separate deep-scan date and storage-source label", t => {
   const api = fixture(t);
   api.state.report.scan_profile = "targeted";
@@ -134,6 +153,28 @@ test("targeted checks retain a separate deep-scan date and storage-source label"
   api.state.report.last_deep_scan_at = checked;
   api.renderStatus();
   assert.doesNotMatch(doc.querySelector("#statusRow").textContent, /deep scan not recorded yet/);
+});
+
+test("GMGN metrics separate candidates, selected pools, read heads and analysis", t => {
+  const api = fixture(t);
+  api.state.report.config = {discovery_source_mode:"gmgn_attention"};
+  api.state.report.stats = {universe_pools:120,scanned_pools:4,gmgn_discovery:{tokens:277},
+    scan_health:{selected_pools:40,head_sweep:{reactivation:{prepared:39}}}};
+  api.renderFilters();
+  const text = api.dom.window.document.querySelector("#metrics").textContent;
+  assert.match(text,/GMGN candidates\s*277/);
+  assert.match(text,/Selected pools\s*40/);
+  assert.match(text,/History heads read\s*39/);
+  assert.match(text,/Analyzed pools\s*4/);
+});
+
+test("failed RPC usage tracking is visible without claiming its quota was spent", t => {
+  const api = fixture(t);
+  api.state.report.stats = {rpc_providers:{helius:{status:"budget_ledger_unavailable",calls:{getHealth:1}}}};
+  api.renderStatus();
+  const text = api.dom.window.document.querySelector("#statusRow").textContent;
+  assert.match(text,/Helius: usage tracking unavailable/);
+  assert.doesNotMatch(text,/Helius blocked|Helius.*quota exhausted/);
 });
 
 test("saved current snapshots do not label a historical backlog as a cloud failure", t => {
@@ -361,11 +402,11 @@ test("partial movement note needs actual observations and never renders raw amou
 
 test("HTML entrypoint and every dashboard JS import use the same evidence cache tag", () => {
   const html = readFileSync(new URL("../index.html",import.meta.url),"utf8");
-  assert.match(html, /src="radar-bootstrap\.js\?v=20261004-wallet-activity-v4"/);
+  assert.match(html, /src="radar-bootstrap\.js\?v=20261006-gmgn-fair-v2"/);
   for (const file of readdirSync(new URL("../",import.meta.url)).filter(file => file.endsWith(".js"))) {
     const source = readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
     for (const match of source.matchAll(/(?:from\s+|import\()"(\.\/[^"?]+\.js\?v=([^"]+))"/g)) {
-      assert.equal(match[2],"20261004-wallet-activity-v4",`${file}: ${match[1]}`);
+      assert.equal(match[2],"20261006-gmgn-fair-v2",`${file}: ${match[1]}`);
     }
   }
 });
