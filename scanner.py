@@ -11905,13 +11905,29 @@ def history_state_snapshot(pool_state):
         if key.startswith(("helius_live_", "helius_rolling_", "rpc_latest_"))
         or key in {"latest_signature", "latest_time", "helius_latest_signature", "helius_latest_time",
             "helius_latest_block_time", "candidate_signature_gaps", "candidate_processed_signatures",
-            "last_activity_signature", "last_activity_probe_at"}}
+            "last_activity_signature", "last_activity_probe_at", "candidate_history_context_version",
+            "candidate_previous_history_checkpoint", "candidate_history_complete_to", "candidate_covered_ranges"}}
 
 
 def restore_history_state(pool_state, snapshot):
     for key in history_state_snapshot(pool_state):
         pool_state.pop(key, None)
     pool_state.update(copy.deepcopy(snapshot))
+
+
+def initialize_attention_history_context(pool_state):
+    if pool_state.get("candidate_history_context_version") == 1:
+        return
+    previous = history_state_snapshot(pool_state)
+    known = copy.deepcopy(pool_state.get("candidate_processed_signatures") or {})
+    start = int(pool_state.get("candidate_history_start") or 0)
+    for field in ("reactivation_wave_swaps", "sticky_accumulation_swaps"):
+        for swap in pool_state.get(field) or []:
+            if swap.get("signature") and int(swap.get("block_time") or 0) >= start:
+                known[swap["signature"]] = int(swap.get("block_time") or 0)
+    restore_history_state(pool_state, {})
+    pool_state.update(candidate_history_context_version=1,
+        candidate_previous_history_checkpoint=previous, candidate_processed_signatures=known)
 
 
 def scan_pool(rpc, pool, config, state, classification_budget):
@@ -11925,6 +11941,7 @@ def scan_pool(rpc, pool, config, state, classification_budget):
         pool_state["force_enhanced_next_scan"] = True
 
     try:
+        initialize_attention_history_context(pool_state)
         result = scan_pool_history(rpc, pool, config, state, classification_budget)
     except Exception:
         restore()
@@ -14338,6 +14355,7 @@ def prepare_attention_history(rpc, targets, state, config):
                     prepared[pool.pool_address] = {"mode": mode, "head": head, "observed_to": observed_to}
                 else:
                     working = copy.deepcopy(pool_state)
+                    initialize_attention_history_context(working)
                     changed, activity = pool_has_new_activity(rpc, pool, working, pool_config)
                     transactions, fetch_stats = [], {}
                     if changed:

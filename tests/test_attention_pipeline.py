@@ -184,6 +184,39 @@ class AttentionPipelineTests(unittest.TestCase):
             s.scan_pool(Mock(), pool, config, state, {})
         self.assertEqual(state["pools"][pool.pool_address]["latest_signature"], "old")
         self.assertEqual(state["pools"][pool.pool_address]["helius_rolling_backlogs"], original["helius_rolling_backlogs"])
+        self.assertNotIn("candidate_history_context_version", state["pools"][pool.pool_address])
+        self.assertNotIn("candidate_previous_history_checkpoint", state["pools"][pool.pool_address])
+
+    def test_old_discovery_cursors_are_preserved_but_cannot_extend_new_gmgn_window(self):
+        config = self.config()
+        config.update(helius_recent_lookback_minutes=360,helius_probe_max_pages=1,
+            market_activity_consistency_enabled=False)
+        thesis={"signal_at":"2026-10-01T10:00:00Z","cohort_id":"original"}
+        old_cursor={"cursor":"legacy","provider":"helius","from":NOW-7*86400,
+            "head_signature":"old","head_block_time":NOW-600}
+        history={"rpc_latest_block_time":NOW-300,"helius_rolling_backlogs":[old_cursor],
+            "candidate_history_start":NOW-6*3600,"signal_thesis":copy.deepcopy(thesis)}
+        s.initialize_attention_history_context(history)
+        rpc=Mock()
+        rpc.transactions_for_address.return_value={"data":[]}
+        with patch.object(s.time,"time",return_value=NOW):
+            s.fetch_helius_pool_transactions(rpc,self.pool(),config,history,phase="probe")
+        self.assertEqual(rpc.transactions_for_address.call_count,1)
+        self.assertEqual(rpc.transactions_for_address.call_args.kwargs["block_time"]["gte"],NOW-6*3600)
+        self.assertEqual(history["candidate_previous_history_checkpoint"]["helius_rolling_backlogs"],[old_cursor])
+        self.assertEqual(history["signal_thesis"],thesis)
+        history["rpc_latest_block_time"]=NOW
+        s.initialize_attention_history_context(history)
+        self.assertEqual(history["rpc_latest_block_time"],NOW)
+
+    def test_scope_transition_reuses_already_parsed_swaps_without_dropping_history(self):
+        history={"candidate_history_start":NOW-100,"reactivation_wave_swaps":[
+            {"signature":"parsed","block_time":NOW-10}],"latest_signature":"legacy-head"}
+        s.initialize_attention_history_context(history)
+        transaction={"transaction":{"signatures":["parsed"]},"blockTime":NOW-10}
+        self.assertEqual(g.unprocessed_transactions([transaction],history),[])
+        self.assertEqual(history["candidate_previous_history_checkpoint"]["latest_signature"],"legacy-head")
+        self.assertEqual(history["reactivation_wave_swaps"][0]["signature"],"parsed")
 
     def test_missing_wallet_evidence_keeps_successful_history_without_a_signal(self):
         pool, rpc, state = self.pool(), Mock(), {}

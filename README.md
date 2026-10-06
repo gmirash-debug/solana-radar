@@ -378,6 +378,11 @@ An unavailable balance/supply verification does not discard already parsed
 history or emit a confirmed signal. History coverage and wallet-evidence retry
 are recorded separately, so the next pass can reuse trades and retry evidence.
 Decode errors still roll back cursors, and programming errors still fail loudly.
+The first GMGN history context is independent of legacy all-pool cursors. A
+legacy checkpoint is retained under `candidate_previous_history_checkpoint`,
+while the active read starts at the anchored GMGN window. Already parsed swaps
+seed deduplication, and the one-time transition never changes the original
+cohort or caught dates. Decode failure restores the previous context.
 
 First analysis is anchored to six hours, or 24 hours for tokens present only
 in the long (`6h`/`24h`) rankings. Retries keep the original lower boundary.
