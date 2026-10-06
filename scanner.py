@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -1337,13 +1338,40 @@ def load_durable_rpc_ledger(state, config):
 
 def commit_durable_rpc_ledger(state, config):
     revision = config.get("_rpc_ledger_revision", 0) + 1
-    result = remote_api_call("POST", "/api/runtime/rpc-ledger", config, {
-        "value": {"version": 1, "ledger": state["rpc_monthly_usage"]},
-        "updated_at": utc_now().isoformat().replace("+00:00", "Z"), "revision": revision})
-    accepted = result.get("ok") is True and result.get("accepted") is True
-    if accepted:
-        config["_rpc_ledger_revision"] = max(revision, int(result.get("revision") or 0))
-    return accepted
+    payload = {"value": {"version": 1, "ledger": copy.deepcopy(state["rpc_monthly_usage"]),
+        "allocation_id": str(uuid.uuid4())}, "updated_at": utc_now().isoformat().replace("+00:00", "Z"),
+        "revision": revision}
+    for attempt in range(2):
+        transient = False
+        try:
+            result = remote_api_call("POST", "/api/runtime/rpc-ledger", config, payload)
+            if result.get("ok") is True and result.get("accepted") is True:
+                config["_rpc_ledger_revision"] = max(revision, int(result.get("revision") or 0))
+                config.pop("_rpc_ledger_error", None)
+                return True
+            error = "RPC budget reservation was not acknowledged"
+        except (requests.RequestException, RuntimeError) as exc:
+            error = str(exc)[:300]
+            transient = isinstance(exc, requests.RequestException) or "Remote HTTP 503:" in error or "storage_sql_timeout" in error
+            if "counter_regression" in error or "invalid_rpc_ledger" in error:
+                transient = False
+        # A lost reply is not proof of a failed write. Only this unique grant,
+        # with the exact reserved counters and source version, may be recovered.
+        try:
+            readback = remote_api_call("GET", "/api/runtime/rpc-ledger", config).get("document") or {}
+            if (readback.get("value") == payload["value"] and readback.get("revision") == revision
+                    and readback.get("updated_at") == payload["updated_at"]):
+                config["_rpc_ledger_revision"] = revision
+                config.pop("_rpc_ledger_error", None)
+                return True
+        except (requests.RequestException, RuntimeError):
+            pass
+        if not transient or attempt:
+            config["_rpc_ledger_error"] = error
+            print(f"warn: RPC budget reservation unavailable: {error}", file=sys.stderr, flush=True)
+            return False
+        time.sleep(0.3)
+    return False
 
 
 def configure_durable_rpc_budgets(rpc, state, config):
@@ -1351,7 +1379,7 @@ def configure_durable_rpc_budgets(rpc, state, config):
         return
     try:
         load_durable_rpc_ledger(state, config)
-        chunks = {"helius": 50, "alchemy": 1000, "chainstack": 100,
+        chunks = {"helius": 250, "alchemy": 2000, "chainstack": 500,
                   **(config.get("rpc_durable_grant_units") or {})}
         for name, provider in rpc.providers.items():
             if name in chunks and provider.monthly_budget is not None:

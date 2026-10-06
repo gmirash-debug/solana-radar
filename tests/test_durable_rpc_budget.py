@@ -9,6 +9,61 @@ from rpc_budget import DurableChunkBudget, MonthlyRpcBudget, configure_monthly_b
 
 
 class DurableRpcBudgetTests(unittest.TestCase):
+    def test_lost_commit_reply_only_recovers_exact_unique_persisted_grant(self):
+        saved = {}
+        config = {}
+        state = {"rpc_monthly_usage": {"2026-10": {"helius": {"estimated_units": 250}}}}
+        def remote(method, path, cfg, payload=None):
+            if method == "POST":
+                saved.update(copy.deepcopy(payload))
+                raise scanner.requests.Timeout("lost response")
+            return {"document": copy.deepcopy(saved)}
+        with patch.object(scanner,"remote_api_call",side_effect=remote) as call:
+            self.assertTrue(scanner.commit_durable_rpc_ledger(state,config))
+        self.assertEqual([item.args[0] for item in call.call_args_list],["POST","GET"])
+        self.assertTrue(saved["value"]["allocation_id"])
+        self.assertEqual(config["_rpc_ledger_revision"],1)
+        self.assertEqual(state["rpc_monthly_usage"]["2026-10"]["helius"]["estimated_units"],250)
+
+    def test_another_grant_with_equal_counters_cannot_acknowledge_our_reservation(self):
+        def remote(method,path,cfg,payload=None):
+            if method == "POST":
+                return {"ok":True,"accepted":False}
+            return {"document":{"value":{"version":1,"ledger":{},"allocation_id":"another"},"revision":1}}
+        config={}
+        with patch.object(scanner,"remote_api_call",side_effect=remote) as call:
+            self.assertFalse(scanner.commit_durable_rpc_ledger({"rpc_monthly_usage":{}},config))
+        self.assertEqual(call.call_count,2)
+        self.assertNotIn("_rpc_ledger_revision",config)
+
+    def test_transient_retry_uses_same_allocation_without_recharging_or_changing_payload(self):
+        writes=[]
+        def remote(method,path,cfg,payload=None):
+            if method == "GET":
+                return {"document":{}}
+            writes.append(copy.deepcopy(payload))
+            if len(writes)==1:
+                raise RuntimeError("Remote HTTP 503: storage_sql_timeout")
+            return {"ok":True,"accepted":True,"revision":payload["revision"]}
+        account=MonthlyRpcBudget({},"alchemy",10000)
+        state={"rpc_monthly_usage":account.ledger}
+        budget=DurableChunkBudget(account,lambda:scanner.commit_durable_rpc_ledger(state,{}),2000)
+        with patch.object(scanner,"remote_api_call",side_effect=remote), patch.object(scanner.time,"sleep"):
+            self.assertTrue(budget.reserve(100))
+        self.assertEqual(writes[0],writes[1])
+        self.assertEqual(account.snapshot()["estimated_units"],2000)
+        self.assertEqual(budget.used,100)
+
+    def test_counter_regression_and_unknown_errors_never_retry_new_writes(self):
+        for message in ("Remote HTTP 500: rpc_ledger_counter_regression","invariant failure"):
+            def remote(method,path,cfg,payload=None):
+                if method=="POST":
+                    raise RuntimeError(message)
+                return {"document":{}}
+            with patch.object(scanner,"remote_api_call",side_effect=remote) as call:
+                self.assertFalse(scanner.commit_durable_rpc_ledger({"rpc_monthly_usage":{}},{}))
+            self.assertEqual(sum(item.args[0]=="POST" for item in call.call_args_list),1)
+
     def test_real_provider_call_has_a_confirmed_grant_before_network_send(self):
         provider = scanner.HeliusRpc("https://rpc.invalid", max_retries=0)
         saved = []
