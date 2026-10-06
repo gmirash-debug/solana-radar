@@ -365,6 +365,11 @@ a 60-minute grace period for failed list reads. Successful snapshots remove
 absent memberships immediately; previously caught positions keep independent
 holding checks, but cannot produce new off-list signals. The old 1,000-pool
 light-universe cutoff does not truncate GMGN candidates.
+Discovery-state merges compare the list snapshot's observation time, not the
+last positive token sighting. Newer removal records win, and older snapshots
+cannot reactivate dropped candidates. Local market resolution and deep cursors
+remain independently preserved; candidate counts include any valid failed-list
+grace memberships and expose the raw snapshot count separately.
 If DexScreener cannot resolve an admitted token, GMGN Token Info supplies a
 token-identity-checked pool. This queue uses at most 12 lookups per deep scan,
 two per targeted check or four per discovery pulse, caches the pool and retries

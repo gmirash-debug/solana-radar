@@ -149,6 +149,41 @@ def current_candidates(state, config, now):
         and 0 <= now - stamp(record.get("last_seen_at")) <= ttl}
 
 
+def merge_discovery_candidates(state, discovery_state):
+    """Membership belongs to the list snapshot, not a token's last positive sighting."""
+    health = discovery_state.get("gmgn_discovery_health") or {}
+    observed = stamp(health.get("observed_at"))
+    previous = stamp((state.get("gmgn_discovery_health") or {}).get("observed_at"))
+    if not observed or observed < previous:
+        return
+    candidates = state.setdefault("gmgn_candidates", {})
+    incoming = discovery_state.get("gmgn_candidates") or {}
+    incoming = {token: record for token, record in incoming.items() if isinstance(record, dict)}
+    successful = set(health.get("successful_lists") or [])
+    for token, record in candidates.items():
+        if token in incoming or not isinstance(record, dict) or not successful:
+            continue
+        record["memberships"] = [item for item in record.get("memberships", [])
+            if f"{item.get('source')}:{item.get('interval')}" not in successful]
+        record["sources"] = sorted({item["source"] for item in record["memberships"]})
+        record["in_both"] = len(record["sources"]) == 2
+        record["active"] = bool(record["memberships"])
+    for token, record in incoming.items():
+        existing = candidates.get(token) or {}
+        merged = copy.deepcopy(record)
+        first_seen = [stamp(value) for value in (existing.get("first_seen_at"), record.get("first_seen_at"))]
+        if any(first_seen):
+            merged["first_seen_at"] = iso(min(value for value in first_seen if value))
+        if stamp(existing.get("last_seen_at")) > stamp(record.get("last_seen_at")):
+            merged["last_seen_at"] = existing["last_seen_at"]
+        if stamp(existing.get("market_resolution_attempt_at")) > stamp(record.get("market_resolution_attempt_at")):
+            for key in ("market_resolution_attempt_at", "market_pool"):
+                if key in existing:
+                    merged[key] = copy.deepcopy(existing[key])
+        candidates[token] = merged
+    state["gmgn_discovery_health"] = copy.deepcopy(health)
+
+
 def history_plan(pool_state, config, now):
     """An unchanged ranking is not new trading evidence; probes still run periodically."""
     previous = stamp(pool_state.get("candidate_checked_at"))

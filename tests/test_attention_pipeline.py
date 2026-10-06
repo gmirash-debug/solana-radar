@@ -34,6 +34,66 @@ class AttentionPipelineTests(unittest.TestCase):
         self.assertEqual(g.current_candidates(state, {}, NOW + 61)[TOKEN]["sources"], ["hot_searches"])
         self.assertEqual(g.current_candidates(state, {}, NOW + 3601), {})
 
+    def test_newer_list_removal_wins_over_later_positive_sighting(self):
+        state = {"gmgn_candidates": {TOKEN: {"active": True, "last_seen_at": g.iso(NOW),
+            "memberships": [{"source": "trending", "interval": "5m"}]}},
+            "gmgn_discovery_health": {"observed_at": g.iso(NOW)}}
+        incoming = {"gmgn_candidates": {TOKEN: {"active": False, "last_seen_at": g.iso(NOW - 60),
+            "memberships": [], "sources": []}}, "gmgn_discovery_health": {
+            "observed_at": g.iso(NOW + 60), "successful_lists": ["trending:5m"], "status": "ok"}}
+        s.merge_discovery_state(state, incoming)
+        self.assertEqual(g.current_candidates(state, {}, NOW + 61), {})
+        self.assertEqual(state["gmgn_candidates"][TOKEN]["last_seen_at"], g.iso(NOW))
+
+    def test_missing_snapshot_record_clears_only_successful_memberships(self):
+        state = {"gmgn_candidates": {TOKEN: {"last_seen_at": g.iso(NOW), "memberships": [
+            {"source": "trending", "interval": "5m"}, {"source": "hot_searches", "interval": "1h"}]}}}
+        s.merge_discovery_state(state, {"gmgn_candidates": {}, "gmgn_discovery_health": {
+            "observed_at": g.iso(NOW + 60), "successful_lists": ["trending:5m"]}})
+        self.assertEqual(g.current_candidates(state, {}, NOW + 61)[TOKEN]["sources"], ["hot_searches"])
+        self.assertEqual(g.current_candidates(state, {}, NOW + 3601), {})
+
+    def test_stale_snapshot_cannot_reactivate_removed_candidate(self):
+        state = {"gmgn_candidates": {TOKEN: {"active": False, "last_seen_at": g.iso(NOW - 60)}},
+            "gmgn_discovery_health": {"observed_at": g.iso(NOW)}}
+        s.merge_discovery_state(state, {"gmgn_candidates": {TOKEN: {"active": True,
+            "last_seen_at": g.iso(NOW - 30)}}, "gmgn_discovery_health": {"observed_at": g.iso(NOW - 30)}})
+        self.assertFalse(state["gmgn_candidates"][TOKEN]["active"])
+        self.assertEqual(state["gmgn_discovery_health"]["observed_at"], g.iso(NOW))
+
+    def test_fresh_membership_merge_preserves_newer_local_market_resolution(self):
+        pool = self.pool().as_dict()
+        state = {"gmgn_candidates": {TOKEN: {"first_seen_at": g.iso(NOW - 600),
+            "market_resolution_attempt_at": g.iso(NOW + 30), "market_pool": pool}},
+            "pools": {"one": {"candidate_covered_ranges": [[1, 9]]}}}
+        s.merge_discovery_state(state, {"gmgn_candidates": {TOKEN: {"active": True,
+            "last_seen_at": g.iso(NOW + 60), "first_seen_at": g.iso(NOW),
+            "market_resolution_attempt_at": g.iso(NOW - 60)}},
+            "gmgn_discovery_health": {"observed_at": g.iso(NOW + 60)}})
+        record = state["gmgn_candidates"][TOKEN]
+        self.assertEqual(record["first_seen_at"], g.iso(NOW - 600))
+        self.assertEqual(record["market_pool"], pool)
+        self.assertEqual(record["market_resolution_attempt_at"], g.iso(NOW + 30))
+        self.assertEqual(state["pools"]["one"]["candidate_covered_ranges"], [[1, 9]])
+
+    def test_candidate_count_includes_valid_failed_list_grace_without_mutating_snapshot(self):
+        other = "So11111111111111111111111111111111111111112"
+        state = {"gmgn_candidates": {TOKEN: {"last_seen_at": g.iso(NOW), "memberships": [
+            {"source": "trending", "interval": "5m"}]}}}
+        incoming = {other: {"first_seen_at": g.iso(NOW + 60), "last_seen_at": g.iso(NOW + 60),
+            "memberships": [{"source": "hot_searches", "interval": "1h"}]}}
+        health = {"status": "partial", "observed_at": g.iso(NOW + 60), "tokens": 1,
+            "successful_lists": ["hot_searches:1h"], "errors": [{"source": "trending"}]}
+        config = {"discovery_source_mode": "gmgn_attention", "_active_runtime_state": state}
+        with patch.dict(s.os.environ, {"GMGN_API_KEY": "test"}), patch.object(s.time, "time", return_value=NOW + 60), \
+                patch.object(s, "fetch_attention", return_value=(incoming, health)), \
+                patch.object(s, "fetch_dex_pairs_for_tokens", return_value={}), \
+                patch.object(s, "resolve_missing_attention_pools", return_value={}):
+            s.discover_market_pools(Mock(), config)
+        self.assertEqual(config["_gmgn_attention_health"]["tokens"], 2)
+        self.assertEqual(config["_gmgn_attention_health"]["snapshot_tokens"], 1)
+        self.assertEqual(state["gmgn_discovery_health"]["tokens"], 1)
+
     def test_cli_hot_searches_unwrapped_array_is_accepted_for_all_windows(self):
         def run(config, args, label):
             if args[1] == "trending":

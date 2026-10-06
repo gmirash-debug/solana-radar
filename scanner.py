@@ -24,7 +24,7 @@ from urllib.parse import urlparse, parse_qs
 
 import requests
 from gmgn_context import token_ath, VERSION as GMGN_VERSION
-from gmgn_discovery import (attention_mode, fetch_attention, merge_candidates,
+from gmgn_discovery import (attention_mode, fetch_attention, merge_candidates, merge_discovery_candidates,
     current_candidates, history_plan, record_history_check, collect_signature_ranges, initial_history_hours,
     unprocessed_transactions, remember_transactions, prune_processed_signatures)
 from coordinated_activity import analyze_coordinated_activity, compact_coordinated_activity
@@ -444,13 +444,7 @@ def merge_discovery_state(state, discovery_state):
     """Merge only newer discovery-owned records into a deep-scan state snapshot."""
     if not isinstance(state, dict) or not isinstance(discovery_state, dict):
         return {"market": 0, "baselines": 0, "queue": 0}
-    candidates = state.setdefault("gmgn_candidates", {})
-    for token, incoming in (discovery_state.get("gmgn_candidates") or {}).items():
-        if isinstance(incoming, dict) and parse_timestamp(incoming.get("last_seen_at")) >= parse_timestamp((candidates.get(token) or {}).get("last_seen_at")):
-            candidates[token] = copy.deepcopy(incoming)
-    incoming_health = discovery_state.get("gmgn_discovery_health") or {}
-    if parse_timestamp(incoming_health.get("observed_at")) >= parse_timestamp((state.get("gmgn_discovery_health") or {}).get("observed_at")):
-        state["gmgn_discovery_health"] = copy.deepcopy(incoming_health)
+    merge_discovery_candidates(state, discovery_state)
     market = state.setdefault("market", {})
     baselines = state.setdefault("activity_baselines", {})
     merged_market = 0
@@ -3912,7 +3906,7 @@ def discover_market_pools(http, config):
         state = config.get("_active_runtime_state")
         if not isinstance(state, dict):
             state = {}
-        health = state.get("gmgn_discovery_health") or {}
+        health = copy.deepcopy(state.get("gmgn_discovery_health") or {})
         age = int(time.time()) - parse_timestamp(health.get("observed_at"))
         reuse = config.get("_scan_profile") != "discovery" and health.get("status") == "ok" and 0 <= age < int(config.get("gmgn_discovery_reuse_minutes", 10)) * 60
         if not reuse:
@@ -3926,6 +3920,8 @@ def discover_market_pools(http, config):
         if health.get("status") != "ok":
             config["_gmgn_error"] = str(health.get("errors") or "GMGN discovery incomplete")[:500]
         records = current_candidates(state, config, int(time.time()))
+        health["snapshot_tokens"] = health.get("tokens", 0)
+        health["tokens"] = len(records)
         resolved = fetch_dex_pairs_for_tokens(http, records, "gmgn_attention")
         resolved = {key: pool for key, pool in resolved.items() if pool.token_address in records}
         health["pool_resolution"] = resolve_missing_attention_pools(records, resolved, config)
