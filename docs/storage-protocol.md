@@ -46,9 +46,10 @@ same bounded budget discipline. GC errors are reported, not silently ignored.
 
 The 256 MiB runtime target is an operational target, not a promise about the
 entire SQL database. Historical evidence and indexes are measured separately.
-The fresh cloud database has a 4 GB maximum to leave headroom below the 5 GB
-organization free-storage allowance. This is a last-resort safeguard, not a
-replacement for retention or monitoring.
+The replacement cloud database must be created with a 4 GB maximum to leave
+headroom below the 5 GB organization free-storage allowance. It has not yet
+been created while the provider block remains. This is a last-resort safeguard,
+not a replacement for retention or monitoring.
 
 ## Clean Restart
 
@@ -82,13 +83,13 @@ No paid plan or overages were enabled. The source configuration remains frozen
 and the Solana scan, discovery, watchdog and private SQL-backup workflows are
 paused. R2 monitoring and private R2 backups remain enabled.
 
-After provider unblock: regenerate the verified empty seed with migration
-`0006`, create `solana-radar` in `radar-eu`, rotate equivalent DB credentials,
-verify preserved RPC counters and retention, and update the source freeze flags
-before reenabling workflows. Set `storage_maintenance=false` only after the
-new database is verified. This CLI guard prevents an independently scheduled
-GitHub job from spending RPC while the Worker is frozen. Do not restore old
-`state-v4` or `outbox-v1` caches. Use the already prepared verified empty seed;
+After provider unblock: use the already prepared verified empty seed, which
+includes migration `0006`, to create `solana-radar` in `radar-eu`. Rotate
+equivalent DB credentials, verify preserved RPC counters and retention, and
+update the source freeze flags before reenabling workflows. Set
+`storage_maintenance=false` only after the new database is verified. This CLI
+guard prevents an independently scheduled GitHub job from spending RPC while
+the Worker is frozen. Do not restore old `state-v4` or `outbox-v1` caches, and
 do not rederive monthly counters from the empty public maintenance snapshot.
 
 ## R2 Is Not An Unlimited Replacement
