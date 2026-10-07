@@ -31,6 +31,8 @@ on:
       - "solana_position_lineage.py"
       - "runtime_checkpoint.py"
       - "cold_outbox.py"
+      - "cold_evidence.py"
+      - "evidence_lifecycle.py"
       - "runtime_dashboard.py"
       - "history_contract.py"
       - "rpc_budget.py"

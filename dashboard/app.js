@@ -1,11 +1,11 @@
-import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261007-storage-reset-v1";
-import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261007-storage-reset-v1";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261007-storage-reset-v1";
-import { installTerminology } from "./terminology.js?v=20261007-storage-reset-v1";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261007-storage-reset-v1";
-import { loadTokenDetail } from "./static-detail.js?v=20261007-storage-reset-v1";
-import { r2BudgetView } from "./r2-budget-view.js?v=20261007-storage-reset-v1";
-import { walletActivityView } from "./wallet-activity-view.js?v=20261007-storage-reset-v1";
+import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261008-stalled-evidence-v1";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261008-stalled-evidence-v1";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261008-stalled-evidence-v1";
+import { installTerminology, TERMS } from "./terminology.js?v=20261008-stalled-evidence-v1";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261008-stalled-evidence-v1";
+import { loadTokenDetail } from "./static-detail.js?v=20261008-stalled-evidence-v1";
+import { r2BudgetView } from "./r2-budget-view.js?v=20261008-stalled-evidence-v1";
+import { walletActivityView } from "./wallet-activity-view.js?v=20261008-stalled-evidence-v1";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -16,12 +16,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261007-storage-reset-v1";
+} from "./token-state.js?v=20261008-stalled-evidence-v1";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261007-storage-reset-v1";
+} from "./filter-scope.js?v=20261008-stalled-evidence-v1";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const PENDING_TOKEN_ACTIONS_KEY = "solana-radar:pending-token-actions:v1";
@@ -2051,6 +2051,21 @@ function renderDetailLoadState(key) {
   if (notice && state.selectedTokenKey === key) notice.innerHTML = detailLoadMessage(key);
 }
 
+function renderStorageHealth(report) {
+  const health = report.storage_health;
+  if (health?.version !== 1 || health.warning !== true) return "";
+  const counts = [
+    ["unresolved", health.unresolved_count], ["stalled", health.stalled_count],
+    ["archive pending", health.archive_pending_count], ["archived", health.archived_count],
+  ].map(([label, value]) => `${observedCount(value) ?? "unknown"} ${label}`);
+  const bytes = observedCount(health.hot_bytes);
+  const oldest = observedAmount(health.oldest_stalled_days);
+  const warnings = Array.isArray(health.warnings)
+    ? health.warnings.filter(value => typeof value === "string" && value.trim()).join("; ") : "";
+  const summary = `Investigation storage warning: ${counts.join(" / ")} / hot ${bytes === null ? "unknown" : bytes.toLocaleString("en-US")} bytes / oldest stalled ${oldest === null ? "unknown" : `${oldest}d`}`;
+  return `<span class="status-pill freshness-warn storage-health-warning" title="${esc(warnings)}">${esc(summary)}</span>`;
+}
+
 function renderStatus() {
   const budget = r2BudgetView(state.r2Budget);
   const budgetAlert = document.querySelector("#r2BudgetAlert");
@@ -2137,6 +2152,7 @@ function renderStatus() {
     targeted ? `<span class="status-pill">targeted check: ${esc(report.stats?.scanned_pools ?? "-")} pools</span>` : "",
     targeted ? `<span class="status-pill freshness-${deepFreshness?.tone || "warn"}">deep scan ${deepAt ? esc(dateLabel(deepAt)) : "not recorded yet"}</span>` : "",
     `<span class="status-pill freshness-${healthTone}" title="${esc(healthReason)}"><span class="dot ${healthTone === "good" ? "" : healthTone}"></span>scan ${esc(healthStatus)}</span>`,
+    renderStorageHealth(report),
     persistenceBadge,
     discoveryFailed
       ? `<span class="status-pill freshness-bad" title="${esc(discoveryStatus.error || "Discovery pulse failed")}"><span class="dot bad"></span>discovery failed</span>`
@@ -2271,6 +2287,7 @@ function renderTokenRow(token) {
         </div>
         <div class="chips">
           ${primaryStatusChip(token)}
+          ${renderAnalysisHealthBadge(token)}
           ${supplyIntegrityChip(token)}
           ${renderCoordinatedActivity(resolveCoordinatedActivity(token), {now: Date.now(), compact: true})}
           ${operationalFlagChips(token)}
@@ -2704,6 +2721,43 @@ function renderThesisSummary(token) {
       ? `${holders}/${originalWallets} tracked wallets holding at last check` : "holder count unverified",
     checked,
   ].filter(Boolean).join(" / ");
+}
+
+function analysisHealthMeta(token) {
+  const health = token.signalThesis?.analysis_health;
+  if (health?.version !== 1) return null;
+  const term = health.status === "stalled" ? "history_stalled"
+    : health.status === "archive_pending" ? "history_archive_pending"
+      : health.status === "archived" ? "history_archived" : null;
+  return term ? {health, term} : null;
+}
+
+function renderAnalysisHealthBadge(token) {
+  const meta = analysisHealthMeta(token);
+  if (!meta) return "";
+  const term = TERMS[meta.term];
+  return `<span class="chip warn analysis-health-badge" title="${esc(`${term.text} ${term.note}`)}">${esc(term.title)}</span>`;
+}
+
+function renderAnalysisTime(value, allowFuture = false) {
+  const at = typeof value === "string" && value.trim() ? Date.parse(value) : NaN;
+  if (!Number.isFinite(at) || (!allowFuture && at > Date.now())) return null;
+  return `<time datetime="${esc(value)}" title="${esc(new Date(at).toISOString())}">${esc(dateLabel(value))}</time>`;
+}
+
+function renderAnalysisHealthDetails(token) {
+  const meta = analysisHealthMeta(token);
+  if (!meta) return "";
+  const health = meta.health;
+  const days = observedAmount(health.stalled_days);
+  const errors = observedCount(health.repeat_error_count);
+  const category = typeof health.last_error_category === "string" ? health.last_error_category.trim() : "";
+  const retry = renderAnalysisTime(health.next_history_retry_at, true);
+  return `
+    <div class="kv analysis-health-row"><span>Last new evidence</span><span>${renderAnalysisTime(health.last_progress_at) ?? "Not recorded"}${days === null ? "" : ` / ${esc(days)}d without progress`}</span></div>
+    <div class="kv analysis-health-row"><span>Last verification attempt</span><span>${renderAnalysisTime(health.last_attempt_at) ?? "Not recorded"}${errors > 0 ? ` / ${esc(errors)} repeated errors` : ""}${category ? ` / ${esc(category)}` : ""}</span></div>
+    ${retry ? `<div class="kv analysis-health-row"><span>Next history retry</span><span>${retry}</span></div>` : ""}
+  `;
 }
 
 function renderThesisDetails(token) {
@@ -3350,6 +3404,7 @@ function renderTokenDetail(token) {
             <p class="token-identity-sub">${esc(token.name)} · ${esc(durationLabel(token.tokenAgeHours))} old</p>
             <div class="detail-head-chips">
               ${primaryStatusChip(token)}
+              ${renderAnalysisHealthBadge(token)}
             </div>
           </div>
         </div>
@@ -3360,6 +3415,7 @@ function renderTokenDetail(token) {
         </div>
       </div>
       <div class="detail-load-state" role="status">${detailLoadMessage(token.key)}</div>
+      ${renderAnalysisHealthDetails(token)}
       <div class="decision-grid">
         ${detailMetric("Caught mcap", moneyMaybe(token.firstObsMcapUsd || token.firstMcap), esc(dateLabel(token.firstSignalAt)))}
         ${detailMetric("Current mcap", token.currentMarket?.isFresh ? moneyMaybe(token.currentMcap) : "Unverified", marketNowSub, token.currentMarket?.isFresh ? "" : "warn")}
@@ -3624,7 +3680,7 @@ function openRadarToken(key, detailTab = "overview") {
 function renderReviewRow(token) {
   const view = token.decision;
   return `<button class="review-row${token.key === state.selectedTokenKey ? " is-selected" : ""}${token.hidden ? " is-hidden" : ""}" type="button" data-token-key="${esc(token.key)}" aria-pressed="${token.key === state.selectedTokenKey}">
-    <span class="review-identity">${tokenAvatar(token, true)}<span class="review-copy"><strong>${esc(token.symbol)}</strong><span class="review-reason">${esc(view.reason)}</span>${renderCoordinatedActivity(resolveCoordinatedActivity(token), {now: Date.now(), compact: true})}<small>Caught ${esc(dateLabel(token.firstSignalAt))}</small></span></span>
+    <span class="review-identity">${tokenAvatar(token, true)}<span class="review-copy"><strong>${esc(token.symbol)}</strong><span class="review-reason">${esc(view.reason)}</span>${renderAnalysisHealthBadge(token)}${renderCoordinatedActivity(resolveCoordinatedActivity(token), {now: Date.now(), compact: true})}<small>Caught ${esc(dateLabel(token.firstSignalAt))}</small></span></span>
     <span class="review-position"><strong>${esc(retentionBound(view.retained))}</strong><small>${view.supply === null ? "supply unknown" : `${esc(retentionBound(view.supply, 1))} supply`}</small><small class="${view.fresh ? "" : "warning"}">${view.fresh ? "checked" : "check overdue"}${!view.complete ? " · partial" : ""}</small></span>
     <span class="review-market"><strong>${token.currentMarket?.isFresh ? moneyMaybe(token.currentMcap) : "Unverified"}</strong><small class="${pClass(token.profitPct)}">${pct(token.profitPct)} since catch</small></span>
   </button>`;

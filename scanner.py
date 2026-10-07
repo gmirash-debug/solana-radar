@@ -34,6 +34,12 @@ from position_history_rpc import check_receipt_positions
 from wallet_activity import AuditBudget, advance_wallet_history, summarize_wallet_activity, recover_sale_history_status
 from runtime_checkpoint import build_checkpoint, restore_checkpoint, checkpoint_documents, hydrate_checkpoint
 from cold_outbox import archive_snapshot
+from evidence_lifecycle import (ensure_health as ensure_analysis_health, refresh_health as refresh_analysis_health,
+    record_attempt as record_analysis_attempt, retention_event_at, history_due as analysis_history_due,
+    mark_history_attempt, public_health as public_analysis_health, archive_due as analysis_archive_due,
+    cold_snapshot as analysis_cold_snapshot, digest as evidence_digest, event_payload as analysis_event_payload,
+    prune_archived_events, restore_archived_events, storage_health as analysis_storage_health,
+    bounded_number as analysis_bounded_number)
 from storage_generation import storage_epoch
 from runtime_dashboard import dashboard_documents
 from history_contract import history_event_error, source_time
@@ -1116,7 +1122,7 @@ def build_history_ledger(report_payload, state, config, generated_at):
         }
         events.append(signal_event)
 
-        checked_at = thesis.get("last_checked_at")
+        checked_at = retention_event_at(thesis)
         if parse_timestamp(checked_at) > parse_timestamp(caught_at):
             checked_market = outcome_market_snapshot(market_entry, checked_at) or {}
             events.append(
@@ -7826,6 +7832,20 @@ def capture_signal_thesis(
 
 def recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
     thesis = pool_state.get("signal_thesis")
+    checked_at = checked_at or utc_now().isoformat().replace("+00:00", "Z")
+    if not isinstance(thesis, dict) or thesis.get("status") in {"invalidated", "closed"}:
+        return thesis
+    ensure_analysis_health(thesis, checked_at)
+    result = _recheck_signal_thesis(rpc, pool, pool_state, config, checked_at)
+    success = any(row.get("checked_at") == checked_at for row in thesis.get("cohort") or [])
+    errors = int(thesis.get("balance_errors") or 0)
+    record_analysis_attempt(thesis, config, checked_at,
+        error="balance_unavailable" if errors else None, balance_success=success)
+    return result
+
+
+def _recheck_signal_thesis(rpc, pool, pool_state, config, checked_at=None):
+    thesis = pool_state.get("signal_thesis")
     prepare_thesis_position_evidence(thesis)
     if not isinstance(thesis, dict) or thesis.get("status") == "invalidated":
         return thesis
@@ -8180,6 +8200,8 @@ def public_signal_thesis(thesis):
         for key, value in thesis.items()
         if key in public_fields
     }
+    if thesis.get("analysis_health"):
+        public["analysis_health"] = public_analysis_health(thesis)
     activity = thesis.get("wallet_activity") or {}
     if activity:
         public["wallet_activity"] = {key: value for key, value in activity.items() if key not in {"owners", "events"}}
@@ -8399,6 +8421,8 @@ def refresh_signal_thesis(
             }
     if isinstance(thesis, dict):
         update_thesis_position_observation(thesis, config)
+        if should_recheck or observed_transactions is not None or observed_swaps is not None:
+            record_analysis_attempt(thesis, config, checked_at)
     return public_signal_thesis(thesis)
 
 
@@ -13601,6 +13625,7 @@ def compact_pool_swap_buffers(pools_state, config, now):
 
 
 def compact_state(state, pools, alerts, config, observed_at):
+    analysis_storage_health(state, config, observed_at)
     now = parse_timestamp(observed_at) or int(time.time())
     token_keys = set()
     pool_keys = set()
@@ -14093,6 +14118,7 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
         "mode": config.get("mode"),
         "lane": config.get("lane"),
         "profile": config.get("lane") or config.get("mode"),
+        "storage_health": (state.get("maintenance") or {}).get("analysis_storage_health", {}),
         "config": {
             "discovery_source_mode": config.get("discovery_source_mode", "composite"),
             "candidate_initial_history_hours": config.get("candidate_initial_history_hours", 6),
@@ -14665,6 +14691,7 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
 
 def publish_targeted_balance_report(rpc, universe, state, config, lane_configs, lane_stats):
     generated_at = utc_now().isoformat().replace("+00:00", "Z")
+    maintain_analysis_archives(state, config, generated_at)
     report_config = report_config_for_lanes(config, lane_configs)
     config["_scan_health"] = {"status": "degraded", "scanned_pools": 0,
         "reasons": ["Cohort balances rechecked; no new pool transaction history scanned"],
@@ -14718,11 +14745,19 @@ def run_position_history_task(rpc, universe, state, config, observed_at):
     candidates = []
     for pool in universe:
         thesis = (state.get("pools", {}).get(pool.pool_address) or {}).get("signal_thesis") or {}
+        if thesis and not analysis_history_due(thesis, config, observed_at):
+            continue
+        health = thesis.get("analysis_health") or {}
+        position_retry = parse_timestamp(health.get("_last_position_attempt_at"))
+        retry_seconds = analysis_bounded_number(config, "analysis_stalled_history_retry_minutes", 720, 60) * 60
+        if health.get("status") != "active" and parse_timestamp(observed_at) - position_retry < retry_seconds:
+            continue
         reduced = {row.get("owner") for row in thesis.get("cohort", []) if row.get("movement_status") == "reduced_unresolved"}
         seeds = (thesis.get("receipt_position_seeds") or {}).get("owners") or {}
         if reduced and any(owner in reduced and row.get("seeds") for owner, row in seeds.items()):
             candidates.append(((thesis.get("receipt_position_history") or {}).get("checked_at") or "", pool.pool_address, pool, thesis))
     for _, _, pool, thesis in sorted(candidates)[:1]:
+        ensure_analysis_health(thesis, observed_at)["_last_position_attempt_at"] = observed_at
         try:
             thesis["receipt_position_history"] = check_receipt_positions(rpc, thesis, pool.token_address,
                 services=[pool.pool_address, *infrastructure_sources(config)], checked_at=observed_at)
@@ -14734,6 +14769,63 @@ def run_position_history_task(rpc, universe, state, config, observed_at):
     return {"status": "idle", "checked": 0}
 
 
+def hydrate_analysis_receipts(thesis, config, observed_at):
+    health = ensure_analysis_health(thesis, observed_at)
+    if not health.get("_cold"):
+        return True
+    from cold_evidence import read_evidence
+    try:
+        snapshot = read_evidence(health["archive_ref"], remote_data_url_from_env(), remote_ingest_secret(),
+            epoch=storage_epoch(config))
+        restore_archived_events(thesis, snapshot)
+        health.pop("archive_error", None)
+        health.pop("_restore_retry_after", None)
+        return True
+    except Exception:
+        mark_history_attempt(thesis, observed_at)
+        health["archive_error"] = "archive_restore_unavailable"
+        health["_restore_retry_after"] = iso(parse_timestamp(observed_at) + max(3600,
+            float(config.get("analysis_archive_retry_minutes", 720)) * 60))
+        record_analysis_attempt(thesis, config, observed_at, error="archive_restore_unavailable")
+        return False
+
+
+def maintain_analysis_archives(state, config, observed_at):
+    """Archive unique receipts only; failed writes never trim their original."""
+    stats = {"archived": 0, "deferred": 0, "reused": 0}
+    limit = max(0, int(config.get("analysis_archive_max_per_scan", 1)))
+    attempts = 0
+    for entry in (state.get("pools") or {}).values():
+        thesis = entry.get("signal_thesis") if isinstance(entry, dict) else None
+        if not isinstance(thesis, dict) or not thesis.get("pool_address") or not thesis.get("token_address"):
+            continue
+        health = refresh_analysis_health(thesis, config, observed_at)
+        if health.get("_cold") or health["status"] == "active":
+            continue
+        fingerprint = evidence_digest(analysis_event_payload(thesis))
+        # Rehydration followed by the same failure reuses the original immutable archive.
+        if health.get("archive_ref") and fingerprint == health.get("_archive_fingerprint"):
+            prune_archived_events(thesis, health["archive_ref"], observed_at, fingerprint)
+            stats["reused"] += 1
+            continue
+        if not analysis_archive_due(thesis, config, observed_at) or attempts >= limit:
+            continue
+        health["_archive_attempt_at"] = observed_at
+        attempts += 1
+        try:
+            from cold_evidence import archive_evidence
+            ref = archive_evidence(analysis_cold_snapshot(thesis), remote_data_url_from_env(), remote_ingest_secret(),
+                observed_at, epoch=storage_epoch(config))
+            prune_archived_events(thesis, ref, observed_at, fingerprint)
+            stats["archived"] += 1
+        except Exception:
+            health["archive_error"] = "archive_write_unavailable"
+            stats["deferred"] += 1
+        refresh_analysis_health(thesis, config, observed_at)
+    analysis_storage_health(state, config, observed_at)
+    return stats
+
+
 def run_wallet_activity_tasks(rpc, universe, state, config, observed_at):
     if not config.get("wallet_activity_enabled", True):
         return {"status": "disabled", "pages": 0, "checked": 0}
@@ -14742,6 +14834,7 @@ def run_wallet_activity_tasks(rpc, universe, state, config, observed_at):
                          config.get("wallet_activity_max_seconds", 90))
     now = parse_timestamp(observed_at)
     tasks, seen, theses = [], set(), {}
+    restore_remaining = max(0, int(config.get("analysis_archive_restore_max_per_scan", 1)))
     for pool in universe:
         if pool.pool_address in seen:
             continue
@@ -14750,6 +14843,14 @@ def run_wallet_activity_tasks(rpc, universe, state, config, observed_at):
         if not thesis.get("token_address") or not thesis.get("signal_at") or thesis.get("status") == "invalidated":
             continue
         theses[pool.pool_address] = thesis
+        if not analysis_history_due(thesis, config, observed_at):
+            continue
+        if (thesis.get("analysis_health") or {}).get("_cold"):
+            if restore_remaining <= 0 or not budget.available():
+                continue
+            restore_remaining -= 1
+            if not hydrate_analysis_receipts(thesis, config, observed_at):
+                continue
         for row in thesis.get("cohort") or []:
             if not row.get("owner"):
                 continue
@@ -14774,17 +14875,35 @@ def run_wallet_activity_tasks(rpc, universe, state, config, observed_at):
         if not recent:
             order.extend(older); older = []
     changed, touched = 0, {}
+    stalled_pages = Counter()
     for _, _, _, _, _, pool, thesis, row in order:
         if not budget.available():
             break
-        changed += int(advance_wallet_history(rpc, thesis, row, budget, observed_at,
+        if (thesis.get("analysis_health") or {}).get("status") != "active":
+            if stalled_pages[pool.pool_address] >= max(1, int(config.get("analysis_stalled_pages_per_scan", 4))):
+                continue
+            stalled_pages[pool.pool_address] += 1
+        used_before = budget.used
+        advanced = advance_wallet_history(rpc, thesis, row, budget, observed_at,
             services=[pool.pool_address, *infrastructure_sources(config)],
-            page_size=int(config.get("wallet_activity_page_size", 100))))
+            page_size=int(config.get("wallet_activity_page_size", 100)))
+        if budget.used == used_before:
+            continue
+        mark_history_attempt(thesis, observed_at)
+        changed += int(record_analysis_attempt(thesis, config, observed_at,
+            error=None if advanced else "history_unavailable"))
         touched[pool.pool_address] = thesis
     recovered = 0
     for pool_address, thesis in theses.items():
+        if (thesis.get("analysis_health") or {}).get("_cold"):
+            continue  # The saved as-of summary is still valid; absent hot receipts are not zero flows.
+        if pool_address not in touched and thesis.get("wallet_activity"):
+            continue  # Scheduling a pass is not a new wallet-history observation.
         summary = summarize_wallet_activity(thesis, observed_at)
-        recovered += int(recover_sale_history_status(thesis, summary))
+        did_recover = recover_sale_history_status(thesis, summary)
+        recovered += int(did_recover)
+        if did_recover:
+            record_analysis_attempt(thesis, config, observed_at)
         if pool_address in touched:
             thesis["updated_at"] = observed_at
     return {"status": "progress" if changed else "idle" if not tasks else "deferred", "checked": len(touched),
@@ -14911,6 +15030,7 @@ def run_once(config, lane_name=None):
         if checks or config["_wallet_activity_stats"].get("checked"):
             publish_targeted_balance_report(rpc, universe, state, config, lane_configs, lane_stats)
         else:
+            maintain_analysis_archives(state, config, utc_now().isoformat().replace("+00:00", "Z"))
             save_runtime_state(state, config, "targeted_idle")
             config["_targeted_idle"] = True
         return
@@ -14929,6 +15049,7 @@ def run_once(config, lane_name=None):
     config["_launch_history_stats"] = run_launch_history_tasks(rpc, universe, state, config, generated_at)
     config["_position_history_stats"] = run_position_history_task(rpc, universe, state, config, generated_at)
     config["_wallet_activity_stats"] = run_wallet_activity_tasks(rpc, universe, state, config, generated_at)
+    config["_analysis_archive_stats"] = maintain_analysis_archives(state, config, generated_at)
     config["_rpc_providers"] = rpc.provider_stats()
     config["_rpc_retries"] = dict(rpc.retries)
     config["_rpc_failures"] = dict(rpc.failures)

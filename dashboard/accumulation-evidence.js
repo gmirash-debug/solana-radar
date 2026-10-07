@@ -1,4 +1,4 @@
-import {formatSupplyPercent} from "./robinhood-state.js?v=20261007-storage-reset-v1";
+import {formatSupplyPercent} from "./robinhood-state.js?v=20261008-stalled-evidence-v1";
 
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[c]));
 const fact = (label, value) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;

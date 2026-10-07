@@ -1,4 +1,4 @@
-import { walletActivityView } from "./wallet-activity-view.js?v=20261007-storage-reset-v1";
+import { walletActivityView } from "./wallet-activity-view.js?v=20261008-stalled-evidence-v1";
 // Presentation only: never upgrades the scanner's confirmation or lifecycle.
 export const REVIEW_QUEUES = [
   { id: "review", label: "Ready to review", note: "Current confirmed signals with fresh cohort and market checks.", tone: "positive" },
