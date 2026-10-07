@@ -63,6 +63,12 @@ export const TERMS = Object.freeze({
   contract: {title:"Contract risk", text:"Выявленные риски токен-контракта и ограничения проведённых проверок.", note:"No flags означает отсутствие выявленного флага, а не отсутствие любого риска или гарантию продаваемости."},
   gmgn_labels: {title:"GMGN wallet labels", text:"Классификация провайдера: Smart, KOL, Bundler и другие метки адресов.", note:"Это внешние метки, не доказательство инсайда, личности или точного участия в бандле."},
   backlog: {title:"Backlog / History window", text:"Часть истории, которую индексатор ещё не обработал. Окно может начинаться с первого наблюдения, а не с запуска токена.", note:"При отставании ранние покупки могут отсутствовать. Complete относится только к указанному окну."},
+  history_stalled: {title:"History stalled", text:"Восстановление истории не продвигается. Отсутствующая история не означает продажу; последние достоверные балансы сохранены без изменений.", note:"Проверки балансов продолжаются независимо от восстановления истории. Этот статус не подтверждает накопление и не отменяет действительные балансы; их свежесть проверяется отдельно."},
+  history_archive_pending: {title:"History archive pending", text:"Неполная история ожидает переноса в архив. Отсутствующая история не означает продажу; последние достоверные балансы сохранены без изменений.", note:"Архивирование ещё не подтверждено. Проверки балансов продолжаются; статус истории не меняет подтверждение сигнала, удержание позиции или свежесть балансов."},
+  history_archived: {title:"History archived", text:"Материалы неполного расследования перенесены в архив. Отсутствующая история не означает продажу; последние достоверные балансы сохранены без изменений.", note:"Архив истории не закрывает позицию и не подтверждает накопление. Проверки балансов продолжаются; их свежесть оценивается отдельно. Следующая попытка восстановления показана только при известном времени."},
+  new_evidence: {title:"Last new evidence", text:"Время последних новых значимых данных: новых доказательств по балансам, подтверждённых операций истории или продвижения её проверки.", note:"Свежая повторная проверка с прежними балансами не продвигает это время. Попытка запроса сама по себе не является прогрессом. Not recorded означает, что достоверное время не передано."},
+  verification_attempt: {title:"Last verification attempt", text:"Время последней попытки проверить балансы или восстановить историю; попытка могла не дать новых значимых данных или завершиться ошибкой.", note:"Не означает успешную проверку или продажу. Смотри отдельно время последних новых доказательств и свежесть проверенных балансов."},
+  history_retry: {title:"Next history retry", text:"Запланированное время следующей попытки восстановить недостающую историю.", note:"Это не обещание успешного восстановления и не расписание проверок балансов. Последние достоверные балансы остаются отдельными данными."},
   quality: {title:"Signal quality / score", text:"Сводная оценка признаков активности по правилам сканера, с отдельными причинами и штрафами.", note:"Score не является вероятностью роста или процентом уверенности в инсайде. Смотри причины, ограничения и актуальность проверки."},
 });
 
@@ -93,6 +99,8 @@ const aliases = {
   transfer:["Where the position went", "At original buyers (min.)", "At transfer recipients (min.)"], sold:["Confirmed sold (min.)"],
   bounds:["Supply max.", "Supply min."], tax:["Buy tax", "Sell tax"], contract:["Contract risk"], gmgn_labels:["GMGN wallet labels"],
   backlog:["History window", "Backlog"], partial:["Partial", "Unverified", "Pending", "Unresolved", "Supply pending", "Supply unverified"],
+  history_stalled:["History stalled"], history_archive_pending:["History archive pending"], history_archived:["History archived"],
+  new_evidence:["Last new evidence"], verification_attempt:["Last verification attempt"], history_retry:["Next history retry"],
 };
 const normal = value => String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
 const byLabel = new Map(Object.entries(aliases).flatMap(([id, labels]) => labels.map(label => [normal(label), id])));

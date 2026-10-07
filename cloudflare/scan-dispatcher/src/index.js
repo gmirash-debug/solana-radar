@@ -23,6 +23,7 @@ import {validateHistoryEvents} from "./runtime-history.js";
 import {runHistoryMaintenance, historyMaintenanceStatus, pruneArchivedHistoryOutbox} from "./history-maintenance.js";
 import {r2BudgetStatus, r2BudgetCall, dispatchR2BudgetNotice} from "./r2-budget.js";
 import {coldOutboxResponse,coldOutboxStatus} from "./cold-outbox.js";
+import {evidenceArchiveResponse} from "./evidence-archive.js";
 import {archiveBackupResponse} from "./archive-backup.js";
 import {runStorageRetention, previewStorageRetention, STORAGE_RETENTION_POLICY} from "./storage-retention.js";
 export {RuntimeSnapshots} from "./runtime.js";
@@ -1405,6 +1406,13 @@ export default {
       const access = ingestAccess(request, env);
       if (!access.ok) return json({ ok: false, error: access.error }, access.status, corsHeaders(request, env));
       try {
+        if (url.pathname === "/api/storage/evidence-archive") {
+          if (env.STORAGE_EPOCH && request.headers.get("x-radar-storage-epoch") !== env.STORAGE_EPOCH) {
+            return json({ok:false,error:"storage_epoch_mismatch"},409,corsHeaders(request,env));
+          }
+          if (!runtimeUsesSql(env) || !env.RADAR_ARCHIVE) return json({ok:false,error:"evidence_archive_not_configured"},503);
+          return await evidenceArchiveResponse(env,request);
+        }
         if (url.pathname === "/api/storage/outbox") {
           if (!runtimeUsesSql(env) || !env.RADAR_ARCHIVE) return json({ok:false,error:"outbox_archive_not_configured"},503);
           return await coldOutboxResponse(env,request);

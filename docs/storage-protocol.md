@@ -11,7 +11,9 @@ Production generation: `20261007-clean-v1`.
 | Activity baseline | Every discovery pulse | 5-minute buckets for 48 hours; hourly buckets for 7 days; inactive baseline containers for 14 days |
 | Processed transaction signatures | Incremental onchain passes | 24 hours, bounded dedup index; incomplete history remains explicitly incomplete |
 | Runtime recovery checkpoint | After a state writer | Immutable content-addressed parts; unchanged parts are reused; superseded/unreferenced parts have a 60-minute reader/upload grace |
-| Current signal cohort, catch evidence, balances and cursors | At capture and scheduled rechecks | An active or unresolved position never expires merely because it is old |
+| Current signal cohort, catch evidence, balances and cursors | At capture and scheduled rechecks | Original capture, owner IDs and last trustworthy balances stay hot; stalled receipt bodies can move to a verified archive after 30 days |
+| Repeated unsuccessful checks | Every real attempt | Last safe error category plus repetition count; identical failures do not append wallet snapshots |
+| Successful balance history | Immediately on new balance evidence, otherwise daily | One daily sample for unchanged balances; pending earlier writes remain in their existing outbox |
 | Local closed/invalidated thesis | On close and subsequent passes | 30 days, then normal state compaction may retire it |
 | Compact alert list | On a completed scan | 7 days, capped by the existing token/alert limits |
 | Delivered history-outbox duplicates | Hourly maintenance | At least 7 days; remove only with an identical canonical event and no pending dependency |
@@ -29,6 +31,47 @@ is deliberately not enabled for ordinary `invalidated` signals. Low balances
 or unresolved sale/transfer history do not prove a terminal close. Until a
 producer supplies `terminal-closed-v1` evidence, these compact learning records
 remain protected. This restriction does not retain obsolete runtime copies.
+
+## Stalled Investigation Lifecycle
+
+Attempt time and evidence progress are separate. Error timestamps, retry counts,
+page counts, opaque cursor resets, and polling unchanged balances do not advance
+`last_progress_at`. New trustworthy balances/receipts or an advancing finalized
+history checkpoint do. Checking new empty windows cannot reconstruct a missing
+legacy purchase window. A migration uses actual wallet/checkpoint evidence times,
+not a generic `updated_at` or failed `last_checked_at`.
+
+After 7 days without new evidence an unresolved investigation gets an independent
+`History stalled` label. History repair retries at most once per 12 hours, with
+up to 4 wallet pages per stalled cohort per pass, inside the existing global
+budget. Regular current balance checks keep their normal 30/60-minute schedule.
+This label never means sold, invalidated or confirmed. Unattempted history
+summaries retain their original observation timestamp.
+
+After 30 days without evidence progress, wallet movement receipt bodies of at
+least 16 KiB can be archived. Each run attempts at most one archive and one
+restore; unsuccessful attempts back off for 12 hours. The source is removed
+from hot state only after an authenticated R2 write, hash/size verification and
+a durable Turso manifest acknowledgement. R2's existing 80%/90% budget guard is
+mandatory. Paused R2 or an unverified receipt leaves the entire original hot and
+produces `History archive pending`, not data loss. Small records need no R2 write.
+
+The archive uses immutable `evidence/v1/sha256/` objects and compact
+`evidence-archive:` manifests. They are not a replay outbox and are not eligible
+for its delivered-event cleanup. A restore verifies compressed SHA-256, bounded
+decompression, cohort/owner identity and the event fingerprint before replacing
+any receipt bodies. Only receipt bodies are restored: current balances, cursors
+and retry counters are never rolled back. A subsequent identical failure reuses
+the same verified archive instead of uploading another copy. The original
+signal, cohort, cursors, counts and last trustworthy as-of flow summary stay hot.
+
+`report.storage_health` monitors unresolved/stalled/archive-pending counts,
+oldest stalled age and hot investigation bytes. The dashboard warns on stalls,
+blocked archives, growth above both 20% and 1 MiB relative to the daily baseline,
+or the 64 MiB operational hot-data target. These are warnings, not deletion or
+confirmation rules. Genuine new evidence wakes the normal repair lane again.
+The compact original cohorts and immutable archives still occupy storage:
+this protocol avoids failure-driven amplification, not an unlimited free store.
 
 ## Prevent Full Copy Amplification
 

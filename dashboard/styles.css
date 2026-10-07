@@ -250,6 +250,13 @@ main {
   color: var(--bad);
 }
 
+.status-pill.storage-health-warning {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .dot {
   background: var(--good);
   border-radius: 50%;
@@ -1008,6 +1015,19 @@ button.metric[aria-pressed="true"] {
   background: var(--bad-soft);
   border-color: #efbbb5;
   color: var(--bad);
+}
+
+.analysis-health-badge {
+  align-self: flex-start;
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.analysis-health-row > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .token-terminal-link {
