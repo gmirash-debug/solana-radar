@@ -24,6 +24,7 @@ import {runHistoryMaintenance, historyMaintenanceStatus, pruneArchivedHistoryOut
 import {r2BudgetStatus, r2BudgetCall, dispatchR2BudgetNotice} from "./r2-budget.js";
 import {coldOutboxResponse,coldOutboxStatus} from "./cold-outbox.js";
 import {archiveBackupResponse} from "./archive-backup.js";
+import {runStorageRetention, previewStorageRetention, STORAGE_RETENTION_POLICY} from "./storage-retention.js";
 export {RuntimeSnapshots} from "./runtime.js";
 export {HistoryQueue} from "./runtime-history.js";
 export {R2Budget} from "./r2-budget.js";
@@ -42,6 +43,19 @@ const MAINTENANCE_CRON = "47 * * * *";
 const D1_IN_PARAMETER_LIMIT = 100;
 const GITHUB_STATUS_COMPONENTS_URL = "https://www.githubstatus.com/api/v2/components.json";
 let accessCertCache = { expiresAt: 0, keys: new Map() };
+let lastStorageRetention = null;
+
+async function operationalRetention(env, options) {
+  const result = await runStorageRetention(env,options);
+  lastStorageRetention = {checked_at:new Date().toISOString(),...result};
+  if (!result.ok) console.warn("Storage retention failed",JSON.stringify(lastStorageRetention));
+  return result;
+}
+
+function retentionPolicy(env) {
+  return {...STORAGE_RETENTION_POLICY,
+    episodeCleanupEnabled:env.HISTORY_EPISODE_CLOSURE_CONTRACT === STORAGE_RETENTION_POLICY.episodeClosureContract};
+}
 
 function corsHeaders(request, env) {
   const origin = request.headers.get("origin");
@@ -1194,7 +1208,7 @@ export default {
         ctx.waitUntil(runHistoryMaintenance(env,{maxQueries:turso ? 16 : 32,maxWrites:turso ? 50 : 100}));
       }
       ctx.waitUntil(runArchiveRetention(env));
-      if (runtimeUsesSql(env)) ctx.waitUntil(collectSqlRuntimeGarbage(env).catch(() => null));
+      if (runtimeUsesSql(env)) ctx.waitUntil(operationalRetention(env,{runtime:false,maxQueries:16,maxBatches:2}));
       return;
     }
     const historyTask = env.HISTORY_QUEUE && hasHistoryDb(env) && _event?.cron === DISCOVERY_CRON
@@ -1203,7 +1217,9 @@ export default {
         ? env.HISTORY_SCHEMA_AUTO_UPGRADE !== undefined
           ? flushAndPublishHistoryHealth(env,1,{legacy:true,archives:env.HISTORY_QUEUE_BACKEND === "turso_sql"})
           : flushHistoryOutbox(env).catch(() => null) : Promise.resolve(null);
-    if (runtimeUsesSql(env) && _event?.cron === DISCOVERY_CRON) ctx.waitUntil(collectSqlRuntimeGarbage(env).catch(() => null));
+    if (runtimeUsesSql(env) && _event?.cron === DISCOVERY_CRON) {
+      ctx.waitUntil(operationalRetention(env,{history:false,maxQueries:16,maxBatches:2}));
+    }
     if (mode === "disabled" || shouldFlushScheduledHistory(_event, env)) {
       ctx.waitUntil(historyTask);
       return;
@@ -1246,6 +1262,14 @@ export default {
         {...corsHeaders(request, env), "retry-after":"120"});
     }
 
+    // Old cached runs cannot repopulate a deliberately cleared generation.
+    if (env.STORAGE_EPOCH && url.pathname.startsWith("/api/")
+        && !["GET", "HEAD", "OPTIONS"].includes(request.method)
+        && !url.pathname.startsWith("/api/storage/r2-budget/")
+        && request.headers.get("x-radar-storage-epoch") !== env.STORAGE_EPOCH) {
+      return json({ok:false,error:"storage_epoch_mismatch"},409,corsHeaders(request,env));
+    }
+
     if (url.pathname === "/health") {
       let d1Healthy = false;
       let d1Error = null;
@@ -1274,6 +1298,9 @@ export default {
         d1_error: env.STORAGE_SQL_BACKEND !== "turso" ? d1Error : null,
         sql_backend: env.STORAGE_SQL_BACKEND || "d1",
         storage_writes_frozen: env.STORAGE_WRITES_FROZEN === "true",
+        storage_epoch: env.STORAGE_EPOCH || null,
+        storage_retention_policy:retentionPolicy(env),
+        storage_retention_last_attempt:lastStorageRetention,
         sql_healthy: d1Healthy,
         sql_error: d1Error,
         archive_configured: Boolean(env.RADAR_ARCHIVE),
@@ -1428,10 +1455,16 @@ export default {
             history_schema:await historySchemaState(env),
             learning:await historyMaintenanceStatus(env)});
         }
+        if (url.pathname === "/api/storage/retention") {
+          if (request.method !== "GET") return json({ok:false,error:"GET required"},405);
+          const retention=await previewStorageRetention(env,{maxQueries:32});
+          return json({ok:retention.ok,policy:retentionPolicy(env),retention},retention.ok ? 200 : 503);
+        }
         if (url.pathname === "/api/storage/maintenance") {
           if (request.method !== "POST") return json({ok:false,error:"POST required"},405);
-          return json({ok:true,...await runHistoryMaintenance(env,{maxQueries:20,maxWrites:50}),
-            retention:await runArchiveRetention(env)});
+          const storage=await operationalRetention(env,{maxQueries:16,maxBatches:2});
+          return json({ok:storage.ok,...await runHistoryMaintenance(env,{maxQueries:20,maxWrites:50}),
+            retention:await runArchiveRetention(env),storage_retention:storage},storage.ok ? 200 : 503);
         }
         if (url.pathname === "/api/runtime/checkpoint-parts") {
           if (request.method !== "POST") return json({ok:false,error:"POST required"},405);

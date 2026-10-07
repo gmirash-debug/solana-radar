@@ -41,9 +41,9 @@ jobs:
             data/state.json
             data/discovery_state.json
             data/discovery_status.json
-          key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ runner.os }}-solana-radar-state-v5-20261007-clean-v1-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ${{ runner.os }}-solana-radar-state-v4-
+            ${{ runner.os }}-solana-radar-state-v5-20261007-clean-v1-
 
       - name: Skip duplicate scheduled pulse
         id: freshness
@@ -145,4 +145,4 @@ jobs:
             data/state.json
             data/discovery_state.json
             data/discovery_status.json
-          key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ runner.os }}-solana-radar-state-v5-20261007-clean-v1-${{ github.run_id }}-${{ github.run_attempt }}

@@ -1,11 +1,11 @@
-import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261006-gmgn-cap-v4";
-import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261006-gmgn-cap-v4";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261006-gmgn-cap-v4";
-import { installTerminology } from "./terminology.js?v=20261006-gmgn-cap-v4";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261006-gmgn-cap-v4";
-import { loadTokenDetail } from "./static-detail.js?v=20261006-gmgn-cap-v4";
-import { r2BudgetView } from "./r2-budget-view.js?v=20261006-gmgn-cap-v4";
-import { walletActivityView } from "./wallet-activity-view.js?v=20261006-gmgn-cap-v4";
+import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261007-storage-reset-v1";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261007-storage-reset-v1";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261007-storage-reset-v1";
+import { installTerminology } from "./terminology.js?v=20261007-storage-reset-v1";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261007-storage-reset-v1";
+import { loadTokenDetail } from "./static-detail.js?v=20261007-storage-reset-v1";
+import { r2BudgetView } from "./r2-budget-view.js?v=20261007-storage-reset-v1";
+import { walletActivityView } from "./wallet-activity-view.js?v=20261007-storage-reset-v1";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -16,12 +16,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261006-gmgn-cap-v4";
+} from "./token-state.js?v=20261007-storage-reset-v1";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261006-gmgn-cap-v4";
+} from "./filter-scope.js?v=20261007-storage-reset-v1";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const PENDING_TOKEN_ACTIONS_KEY = "solana-radar:pending-token-actions:v1";
@@ -2061,6 +2061,7 @@ function renderStatus() {
   const status = state.scanStatus || {};
   const discoveryStatus = state.discoveryStatus || {};
   const running = Boolean(status.running);
+  const maintenance = status.status === "maintenance";
   const failed = status.status === "failed";
   const freshness = reportFreshness(report.generated_at);
   const failedHealth = failed && status.scan_health && Object.keys(status.scan_health).length
@@ -2112,24 +2113,25 @@ function renderStatus() {
         ? `<span class="status-pill" title="${esc(persistence.deferred_reason || persistence.error || "Current dashboard is saved; older history is waiting for background delivery")}">Archive pending: ${esc(persistence.pending)}</span>`
         : `<span class="status-pill freshness-warn" title="${esc(persistence.error || persistence.durable_dashboard_error || "Current cloud snapshot is not confirmed; retry queued")}">Cloud save pending: ${esc(persistence.pending)}</span>`;
   const targeted = report.scan_profile === "targeted";
-  const deepAt = report.last_deep_scan_at || (targeted ? null : report.generated_at);
+  const deepAt = maintenance ? null : report.last_deep_scan_at || (targeted ? null : report.generated_at);
   const deepFreshness = deepAt ? reportFreshness(deepAt) : null;
-  els.subtitle.textContent = report.generated_at
+  els.subtitle.textContent = maintenance ? "Clean restart: first scan pending" : report.generated_at
     ? `${targeted ? "Last check" : "Last scan"} ${dateLabel(report.generated_at)}`
     : "No scan report yet";
   const summary = document.querySelector("#scannerSummary");
   if (summary) {
-    summary.textContent = failed ? "Last scan attempt failed. Previous results are shown."
+    summary.textContent = maintenance ? "Scanner paused while Turso account access is restored."
+      : failed ? "Last scan attempt failed. Previous results are shown."
       : freshness.tone !== "good" ? `Scan data is ${freshness.label}. Checks may be overdue.`
         : state.dataSource === "static" ? "Published scan snapshot. Live wallet details may be unavailable."
           : healthStatus !== "healthy" ? "Scan coverage is incomplete. Check each token's evidence."
             : "Scanner is up to date";
     summary.className = failed || freshness.tone === "bad" ? "negative" : "";
   }
-  els.runScan.disabled = running || state.publishedDashboard;
+  els.runScan.disabled = running || maintenance || state.publishedDashboard;
   els.runScan.title = state.publishedDashboard ? "Scanner runs by the hourly GitHub Actions schedule" : "";
   els.statusRow.innerHTML = [
-    `<span class="status-pill"><span class="dot ${running ? "warn" : ""}"></span>${running ? "scan running" : "idle"}</span>`,
+    `<span class="status-pill"><span class="dot ${running || maintenance ? "warn" : ""}"></span>${maintenance ? "maintenance" : running ? "scan running" : "idle"}</span>`,
     failed ? `<span class="status-pill freshness-bad" title="${esc(status.error || "Scanner failed")}"><span class="dot bad"></span>last attempt failed ${esc(dateLabel(status.last_attempt_at))}</span>` : "",
     `<span class="status-pill freshness-${freshness.tone}"><span class="dot ${freshness.tone === "good" ? "" : freshness.tone}"></span>${esc(freshness.label)}</span>`,
     targeted ? `<span class="status-pill">targeted check: ${esc(report.stats?.scanned_pools ?? "-")} pools</span>` : "",

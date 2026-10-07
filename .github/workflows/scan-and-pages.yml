@@ -224,9 +224,9 @@ jobs:
             data/state.json
             data/discovery_state.json
             data/discovery_status.json
-          key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ runner.os }}-solana-radar-state-v5-20261007-clean-v1-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ${{ runner.os }}-solana-radar-state-v4-
+            ${{ runner.os }}-solana-radar-state-v5-20261007-clean-v1-
 
       - name: Preserve pending cloud writes
         id: outbox_restore
@@ -234,9 +234,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: data/remote_outbox
-          key: ${{ runner.os }}-solana-radar-outbox-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ runner.os }}-solana-radar-outbox-v2-20261007-clean-v1-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ${{ runner.os }}-solana-radar-outbox-v1-
+            ${{ runner.os }}-solana-radar-outbox-v2-20261007-clean-v1-
 
       - name: Record pre-writer runtime revisions
         if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.observe_robinhood == 'true' || steps.plan.outputs.recover_storage == 'true'
@@ -397,7 +397,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: data/remote_outbox
-          key: ${{ runner.os }}-solana-radar-outbox-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ runner.os }}-solana-radar-outbox-v2-20261007-clean-v1-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Restore independent Robinhood observations
         if: steps.plan.outputs.observe_robinhood == 'true'
@@ -448,7 +448,7 @@ jobs:
             data/state.json
             data/discovery_state.json
             data/discovery_status.json
-          key: ${{ runner.os }}-solana-radar-state-v4-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ runner.os }}-solana-radar-state-v5-20261007-clean-v1-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Preserve Robinhood observations
         if: steps.robinhood.outcome == 'success'

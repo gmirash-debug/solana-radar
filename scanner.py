@@ -34,6 +34,7 @@ from position_history_rpc import check_receipt_positions
 from wallet_activity import AuditBudget, advance_wallet_history, summarize_wallet_activity, recover_sale_history_status
 from runtime_checkpoint import build_checkpoint, restore_checkpoint, checkpoint_documents, hydrate_checkpoint
 from cold_outbox import archive_snapshot
+from storage_generation import storage_epoch
 from runtime_dashboard import dashboard_documents
 from history_contract import history_event_error, source_time
 from rpc_budget import configure_monthly_budgets, request_reservation, native_cost, DurableChunkBudget, monthly_budget_for
@@ -1285,6 +1286,7 @@ def remote_api_call(method, path, config, payload=None, params=None):
         "Content-Type": "application/json",
         "accept": "application/json",
         "x-radar-ingest-secret": secret,
+        "x-radar-storage-epoch": storage_epoch(config),
     }
     response = requests.request(
         method,
@@ -13602,6 +13604,13 @@ def compact_state(state, pools, alerts, config, observed_at):
     now = parse_timestamp(observed_at) or int(time.time())
     token_keys = set()
     pool_keys = set()
+    # Age alone cannot retire a still-held or unresolved original cohort.
+    for pool_key, entry in (state.get("pools") or {}).items():
+        thesis = entry.get("signal_thesis") if isinstance(entry, dict) else None
+        if isinstance(thesis, dict) and thesis.get("status") not in {"invalidated", "closed"}:
+            pool_keys.add(pool_key)
+            if thesis.get("token_address"):
+                token_keys.add(thesis["token_address"])
     for pool in pools or []:
         if pool.token_address:
             token_keys.add(pool.token_address)
@@ -13688,7 +13697,8 @@ def compact_state(state, pools, alerts, config, observed_at):
             keep_thesis = bool(
                 isinstance(thesis, dict)
                 and (
-                    not thesis_cutoff
+                    thesis.get("status") not in {"invalidated", "closed"}
+                    or not thesis_cutoff
                     or thesis_seen >= thesis_cutoff
                 )
             )
@@ -15129,6 +15139,9 @@ def main():
     args = parser.parse_args()
 
     config = load_json(CONFIG_PATH if CONFIG_PATH.exists() else DEFAULT_CONFIG_PATH, {})
+    if config.get("storage_maintenance") is True:
+        print("Scanner paused for storage maintenance. No RPC work was started.")
+        return
     if args.mode and not args.lane:
         config = apply_mode(config, args.mode)
         config.pop("lanes", None)

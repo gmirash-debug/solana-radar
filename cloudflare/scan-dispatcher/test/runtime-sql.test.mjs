@@ -89,6 +89,22 @@ test("SQL checkpoint rejects missing or corrupted parts, publishes atomically, a
   assert.equal(f.sql.prepare("SELECT COUNT(*) n FROM runtime_sql_references").get().n,1);
 });
 
+test("metadata-only manifests update one row and do not rewrite common references",async t=>{
+  const f=fixture(t),a=await blob("AAAA"),b=await blob("BBBB");
+  for (const part of [a,b]) await writeSqlRuntime(f.env,`checkpoint:deep:blob:${part.sha256}`,part,AT);
+  const value={...manifest(a),encoded_bytes:8,parts:[a,b].map(part=>({id:part.sha256,bytes:4}))};
+  await writeSqlRuntime(f.env,"checkpoint:deep",value,AT,1);
+  const before=f.writes;
+  const original=f.sql.prepare("SELECT name,touched_at FROM runtime_sql_documents WHERE content_id IS NOT NULL ORDER BY name").all();
+  await writeSqlRuntime(f.env,"checkpoint:deep",{...value,runtime:{revision:2}},AT,2);
+  assert.equal(f.writes-before,1);
+  assert.deepEqual(f.sql.prepare("SELECT name,touched_at FROM runtime_sql_documents WHERE content_id IS NOT NULL ORDER BY name").all(),original);
+  assert.equal(f.sql.prepare("SELECT COUNT(*) n FROM runtime_sql_references").get().n,2);
+  await writeSqlRuntime(f.env,"checkpoint:deep",manifest(b),AT,3);
+  assert.deepEqual(f.sql.prepare("SELECT part FROM runtime_sql_references").all().map(row=>row.part),
+    [`checkpoint:deep:blob:${b.sha256}`]);
+});
+
 test("equivalent checkpoint representations can change without changing source time or revision",async t=>{
   const f=fixture(t),a=await blob("AAAA"),b=await blob("BBBB"),runtime={updated_at:AT,revision:2};
   await writeSqlRuntime(f.env,`checkpoint:deep:blob:${a.sha256}`,a,AT);
