@@ -271,10 +271,10 @@ class WorkflowContracts(unittest.TestCase):
                            ("discovery-pulse.yml", "Save shared scanner state")):
             source = (WORKFLOWS / name).read_text()
             self.assertFalse(condition(workflow_steps(name)[save], {"steps.runtime_cache.outputs.valid": "false"}))
-            self.assertIn("solana-radar-state-v4-", source)
+            self.assertIn("solana-radar-state-v5-20261007-clean-v1-", source)
             self.assertIn("github.run_attempt", source)
             self.assertIn("restore-keys:", source)
-        self.assertIn("solana-radar-outbox-v1-", (WORKFLOWS / "scan-and-pages.yml").read_text())
+        self.assertIn("solana-radar-outbox-v2-20261007-clean-v1-", (WORKFLOWS / "scan-and-pages.yml").read_text())
 
     def test_baselines_precede_installs_and_validation(self):
         names = list(self.steps)

@@ -5,6 +5,7 @@ import json
 from urllib.parse import urlparse
 
 import requests
+from storage_generation import storage_epoch
 
 MAX_BYTES = 16 * 1024 * 1024
 MAX_DECODED_BYTES = 128 * 1024 * 1024
@@ -24,6 +25,7 @@ def archive_snapshot(body, url, secret, timeout=25, session=None):
     session = session or requests
     response = session.post(url.rstrip("/") + "/api/storage/outbox", params={"id": digest}, data=data,
                             headers={"x-radar-ingest-secret": secret, "content-type": "application/gzip",
+                                     "x-radar-storage-epoch": storage_epoch(),
                                      "x-radar-generated-at": body["report"]["generated_at"]},
                             timeout=timeout, allow_redirects=False)
     if not response.ok:
@@ -37,7 +39,7 @@ def archive_snapshot(body, url, secret, timeout=25, session=None):
     progress = body.get("_sync_progress") or {}
     if progress:
         saved = session.patch(url.rstrip("/") + "/api/storage/outbox",params={"id":digest},
-                              headers={"x-radar-ingest-secret":secret},
+                              headers={"x-radar-ingest-secret":secret, "x-radar-storage-epoch":storage_epoch()},
                               json={"progress":progress,"completed":False},timeout=timeout,allow_redirects=False)
         receipt = saved.json()
         if not saved.ok or receipt.get("ok") is not True or receipt.get("accepted") is not True:

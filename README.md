@@ -138,6 +138,10 @@ python3 solana-radar/scanner.py --watch --lane reactivation
 
 ## GitHub automation
 
+Storage retention and clean-restart rules are defined in
+[`docs/storage-protocol.md`](docs/storage-protocol.md). Runtime parts are reused,
+inactive discovery data expires, and active/unresolved positions are protected.
+
 The repository includes `.github/workflows/scan-and-pages.yml`.
 
 It runs the scanner at most once per hour, keeps its private runtime state in

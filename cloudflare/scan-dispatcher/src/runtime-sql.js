@@ -132,12 +132,18 @@ export async function writeSqlRuntime(env, name, value, updatedAt, revision = 0)
        ${representationUpgrade}))${name === "rpc_ledger" ? " RETURNING updated_at,revision,bytes,payload_sha256" : ""}`).bind(...args);
   const statements = [write];
   if (!blob && name !== "rpc_ledger") {
-    // A restore that fetched the superseded manifest keeps its parts for 48h.
+    const retainedParts = refs.map(ref => `${name}:blob:${ref.id}`);
+    const retiredOnly = retainedParts.length
+      ? ` AND part NOT IN (${retainedParts.map((_,i) => `?${i+4}`).join(",")})` : "";
+    // Only retired parts need new grace timestamps. Stable references incur
+    // no row writes on metadata-only checkpoint revisions.
     statements.push(db.prepare(`UPDATE runtime_sql_documents SET touched_at=?3 WHERE name IN
-      (SELECT part FROM runtime_sql_references WHERE root=?1) AND EXISTS
-      (SELECT 1 FROM runtime_sql_documents WHERE name=?1 AND payload_sha256=?2)`).bind(name, digest, touchedAt));
-    statements.push(db.prepare(`DELETE FROM runtime_sql_references WHERE root=?1 AND EXISTS
-      (SELECT 1 FROM runtime_sql_documents WHERE name=?1 AND payload_sha256=?2)`).bind(name, digest));
+      (SELECT part FROM runtime_sql_references WHERE root=?1${retiredOnly}) AND EXISTS
+      (SELECT 1 FROM runtime_sql_documents WHERE name=?1 AND payload_sha256=?2)`).bind(name, digest, touchedAt,...retainedParts));
+    const removedOnly = retainedParts.length
+      ? ` AND part NOT IN (${retainedParts.map((_,i) => `?${i+3}`).join(",")})` : "";
+    statements.push(db.prepare(`DELETE FROM runtime_sql_references WHERE root=?1${removedOnly} AND EXISTS
+      (SELECT 1 FROM runtime_sql_documents WHERE name=?1 AND payload_sha256=?2)`).bind(name, digest,...retainedParts));
     // One statement rather than one external request per token/part.
     if (refs.length) {
       const refArgs = [name, digest];
@@ -233,11 +239,130 @@ export async function sqlDashboardResponse(env, request, extra = {}) {
   return Response.json({...summary,...extra,ok:true,report_source_updated_at:stored.updated_at,storage_source:"turso_runtime"});
 }
 
-export async function collectSqlRuntimeGarbage(env, now = Date.now()) {
-  // The indexed bounded deletion is atomic with publication and the FK is an
-  // additional safeguard. No R2 calls and no legacy DO data are deleted.
-  return database(env).prepare(`DELETE FROM runtime_sql_documents WHERE name IN
-    (SELECT d.name FROM runtime_sql_documents d WHERE d.content_id IS NOT NULL AND d.touched_at<?1
-      AND NOT EXISTS (SELECT 1 FROM runtime_sql_references r WHERE r.part=d.name)
-      ORDER BY d.touched_at,d.name LIMIT 128)`).bind(now - 48 * 3600000).run();
+export const RUNTIME_RETENTION_LIMITS = Object.freeze({graceMinutes:60, maxBatches:4,
+  batchRows:256, maxQueries:32, garbageThresholdBytes:8 * 1024 * 1024, targetBytes:256 * 1024 * 1024});
+
+const GC_BLOB = `(d.content_id IS NOT NULL AND length(d.content_id)=64
+  AND d.content_id NOT GLOB '*[^a-f0-9]*' AND d.name IN
+  ('dashboard:blob:'||d.content_id,'checkpoint:deep:blob:'||d.content_id,'checkpoint:discovery:blob:'||d.content_id))`;
+const GC_UNREFERENCED = "NOT EXISTS (SELECT 1 FROM runtime_sql_references r WHERE r.part=d.name)";
+const GC_ELIGIBLE = `${GC_BLOB} AND typeof(d.touched_at)='integer' AND d.touched_at>=0
+  AND d.touched_at<?1 AND ${GC_UNREFERENCED}`;
+
+function gcInteger(value, fallback, minimum, maximum) {
+  if (value !== undefined && typeof value !== "number"
+      && (typeof value !== "string" || !/^\d+$/.test(value))) throw new Error("runtime_gc_options_invalid");
+  const parsed = value === undefined ? fallback : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) throw new Error("runtime_gc_options_invalid");
+  return parsed;
+}
+
+function gcOptions(env, options) {
+  if (!options || typeof options !== "object" || Array.isArray(options)
+      || (options.preview !== undefined && typeof options.preview !== "boolean")
+      || (options.force !== undefined && typeof options.force !== "boolean")
+      || (options.onQuery !== undefined && typeof options.onQuery !== "function")) throw new Error("runtime_gc_options_invalid");
+  const limits = RUNTIME_RETENTION_LIMITS;
+  const now = gcInteger(options.now, Date.now(), 0, 8_640_000_000_000_000);
+  const graceMinutes = gcInteger(options.graceMinutes ?? env.RUNTIME_GC_GRACE_MINUTES, limits.graceMinutes, 60, 2880);
+  return {...options, now, graceMinutes, cutoff:now - graceMinutes * 60_000,
+    maxBatches:gcInteger(options.maxBatches, limits.maxBatches, 0, limits.maxBatches),
+    batchRows:gcInteger(options.batchRows, limits.batchRows, 1, limits.batchRows),
+    maxQueries:gcInteger(options.maxQueries, limits.maxQueries, 1, limits.maxQueries),
+    garbageThresholdBytes:gcInteger(options.garbageThresholdBytes, 0, 0, Number.MAX_SAFE_INTEGER),
+    targetBytes:gcInteger(options.targetBytes, limits.targetBytes, 1, Number.MAX_SAFE_INTEGER)};
+}
+
+function gcCount(value) {
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error("runtime_gc_result_invalid");
+  return value;
+}
+
+async function runtimeInventory(db, cutoff, reserve) {
+  reserve();
+  // Only scalar metadata is read, never the blobs or manifests' payload_json.
+  const row = await db.prepare(`SELECT COUNT(*) runtime_rows,COALESCE(SUM(bytes),0) runtime_bytes,
+    COALESCE(SUM(CASE WHEN content_id IS NOT NULL AND NOT (${GC_UNREFERENCED}) THEN 1 ELSE 0 END),0) referenced_rows,
+    COALESCE(SUM(CASE WHEN content_id IS NOT NULL AND NOT (${GC_UNREFERENCED}) THEN bytes ELSE 0 END),0) referenced_bytes,
+    COALESCE(SUM(CASE WHEN ${GC_ELIGIBLE} THEN 1 ELSE 0 END),0) backlog_rows,
+    COALESCE(SUM(CASE WHEN ${GC_ELIGIBLE} THEN bytes ELSE 0 END),0) backlog_bytes,
+    COALESCE(SUM(CASE WHEN ${GC_BLOB} AND ${GC_UNREFERENCED} AND d.touched_at>=?1 THEN 1 ELSE 0 END),0) grace_rows,
+    COALESCE(SUM(CASE WHEN ${GC_BLOB} AND ${GC_UNREFERENCED} AND d.touched_at>=?1 THEN bytes ELSE 0 END),0) grace_bytes
+    FROM runtime_sql_documents d`).bind(cutoff).first();
+  if (!row) throw new Error("runtime_gc_result_invalid");
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, gcCount(value)]));
+}
+
+export async function previewSqlRuntimeGarbage(env, options = {}) {
+  return collectSqlRuntimeGarbage(env, {...options, preview:true});
+}
+
+export async function collectSqlRuntimeGarbage(env, now = Date.now(), options = {}) {
+  const result = {ok:true, preview:false, deleted_rows:0, deleted_bytes:0, batches:0, queries:0,
+    backlog_rows:null, backlog_bytes:null, runtime_bytes:null, error:null, outcome_unknown:false,
+    bytes_basis:"stored_payload_bytes_not_physical", meta:{changes:0}};
+  let writeInFlight = false;
+  try {
+    const config = gcOptions(env, typeof now === "object" ? now : {...options, now});
+    Object.assign(result, {preview:Boolean(config.preview), grace_minutes:config.graceMinutes,
+      cutoff_ms:config.cutoff, target_bytes:config.targetBytes});
+    const db = database(env);
+    const reserve = () => {
+      if (result.queries >= config.maxQueries) throw new Error("runtime_gc_query_budget");
+      config.onQuery?.(); result.queries++;
+    };
+    let inventory = await runtimeInventory(db, config.cutoff, reserve);
+    Object.assign(result, inventory);
+    const pressure = inventory.backlog_bytes >= RUNTIME_RETENTION_LIMITS.garbageThresholdBytes
+      || inventory.runtime_bytes > config.targetBytes;
+    const batches = pressure ? config.maxBatches : Math.min(1, config.maxBatches);
+    const rows = pressure ? config.batchRows : Math.min(128, config.batchRows);
+    if (!config.preview && inventory.backlog_rows && (config.force
+        || inventory.backlog_bytes >= config.garbageThresholdBytes || inventory.runtime_bytes > config.targetBytes)) {
+      for (let index = 0; index < batches; index++) {
+        // Leave one query for a fresh inventory; never advertise a stale backlog.
+        if (result.queries + 3 > config.maxQueries) { result.deferred_reason="runtime_gc_query_budget"; break; }
+        reserve();
+        const page = await db.prepare(`SELECT d.name,d.bytes,d.touched_at,d.payload_sha256
+          FROM runtime_sql_documents d WHERE ${GC_ELIGIBLE}
+          ORDER BY d.touched_at,d.name LIMIT ?2`).bind(config.cutoff, rows).all();
+        if (page?.success === false || !Array.isArray(page?.results)) throw new Error("runtime_gc_result_invalid");
+        if (!page.results.length) break;
+        const args = [config.cutoff];
+        const tuples = page.results.map(row => {
+          const first = args.length + 1;
+          args.push(row.name,row.touched_at,row.payload_sha256,row.bytes);
+          return `(?${first},?${first+1},?${first+2},?${first+3})`;
+        });
+        reserve(); writeInFlight=true;
+        // Recheck both protection and the selected version in the DELETE itself.
+        // Publication and FK RESTRICT fence concurrent ref additions/restaging.
+        const removed = await db.prepare(`DELETE FROM runtime_sql_documents AS d WHERE ${GC_ELIGIBLE}
+          AND (d.name,d.touched_at,d.payload_sha256,d.bytes) IN (VALUES ${tuples.join(",")})
+          RETURNING name,bytes`).bind(...args).all();
+        if (removed?.success === false || !Array.isArray(removed?.results)) {
+          throw Object.assign(new Error("runtime_gc_result_invalid"), {outcomeUnknown:true});
+        }
+        let deletedBytes;
+        try { deletedBytes = removed.results.reduce((sum, row) => gcCount(sum + gcCount(row.bytes)), 0); }
+        catch { throw Object.assign(new Error("runtime_gc_result_invalid"), {outcomeUnknown:true}); }
+        writeInFlight=false;
+        result.deleted_rows += removed.results.length; result.deleted_bytes += deletedBytes; result.batches++;
+        result.backlog_rows=result.backlog_bytes=result.runtime_bytes=null;
+        if (!removed.results.length) { result.deferred_reason="runtime_gc_concurrent_protection"; break; }
+        if (page.results.length < rows) break;
+      }
+      inventory = await runtimeInventory(db, config.cutoff, reserve);
+      Object.assign(result, inventory);
+    } else if (!config.preview && inventory.backlog_rows) result.deferred_reason="runtime_gc_below_threshold";
+    result.target_met = result.runtime_bytes <= config.targetBytes;
+    result.protected_over_target = !result.target_met && !result.backlog_rows;
+    if (!config.preview && result.backlog_rows && !result.deferred_reason) result.deferred_reason="runtime_gc_batch_budget";
+  } catch (error) {
+    result.ok=false; result.error=String(error?.message || error);
+    result.outcome_unknown=writeInFlight && Boolean(error?.outcomeUnknown);
+    result.backlog_rows=result.backlog_bytes=result.runtime_bytes=null;
+  }
+  result.meta.changes=result.deleted_rows;
+  return result;
 }

@@ -180,6 +180,17 @@ test("GMGN metrics separate candidates, selected pools, read heads and analysis"
   assert.match(text,/Analyzed pools\s*4/);
 });
 
+test("a clean restart is not displayed as a successful fresh scan",t=>{
+  const api=fixture(t,{signalThesis:null});
+  api.state.scanStatus={status:"maintenance",running:false,last_success_at:null};
+  api.state.report.scan_profile="storage_reset";
+  api.renderStatus();
+  assert.equal(api.dom.window.document.querySelector("#runScan").disabled,true);
+  assert.match(api.dom.window.document.querySelector("#scannerSummary").textContent,/Scanner paused/);
+  assert.match(api.dom.window.document.body.textContent,/Clean restart: first scan pending/);
+  assert.equal(api.buildTokenSignals().length,0);
+});
+
 test("complete trading history remains distinct from pending wallet verification", t => {
   const p = {...pool,candidate_analysis:{initial_hours:6,checked_at:checked,pending:true,
     history_pending:false,evidence_pending:true,covered_ranges:[],scope:"probe"}};
@@ -425,11 +436,11 @@ test("partial movement note needs actual observations and never renders raw amou
 
 test("HTML entrypoint and every dashboard JS import use the same evidence cache tag", () => {
   const html = readFileSync(new URL("../index.html",import.meta.url),"utf8");
-  assert.match(html, /src="radar-bootstrap\.js\?v=20261006-gmgn-cap-v4"/);
+  assert.match(html, /src="radar-bootstrap\.js\?v=20261007-storage-reset-v1"/);
   for (const file of readdirSync(new URL("../",import.meta.url)).filter(file => file.endsWith(".js"))) {
     const source = readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
     for (const match of source.matchAll(/(?:from\s+|import\()"(\.\/[^"?]+\.js\?v=([^"]+))"/g)) {
-      assert.equal(match[2],"20261006-gmgn-cap-v4",`${file}: ${match[1]}`);
+      assert.equal(match[2],"20261007-storage-reset-v1",`${file}: ${match[1]}`);
     }
   }
 });
