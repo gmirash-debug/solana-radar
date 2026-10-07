@@ -88,12 +88,23 @@ Cloud integrity, foreign keys, empty trading tables, preserved RPC counters and
 4 GB maximum. Worker credentials and the backup recipient's read-only token
 were rotated without printing or committing them.
 
-Writes are enabled for a bounded control scan, but the automatic scheduler and
-discovery/watchdog workflows remain paused until a real new-generation scan
-has published successfully. R2 monitoring and private R2 backups remain enabled.
-Never restore old `state-v4` or `outbox-v1` caches, and never rederive monthly
-counters from the empty public maintenance snapshot. A maintenance banner is
-not proof that a first scan has succeeded.
+The bounded control scan published at `2026-10-07T21:39:21Z`. It resolved 59
+eligible pools from all ten GMGN attention lists and checked 6 pools onchain.
+RPC calls had no errors. Current dashboard, its summary and all 144 checkpoint
+parts were acknowledged by Turso, with no pending or quarantined writes.
+SQL occupied about 1.35 MB after this first pass, measured using page count
+and page size rather than delayed provider usage metrics.
+
+The first pass produced no confirmed alerts and its history coverage remains
+partial. This proves storage/routing/publication recovery, not complete market
+coverage or detection quality. Fresh observations and scheduled history tasks
+must accumulate again after the deliberately empty restart.
+
+Automatic scheduling, discovery/watchdog and the daily read-only SQL backup
+are being restored after this verified publication. The new daily backup run
+passed export, restore and original-row comparison. R2 monitoring and private
+R2 backups remain enabled. Never restore old `state-v4` or `outbox-v1` caches,
+and never rederive monthly counters from the old empty maintenance snapshot.
 
 ## R2 Is Not An Unlimited Replacement
 
