@@ -1,6 +1,8 @@
+import os
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+from storage_generation import DEFAULT_STORAGE_EPOCH
 from tools.flush_history_queue import drain
 
 
@@ -9,6 +11,24 @@ def response(body, status=200):
 
 
 class HistoryDrainTests(unittest.TestCase):
+    def test_each_flush_uses_the_current_storage_epoch(self):
+        for configured, expected in (("", DEFAULT_STORAGE_EPOCH), ("next-generation", "next-generation")):
+            with self.subTest(epoch=configured), patch.dict(os.environ, {"RADAR_STORAGE_EPOCH": configured}):
+                session = Mock()
+                session.post.return_value = response({"ok": True, "pending": 2, "delivered": 1})
+                drain("https://worker.invalid", "secret", maximum=2, session=session)
+                self.assertEqual(session.post.call_count, 2)
+                for call in session.post.call_args_list:
+                    self.assertEqual(call.kwargs["headers"], {
+                        "x-radar-ingest-secret": "secret", "x-radar-storage-epoch": expected,
+                    })
+
+    def test_invalid_epoch_is_rejected_before_any_request(self):
+        session = Mock()
+        with patch.dict(os.environ, {"RADAR_STORAGE_EPOCH": "unsafe/epoch"}), self.assertRaises(ValueError):
+            drain("https://worker.invalid", "secret", session=session)
+        session.post.assert_not_called()
+
     def test_progressing_legacy_migration_continues_only_within_request_limit(self):
         session = Mock()
         session.post.return_value = response({"ok": True, "migration_pending": True, "migration_progressed": 25})

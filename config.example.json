@@ -605,7 +605,7 @@
   "alert_event_export_limit": 80,
   "state_json_compact": true,
   "storage_epoch": "20261007-clean-v1",
-  "storage_maintenance": true,
+  "storage_maintenance": false,
   "alert_history_keep_tiers": [
     "candidate",
     "actionable",

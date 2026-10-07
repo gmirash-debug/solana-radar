@@ -315,11 +315,22 @@ class WorkflowContracts(unittest.TestCase):
         self.assertLess(names.index(name), names.index("Save pending cloud writes"))
         step = self.steps[name]
         self.assertIn("continue-on-error: true", step)
+        self.assertIn("steps.run_scanner.outcome == 'success'", step)
         self.assertIn("steps.run_scanner.outputs.exit_code == '0'", step)
         self.assertIn("hashFiles('tools/flush_history_queue.py') != ''", step)
         self.assertIn("--max-flushes 10 --max-seconds 55", step)
         self.assertIn("--kill-after=5s 60s", step)
         self.assertIn("RADAR_INGEST_SECRET:", step)
+
+    def test_history_consumer_never_runs_for_a_skipped_or_failed_scanner(self):
+        step = self.steps["Flush bounded SQL history queue after live publication"].replace(
+            "hashFiles('tools/flush_history_queue.py') != ''", "True")
+        for outcome, code, expected in (("success", "0", True), ("success", "1", False),
+                                         ("skipped", "", False), ("skipped", "0", False),
+                                         ("failure", "0", False)):
+            with self.subTest(outcome=outcome, code=code):
+                values = {"steps.run_scanner.outcome": outcome, "steps.run_scanner.outputs.exit_code": code}
+                self.assertEqual(condition(step, values), expected)
 
     def test_manual_ui_freshness_step_does_not_scan(self):
         source = self.steps["Check scan freshness"]

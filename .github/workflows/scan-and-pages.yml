@@ -375,7 +375,7 @@ jobs:
 
       - name: Flush bounded SQL history queue after live publication
         id: history_flush
-        if: steps.run_scanner.outputs.exit_code == '0' && hashFiles('tools/flush_history_queue.py') != ''
+        if: steps.run_scanner.outcome == 'success' && steps.run_scanner.outputs.exit_code == '0' && hashFiles('tools/flush_history_queue.py') != ''
         continue-on-error: true
         timeout-minutes: 2
         env:

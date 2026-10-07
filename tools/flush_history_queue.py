@@ -2,10 +2,15 @@
 import argparse
 import json
 import os
+from pathlib import Path
+import sys
 import time
 from urllib.parse import urlparse
 
 import requests
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from storage_generation import storage_epoch
 
 
 def drain(url, secret, maximum=10, seconds=55, session=None, clock=time.monotonic):
@@ -14,6 +19,7 @@ def drain(url, secret, maximum=10, seconds=55, session=None, clock=time.monotoni
         raise ValueError("invalid history API URL")
     if not secret or not 1 <= maximum <= 10 or not 1 <= seconds <= 55:
         raise ValueError("invalid history drain configuration")
+    headers = {"x-radar-ingest-secret": secret, "x-radar-storage-epoch": storage_epoch()}
     session = session or requests.Session()
     deadline = clock() + seconds
     summary = {"flushes": 0, "delivered": 0, "continued": 0, "pending": None, "status": "bounded"}
@@ -24,7 +30,7 @@ def drain(url, secret, maximum=10, seconds=55, session=None, clock=time.monotoni
             break
         try:
             response = session.post(url.rstrip("/") + "/api/runtime/history/flush",
-                                    headers={"x-radar-ingest-secret": secret},
+                                    headers=headers,
                                     timeout=min(remaining, 15), allow_redirects=False)
             body = response.json()
         except (requests.RequestException, ValueError):

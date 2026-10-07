@@ -46,9 +46,8 @@ same bounded budget discipline. GC errors are reported, not silently ignored.
 
 The 256 MiB runtime target is an operational target, not a promise about the
 entire SQL database. Historical evidence and indexes are measured separately.
-The replacement cloud database must be created with a 4 GB maximum to leave
-headroom below the 5 GB organization free-storage allowance. It has not yet
-been created while the provider block remains. This is a last-resort safeguard,
+The replacement cloud database has a 4 GB maximum to leave headroom below the
+5 GB organization free-storage allowance. This is a last-resort safeguard,
 not a replacement for retention or monitoring.
 
 ## Clean Restart
@@ -74,23 +73,27 @@ monthly sync/read/write quotas are exhausted or storage usage has not been
 recalculated. Never claim the restart is complete before the new cloud DB is
 actually reachable. Paid-plan activation requires the user's separate action.
 
-## Pending Provider Unblock
+## Recovery Status
 
 On 2026-10-07 the user explicitly requested a clean restart. The old cloud DB
-was deleted; creating its replacement was rejected by the organization's
-monthly quota block. Support was contacted at `support@turso.tech`.
-No paid plan or overages were enabled. The source configuration remains frozen
-and the Solana scan, discovery, watchdog and private SQL-backup workflows are
-paused. R2 monitoring and private R2 backups remain enabled.
+was deleted; creating its replacement was initially rejected by the
+organization's monthly quota block. Support was contacted at `support@turso.tech`
+and granted a one-time free sync-quota reset. No paid plan or overages were enabled.
 
-After provider unblock: use the already prepared verified empty seed, which
-includes migration `0006`, to create `solana-radar` in `radar-eu`. Rotate
-equivalent DB credentials, verify preserved RPC counters and retention, and
-update the source freeze flags before reenabling workflows. Set
-`storage_maintenance=false` only after the new database is verified. This CLI
-guard prevents an independently scheduled GitHub job from spending RPC while
-the Worker is frozen. Do not restore old `state-v4` or `outbox-v1` caches, and
-do not rederive monthly counters from the empty public maintenance snapshot.
+The replacement `solana-radar` in `radar-eu` was created and the verified empty
+seed, including migration `0006`, was imported in one atomic SQL transaction.
+Native SQLite upload hit a provider routing error; no partial import was reused.
+Cloud integrity, foreign keys, empty trading tables, preserved RPC counters and
+80 manual exclusions were verified. The database has delete protection and a
+4 GB maximum. Worker credentials and the backup recipient's read-only token
+were rotated without printing or committing them.
+
+Writes are enabled for a bounded control scan, but the automatic scheduler and
+discovery/watchdog workflows remain paused until a real new-generation scan
+has published successfully. R2 monitoring and private R2 backups remain enabled.
+Never restore old `state-v4` or `outbox-v1` caches, and never rederive monthly
+counters from the empty public maintenance snapshot. A maintenance banner is
+not proof that a first scan has succeeded.
 
 ## R2 Is Not An Unlimited Replacement
 
