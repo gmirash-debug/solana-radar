@@ -45,7 +45,7 @@ GITHUB_DISCOVERY_WORKFLOW = "discovery-pulse.yml"
 GITHUB_REF = "main"
 ALLOWED_ORIGIN = "https://gmirash-debug.github.io"
 SCHEDULER_ENABLED = "disabled"
-STORAGE_WRITES_FROZEN = "true"
+STORAGE_WRITES_FROZEN = "false"
 STORAGE_EPOCH = "20261007-clean-v1"
 HISTORY_FLUSH_CRON = "37 * * * *"
 # Release-specific deferred migration. Other versions are deliberately rejected.
