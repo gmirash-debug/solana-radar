@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {DatabaseSync} from "node:sqlite";
 import {readFileSync} from "node:fs";
 import test from "node:test";
-import {writeSqlRuntime,readSqlRuntime,sqlDashboardResponse,collectSqlRuntimeGarbage,availableSqlDashboardParts} from "../src/runtime-sql.js";
+import {writeSqlRuntime,readSqlRuntime,sqlRuntimeResponse,sqlDashboardResponse,collectSqlRuntimeGarbage,availableSqlDashboardParts} from "../src/runtime-sql.js";
 import {runtimeCheckpointResponse,runtimeDocument} from "../src/runtime.js";
 import {availableSqlRuntimeParts} from "../src/runtime-sql.js";
 import {coldOutboxResponse} from "../src/cold-outbox.js";
@@ -137,6 +137,26 @@ test("generation-bound token evidence never becomes a public checkpoint or a dif
   assert.equal(detail.detail_status,"ready");
   await assert.rejects(writeSqlRuntime(f.env,"dashboard",{...root,token_detail_refs:{wrong:root.token_detail_refs.token}},AT,1),/missing_or_mismatched/);
   assert.equal((await readSqlRuntime(f.env,"dashboard")).value.token_detail_refs.token.id,part.sha256);
+});
+
+test("GMGN null-age observations survive both SQL ingestion and public read shaping",async t=>{
+  const f=fixture(t),pool={token_address:"gmgn-token",age_hours:2000};
+  const payload={report:{generated_at:AT,
+    config:{discovery_source_mode:"gmgn_attention",age_min_hours:null,age_max_hours:null},
+    alerts:[{pool,created_at:AT,action_tier:"candidate"}],
+    signal_theses:[{...pool,signal_at:AT,status:"unknown",cohort:[{owner:"private-owner"}]}],
+    summaries:[{pool}]},history:[]};
+  const saved=await sqlRuntimeResponse(f.env,new Request("https://worker/api/runtime?ingest_dashboard=1",{
+    method:"POST",body:JSON.stringify(payload)}),"dashboard");
+  assert.equal(saved.status,200);
+  assert.equal((await saved.json()).accepted,true);
+  assert.equal((await readSqlRuntime(f.env,"dashboard")).value.report.signal_theses.length,1);
+  const published=await (await sqlDashboardResponse(f.env,new Request("https://worker/api/dashboard"))).json();
+  assert.equal(published.report.alerts.length,1);
+  assert.equal(published.report.summaries.length,1);
+  assert.equal(published.report.signal_theses.length,1);
+  assert.equal(published.report.signal_theses[0].status,"unknown");
+  assert.equal(published.report.signal_theses[0].cohort,undefined);
 });
 
 test("list-first token responses remain pending until the full generation manifest is published",async t=>{
