@@ -749,6 +749,7 @@
   "candidate_extended_history_hours": 24,
   "candidate_history_check_minutes": 15,
   "candidate_history_retry_minutes": 5,
+  "candidate_history_archive_page_size": 1000,
   "unified_gecko_pages": 2,
   "gmgn_enabled": true,
   "gmgn_trenches_limit": 80,

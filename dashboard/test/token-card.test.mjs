@@ -202,6 +202,39 @@ test("complete trading history remains distinct from pending wallet verification
   assert.doesNotMatch(html,/Incomplete \/ retry pending/);
 });
 
+test("covered signal and fresh windows do not label an unrelated initial tail as incomplete", t => {
+  const p = {...pool, candidate_analysis:{coverage_version:2, initial_hours:6,checked_at:checked,
+    history_pending:true, initial_history_pending:true, pending_ranges:2,
+    live_window_complete:true,signal_window_complete:true,live_window_start:start,live_window_end:end,
+    covered_ranges:[[Date.parse(start)/1000,Date.parse(end)/1000]]}};
+  const api = fixture(t,{signalThesis:thesis({...p}),alerts:[alert({pool:p})]});
+  const html = api.renderEvidenceTab(api.buildTokenSignals()[0],"","");
+  assert.match(html,/Fresh transaction window<\/span><span>Checked/);
+  assert.match(html,/Original signal window<\/span><span>Checked/);
+  assert.match(html,/Initial history<\/span><span>Still loading \/ 2 ranges pending/);
+  assert.doesNotMatch(html,/History coverage<\/span><span>Incomplete/);
+});
+
+test("missing original coverage is not displayed as checked and interval rendering is bounded", t => {
+  const p = {...pool,candidate_analysis:{coverage_version:2, live_window_complete:false,
+    signal_window_complete:null, initial_history_pending:true, covered_ranges:Array.from({length:20},(_,i)=>[i+1,i+1])}};
+  const api = fixture(t,{signalThesis:thesis({...p}),alerts:[alert({pool:p})]});
+  const html = api.renderEvidenceTab(api.buildTokenSignals()[0],"","");
+  assert.match(html,/Fresh transaction window<\/span><span>Incomplete/);
+  assert.match(html,/Original signal window<\/span><span>Not established/);
+  assert.match(html,/16 earlier ranges/);
+});
+
+test("metrics distinguish complete fresh windows from initial history still loading", t => {
+  const api=fixture(t);
+  api.state.report.config={discovery_source_mode:"gmgn_attention"};
+  api.state.report.stats={scan_health:{live_fetch_pools:40,partial_live_windows:2,initial_history_pending_pools:30}};
+  api.renderFilters();
+  const text=api.dom.window.document.querySelector("#metrics").textContent;
+  assert.match(text,/Fresh windows checked\s*38/);
+  assert.match(text,/Initial history pending\s*30/);
+});
+
 test("failed RPC usage tracking is visible without claiming its quota was spent", t => {
   const api = fixture(t);
   api.state.report.stats = {rpc_providers:{helius:{status:"budget_ledger_unavailable",calls:{getHealth:1}}}};
@@ -436,11 +469,11 @@ test("partial movement note needs actual observations and never renders raw amou
 
 test("HTML entrypoint and every dashboard JS import use the same evidence cache tag", () => {
   const html = readFileSync(new URL("../index.html",import.meta.url),"utf8");
-  assert.match(html, /src="radar-bootstrap\.js\?v=20261008-stalled-evidence-v1"/);
+  assert.match(html, /src="radar-bootstrap\.js\?v=20261008-pool-history-v2"/);
   for (const file of readdirSync(new URL("../",import.meta.url)).filter(file => file.endsWith(".js"))) {
     const source = readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
     for (const match of source.matchAll(/(?:from\s+|import\()"(\.\/[^"?]+\.js\?v=([^"]+))"/g)) {
-      assert.equal(match[2],"20261008-stalled-evidence-v1",`${file}: ${match[1]}`);
+      assert.equal(match[2],"20261008-pool-history-v2",`${file}: ${match[1]}`);
     }
   }
 });
