@@ -62,6 +62,36 @@ class RpcRoutingTests(unittest.TestCase):
         self.assertEqual(rpc.transactions_for_address("pool", history_task="archive")["_provider"], "helius")
         self.assertEqual(rpc.transactions_for_address("pool", history_task="archive", provider_name="alchemy", pagination_token="pinned")["_provider"], "alchemy")
 
+    def test_archive_page_sizes_and_costs_are_provider_specific(self):
+        rpc = self.router()
+        for provider in rpc.providers.values():
+            provider.session.post.return_value = response({"data": []})
+        helius = rpc.transactions_for_address("pool", limit=1000, history_task="archive")
+        self.assertEqual(helius["_page_limit"], 1000)
+        self.assertEqual(rpc.providers["helius"].session.post.call_args.kwargs["json"]["params"][1]["limit"], 1000)
+        self.assertEqual(rpc.providers["helius"].attempted_credits, 100)
+        alchemy = rpc.transactions_for_address("pool", limit=1000, history_task="archive", provider_name="alchemy")
+        self.assertEqual(alchemy["_page_limit"], 100)
+        self.assertEqual(rpc.providers["alchemy"].session.post.call_args.kwargs["json"]["params"][1]["limit"], 100)
+        self.assertEqual(rpc.providers["alchemy"].attempted_credits, 100)
+
+    def test_large_archive_page_shrinks_to_remaining_native_budget(self):
+        rpc = self.router({"helius_rpc_credit_budget_per_scan": 20})
+        rpc.providers["helius"].session.post.return_value = response({"data": []})
+        result = rpc.transactions_for_address("pool", limit=1000, history_task="archive")
+        self.assertEqual(result["_provider"], "helius")
+        self.assertEqual(result["_page_limit"], 200)
+        self.assertEqual(rpc.providers["helius"].attempted_credits, 20)
+        self.assertNotIn("helius", rpc.blocked_providers)
+
+    def test_unaffordable_minimum_archive_page_uses_independent_fallback(self):
+        rpc = self.router({"helius_rpc_credit_budget_per_scan": 5})
+        rpc.providers["alchemy"].session.post.return_value = response({"data": []})
+        result = rpc.transactions_for_address("pool", limit=1000, history_task="archive")
+        self.assertEqual(result["_provider"], "alchemy")
+        self.assertEqual(result["_page_limit"], 100)
+        rpc.providers["helius"].session.post.assert_not_called()
+
     def test_chainstack_restricted_indexed_reads_are_not_attempted(self):
         rpc = self.router()
         rpc.providers["alchemy"].session.post.return_value = response({"value": []})

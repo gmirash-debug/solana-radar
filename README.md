@@ -423,6 +423,34 @@ Parser failures never advance the history checkpoint. The private runtime
 checkpoint persists memberships, covered time ranges, pending cursors, and
 recently parsed signatures; the dashboard exposes list/window membership.
 
+GMGN history coverage v2 separates the newest observed head from the contiguous
+fully parsed history watermark. New passes request only the observed-head delta
+with a 30-second deduplicated overlap, while older unread intervals have frozen
+inclusive `from`/`to` bounds and a provider-owned cursor. Pending ranges are
+reconciled against covered intervals; reaching a new head cannot close an old
+hole. The final second of a paginated page stays uncovered until all transactions
+in that second have been read. Legacy unbounded cursors are conservatively
+replayed once, with existing swaps and the original cohort retained.
+
+Archive repair prefers Helius, up to 1,000 full transactions per page; Alchemy
+full pages remain capped at 100. A handoff discards the other provider's cursor
+and restarts only the unread seconds, not the whole original window. Helius
+pages shrink to the remaining native per-scan/monthly allowance. Larger pages
+reduce HTTP requests, not billed credits (Helius reserves 10 credits per 100
+full transactions). All existing rate, ledger and quota guards still apply.
+Original purchase-window gaps get repair priority. A stalled cursor is reset to
+the fixed unread interval; archive failure retains both the cursor and any
+successfully parsed fresh head. A fallback signature read cannot erase an
+unfinished enhanced-history range or acknowledge its coverage.
+
+The dashboard distinguishes the fresh transaction window, original signal
+window and initial history still loading. Signal data quality is based on the
+exact purchase interval, so unrelated older pending history does not masquerade
+as a missing current buy window. Missing purchases, parse errors, incomplete
+wallet attribution, graph evidence, baseline and retention still prevent
+confirmation. Sale-history coverage is evaluated from the signal through the
+frozen observed cutoff, independently of older pre-signal gaps.
+
 GMGN token info supplies ATH market cap. The scanner locates its timestamp with
 a bounded `1d -> 1h -> 5m` K-line search. Reactivation does not wait for ATH
 before scanning: unknown or high-range ATH context can cap conviction, but it

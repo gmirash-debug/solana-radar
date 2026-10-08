@@ -1,11 +1,11 @@
-import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261008-stalled-evidence-v1";
-import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261008-stalled-evidence-v1";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261008-stalled-evidence-v1";
-import { installTerminology, TERMS } from "./terminology.js?v=20261008-stalled-evidence-v1";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261008-stalled-evidence-v1";
-import { loadTokenDetail } from "./static-detail.js?v=20261008-stalled-evidence-v1";
-import { r2BudgetView } from "./r2-budget-view.js?v=20261008-stalled-evidence-v1";
-import { walletActivityView } from "./wallet-activity-view.js?v=20261008-stalled-evidence-v1";
+import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261008-pool-history-v2";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261008-pool-history-v2";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261008-pool-history-v2";
+import { installTerminology, TERMS } from "./terminology.js?v=20261008-pool-history-v2";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261008-pool-history-v2";
+import { loadTokenDetail } from "./static-detail.js?v=20261008-pool-history-v2";
+import { r2BudgetView } from "./r2-budget-view.js?v=20261008-pool-history-v2";
+import { walletActivityView } from "./wallet-activity-view.js?v=20261008-pool-history-v2";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -16,12 +16,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261008-stalled-evidence-v1";
+} from "./token-state.js?v=20261008-pool-history-v2";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261008-stalled-evidence-v1";
+} from "./filter-scope.js?v=20261008-pool-history-v2";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const PENDING_TOKEN_ACTIONS_KEY = "solana-radar:pending-token-actions:v1";
@@ -2194,6 +2194,10 @@ function renderMetrics(tokens) {
     metric(attention ? "GMGN candidates" : "Universe", attention ? stats.gmgn_discovery?.tokens ?? stats.universe_pools ?? 0 : stats.universe_pools ?? 0),
     ...(attention && stats.gmgn_discovery?.mcap_filter ? [metric("In cap range", stats.gmgn_discovery.mcap_filter.eligible_tokens ?? "-")] : []),
     ...(attention ? [metric("Selected pools", health.selected_pools ?? "-"), metric("History heads read", headsRead ?? "-")] : []),
+    ...(attention && health.initial_history_pending_pools !== undefined ? [
+      metric("Fresh windows checked", Math.max(0, Number(health.live_fetch_pools || 0) - Number(health.partial_live_windows || 0))),
+      metric("Initial history pending", health.initial_history_pending_pools),
+    ] : []),
     metric(attention ? "Analyzed pools" : "Scanned pools", stats.scanned_pools ?? 0),
     metric("Open positions", baseTokens.filter((token) => token.decision.queue !== "inactive").length),
     metric("Original-wallet outflow", baseTokens.filter((token) => token.decision.queue === "reducing").length),
@@ -3349,14 +3353,21 @@ function renderEvidenceTab(token, gmgnUrl, sourceLinks) {
   const memberships = Array.isArray(attention?.memberships) ? attention.memberships : [];
   const attentionLabel = memberships.map(item => `${item.source === "trending" ? "Trending" : "Hot Searches"} ${item.interval} #${item.rank}`).join(" / ");
   const analysis = token.latestPool?.candidate_analysis || token.market?.candidate_analysis;
-  const ranges = (analysis?.covered_ranges || []).map(([from, to]) => `${dateLabel(from * 1000)} - ${dateLabel(to * 1000)}`).join(" / ");
+  const coveredRanges = analysis?.covered_ranges || [];
+  const ranges = coveredRanges.slice(-4).map(([from, to]) => `${dateLabel(from * 1000)} - ${dateLabel(to * 1000)}`).join(" / ");
+  const coverage = analysis?.coverage_version === 2 ? `
+    <div class="kv"><span>Fresh transaction window</span><span>${analysis.live_window_complete === true ? "Checked" : "Incomplete / retry pending"} / ${esc(dateLabel(analysis.live_window_start))} - ${esc(dateLabel(analysis.live_window_end))}</span></div>
+    <div class="kv"><span>Original signal window</span><span>${analysis.signal_window_complete === true ? "Checked" : analysis.signal_window_complete === false ? "Incomplete / retry pending" : "Not established"}</span></div>
+    <div class="kv"><span>Initial history</span><span>${analysis.initial_history_pending ? "Still loading" : "Checked"}${analysis.history_pending ? ` / ${esc(analysis.pending_ranges ?? "-")} ranges pending` : ""}</span></div>
+    ${ranges ? `<div class="kv"><span>Covered ranges</span><span>${esc(ranges)}${coveredRanges.length > 4 ? ` / ${esc(coveredRanges.length - 4)} earlier ranges` : ""}</span></div>` : ""}
+  ` : `<div class="kv"><span>History coverage</span><span>${(analysis?.history_pending ?? analysis?.pending) ? "Incomplete / retry pending" : "Checked"}${ranges ? ` / ${esc(ranges)}` : ""}</span></div>`;
   return `
     <section class="detail-block">
       <div class="detail-block-title">Signal evidence</div>
       <div class="kv"><span>Quality</span><span>${renderSignalQuality(token)}</span></div>
       <div class="kv"><span>Scanner rule</span><span>${renderFilterLine(token)}</span></div>
       ${attention ? `<div class="kv"><span>GMGN lists</span><span>${esc(attentionLabel)}</span></div><div class="kv"><span>First seen in GMGN</span><span>${esc(dateLabel(attention.first_seen_at))}</span></div><div class="kv"><span>Last seen in GMGN</span><span>${esc(dateLabel(attention.last_seen_at))}</span></div>` : ""}
-      ${analysis ? `<div class="kv"><span>Initial history window</span><span>${esc(analysis.initial_hours ?? "-")}h</span></div><div class="kv"><span>History coverage</span><span>${(analysis.history_pending ?? analysis.pending) ? "Incomplete / retry pending" : "Checked"}${ranges ? ` / ${esc(ranges)}` : ""}</span></div>${analysis.evidence_pending ? `<div class="kv"><span>Wallet verification</span><span>Pending / parsed trading history retained</span></div>` : ""}<div class="kv"><span>Last history check</span><span>${esc(dateLabel(analysis.checked_at))} / ${esc(analysis.scope || "unknown")}</span></div>` : ""}
+      ${analysis ? `<div class="kv"><span>Initial history window</span><span>${esc(analysis.initial_hours ?? "-")}h</span></div>${coverage}${analysis.evidence_pending ? `<div class="kv"><span>Wallet verification</span><span>Pending / parsed trading history retained</span></div>` : ""}<div class="kv"><span>Last history check</span><span>${esc(dateLabel(analysis.checked_at))} / ${esc(analysis.scope || "unknown")}</span></div>` : ""}
       <div class="kv"><span>Risk flags</span><span>${renderRiskFlags(token)}</span></div>
       ${renderWaveLine(token)}
     </section>

@@ -18,6 +18,15 @@ METHOD_ORDERS = {
 }
 
 
+def history_page_params(provider, params):
+    """Full-history page caps differ; reservations must use the actual request."""
+    address, options = params
+    options = dict(options)
+    cap = 1000 if provider == "helius" else 100
+    options["limit"] = min(cap, max(1, int(options.get("limit", 100))))
+    return [address, options]
+
+
 def evm_endpoint_provider(endpoint):
     """No credentials in provider labels; custom proxy classification is parent-owned."""
     host = (urlparse(endpoint).hostname or "").lower()

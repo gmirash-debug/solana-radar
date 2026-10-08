@@ -222,13 +222,19 @@ def record_history_check(pool_state, summary, config, now):
     pool_state["candidate_history_pending"] = pending
     pool_state["candidate_history_gap_pending"] = history_pending
     pool_state["candidate_evidence_pending"] = evidence_pending
+    if trade.get("coverage_version") == 2:
+        pool_state["candidate_history_live_window_complete"] = not failed and bool(trade.get("live_window_complete"))
+        pool_state["candidate_history_initial_pending"] = bool(trade.get("initial_history_pending"))
+        pool_state["candidate_history_extended_pending"] = bool(trade.get("extended_history_pending"))
+    elif pool_state.get("candidate_pool_history_version") == 2:
+        pool_state["candidate_history_live_window_complete"] = False
     if failed:
         pool_state["candidate_retry_at"] = iso(now + max(1, int(config.get("candidate_history_retry_minutes", 5))) * 60)
     else:
         pool_state.pop("candidate_retry_at", None)
     start = int(trade.get("live_from") or 0)
     end = min(now, int(trade.get("observed_to") or now))
-    if not history_pending and start and end >= start:
+    if trade.get("coverage_version") != 2 and pool_state.get("candidate_pool_history_version") != 2 and not history_pending and start and end >= start:
         pool_state["candidate_history_complete_to"] = end
         ranges = pool_state.setdefault("candidate_covered_ranges", [])
         ranges.append([start, end])

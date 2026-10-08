@@ -46,7 +46,8 @@ from history_contract import history_event_error, source_time
 from rpc_budget import configure_monthly_budgets, request_reservation, native_cost, DurableChunkBudget, monthly_budget_for
 from rpc_limiter import DEFAULT_PROVIDER_LIMITERS, wait_for_gmgn_slot
 from balance_batch import remember_enumeration, prime_known_balances
-from rpc_routing import STANDARD_ORDER, HISTORY_ORDER, BALANCE_ORDER, METHOD_ORDERS, validate_result
+from rpc_routing import STANDARD_ORDER, HISTORY_ORDER, BALANCE_ORDER, METHOD_ORDERS, validate_result, history_page_params
+from pool_history import collect_history as collect_pool_history, missing_seconds as history_missing_seconds
 from scan_scheduling import targeted_profile, fast_candidate_pools
 from scan_failure import failure_metadata, scanner_failure_class, PROGRAMMING_ERRORS, SOFT_CATEGORIES
 from launch_history import advance_launch_history
@@ -2843,12 +2844,16 @@ class RoutedSolanaRpc:
         for index, name in enumerate(names):
             provider = self.providers[name]
             try:
+                provider_params = history_page_params(name, params) if method == "getTransactionsForAddress" else params
+                if method == "getTransactionsForAddress" and name == "helius":
+                    while provider_params[1]["limit"] > 100 and not provider.can_call(method, provider_params):
+                        provider_params[1]["limit"] = max(100, provider_params[1]["limit"] - 100)
                 provider_timeout = timeout
                 if provider_timeout is None and method == "getTransactionsForAddress":
                     provider_timeout = provider.transactions_timeout_seconds
-                result = provider.call(method, params=params, timeout=provider_timeout)
+                result = provider.call(method, params=provider_params, timeout=provider_timeout)
                 try:
-                    validate_result(method, params or [], result)
+                    validate_result(method, provider_params or [], result)
                 except (ValueError, TypeError, AttributeError) as exc:
                     error = HeliusRpcError(method, "provider", "invalid read response: " + str(exc), provider=name)
                     provider.record_failure(error)
@@ -2869,6 +2874,8 @@ class RoutedSolanaRpc:
                     self.route_failovers[method] += 1
                 continue
             self.last_provider_by_method[method] = name
+            if method == "getTransactionsForAddress":
+                result = {**result, "_page_limit": provider_params[1]["limit"]}
             return result, name
         if null_provider:
             return None, null_provider
@@ -2971,6 +2978,7 @@ class RoutedSolanaRpc:
             )
         routed_result = dict(result)
         routed_result["_provider"] = provider
+        routed_result.setdefault("_page_limit", history_page_params(provider, [address, opts])[1]["limit"])
         return routed_result
 
     def next_enhanced_provider(self, excluded=None, history_task="live"):
@@ -8335,6 +8343,13 @@ def refresh_signal_thesis(
                            if observed_coverage.get(name)]
         if int(observed_coverage.get("history_gap_seconds") or 0) > 60:
             coverage_issues.append("history_gap")
+        if observed_coverage.get("coverage_version") == 2:
+            start = parse_timestamp(thesis.get("signal_window_start"))
+            end = min(parse_timestamp(checked_at), int(observed_coverage.get("observed_to") or 0))
+            coverage_issues = [name for name in ("transaction_errors", "parse_errors") if observed_coverage.get(name)]
+            if not start or end < start or history_missing_seconds(
+                    observed_coverage.get("coverage_ranges") or [], start, end):
+                coverage_issues.append("signal_and_sale_window_partial")
         for issue in coverage_issues:
             mark_thesis_sale_history_unknown(thesis, issue)
     sales_changed = record_thesis_sales(thesis, pool, observed_swaps, checked_at)
@@ -10348,7 +10363,78 @@ def encode_provider_cursor(provider, token):
     }
 
 
+def verify_pool_history_head(rpc, pool, config, pool_state, stats, now):
+    if not market_activity_requires_head_check(pool, config):
+        return
+    expected_max_lag = market_activity_expected_head_lag_seconds(pool, config)
+    enhanced_head = int(stats.get("live_newest_block_time") or 0)
+    if enhanced_head and max(0, now - enhanced_head) <= expected_max_lag:
+        mark_market_activity_head_state(pool_state, pool, {"status": "fresh"}, config, now=now)
+        return
+    try:
+        signatures = rpc.signatures_for_address(pool.pool_address,
+            limit=max(1, int(config.get("market_activity_consistency_signature_limit", 5))))
+        head = market_activity_head_probe(pool, signatures, config, now=now)
+    except Exception as exc:
+        head = {"status": "unverified", "expected_max_lag_seconds": expected_max_lag,
+                "error": str(exc)[:200]}
+    stats["market_activity_probe"] = head
+    if head.get("status") == "unverified":
+        stats["market_activity_unverified"] = True
+    elif head.get("status") in ("stale", "fresh"):
+        mark_market_activity_head_state(pool_state, pool, head, config, now=now)
+        if head["status"] == "stale":
+            stats["market_activity_stale"] = True
+        else:
+            standard_head = int(head.get("latest_block_time") or 0)
+            mismatch = max(0, int(config.get("market_activity_consistency_head_mismatch_seconds", 60)))
+            if not enhanced_head or standard_head - enhanced_head > mismatch:
+                raise EnhancedHistoryHeadMismatch(
+                    "enhanced transaction head lagged the standard RPC head "
+                    f"by {max(0, standard_head - enhanced_head)}s")
+
+
+def fetch_attention_pool_transactions(rpc, pool, config, pool_state, phase):
+    now = int(time.time())
+    lookback = int(config.get("helius_recent_lookback_minutes", config["alert_window_minutes"]))
+    prior_ranges = pool_state.get("candidate_covered_ranges") or []
+    inferred_start = min((int(a) for a, b in prior_ranges), default=max(1, now - lookback * 60))
+    start = int(pool_state.setdefault("candidate_history_start", inferred_start))
+
+    def fetch_page(**kwargs):
+        if not isinstance(rpc, RoutedSolanaRpc):
+            for key in ("provider_name", "excluded_providers", "history_task"):
+                kwargs.pop(key)
+        return rpc.transactions_for_address(pool.pool_address, **kwargs)
+
+    def next_provider(excluded, history_task):
+        if isinstance(rpc, RoutedSolanaRpc):
+            return rpc.next_enhanced_provider(excluded=excluded, history_task=history_task)
+        return None
+
+    thesis = pool_state.get("signal_thesis") or {}
+    priority = [parse_timestamp(thesis.get(key)) for key in ("signal_window_start", "signal_window_end")]
+    budget_kind = "incremental" if pool_state.get("candidate_history_head_observed_to") else "recent"
+    repair_key = f"helius_{phase}_rolling_backlog_pages" if phase else "helius_rolling_backlog_pages"
+    working = copy.deepcopy(pool_state)
+    txs, stats = collect_pool_history(working, now, start, fetch_page, next_provider,
+        live_limit=int(config.get("helius_transactions_limit", 100)),
+        archive_limit=min(1000, max(100, int(config.get("candidate_history_archive_page_size", 1000)))),
+        head_pages=helius_page_budget(pool, config, budget_kind, phase=phase),
+        repair_pages=max(1, int(config.get(repair_key, config.get("helius_rolling_backlog_pages", 2)))),
+        overlap=max(0, int(config.get("helius_incremental_overlap_seconds", 30))),
+        head_only=bool(config.get("_candidate_head_only")),
+        reuse_head=bool(config.get("_reuse_probe_head")), priority_window=priority if all(priority) else None)
+    stats["phase"] = phase or "full"
+    verify_pool_history_head(rpc, pool, config, pool_state, stats, int(stats["observed_to"]))
+    if not stats.get("market_activity_stale") and not stats.get("market_activity_unverified"):
+        restore_history_state(pool_state, history_state_snapshot(working))
+    return txs, stats
+
+
 def fetch_helius_pool_transactions(rpc, pool, config, pool_state, phase=None):
+    if attention_mode(config):
+        return fetch_attention_pool_transactions(rpc, pool, config, pool_state, phase)
     now = int(time.time())
     limit = int(config.get("helius_transactions_limit", 100))
     lookback_minutes = int(config.get("helius_recent_lookback_minutes", max(60, int(config["alert_window_minutes"]))))
@@ -11147,6 +11233,8 @@ def combine_fetch_stats(probe_stats, deep_stats):
         combined[key] = int(probe_stats.get(key) or 0) + int(deep_stats.get(key) or 0)
     combined["passes"] = [*(probe_stats.get("passes") or []), *(deep_stats.get("passes") or [])]
     combined["truncated"] = bool(probe_stats.get("truncated") or deep_stats.get("truncated"))
+    if deep_stats.get("coverage_version") == 2:
+        combined["truncated"] = bool(deep_stats.get("truncated"))
     if "rolling_backlog_segments_after" in deep_stats or deep_stats.get("live_resumed"):
         combined["live_truncated"] = bool(deep_stats.get("live_truncated"))
     else:
@@ -11156,6 +11244,8 @@ def combine_fetch_stats(probe_stats, deep_stats):
     combined["backfill_pending"] = bool(
         probe_stats.get("backfill_pending") or deep_stats.get("backfill_pending")
     )
+    if deep_stats.get("coverage_version") == 2:
+        combined["backfill_pending"] = bool(deep_stats.get("backfill_pending"))
     # A deep pass observes the queue after the probe; closed gaps must not remain
     # stuck in the final report just because they were pending during the probe.
     if "rolling_backlog_segments_after" in deep_stats:
@@ -11237,7 +11327,8 @@ def apply_alert_data_quality(
     partial_reasons = []
     if fetch_stats.get("evidence_pending"):
         partial_reasons.append("wallet verification pending")
-    if fetch_stats.get("live_truncated"):
+    scoped_coverage = fetch_stats.get("coverage_version") == 2
+    if fetch_stats.get("live_truncated") and not scoped_coverage:
         partial_reasons.append("partial live transaction window")
     if int(fetch_stats.get("transaction_errors") or 0):
         partial_reasons.append("transaction detail fetch errors")
@@ -11247,7 +11338,7 @@ def apply_alert_data_quality(
         partial_reasons.append("partial accumulation buffer")
     if fetch_stats.get("market_activity_unverified"):
         partial_reasons.append("market activity head could not be verified")
-    if int(fetch_stats.get("history_gap_seconds") or 0) > int(
+    if not scoped_coverage and int(fetch_stats.get("history_gap_seconds") or 0) > int(
         config.get("actionable_max_history_gap_seconds", 60)
     ):
         partial_reasons.append("onchain history gap")
@@ -11264,6 +11355,19 @@ def apply_alert_data_quality(
     )
     for alert in alerts or []:
         reasons = list(partial_reasons)
+        window_coverage = {}
+        if scoped_coverage:
+            start, end = (parse_timestamp(alert.get(key)) for key in ("window_start", "window_end"))
+            valid_window = bool(start and end >= start and end <= int(fetch_stats.get("observed_to") or 0))
+            missing = history_missing_seconds(fetch_stats.get("coverage_ranges") or [], start, end) if valid_window else None
+            window_coverage = {"coverage_basis": "signal_window", "signal_window_complete": valid_window and missing == 0,
+                "signal_window_missing_seconds": missing,
+                "initial_history_pending": bool(fetch_stats.get("initial_history_pending")),
+                "extended_history_pending": bool(fetch_stats.get("extended_history_pending"))}
+            if not valid_window:
+                reasons.append("signal window coverage missing")
+            elif missing:
+                reasons.append("partial signal transaction window")
         if (
             alert.get("signal_family") not in ("sticky_accumulation", "reactivation_wave")
             and classification_coverage_pct < float(config.get("actionable_min_classification_coverage_pct", 35))
@@ -11298,6 +11402,7 @@ def apply_alert_data_quality(
             "classification_coverage_pct": classification_coverage_pct,
             "balance_coverage_pct": balance_coverage_pct,
             "owner_resolution_coverage_pct": owner_resolution_coverage_pct,
+            **window_coverage,
         }
         if reasons and alert.get("action_tier") in ("actionable", "hot_reactivation"):
             alert["action_tier"] = "watch"
@@ -11589,11 +11694,12 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
                 classification_budget,
                 swaps=probe_signal_swaps,
             )
-            bounded_repair = attention_mode(config) and not deepen and bool(probe_fetch_stats.get("live_truncated"))
+            history_pending = bool(probe_fetch_stats.get("live_truncated") or probe_fetch_stats.get("rolling_gap_pending"))
+            bounded_repair = attention_mode(config) and not deepen and history_pending
             if bounded_repair:
                 deepen, deep_reason = True, "bounded_gap_repair"
             if deepen:
-                if attention_mode(config) and not probe_fetch_stats.get("live_truncated"):
+                if attention_mode(config) and not history_pending:
                     deep_txs, deep_fetch_stats = [], probe_fetch_stats
                     fetch_stats = dict(probe_fetch_stats)
                     fetch_stats["reused_probe_history"] = True
@@ -11673,7 +11779,7 @@ def scan_pool_helius_transactions(rpc, pool, config, state, classification_budge
         if attention_mode(config):
             remember_transactions(txs, pool_state, int(time.time()))
             gaps = pool_state.get("candidate_signature_gaps") or []
-            if gaps and not fetch_stats.get("live_truncated") and int(fetch_stats.get("live_from") or 0) <= min(int(item["stop_time"]) for item in gaps):
+            if gaps and fetch_stats.get("full_history_complete", not fetch_stats.get("live_truncated")) and int(fetch_stats.get("live_from") or 0) <= min(int(item["stop_time"]) for item in gaps):
                 pool_state["candidate_signature_gaps"] = []
         live_checkpoint = fetch_stats.get("live_checkpoint")
         if live_checkpoint:
@@ -11919,7 +12025,7 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
         pool_state["helius_latest_block_time"] = int(latest_successful_item.get("blockTime") or 0)
         pool_state["symbol"] = pool.symbol
         pool_state.pop("force_enhanced_next_scan", None)
-        if isinstance(fallback_error, str) and "enhanced transaction head lagged" in fallback_error.lower():
+        if pool_state.get("candidate_pool_history_version") != 2 and isinstance(fallback_error, str) and "enhanced transaction head lagged" in fallback_error.lower():
             for key in (
                 "helius_live_cursor",
                 "helius_live_cursor_complete",
@@ -11980,7 +12086,9 @@ def history_state_snapshot(pool_state):
         or key in {"latest_signature", "latest_time", "helius_latest_signature", "helius_latest_time",
             "helius_latest_block_time", "candidate_signature_gaps", "candidate_processed_signatures",
             "last_activity_signature", "last_activity_probe_at", "candidate_history_context_version",
-            "candidate_previous_history_checkpoint", "candidate_history_complete_to", "candidate_covered_ranges"}}
+            "candidate_previous_history_checkpoint", "candidate_history_complete_to", "candidate_covered_ranges",
+            "candidate_pool_history_version", "candidate_history_initial_to", "candidate_history_head_observed_to",
+            "candidate_history_head_block_time", "candidate_history_live_from"}}
 
 
 def restore_history_state(pool_state, snapshot):
@@ -12022,7 +12130,7 @@ def scan_pool(rpc, pool, config, state, classification_budget):
         raise
     summary = result[1]
     trade = summary.get("trade_fetch") or {}
-    if summary.get("error") or summary.get("scan_failed") or summary.get("parse_errors") or trade.get("transaction_errors") or trade.get("timestamp_missing"):
+    if summary.get("error") or summary.get("scan_failed") or summary.get("parse_errors") or trade.get("transaction_errors") or trade.get("timestamp_missing") or trade.get("market_activity_stale") or trade.get("market_activity_unverified"):
         restore()
     return result
 
@@ -12889,6 +12997,18 @@ def record_market_observations(state, pools, observed_at):
                 "history_pending": bool(history.get("candidate_history_gap_pending", history.get("candidate_history_pending"))),
                 "evidence_pending": bool(history.get("candidate_evidence_pending")),
                 "covered_ranges": copy.deepcopy(history.get("candidate_covered_ranges") or [])}
+            if history.get("candidate_pool_history_version") == 2:
+                analysis = entry["candidate_analysis"]
+                thesis = history.get("signal_thesis") or {}
+                start, end = (parse_timestamp(thesis.get(key)) for key in ("signal_window_start", "signal_window_end"))
+                analysis.update(coverage_version=2,
+                    live_window_complete=history.get("candidate_history_live_window_complete", False),
+                    live_window_start=iso(history.get("candidate_history_live_from")),
+                    live_window_end=iso(history.get("candidate_history_head_observed_to")),
+                    signal_window_complete=(not history_missing_seconds(analysis["covered_ranges"], start, end)) if start and end >= start else None,
+                    initial_history_pending=bool(history.get("candidate_history_initial_pending", True)),
+                    extended_history_pending=bool(history.get("candidate_history_extended_pending", True)),
+                    pending_ranges=len(history.get("helius_rolling_backlogs") or []))
         previous_pool = entry.get("pool_address")
         snapshot_at = int(pool.market_snapshot_at or 0)
         snapshot_stale = bool(pool.market_snapshot_stale or not snapshot_at
@@ -13928,6 +14048,9 @@ def build_scan_health(summaries, lane_stats, config):
     rolling_gap_pending = sum(
         1 for fetch in live_fetches if fetch.get("rolling_gap_pending")
     )
+    initial_history_pending = sum(bool(fetch.get("initial_history_pending")) for fetch in live_fetches)
+    extended_history_pending = sum(bool(fetch.get("extended_history_pending")) for fetch in live_fetches)
+    repair_errors = sum(int(fetch.get("repair_errors") or 0) for fetch in live_fetches)
     history_gap = sum(1 for fetch in live_fetches if int(fetch.get("history_gap_seconds") or 0) > 60)
     stale_market_snapshots = sum(
         1 for fetch in live_fetches if fetch.get("market_activity_stale")
@@ -14019,6 +14142,12 @@ def build_scan_health(summaries, lane_stats, config):
         reasons.append(f"pool failure ratio {failed_ratio:.0%} exceeds {max_failed_ratio:.0%}")
 
     if status != "unhealthy":
+        if initial_history_pending:
+            status = "degraded"
+            reasons.append(f"initial purchase history pending for {initial_history_pending} analyzed pools")
+        if repair_errors:
+            status = "degraded"
+            reasons.append(f"{repair_errors} archive repair requests could not finish")
         if evidence_pending:
             status = "degraded"
             reasons.append(f"wallet evidence pending for {evidence_pending} analyzed pools")
@@ -14078,6 +14207,11 @@ def build_scan_health(summaries, lane_stats, config):
         "partial_live_ratio": live_truncated_ratio,
         "backfill_pending_pools": backfill_pending,
         "rolling_gap_pending_pools": rolling_gap_pending,
+        "initial_history_pending_pools": initial_history_pending,
+        "extended_history_pending_pools": extended_history_pending,
+        "history_repair_errors": repair_errors,
+        "history_archive_pages": sum(int(p.get("pages") or 0) for fetch in live_fetches
+            for p in fetch.get("passes") or [] if p.get("history_task") == "archive"),
         "history_gap_pools": history_gap,
         "history_gap_ratio": history_gap_ratio,
         "coverage_by_source": {

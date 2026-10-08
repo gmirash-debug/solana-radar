@@ -1,4 +1,4 @@
-import {numeric} from "./decision-view.js?v=20261008-stalled-evidence-v1";
+import {numeric} from "./decision-view.js?v=20261008-pool-history-v2";
 
 export const CHAIN_ID = 4663;
 export function ageFilterLabel(config) {
