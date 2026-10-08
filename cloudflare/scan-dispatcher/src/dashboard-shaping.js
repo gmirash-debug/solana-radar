@@ -81,8 +81,9 @@ function dashboardRecordAgeHours(record = {}) {
 }
 
 function dashboardRecordMatchesAgeWindow(record = {}, report = {}) {
-  const minAgeHours = Number(report?.config?.age_min_hours);
-  const maxAgeHours = Number(report?.config?.age_max_hours);
+  if (report?.config?.discovery_source_mode === "gmgn_attention") return true;
+  const minAgeHours = report?.config?.age_min_hours == null ? NaN : Number(report.config.age_min_hours);
+  const maxAgeHours = report?.config?.age_max_hours == null ? NaN : Number(report.config.age_max_hours);
   const hasMin = Number.isFinite(minAgeHours);
   const hasMax = Number.isFinite(maxAgeHours);
   if (!hasMin && !hasMax) return true;
