@@ -438,7 +438,11 @@ and restarts only the unread seconds, not the whole original window. Helius
 pages shrink to the remaining native per-scan/monthly allowance. Larger pages
 reduce HTTP requests, not billed credits (Helius reserves 10 credits per 100
 full transactions). All existing rate, ledger and quota guards still apply.
-Original purchase-window gaps get repair priority. A stalled cursor is reset to
+Exact original purchase-window gaps get repair priority, followed by gaps in
+the newest observed-head delta, then unrelated older initial tails. Priority
+reads are clipped to their actual missing interval; adjacent tasks retain their
+own frozen filters and cursors even if they form one continuous uncovered span.
+A stalled cursor is reset to
 the fixed unread interval; archive failure retains both the cursor and any
 successfully parsed fresh head. A fallback signature read cannot erase an
 unfinished enhanced-history range or acknowledge its coverage.
