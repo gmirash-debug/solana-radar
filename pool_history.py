@@ -38,11 +38,18 @@ def missing_seconds(ranges, start, end):
 def reconcile_tasks(tasks, covered, start, end):
     result = []
     for lower, upper in missing_ranges(covered, start, end):
-        # Cursors are valid only with the exact original provider and filters.
-        matching = next((task for task in tasks if int(task.get("from") or 0) == lower
-                         and int(task.get("remaining_to", task.get("to") or 0)) == upper), None)
-        result.append(copy.deepcopy(matching) if matching else
-                      {"from": lower, "to": upper, "remaining_to": upper})
+        # Adjacent tasks can have independent cursors. Do not merge their bounds.
+        for task in sorted(tasks, key=lambda item: int(item.get("from") or 0)):
+            a = int(task.get("from") or 0)
+            b = int(task.get("remaining_to", task.get("to") or 0))
+            if a < lower or b > upper or b < a:
+                continue
+            if lower < a:
+                result.append({"from": lower, "to": a - 1, "remaining_to": a - 1})
+            result.append(copy.deepcopy(task))
+            lower = b + 1
+        if lower <= upper:
+            result.append({"from": lower, "to": upper, "remaining_to": upper})
     return result
 
 
@@ -162,13 +169,26 @@ def collect_history(pool_state, now, start, fetch_page, next_provider, *, live_l
     tasks = reconcile_tasks(tasks, covered, start, now)
     if tasks and not head_only:
         selected = 0
+        repair_window, priority = None, "oldest_gap"
         if priority_window and priority_window[0] and priority_window[1] >= priority_window[0]:
             selected = next((i for i, task in enumerate(tasks)
                              if task["from"] <= priority_window[1]
-                             and task["remaining_to"] >= priority_window[0]), 0)
-        task = tasks[selected]
-        stats["repair_priority"] = "signal_window" if selected or priority_window and (
-            task["from"] <= priority_window[1] and task["remaining_to"] >= priority_window[0]) else "oldest_gap"
+                             and task["remaining_to"] >= priority_window[0]), None)
+            if selected is not None:
+                repair_window, priority = priority_window, "signal_window"
+        if repair_window is None:
+            selected = next((i for i, task in enumerate(tasks) if task["remaining_to"] >= live_from), None)
+            if selected is not None:
+                repair_window, priority = [live_from, now], "fresh_window"
+            else:
+                selected = 0
+        task = copy.deepcopy(tasks[selected])
+        if repair_window:
+            lower = max(task["from"], repair_window[0])
+            upper = min(task["remaining_to"], repair_window[1])
+            if lower != task["from"] or upper != task["remaining_to"]:
+                task = {"from": lower, "to": upper, "remaining_to": upper}
+        stats["repair_priority"] = priority
         tail, prefix, pending, result = read_range(fetch_page, next_provider,
             task, repair_pages, archive_limit, "archive")
         transactions.extend(tail)

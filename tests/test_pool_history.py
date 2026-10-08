@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import scanner as s
 from gmgn_discovery import record_history_check
-from pool_history import collect_history, merge_ranges, missing_ranges, missing_seconds, read_range
+from pool_history import collect_history, merge_ranges, missing_ranges, missing_seconds, read_range, reconcile_tasks
 
 
 def tx(at, signature=None):
@@ -180,9 +180,40 @@ class PoolHistoryTests(unittest.TestCase):
                  "candidate_history_live_from": 19970, "candidate_covered_ranges": [[15000, 16000], [19000, 20000]]}
         reader = HistoryReader()
         _, stats = self.collect(reader, state, reuse_head=True, priority_window=[17000, 18000])
-        self.assertEqual(reader.calls[0]["block_time"], {"gte": 16001, "lte": 18999})
+        self.assertEqual(reader.calls[0]["block_time"], {"gte": 17000, "lte": 18000})
         self.assertEqual(stats["repair_priority"], "signal_window")
         self.assertTrue(stats["extended_history_pending"])
+
+    def test_adjacent_unread_tasks_keep_their_independent_frozen_cursors(self):
+        tasks=[{"from":100,"to":150,"remaining_to":150,"cursor":"a","provider":"helius"},
+               {"from":151,"to":200,"remaining_to":180,"cursor":"b","provider":"alchemy"}]
+        self.assertEqual(reconcile_tasks(tasks,[[181,200]],100,200),tasks)
+
+    def test_new_burst_is_repaired_before_unrelated_old_initial_tail(self):
+        old={"from":10000,"to":19000,"remaining_to":18000,"cursor":"helius:900","provider":"helius"}
+        state={"candidate_pool_history_version":2,"candidate_history_head_observed_to":19000,
+               "candidate_covered_ranges":[[18001,19000]],"helius_rolling_backlogs":[copy.deepcopy(old)]}
+        reader=HistoryReader([*(tx(18900-i) for i in range(5000)),*(tx(19990-i) for i in range(250))])
+        rows,stats=self.collect(reader,state,next_provider=lambda excluded,task:"helius")
+        self.assertEqual(len(rows),250)
+        self.assertEqual(stats["repair_priority"],"fresh_window")
+        self.assertTrue(stats["live_window_complete"])
+        self.assertEqual(state["helius_rolling_backlogs"],[old])
+        self.assertGreater(reader.calls[1]["block_time"]["gte"],19000)
+
+    def test_exact_original_window_keeps_its_cursor_when_old_gaps_surround_it(self):
+        state={"candidate_pool_history_version":2,"candidate_history_head_observed_to":20000,
+               "candidate_history_live_from":19970,"candidate_covered_ranges":[[18800,20000]]}
+        reader=HistoryReader([tx(17500,str(i)) for i in range(1200)])
+        _,first=self.collect(reader,state,reuse_head=True,priority_window=[17000,18000])
+        pending=next(task for task in state["helius_rolling_backlogs"] if task["from"]==17000)
+        self.assertEqual(pending["cursor"],"helius:1000")
+        _,second=self.collect(reader,state,reuse_head=True,priority_window=[17000,18000])
+        self.assertEqual(reader.calls[1]["block_time"],{"gte":17000,"lte":18000})
+        self.assertEqual(reader.calls[1]["pagination_token"],"helius:1000")
+        self.assertEqual(missing_seconds(state["candidate_covered_ranges"],17000,18000),0)
+        self.assertTrue(second["extended_history_pending"])
+        self.assertEqual(first["repair_priority"],"signal_window")
 
     def test_record_check_does_not_mark_old_gap_complete_when_live_head_is_complete(self):
         state = {}
