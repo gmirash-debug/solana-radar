@@ -30,11 +30,14 @@ test("remote data wins equal timestamps and newer snapshots", () => {
 
 test("remote retirement fences older static tokens even when the static report is newer", () => {
   const old={token_address:"token",signal_at:"2026-10-08T01:00:00Z"};
-  const staticPayload={report:{generated_at:"2026-10-09T12:00:00Z",signal_theses:[old]},market:{token:{mcap:19000}}};
+  const staticPayload={report:{generated_at:"2026-10-09T12:00:00Z",signal_theses:[old],
+    universe:[{token_address:"token"}],active_pools:[{pool:{token_address:"token"}}]},market:{token:{mcap:19000}}};
   const remotePayload={report:{generated_at:"2026-10-09T11:00:00Z"},token_retirements:{token:{retired_at:"2026-10-09T10:00:00Z"}}};
   const selected=chooseDashboardPayload({staticPayload,remotePayload});
   assert.equal(selected.source,"static");assert.equal(selected.payload.report.signal_theses.length,0);
   assert.equal(selected.payload.market.token,undefined);
+  assert.equal(selected.payload.report.universe.length,0);
+  assert.equal(selected.payload.report.active_pools.length,0);
   assert.equal(staticPayload.report.signal_theses.length,1);
 });
 
