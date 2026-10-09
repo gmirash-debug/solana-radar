@@ -173,6 +173,20 @@ class TokenRetirementTests(unittest.TestCase):
         self.assertEqual(len(self.observe(24)), 1)
         self.assertEqual(self.state["token_low_cap_watch"]["token"]["samples"], first)
 
+    def test_obsolete_checkpoint_does_not_download_its_hundreds_of_parts(self):
+        import scanner
+        from runtime_checkpoint import build_checkpoint, checkpoint_documents
+        state = {"_runtime": {"updated_at": iso(self.start + 3600), "revision": 2}, "pools": {}}
+        old, _ = checkpoint_documents(build_checkpoint({"_runtime": {"updated_at": iso(self.start), "revision": 1}, "pools": {}}))
+        config = {}
+        with patch.object(scanner, "remote_data_url_from_env", return_value="https://test"), \
+             patch.object(scanner, "remote_ingest_secret", return_value="test-only"), \
+             patch.object(scanner, "remote_api_call", return_value={"document": {"value": old}}) as remote, \
+             patch.object(scanner, "hydrate_checkpoint", side_effect=AssertionError("stale parts must not be downloaded")):
+            self.assertIs(scanner.load_runtime_checkpoint(state, config, "deep"), state)
+        remote.assert_called_once()
+        self.assertTrue(config["_runtime_deep_stale_download_skipped"])
+
 
 if __name__ == "__main__":
     unittest.main()

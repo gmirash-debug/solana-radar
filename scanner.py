@@ -1521,6 +1521,16 @@ def load_runtime_checkpoint(state, config, kind):
         result = remote_api_call("GET", "/api/runtime/checkpoint", config, params={"kind": kind})
         payload = (result.get("document") or {}).get("value")
         if payload:
+            local_meta, remote_meta = state.get("_runtime") or {}, payload.get("runtime") or {}
+            if (isinstance(remote_meta, dict) and isinstance(local_meta, dict)
+                and isinstance(remote_meta.get("updated_at"), str) and local_meta.get("updated_at")
+                and type(remote_meta.get("revision", 0)) is int
+                and (remote_meta["updated_at"], remote_meta.get("revision", 0))
+                    <= (local_meta["updated_at"], int(local_meta.get("revision") or 0))):
+                config[f"_runtime_{kind}_recovered"] = False
+                config[f"_runtime_{kind}_available"] = True
+                config[f"_runtime_{kind}_stale_download_skipped"] = True
+                return state
             payload = hydrate_checkpoint(payload, lambda part: (remote_api_call(
                 "GET", "/api/runtime/checkpoint", config, params={"kind": kind, "part": part}).get("document") or {}).get("value") or {})
             state, recovered = restore_checkpoint(state, payload)
