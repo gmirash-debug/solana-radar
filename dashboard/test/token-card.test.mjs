@@ -469,11 +469,11 @@ test("partial movement note needs actual observations and never renders raw amou
 
 test("HTML entrypoint and every dashboard JS import use the same evidence cache tag", () => {
   const html = readFileSync(new URL("../index.html",import.meta.url),"utf8");
-  assert.match(html, /src="radar-bootstrap\.js\?v=20261008-pool-history-v2"/);
+  assert.match(html, /src="radar-bootstrap\.js\?v=20261009-low-cap-retirement"/);
   for (const file of readdirSync(new URL("../",import.meta.url)).filter(file => file.endsWith(".js"))) {
     const source = readFileSync(new URL(`../${file}`,import.meta.url),"utf8");
     for (const match of source.matchAll(/(?:from\s+|import\()"(\.\/[^"?]+\.js\?v=([^"]+))"/g)) {
-      assert.equal(match[2],"20261008-pool-history-v2",`${file}: ${match[1]}`);
+      assert.equal(match[2],"20261009-low-cap-retirement",`${file}: ${match[1]}`);
     }
   }
 });

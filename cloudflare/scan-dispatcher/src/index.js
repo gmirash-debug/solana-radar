@@ -26,6 +26,8 @@ import {coldOutboxResponse,coldOutboxStatus} from "./cold-outbox.js";
 import {evidenceArchiveResponse} from "./evidence-archive.js";
 import {archiveBackupResponse} from "./archive-backup.js";
 import {runStorageRetention, previewStorageRetention, STORAGE_RETENTION_POLICY} from "./storage-retention.js";
+import {retirementEnabled, retirementPage, retirementMarkers, updateRetirements, cleanupRetirements,
+  guardRetirementSnapshot, currentRetirementRecord, TOKEN_RETIREMENT_POLICY} from "./token-retirement.js";
 export {RuntimeSnapshots} from "./runtime.js";
 export {HistoryQueue} from "./runtime-history.js";
 export {R2Budget} from "./r2-budget.js";
@@ -47,7 +49,10 @@ let accessCertCache = { expiresAt: 0, keys: new Map() };
 let lastStorageRetention = null;
 
 async function operationalRetention(env, options) {
-  const result = await runStorageRetention(env,options);
+  const lifecycle=await cleanupRetirements(env,{maxQueries:8});
+  const result = await runStorageRetention(env,{...options,
+    maxQueries:Math.max(1,(options?.maxQueries || 16)-(lifecycle.queries || 0))});
+  result.token_retirement=lifecycle;
   lastStorageRetention = {checked_at:new Date().toISOString(),...result};
   if (!result.ok) console.warn("Storage retention failed",JSON.stringify(lastStorageRetention));
   return result;
@@ -505,6 +510,7 @@ async function pruneRadarData(db, now = isoNow()) {
 }
 
 async function ingestDashboardSnapshot(env, payload) {
+  payload=await guardRetirementSnapshot(env,payload);
   if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
   const report = compactDashboardReport(payload?.report && typeof payload.report === "object" ? payload.report : {});
   const history = Array.isArray(payload?.history) ? payload.history : [];
@@ -575,6 +581,7 @@ async function ingestDashboardSnapshot(env, payload) {
 }
 
 async function ingestSnapshotDetails(env, payload) {
+  payload=await guardRetirementSnapshot(env,payload);
   if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
   const now = isoNow();
   const generatedAt = normalizeId(payload?.generated_at);
@@ -720,6 +727,11 @@ async function upsertDiscoveryStateRows(db, rows) {
 
 async function ingestDiscoveryState(env, rows) {
   if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
+  if (Array.isArray(rows) && retirementEnabled(env)) {
+    const markers=await retirementMarkers(env,rows.slice(0,50).map(row=>row.tokenKey));
+    rows=rows.filter(row=>!markers[row.tokenKey.replace(/^solana:/,"")]
+      || markers[row.tokenKey.replace(/^solana:/,"")].reactivated_at);
+  }
   const rowsSynced = await upsertDiscoveryStateRows(env.RADAR_DB, Array.isArray(rows) ? rows.slice(0, 50) : []);
   return { ok: true, rows_synced: rowsSynced };
 }
@@ -1302,6 +1314,7 @@ export default {
         storage_epoch: env.STORAGE_EPOCH || null,
         storage_retention_policy:retentionPolicy(env),
         storage_retention_last_attempt:lastStorageRetention,
+        token_retirement_policy:retirementEnabled(env) ? TOKEN_RETIREMENT_POLICY : null,
         sql_healthy: d1Healthy,
         sql_error: d1Error,
         archive_configured: Boolean(env.RADAR_ARCHIVE),
@@ -1329,7 +1342,7 @@ export default {
           return json({...await durable.json(),r2_budget:budget},200,corsHeaders(request,env));
         }
         return json(
-          {...await dashboardData(env, url.searchParams.get("history_limit"),budget.paused),r2_budget:budget},
+          {...await guardRetirementSnapshot(env,await dashboardData(env, url.searchParams.get("history_limit"),budget.paused)),r2_budget:budget},
           200,
           corsHeaders(request, env),
         );
@@ -1346,11 +1359,19 @@ export default {
         return json({ok:false, error:"token_key_required"}, 400, corsHeaders(request, env));
       }
       try {
+        const key=normalizeId(url.searchParams.get("token_key"));
+        const marker=(await retirementMarkers(env,[key]))[key.replace(/^solana:/,"")];
+        if (marker && !marker.reactivated_at) return json({ok:false,error:"token_retired_low_cap"},404,corsHeaders(request,env));
         const budget = await budgetView(env);
         const durable = budget.paused && !runtimeUsesSql(env) ? null : await runtimeDashboardResponse(env, request).catch(() => null);
         if (durable?.ok) return new Response(durable.body, {headers:{"content-type":"application/json", "cache-control":"no-store", ...corsHeaders(request, env)}});
+        const fallback=await dashboardTokenDetail(env, url.searchParams.get("token_key"),budget.paused);
+        if (marker && ![fallback.thesis,...(fallback.current_alerts || []),...(fallback.history || [])]
+            .filter(Boolean).some(row=>currentRetirementRecord(row,{[marker.token_address]:marker}))) {
+          return json({ok:false,error:"token_retired_low_cap"},404,corsHeaders(request,env));
+        }
         return json(
-          await dashboardTokenDetail(env, url.searchParams.get("token_key"),budget.paused),
+          fallback,
           200,
           corsHeaders(request, env),
         );
@@ -1406,6 +1427,11 @@ export default {
       const access = ingestAccess(request, env);
       if (!access.ok) return json({ ok: false, error: access.error }, access.status, corsHeaders(request, env));
       try {
+        if (url.pathname === "/api/runtime/token-lifecycle") {
+          if (request.method === "GET") return json(await retirementPage(env,url.searchParams.get("cursor") || ""),200,corsHeaders(request,env));
+          if (request.method === "POST") return json(await updateRetirements(env,(await storageRequestJson(request,32*1024)).actions),200,corsHeaders(request,env));
+          return json({ok:false,error:"GET or POST required"},405,corsHeaders(request,env));
+        }
         if (url.pathname === "/api/storage/evidence-archive") {
           if (env.STORAGE_EPOCH && request.headers.get("x-radar-storage-epoch") !== env.STORAGE_EPOCH) {
             return json({ok:false,error:"storage_epoch_mismatch"},409,corsHeaders(request,env));
@@ -1593,8 +1619,8 @@ export default {
         }
         return json({ ok: false, error: "unknown_api_path" }, 404, corsHeaders(request, env));
       } catch (error) {
-        const status = url.pathname.startsWith("/api/storage/")
-          && [400, 413, 429, 503].includes(error.status) ? error.status : 500;
+        const status = (url.pathname.startsWith("/api/storage/") || url.pathname === "/api/runtime/token-lifecycle")
+          && [400,409,413,429,503].includes(error.status) ? error.status : 500;
         return json({ ok: false, error: error.message }, status, corsHeaders(request, env));
       }
     }

@@ -1,4 +1,4 @@
-import { timestampMs } from "./token-state.js?v=20261008-pool-history-v2";
+import { timestampMs } from "./token-state.js?v=20261009-low-cap-retirement";
 
 // The dashboard keeps historical data for Wallet Edge, but operational lists
 // start from the first completed scan that used the 1d-15d Reactivation rule.

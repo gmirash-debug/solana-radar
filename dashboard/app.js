@@ -1,11 +1,12 @@
-import { chooseDashboardPayload, payloadTimestamp } from "./data-source.js?v=20261008-pool-history-v2";
-import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261008-pool-history-v2";
-import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261008-pool-history-v2";
-import { installTerminology, TERMS } from "./terminology.js?v=20261008-pool-history-v2";
-import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261008-pool-history-v2";
-import { loadTokenDetail } from "./static-detail.js?v=20261008-pool-history-v2";
-import { r2BudgetView } from "./r2-budget-view.js?v=20261008-pool-history-v2";
-import { walletActivityView } from "./wallet-activity-view.js?v=20261008-pool-history-v2";
+import { chooseDashboardPayload, payloadTimestamp, mergeRetirementMarkers, applyRetirementFences,
+  retirementRecordCurrent } from "./data-source.js?v=20261009-low-cap-retirement";
+import { renderEvaluationSummary } from "./evaluation-summary.js?v=20261009-low-cap-retirement";
+import { resolveCoordinatedActivity, renderCoordinatedActivity } from "./coordinated-activity.js?v=20261009-low-cap-retirement";
+import { installTerminology, TERMS } from "./terminology.js?v=20261009-low-cap-retirement";
+import { REVIEW_QUEUES, decisionView, matchesReviewQueue, compareReviewTokens, canApplyDetail, sameDetailCohort, retentionBound, numeric, originalSaleHistoryUnknown } from "./decision-view.js?v=20261009-low-cap-retirement";
+import { loadTokenDetail } from "./static-detail.js?v=20261009-low-cap-retirement";
+import { r2BudgetView } from "./r2-budget-view.js?v=20261009-low-cap-retirement";
+import { walletActivityView } from "./wallet-activity-view.js?v=20261009-low-cap-retirement";
 import {
   DEFAULT_WORKFLOW,
   compareTokensByCatchNewest,
@@ -16,12 +17,12 @@ import {
   resolveCurrentMarket,
   resolveSignalEpisodes,
   resolveWorkflowStatus,
-} from "./token-state.js?v=20261008-pool-history-v2";
+} from "./token-state.js?v=20261009-low-cap-retirement";
 import {
   isCurrentFilterPool,
   isCurrentFilterSignal,
   marketWithCurrentFilterCatch,
-} from "./filter-scope.js?v=20261008-pool-history-v2";
+} from "./filter-scope.js?v=20261009-low-cap-retirement";
 
 const HIDDEN_TOKENS_KEY = "solana-radar:hidden-token-keys:v1";
 const PENDING_TOKEN_ACTIONS_KEY = "solana-radar:pending-token-actions:v1";
@@ -101,6 +102,10 @@ const state = {
   scanStatus: {},
   discoveryStatus: {},
   historyStatus: {},
+  tokenRetirements: (() => {
+    try { return mergeRetirementMarkers(JSON.parse(localStorage.getItem("radar-token-retirements-v1") || "{}")); }
+    catch { return {}; }
+  })(),
   walletEdgeByToken: new Map(),
   intelligence: {
     status: "idle",
@@ -1819,9 +1824,24 @@ async function loadStaticData() {
 
 function applyDashboardPayload(payload, source, fallbackReason = null, requestId = null) {
   if (requestId !== null && requestId !== state.dashboardRequestId) return false;
+  state.tokenRetirements = mergeRetirementMarkers(state.tokenRetirements, payload?.token_retirements);
+  try { localStorage.setItem("radar-token-retirements-v1", JSON.stringify(state.tokenRetirements)); } catch { /* Private mode. */ }
+  payload = applyRetirementFences(payload, state.tokenRetirements);
+  if (state.report && Object.keys(state.tokenRetirements).length) {
+    const current = applyRetirementFences({report:state.report, history:state.history, market:state.market}, state.tokenRetirements);
+    state.report = current.report; state.history = current.history; state.market = current.market;
+    state.tokenDetailCache.forEach((detail, key) => {
+      const marker = state.tokenRetirements[key.replace(/^solana:/, "")];
+      if (marker && (!marker.reactivated_at || !retirementRecordCurrent(detail.thesis || {}, state.tokenRetirements))) {
+        state.tokenDetailCache.delete(key); state.tokenDetailLoadedKeys.delete(key); state.walletEdgeByToken.delete(key);
+      }
+    });
+  }
   const nextTime = payloadTimestamp(payload), currentTime = payloadTimestamp({report:state.report});
-  if (!nextTime || nextTime < currentTime) return false;
-  if (nextTime === currentTime && source === "static" && ["remote", "local_api"].includes(state.dataSource)) return false;
+  if (!nextTime || nextTime < currentTime || (nextTime === currentTime && source === "static" && ["remote", "local_api"].includes(state.dataSource))) {
+    if (Object.keys(state.tokenRetirements).length) render();
+    return false;
+  }
   const nextReport = payload?.report || {};
   const previousGeneratedAt = state.report?.generated_at || "";
   const nextGeneratedAt = nextReport.generated_at || "";
@@ -1964,6 +1984,9 @@ function mergeTokenAlertDetails(existing, tokenKey, details) {
 function applyTokenDetail(detail) {
   const tokenKey = String(detail?.token_key || "").trim();
   if (!tokenKey) return;
+  const marker = state.tokenRetirements[tokenKey.replace(/^solana:/, "")];
+  if (marker && (!marker.reactivated_at || ![detail.thesis, ...(detail.current_alerts || []), ...(detail.history || [])]
+    .filter(Boolean).some(row => retirementRecordCurrent(row, state.tokenRetirements)))) return;
   if (detail.wallet_edge && typeof detail.wallet_edge === "object") {
     state.walletEdgeByToken.set(tokenKey, detail.wallet_edge);
   }

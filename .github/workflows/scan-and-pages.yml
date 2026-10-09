@@ -27,6 +27,7 @@ on:
       - "gmgn_context.py"
       - "gmgn_discovery.py"
       - "pool_history.py"
+      - "token_retirement.py"
       - "relay_context.py"
       - "position_evidence.py"
       - "solana_position_lineage.py"

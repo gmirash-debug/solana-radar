@@ -1,4 +1,4 @@
-import {numeric} from "./decision-view.js?v=20261008-pool-history-v2";
+import {numeric} from "./decision-view.js?v=20261009-low-cap-retirement";
 
 export const CHAIN_ID = 4663;
 export function ageFilterLabel(config) {

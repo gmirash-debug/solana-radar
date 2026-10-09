@@ -52,6 +52,7 @@ HISTORY_FLUSH_CRON = "37 * * * *"
 HISTORY_SCHEMA_AUTO_UPGRADE = "0003_resumable_history.sql"
 STORAGE_SQL_BACKEND = "turso"
 RUNTIME_STORAGE_BACKEND = "turso_sql"
+TOKEN_RETIREMENT_ENABLED = "true"
 RUNTIME_LEGACY_READ = "disabled"
 HISTORY_QUEUE_BACKEND = "turso_sql"
 # Canonical history/resume state was verified before enabling this cutover.

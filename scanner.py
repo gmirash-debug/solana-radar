@@ -53,6 +53,8 @@ from scan_failure import failure_metadata, scanner_failure_class, PROGRAMMING_ER
 from launch_history import advance_launch_history
 from prospective_evidence import capture_evaluation_rows
 from signal_evaluation import evaluate_signals, EvaluationOptions
+from token_retirement import (POLICY as TOKEN_RETIREMENT_POLICY, observe_low_caps, tracked_tokens,
+    purge_retired_state, current_record as current_lifecycle_record, recapture_proof)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -591,6 +593,65 @@ def remote_sync_required(config):
 
 def remote_ingest_secret():
     return os.environ.get("RADAR_INGEST_SECRET") or os.environ.get("RADAR_REMOTE_INGEST_SECRET")
+
+
+def load_token_retirements(state, config):
+    if not config.get("token_retirement_enabled", False):
+        return
+    if remote_data_url_from_env() and remote_ingest_secret():
+        markers, cursor, seen_cursors = {}, None, set()
+        while True:
+            page = remote_api_call("GET", "/api/runtime/token-lifecycle", config,
+                                   params={"cursor": cursor} if cursor else None)
+            if page.get("ok") is not True or page.get("enabled") is not True:
+                raise RuntimeError("token_retirement_fence_unavailable")
+            for row in page.get("records", []):
+                markers[row["token_address"]] = row
+            cursor = page.get("cursor")
+            if not cursor:
+                break
+            if cursor in seen_cursors or len(markers) > 100000:
+                raise RuntimeError("token_retirement_fence_oversize")
+            seen_cursors.add(cursor)
+        state["token_retirements"] = markers
+    purge_retired_state(state)
+    history = load_alert_history(retirements=state.get("token_retirements"))
+    write_jsonl(ALERTS_PATH, history)
+
+
+def update_token_retirements(state, alerts, config, observed_at):
+    if not config.get("token_retirement_enabled", False):
+        return
+    actions = [alert["token_recapture"] for alert in alerts if alert.get("token_recapture")]
+    previous_watch = copy.deepcopy(state.get("token_low_cap_watch") or {})
+    actions.extend(observe_low_caps(state, tracked_tokens(state, load_alert_history()), observed_at))
+    if actions:
+        if remote_data_url_from_env() and remote_ingest_secret():
+            for start in range(0, len(actions), 25):
+                result = remote_api_call("POST", "/api/runtime/token-lifecycle", config,
+                                        {"actions": actions[start:start + 25]})
+                if not result.get("ok"):
+                    raise RuntimeError("token_retirement_update_unverified")
+                for row in result.get("records", []):
+                    state.setdefault("token_retirements", {})[row["token_address"]] = row
+            for action in actions:
+                marker = state.get("token_retirements", {}).get(action["token_address"], {})
+                if (marker.get("retired_at") != action["retired_at"]
+                        or bool(marker.get("reactivated_at")) != (action["operation"] == "recapture")):
+                    raise RuntimeError("token_retirement_readback_mismatch")
+        else:
+            for action in actions:
+                state.setdefault("token_retirements", {})[action["token_address"]] = {
+                    "token_address": action["token_address"], "retired_at": action["retired_at"],
+                    "reactivated_at": action.get("reactivated_at"), "reason": "below_20k_24h"}
+    purge_retired_state(state)
+    state.setdefault("maintenance", {})["token_retirement"] = {
+        "checked_at": observed_at, "policy": TOKEN_RETIREMENT_POLICY,
+        "watching": len(state.get("token_low_cap_watch", {})),
+        "retired_now": sum(action["operation"] == "retire" for action in actions),
+        "recaptured_now": sum(action["operation"] == "recapture" for action in actions)}
+    if any(action["operation"] == "retire" for action in actions) or previous_watch != state.get("token_low_cap_watch", {}):
+        save_runtime_state(state, config, "token_retirement_watch", observed_at)
 
 
 def compact_alert_for_dashboard(alert):
@@ -1217,7 +1278,7 @@ def build_dashboard_snapshot(
     if history_limit is None:
         history_limit = config.get("remote_sync_alert_history_limit", 40)
     history_limit = max(0, int(history_limit))
-    detail_history = load_alert_history()[-history_limit:] if history_limit else []
+    detail_history = load_alert_history(retirements=state.get("token_retirements"))[-history_limit:] if history_limit else []
     history = [compact_alert_for_dashboard(alert) for alert in detail_history]
     token_keys = dashboard_snapshot_token_keys(report_payload, history)
     market = state.get("market") if isinstance(state, dict) else {}
@@ -1240,6 +1301,7 @@ def build_dashboard_snapshot(
         "report": compact_report_for_remote(report_payload),
         "history": history,
         "market": compact_market,
+        "token_retirements": state.get("token_retirements", {}),
         "deleted_tokens": load_json(
             DELETED_TOKENS_PATH,
             {"tokens": [], "pools": [], "entries": {}, "updated_at": None},
@@ -1421,6 +1483,8 @@ def sync_runtime_checkpoint(state, config, kind):
     try:
         runtime = state.get("_runtime", {})
         checkpoint, parts = checkpoint_documents(build_checkpoint(state))
+        if config.get("token_retirement_enabled", False):
+            checkpoint["token_lifecycle_version"] = 1
         progress["parts_total"] = len(parts)
         deadline = time.monotonic() + min(180,max(10,int(config.get("runtime_checkpoint_budget_seconds",180))))
         available = {}
@@ -9891,6 +9955,12 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc, state=None):
                 alert=alert,
                 checked_at=created_at,
             )
+        marker = (state or {}).get("token_retirements", {}).get(pool.token_address)
+        if marker and not marker.get("reactivated_at"):
+            proof = recapture_proof(alert, marker, created_at)
+            if not proof:
+                continue
+            alert["token_recapture"] = proof
         alerts.append(alert)
     if not coverage_available:
         raise WaveDataUnavailable(
@@ -12113,6 +12183,8 @@ def initialize_attention_history_context(pool_state):
 
 
 def scan_pool(rpc, pool, config, state, classification_budget):
+    state.setdefault("pools", {}).setdefault(pool.pool_address, {}).update(token_address=pool.token_address,
+                                                                         pool_address=pool.pool_address)
     if not attention_mode(config):
         return scan_pool_history(rpc, pool, config, state, classification_budget)
     pool_state = state.setdefault("pools", {}).setdefault(pool.pool_address, {})
@@ -12184,7 +12256,7 @@ def alert_history_sort_key(alert):
     )
 
 
-def load_alert_history(path=ALERTS_PATH):
+def load_alert_history(path=ALERTS_PATH, retirements=None):
     if not path.exists():
         return []
     alerts = []
@@ -12195,7 +12267,7 @@ def load_alert_history(path=ALERTS_PATH):
             alert = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(alert, dict):
+        if isinstance(alert, dict) and current_lifecycle_record(alert, retirements or {}):
             alerts.append(alert)
     return alerts
 
@@ -12321,7 +12393,9 @@ def compact_alert_history(existing_alerts, new_alerts, config):
 
 
 def write_alerts(alerts, config):
-    history = compact_alert_history(load_alert_history(), alerts, config)
+    markers = (config.get("_active_runtime_state") or {}).get("token_retirements", {})
+    history = compact_alert_history(load_alert_history(retirements=markers),
+        [alert for alert in alerts if current_lifecycle_record(alert, markers)], config)
     write_jsonl(ALERTS_PATH, history)
 
 
@@ -14253,8 +14327,10 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
         "lane": config.get("lane"),
         "profile": config.get("lane") or config.get("mode"),
         "storage_health": (state.get("maintenance") or {}).get("analysis_storage_health", {}),
+        "token_retirement": (state.get("maintenance") or {}).get("token_retirement", {}),
         "config": {
             "discovery_source_mode": config.get("discovery_source_mode", "composite"),
+            "token_retirement_enabled": config.get("token_retirement_enabled", False),
             "candidate_initial_history_hours": config.get("candidate_initial_history_hours", 6),
             "candidate_extended_history_hours": config.get("candidate_extended_history_hours", 24),
             "candidate_history_check_minutes": config.get("candidate_history_check_minutes", 15),
@@ -15052,6 +15128,7 @@ def run_once(config, lane_name=None):
     config["_active_runtime_state"] = state
     discovery = load_runtime_checkpoint(load_discovery_state(), config, "discovery")
     config["_discovery_state_merge"] = merge_discovery_state(state, discovery)
+    load_token_retirements(state, config)
     config["_gmgn_token_info_cache"] = {}
     config["_gmgn_profile_cache"] = {}
     config["_gmgn_ath_result_cache"] = {}
@@ -15059,6 +15136,11 @@ def run_once(config, lane_name=None):
     if config.get("_scan_profile") == "targeted":
         config["_ath_budget"]["target_tokens"] = []
     http = Http()
+    if config.get("token_retirement_enabled", False):
+        lifecycle_at = utc_now().isoformat().replace("+00:00", "Z")
+        refresh_caught_market_observations(http, state, [], config, lifecycle_at)
+        update_token_retirements(state, [], config, lifecycle_at)
+        write_alerts([], config)
     rpc = build_rpc_router(config)
     rpc.token_account_state = state
     configure_monthly_budgets(rpc, state, config)
@@ -15072,6 +15154,7 @@ def run_once(config, lane_name=None):
 
     if not config.get("_runtime_discovery_available"):
         load_remote_discovery_state(state, config)
+    purge_retired_state(state)
     config["_signal_thesis_bootstrap"] = bootstrap_signal_theses(
         state,
         load_alert_history(),
@@ -15191,11 +15274,18 @@ def run_once(config, lane_name=None):
     config["_rpc_estimated_credits"] = int(rpc.estimated_credits)
     record_market_observations(state, universe, generated_at)
     refreshed_caught_pools = refresh_caught_market_observations(http, state, all_alerts, config, generated_at)
+    update_token_retirements(state, all_alerts, config, generated_at)
+    markers = state.get("token_retirements", {})
+    all_alerts = [alert for alert in all_alerts if current_lifecycle_record(alert, markers)]
+    inactive = {token for token, marker in markers.items() if not marker.get("reactivated_at")}
+    universe = [pool for pool in universe if pool.token_address not in inactive]
+    refreshed_caught_pools = [pool for pool in refreshed_caught_pools if pool.token_address not in inactive]
+    summaries = [row for row in summaries if (row.get("pool") or {}).get("token_address") not in inactive]
     enrich_market_ath(http, state, [*universe, *refreshed_caught_pools], all_alerts, config, generated_at)
     refresh_alert_tiers_with_market_ath(state, all_alerts, config)
     record_alert_observations(state, all_alerts)
     outcome_alerts = compact_alert_history(
-        load_alert_history(),
+        load_alert_history(retirements=markers),
         all_alerts,
         config,
     )
@@ -15303,6 +15393,7 @@ def run_discovery_once(config):
     state = load_runtime_checkpoint(load_discovery_state(), config, "discovery")
     if not config.get("_runtime_discovery_recovered"):
         load_remote_discovery_state(state, config)
+    load_token_retirements(state, config)
     lane_config = discovery_pulse_config(config)
     lane_config["_active_runtime_state"] = state
     observed_at = utc_now().isoformat().replace("+00:00", "Z")
@@ -15337,6 +15428,9 @@ def run_discovery_once(config):
         observed_at,
         lane_config,
     )
+    purge_retired_state(state)
+    inactive = {token for token, marker in state.get("token_retirements", {}).items() if not marker.get("reactivated_at")}
+    universe = [pool for pool in universe if pool.token_address not in inactive]
     remote_stats = sync_remote_discovery_state(
         state,
         universe,
