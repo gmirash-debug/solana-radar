@@ -1,5 +1,6 @@
 import copy
 import unittest
+from unittest.mock import patch
 
 from token_retirement import (POLICY, observe_low_caps, purge_retired_state, recapture_proof,
                               current_record, iso, timestamp)
@@ -106,6 +107,30 @@ class TokenRetirementTests(unittest.TestCase):
         marker = {"retired_at": iso(self.start), "reactivated_at": iso(self.start + 3600)}
         self.assertFalse(current_record({"token_address": "token", "signal_at": iso(self.start - 1)}, {"token": marker}))
         self.assertTrue(current_record({"token_address": "token", "signal_at": iso(self.start + 1800)}, {"token": marker}))
+
+    def test_lifecycle_contract_is_outside_the_checksummed_checkpoint_manifest(self):
+        import scanner
+        from runtime_checkpoint import hydrate_checkpoint, restore_checkpoint
+        state = {"pools": {}, "token_retirements": {}, "token_low_cap_watch": {"token": {"samples": 1}},
+                 "_runtime": {"updated_at": iso(self.start), "revision": 1}}
+        uploads = []
+        def upload(path, config, payload, deadline, params=None):
+            uploads.append((payload, params))
+            return {"ok": True, "accepted": True}
+        with patch.object(scanner, "remote_data_url_from_env", return_value="https://test"), \
+             patch.object(scanner, "remote_ingest_secret", return_value="test-only"), \
+             patch.object(scanner, "remote_api_call", return_value={"parts": []}), \
+             patch.object(scanner, "safe_runtime_upload", side_effect=upload):
+            result = scanner.sync_runtime_checkpoint(state, {"token_retirement_enabled": True}, "deep")
+        self.assertTrue(result["ok"])
+        manifest, params = uploads[-1]
+        self.assertEqual(manifest["token_lifecycle_version"], 1)
+        self.assertNotIn("token_lifecycle_version", manifest["checkpoint"])
+        parts = {params["part"]: payload["checkpoint"] for payload, params in uploads[:-1]}
+        hydrated = hydrate_checkpoint(manifest["checkpoint"], lambda key: parts[key])
+        restored, ok = restore_checkpoint({}, hydrated)
+        self.assertTrue(ok)
+        self.assertEqual(restored, state)
 
 
 if __name__ == "__main__":

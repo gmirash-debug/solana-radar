@@ -1483,8 +1483,6 @@ def sync_runtime_checkpoint(state, config, kind):
     try:
         runtime = state.get("_runtime", {})
         checkpoint, parts = checkpoint_documents(build_checkpoint(state))
-        if config.get("token_retirement_enabled", False):
-            checkpoint["token_lifecycle_version"] = 1
         progress["parts_total"] = len(parts)
         deadline = time.monotonic() + min(180,max(10,int(config.get("runtime_checkpoint_budget_seconds",180))))
         available = {}
@@ -1501,12 +1499,14 @@ def sync_runtime_checkpoint(state, config, kind):
                 progress["parts_reused"] += 1
                 continue
             safe_runtime_upload("/api/runtime/checkpoint", config, {
-                "checkpoint": part, "updated_at": runtime.get("updated_at"), "revision": runtime.get("revision", 0)},
+                "checkpoint": part, "updated_at": runtime.get("updated_at"), "revision": runtime.get("revision", 0),
+                "token_lifecycle_version": 1 if config.get("token_retirement_enabled", False) else 0},
                 deadline, params={"kind": kind, "part": part["sha256"]})
             progress["parts_uploaded"] += 1
         result = safe_runtime_upload("/api/runtime/checkpoint", config, {
             "checkpoint": checkpoint, "updated_at": runtime.get("updated_at"),
-            "revision": runtime.get("revision", 0)}, deadline, params={"kind": kind})
+            "revision": runtime.get("revision", 0),
+            "token_lifecycle_version": 1 if config.get("token_retirement_enabled", False) else 0}, deadline, params={"kind": kind})
         if result.get("ok") is not True or result.get("accepted") is not True:
             raise RuntimeError("runtime checkpoint was not acknowledged: " + json.dumps({
                 "ignored":result.get("ignored"),"server_updated_at":result.get("updated_at"),
