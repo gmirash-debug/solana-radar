@@ -79,6 +79,9 @@ def observe_low_caps(state, tokens, observed_at):
             watches.pop(token, None)
             continue
         if at == previous_at:
+            if (at - timestamp(previous.get("below_since")) >= POLICY["below_seconds"]
+                    and previous.get("samples", 0) >= 13):
+                actions.append({"operation": "retire", "token_address": token, "retired_at": iso(now), **previous})
             continue
         gap = at - previous_at
         if not previous_at or gap > POLICY["max_observation_gap_seconds"]:

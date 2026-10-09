@@ -77,6 +77,17 @@ test("24-hour boundary validation rejects fake/missing quotes, sparse checks, fu
   assert.equal(result.records[0].reactivated_at,null);
 });
 
+test("small clock route stays private and rejects invalid or oversized price clocks",async t=> {
+  const f=fixture(t);f.env.STORAGE_SQL_BACKEND="d1";f.env.RADAR_INGEST_SECRET="test-only";
+  const request=(value,auth=true)=>new Request("https://radar/api/runtime/token-low-cap-watch",{method:"POST",
+    headers:auth ? {"x-radar-ingest-secret":"test-only"} : {},body:JSON.stringify({value})});
+  assert.equal((await worker.fetch(request({version:1,watches:{}},false),f.env)).status,401);
+  for (const value of [{version:2,watches:{}},{version:1,watches:[]},
+    {version:1,watches:{[TOKEN]:{below_since:iso(NOW-HOUR),last_quote_at:iso(NOW),mcap_usd:21000,samples:2,max_gap_seconds:3600}}}]) {
+    assert.equal((await worker.fetch(request(value),f.env)).status,400);
+  }
+});
+
 test("SQL failures roll back the fence and do not manufacture a successful deletion",async t=> {
   const f=fixture(t);f.episode("old");
   f.fail=text=>text.includes("INSERT OR IGNORE INTO retired_episode_ids");
