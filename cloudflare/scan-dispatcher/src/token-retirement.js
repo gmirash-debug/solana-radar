@@ -49,7 +49,8 @@ export function currentRetirementRecord(row, markers) {
 export function snapshotTokenKeys(snapshot) {
   return [...new Set([...(snapshot.report?.signal_theses || []),...(snapshot.report?.alerts || []),
     ...(snapshot.history || []),...(snapshot.detail_signal_theses || []),...(snapshot.detail_current_alerts || []),
-    ...(snapshot.detail_history || []),...(snapshot.history_ledger?.events || []).map(row=>row.episode)]
+    ...(snapshot.detail_history || []),...(snapshot.report?.universe || []),...(snapshot.report?.active_pools || []),
+    ...(snapshot.report?.summaries || []),...(snapshot.history_ledger?.events || []).map(row=>row.episode)]
     .map(rowToken).concat(Object.keys(snapshot.market || {}),Object.keys(snapshot.token_detail_refs || {})).filter(Boolean))];
 }
 
@@ -62,7 +63,7 @@ export function filterRetirementSnapshot(snapshot, markers) {
   for (const field of ["history","detail_signal_theses","detail_current_alerts","detail_history"]) {
     if (Array.isArray(result[field])) result[field]=result[field].filter(keep);
   }
-  for (const field of ["summaries","pools"]) {
+  for (const field of ["summaries","pools","universe","active_pools"]) {
     if (Array.isArray(result.report[field])) result.report[field]=result.report[field].filter(row=>!markers[rowToken(row)]
       || markers[rowToken(row)].reactivated_at);
   }

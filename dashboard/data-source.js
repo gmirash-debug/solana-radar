@@ -26,7 +26,7 @@ export function applyRetirementFences(payload, markers) {
   for (const field of ["signal_theses", "alerts", "active"]) {
     if (Array.isArray(result.report[field])) result.report[field] = result.report[field].filter(keep);
   }
-  for (const field of ["pools", "summaries"]) {
+  for (const field of ["pools", "summaries", "universe", "active_pools"]) {
     if (Array.isArray(result.report[field])) result.report[field] = result.report[field].filter(row =>
       !markers[lifecycleKey(row)] || markers[lifecycleKey(row)].reactivated_at);
   }
