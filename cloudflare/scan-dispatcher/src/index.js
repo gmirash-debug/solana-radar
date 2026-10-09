@@ -728,7 +728,8 @@ async function upsertDiscoveryStateRows(db, rows) {
 async function ingestDiscoveryState(env, rows) {
   if (!hasRadarDb(env)) throw new Error("radar_db_not_configured");
   if (Array.isArray(rows) && retirementEnabled(env)) {
-    const markers=await retirementMarkers(env,rows.slice(0,50).map(row=>row.tokenKey));
+    rows=rows.slice(0,50).filter(row=>typeof row?.tokenKey === "string");
+    const markers=await retirementMarkers(env,rows.map(row=>row.tokenKey));
     rows=rows.filter(row=>!markers[row.tokenKey.replace(/^solana:/,"")]
       || markers[row.tokenKey.replace(/^solana:/,"")].reactivated_at);
   }

@@ -25,6 +25,10 @@ Existing tokens begin their observation window on a fresh verified quote. Market
 refresh and lifecycle processing run before RPC analysis, including passes with
 no new transaction history. Retirement is saved before later RPC failures can
 leave an old private checkpoint as the current state.
+Known low-cap tokens use a 15-minute public market-quote refresh TTL, within the
+20-minute freshness contract. This reuses the existing batched market provider;
+it does not add wallet-history RPC work. Other caught-token quotes keep their
+existing refresh cadence.
 
 ## Return
 
@@ -40,7 +44,9 @@ A return requires all of these:
 - Its buy window starts after the authoritative retirement cutoff.
 - Positive net buy flow and at least four dated on-chain execution-price samples.
 - The median of its last two execution prices exceeds the first two by at least
-  3%. Ranking membership or a price bounce alone is insufficient.
+  3%; both closing price samples are within 20 minutes of capture. Use the full
+  candidate window, not the potentially truncated public event export. Ranking
+  membership or a price bounce alone is insufficient.
 
 The Worker validates the authenticated recapture evidence and acknowledges the
 activation before publication. The new episode receives a new catch and cohort.

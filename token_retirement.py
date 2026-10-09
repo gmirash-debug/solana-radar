@@ -96,7 +96,7 @@ def observe_low_caps(state, tokens, observed_at):
     return actions
 
 
-def recapture_proof(alert, marker, now):
+def recapture_proof(alert, marker, now, price_events=None):
     cutoff = timestamp(marker.get("retired_at"))
     pool = alert.get("pool") or {}
     at = timestamp(pool.get("market_snapshot_at"))
@@ -111,7 +111,7 @@ def recapture_proof(alert, marker, now):
             or not attention.get("memberships") or not 0 <= now - attention_at <= 1800
             or (number((alert.get("wave") or {}).get("net_buy_sol")) or 0) <= 0):
         return None
-    events = alert.get("coordination_events") or alert.get("events") or []
+    events = price_events if price_events is not None else (alert.get("coordination_events") or alert.get("events") or [])
     quotes = []
     for event in events:
         time = timestamp(event.get("block_time") or event.get("time"))
@@ -122,7 +122,8 @@ def recapture_proof(alert, marker, now):
         if price and price > 0 and cutoff < time <= now:
             quotes.append((time, price))
     quotes.sort()
-    if len(quotes) < 4 or quotes[-2][0] <= quotes[1][0]:
+    if (len(quotes) < 4 or quotes[-2][0] <= quotes[1][0]
+            or now - quotes[-2][0] > POLICY["quote_max_age_seconds"]):
         return None
     before, after = median(row[1] for row in quotes[:2]), median(row[1] for row in quotes[-2:])
     growth = (after / before - 1) * 100
@@ -132,7 +133,8 @@ def recapture_proof(alert, marker, now):
             "retired_at": marker["retired_at"], "signal_at": iso(signal_time(alert)),
             "reactivated_at": iso(now), "mcap_usd": cap, "growth_pct": growth,
             "net_buy_sol": alert["wave"]["net_buy_sol"], "quote_at": iso(at),
-            "attention_at": iso(attention_at)}
+            "attention_at": iso(attention_at), "price_samples": len(quotes),
+            "price_start_at": iso(quotes[0][0]), "price_observed_at": iso(quotes[-2][0])}
 
 
 def purge_retired_state(state):

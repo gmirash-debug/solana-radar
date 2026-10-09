@@ -124,7 +124,11 @@ function validateAction(action, now) {
         || action.growth_pct<3 || typeof action.net_buy_sol!=="number" || !Number.isFinite(action.net_buy_sol)
         || action.net_buy_sol<=0 || !stamp(action.quote_at) || !stamp(action.attention_at)
         || active-stamp(action.quote_at)<0 || active-stamp(action.quote_at)>1200000
-        || active-stamp(action.attention_at)<0 || active-stamp(action.attention_at)>1800000) fail();
+        || active-stamp(action.attention_at)<0 || active-stamp(action.attention_at)>1800000
+        || !Number.isSafeInteger(action.price_samples) || action.price_samples<4
+        || !stamp(action.price_start_at) || stamp(action.price_start_at)<=at
+        || stamp(action.price_observed_at)<=stamp(action.price_start_at)
+        || active-stamp(action.price_observed_at)<0 || active-stamp(action.price_observed_at)>1200000) fail();
   } else fail();
 }
 

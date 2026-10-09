@@ -60,7 +60,7 @@ class TokenRetirementTests(unittest.TestCase):
             "market_snapshot_at": now, "gmgn_attention": {"last_seen_at": iso(now),
                 "memberships": [{"source": "trending"}]}}, "wave": {"net_buy_sol": 30},
             "window_start": iso(self.start + 1800), "window_end": iso(now - 60),
-            "coordination_events": [{"block_time": self.start + 1900 + i * 60, "price_native": p}
+            "coordination_events": [{"block_time": self.start + 2400 + i * 60, "price_native": p}
                 for i, p in enumerate([1, 1, 1.1, 1.1])]}
 
     def test_new_growing_buy_wave_can_recapture(self):
@@ -83,6 +83,11 @@ class TokenRetirementTests(unittest.TestCase):
         alert = self.alert()
         for row in alert["coordination_events"]:
             row["price_native"] = 1
+        self.assertIsNone(recapture_proof(alert, marker, now))
+
+        alert = self.alert()
+        for row in alert["coordination_events"]:
+            row["block_time"] -= 3600
         self.assertIsNone(recapture_proof(alert, marker, now))
 
     def test_purge_keeps_other_tokens_and_budget_ledgers_but_not_original_cohort(self):

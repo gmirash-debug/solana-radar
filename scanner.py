@@ -622,7 +622,21 @@ def load_token_retirements(state, config):
 def update_token_retirements(state, alerts, config, observed_at):
     if not config.get("token_retirement_enabled", False):
         return
-    actions = [alert["token_recapture"] for alert in alerts if alert.get("token_recapture")]
+    actions = []
+    now = parse_timestamp(observed_at)
+    for alert in alerts:
+        proof = alert.get("token_recapture")
+        if not proof:
+            continue
+        quote = state.get("market", {}).get(proof["token_address"], {})
+        cap = nullable_market_number(quote.get("latest_mcap_usd"))
+        quote_at = parse_timestamp(quote.get("current_market_verified_at"))
+        if (quote.get("market_snapshot_stale") or cap is None or not 30000 <= cap <= 500000
+            or not quote_at or not 0 <= now - quote_at <= 1200
+            or not 0 <= now - parse_timestamp(proof.get("price_observed_at")) <= 1200
+            or not 0 <= now - parse_timestamp(proof.get("attention_at")) <= 1800):
+            continue
+        actions.append({**proof, "mcap_usd": cap, "quote_at": iso(quote_at), "reactivated_at": observed_at})
     previous_watch = copy.deepcopy(state.get("token_low_cap_watch") or {})
     actions.extend(observe_low_caps(state, tracked_tokens(state, load_alert_history()), observed_at))
     if actions:
@@ -9957,7 +9971,8 @@ def build_reactivation_wave_alerts(pool, swaps, config, rpc, state=None):
             )
         marker = (state or {}).get("token_retirements", {}).get(pool.token_address)
         if marker and not marker.get("reactivated_at"):
-            proof = recapture_proof(alert, marker, created_at)
+            proof = recapture_proof(alert, marker, created_at, price_events=[item for item in candidate["window"]
+                if float(item.get("sol_amount") or 0) >= float(config.get("reactivation_wave_min_trade_sol", 0.25))])
             if not proof:
                 continue
             alert["token_recapture"] = proof
@@ -13163,7 +13178,13 @@ def refresh_caught_market_observations(http, state, alerts, config, observed_at)
     for token in tokens:
         entry = market.get(token) or {}
         latest_seen = parse_timestamp(entry.get("latest_seen_at"))
-        if ttl_seconds > 0 and latest_seen and now - latest_seen < ttl_seconds:
+        refresh_ttl = ttl_seconds
+        cap = nullable_market_number(entry.get("latest_mcap_usd"))
+        if config.get("token_retirement_enabled", False) and (
+            token in state.get("token_low_cap_watch", {}) or (cap is not None and 0 < cap < 20000)
+        ):
+            refresh_ttl = min(ttl_seconds, 900)
+        if refresh_ttl > 0 and latest_seen and now - latest_seen < refresh_ttl:
             continue
         due_tokens.append(token)
 
@@ -13206,6 +13227,16 @@ def refresh_caught_market_observations(http, state, alerts, config, observed_at)
     if refreshed:
         print(f"caught market refresh: {len(refreshed)}/{len(due_tokens)} tokens", flush=True)
     return refreshed
+
+
+def refresh_recapture_market(http, state, alerts, config):
+    tokens = {alert["token_recapture"]["token_address"] for alert in alerts if alert.get("token_recapture")}
+    if not tokens:
+        return
+    pools = best_pool_per_token(fetch_dex_pairs_for_tokens(http, sorted(tokens), "recapture_market_refresh").values(), config)
+    record_market_observations(state, pools, utc_now().isoformat().replace("+00:00", "Z"))
+    for token in tokens - {pool.token_address for pool in pools}:
+        state.setdefault("market", {}).setdefault(token, {})["market_snapshot_stale"] = True
 
 
 def record_alert_observations(state, alerts):
@@ -15139,6 +15170,7 @@ def run_once(config, lane_name=None):
     if config.get("token_retirement_enabled", False):
         lifecycle_at = utc_now().isoformat().replace("+00:00", "Z")
         refresh_caught_market_observations(http, state, [], config, lifecycle_at)
+        lifecycle_at = utc_now().isoformat().replace("+00:00", "Z")
         update_token_retirements(state, [], config, lifecycle_at)
         write_alerts([], config)
     rpc = build_rpc_router(config)
@@ -15272,8 +15304,11 @@ def run_once(config, lane_name=None):
     config["_rpc_failures"] = dict(rpc.failures)
     config["_rpc_failovers"] = dict(rpc.route_failovers)
     config["_rpc_estimated_credits"] = int(rpc.estimated_credits)
+    generated_at = utc_now().isoformat().replace("+00:00", "Z")
     record_market_observations(state, universe, generated_at)
     refreshed_caught_pools = refresh_caught_market_observations(http, state, all_alerts, config, generated_at)
+    refresh_recapture_market(http, state, all_alerts, config)
+    generated_at = utc_now().isoformat().replace("+00:00", "Z")
     update_token_retirements(state, all_alerts, config, generated_at)
     markers = state.get("token_retirements", {})
     all_alerts = [alert for alert in all_alerts if current_lifecycle_record(alert, markers)]

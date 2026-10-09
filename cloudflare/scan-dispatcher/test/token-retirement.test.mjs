@@ -49,7 +49,8 @@ const retire=()=>({operation:"retire",token_address:TOKEN,retired_at:iso(NOW),be
   last_quote_at:iso(NOW),samples:25,max_gap_seconds:3600,mcap_usd:19000});
 const recapture=()=>({operation:"recapture",token_address:TOKEN,retired_at:iso(NOW),reactivated_at:iso(NOW+HOUR),
   signal_at:iso(NOW+HOUR-600000),quote_at:iso(NOW+HOUR),attention_at:iso(NOW+HOUR),
-  growth_pct:5,net_buy_sol:15,mcap_usd:35000});
+  growth_pct:5,net_buy_sol:15,mcap_usd:35000,price_samples:4,
+  price_start_at:iso(NOW+HOUR-600000),price_observed_at:iso(NOW+HOUR-60000)});
 const raw=(id,at=NOW-48*HOUR)=>({episode:{episode_id:id,token_address:TOKEN,caught_at:iso(at)}});
 
 test("retirement is authenticated, epoch fenced, and never offered on a public mutating endpoint",async t=> {
@@ -125,7 +126,7 @@ test("cleanup is resumable and removes children, original cohorts, derived claim
 test("recapture needs a rising new wave in 30k-500k, not ranking alone, and never revives old episodes",async t=> {
   const f=fixture(t);f.episode("old");await updateRetirements(f.env,[retire()],{now:NOW});
   for (const extra of [{growth_pct:0},{net_buy_sol:0},{signal_at:iso(NOW)}, {mcap_usd:29999},{mcap_usd:500001},
-    {quote_at:iso(NOW)}, {attention_at:iso(NOW)}]) {
+    {quote_at:iso(NOW)}, {attention_at:iso(NOW)}, {price_samples:0}, {price_observed_at:iso(NOW)}]) {
     await assert.rejects(()=>updateRetirements(f.env,[{...recapture(),...extra}],{now:NOW+HOUR}),/evidence_invalid/);
   }
   await updateRetirements(f.env,[recapture()],{now:NOW+HOUR});
