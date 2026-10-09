@@ -1,6 +1,7 @@
 {
   "mode": "balanced",
   "lane": "reactivation",
+  "token_retirement_enabled": true,
   "targeted_pool_limit": 6,
   "signal_evaluation_holdout_start": "2026-10-17T00:00:00Z",
   "launch_history_enabled": true,

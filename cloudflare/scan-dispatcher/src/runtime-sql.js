@@ -1,5 +1,6 @@
 import {compactDashboardReport, compactDashboardAlert, dashboardRecordMatchesToken} from "./dashboard-shaping.js";
 import {validateBlob, documentReferences} from "./runtime-documents.js";
+import {retirementEnabled, guardRetirementSnapshot, retirementMarkers} from "./token-retirement.js";
 
 const encoder = new TextEncoder();
 const MAX_BYTES = 8 * 1024 * 1024;
@@ -46,7 +47,14 @@ async function sha256(value) {
     byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-export async function writeSqlRuntime(env, name, value, updatedAt, revision = 0) {
+export async function writeSqlRuntime(env, name, value, updatedAt, revision = 0, options = {}) {
+  if (retirementEnabled(env)) {
+    if (name === "dashboard") value = await guardRetirementSnapshot(env,value);
+    if (/^checkpoint:(deep|discovery)(?::blob:[a-f0-9]{64})?$/.test(name) && options.tokenLifecycleVersion!==1) {
+      const fenced=await database(env).prepare("SELECT 1 FROM token_retirements LIMIT 1").first();
+      if (fenced) throw new Error("checkpoint_token_retirement_contract_required");
+    }
+  }
   if (!/^[a-zA-Z0-9:_-]{1,180}$/.test(name)) throw new Error("invalid_runtime_document");
   const sourceMs = Date.parse(updatedAt);
   if (!Number.isFinite(sourceMs) || sourceMs > Date.now() + 300000) throw new Error("invalid_runtime_timestamp");
@@ -197,7 +205,8 @@ export async function sqlRuntimeResponse(env, request, name) {
       delete value.history_ledger; delete value._sync_progress;
       updatedAt = value.report.generated_at;
     }
-    return Response.json(await writeSqlRuntime(env, name, value, updatedAt, payload.revision || 0));
+    return Response.json(await writeSqlRuntime(env, name, value, updatedAt, payload.revision || 0,
+      {tokenLifecycleVersion:payload.token_lifecycle_version}));
   } catch (error) {
     return Response.json({ok:false,error:error.message},{status:error.code?.startsWith("storage_sql_") ? 503 : 400});
   }
@@ -207,10 +216,12 @@ export async function sqlDashboardResponse(env, request, extra = {}) {
   const url = new URL(request.url);
   const stored = await readSqlRuntime(env, "dashboard");
   if (!stored?.value?.report?.generated_at) return null;
-  const snapshot = stored.value;
+  const snapshot = retirementEnabled(env) ? await guardRetirementSnapshot(env,stored.value) : stored.value;
   const token = url.searchParams.get("token_key");
   if (token) {
     const key = token.replace(/^solana:/, "");
+    const marker=(await retirementMarkers(env,[key]))[key];
+    if (marker && !marker.reactivated_at) return Response.json({ok:false,error:"token_retired_low_cap",token_key:token},{status:404});
     const ref = snapshot.token_detail_refs?.[token] || snapshot.token_detail_refs?.[key];
     if (ref) {
       const part = await readSqlRuntime(env, `dashboard:blob:${ref.id}`);

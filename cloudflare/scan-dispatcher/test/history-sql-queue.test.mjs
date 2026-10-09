@@ -12,6 +12,37 @@ const NOW = Date.parse("2026-10-04T12:00:00.000Z");
 const iso = time => new Date(time).toISOString();
 const ledger = events => ({history_ledger:{events}});
 const credentials = {TURSO_DATABASE_URL:"libsql://queue-test.turso.io",TURSO_AUTH_TOKEN:"test-only"};
+
+test("a retirement discards queued raw evidence without an archive read or replaying the old episode",async t=> {
+  const f=fixture(t,{TOKEN_RETIREMENT_ENABLED:"true",HISTORY_ARCHIVE_MODE:"r2",
+    RADAR_ARCHIVE:new Proxy({}, {get(){assert.fail("Retired history cannot contact R2");}})});
+  const raw=event("retired-row");
+  await enqueueDurableHistory(f.env,ledger([raw]));
+  f.sqlite.prepare(`INSERT INTO token_retirements(token_address,retired_at,reason,cleanup_before,updated_at)
+    VALUES(?,?,'below_20k_24h',?,?)`).run(raw.episode.token_address,iso(NOW),iso(NOW),iso(NOW));
+  const result=await flushDurableHistory(f.env);
+  assert.equal(result.delivered,1);assert.equal(result.failed,0);
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) n FROM signal_episodes").get().n,0);
+  assert.equal(f.rows()[0].payload_json,null);assert.equal(f.meta().pending_rows,0);
+  assert.equal(f.meta().archive_pending_rows,0);
+  const replay=await enqueueDurableHistory(f.env,ledger([raw]));
+  assert.equal(replay.queued,0);assert.equal(replay.retired_discarded,1);
+});
+
+test("recapture admits only a new episode while old archive receipts remain fenced",async t=> {
+  const f=fixture(t,{TOKEN_RETIREMENT_ENABLED:"true"});
+  const old=event("old-retired"), fresh=event("new-catch");
+  fresh.episode.token_address=old.episode.token_address;
+  f.sqlite.prepare(`INSERT INTO token_retirements(token_address,retired_at,reactivated_at,reason,cleanup_before,updated_at)
+    VALUES(?,?,?,'below_20k_24h',?,?)`).run(old.episode.token_address,iso(NOW-HOUR),iso(NOW),iso(NOW-HOUR),iso(NOW));
+  fresh.episode.caught_at=iso(NOW-600000);
+  fresh.event.observed_at=iso(NOW);
+  const result=await enqueueDurableHistory(f.env,ledger([old,fresh]));
+  assert.equal(result.retired_discarded,1);assert.equal(result.queued,1);
+  assert.equal(f.rows()[0].episode_id,"new-catch");
+});
+
+const HOUR=3600000;
 function event(id, {episode = id, at = NOW-3600_000, wallets = [], type = "snapshot"} = {}) {
   return {event_id:id,episode:{episode_id:episode,token_address:`token:${episode}`,caught_at:iso(NOW-4*3600_000),
     caught_mcap_usd:80000,caught_liquidity_usd:20000,token_age_days:40},
@@ -41,6 +72,12 @@ function fixture(t, overrides = {}, {migrate = true} = {}) {
   sqlite.exec(readFileSync(new URL("../migrations-storage/0001_daily_learning.sql",import.meta.url),"utf8"));
   if (migrate) sqlite.exec(readFileSync(new URL("../migrations-storage/0003_sql_queue.sql",import.meta.url),"utf8"));
   if (migrate) sqlite.exec(readFileSync(new URL("../migrations-storage/0005_cutover_staging.sql",import.meta.url),"utf8"));
+  if (overrides.TOKEN_RETIREMENT_ENABLED === "true") {
+    for (const file of ["migrations/0001_radar_data.sql","migrations-storage/0002_runtime_sql.sql",
+      "migrations-storage/0007_token_retirement.sql"]) {
+      sqlite.exec(readFileSync(new URL(`../${file}`,import.meta.url),"utf8"));
+    }
+  }
   const f = {sqlite,calls:[],sql:[],before:null,failSql:null,afterCommit:null};
   const encode = n => n === null ? {type:"null"} : typeof n === "string" ? {type:"text",value:n}
     : Number.isInteger(n) ? {type:"integer",value:String(n)} : {type:"float",value:n};

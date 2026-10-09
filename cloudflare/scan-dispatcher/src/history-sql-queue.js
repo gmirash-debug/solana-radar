@@ -1,6 +1,7 @@
 import {checkedHistoryDb} from "./history.js";
 import {resumeHistoryEvent, HistoryYield, minimumHistoryWork, historyInfrastructure} from "./history-progress.js";
 import {archiveHistoryEvent, readHistoryArchive, historyArchiveEnabled} from "./archive.js";
+import {retirementEnabled, eventIsRetired, filterRetiredHistoryEvents} from "./token-retirement.js";
 
 const WRITE_UNITS = 8;
 const ENCODER = new TextEncoder();
@@ -95,6 +96,9 @@ export class SqlHistoryQueue {
   }
 
   async enqueue(events, now = Date.now(), priorities = new Set()) {
+    this.policy.validateHistoryEvents(events,now,this.eventBytes);
+    const submitted=events.length;
+    events=await filterRetiredHistoryEvents(this.env,events);
     const rows = this.policy.validateHistoryEvents(events,now,this.eventBytes);
     if (events.some(event => minimumHistoryWork(event,this.infra)>this.historyBudget)) {
       throw this.error("history_event_exceeds_atomic_daily_allowance",400);
@@ -120,10 +124,11 @@ export class SqlHistoryQueue {
       return {...this.enqueueResult(meta,queued,events.length),staged:true,
         cutover_pending:staging.pending_rows,cutover_pending_bytes:staging.pending_bytes};
     }
-    return this.persist(rows.map(row => ({...row,status:"pending",attempts:0,nextAttempt:now,
+    const result=await this.persist(rows.map(row => ({...row,status:"pending",attempts:0,nextAttempt:now,
       progress:priorities.has(row.episodeId) || row.sourceAt>=now-24*3600000
         ? JSON.stringify({_live_until:now+24*3600000}) : null,
       archiveVersion:0,deliveredAt:null,lastError:null})),events.length,now);
+    return {...result,retired_discarded:submitted-events.length};
   }
 
   async drainCutover(requests, now) {
@@ -401,6 +406,16 @@ export class SqlHistoryQueue {
         const outcome = {deliveredBefore:total.delivered}, beforeUsed = used;
         try {
           let raw = JSON.parse(row.payload_json);
+          if (retirementEnabled(this.env)) {
+            requests.reserve("history"); queries++;
+            if (await eventIsRetired(this.env,raw,row.episode_id)) {
+              state.phase="done";
+              outcome.delivered=true;
+              outcome.archivePending=false;
+              outcome.retired=true;
+            }
+          }
+          if (!outcome.retired) {
           const envelope = this.policy.archivedEnvelope(raw);
           const archiveOptions = this.archiveOptions(requests);
           if (envelope) {
@@ -427,9 +442,14 @@ export class SqlHistoryQueue {
             derivedMode:this.env.HISTORY_DERIVED_MODE});
           outcome.delivered=true;
           outcome.archivePending=!envelope && historyArchiveEnabled(this.env);
+          }
         } catch (error) {
+          if (String(error.message || error).includes("token_episode_retired")) {
+            state.phase="done";outcome.delivered=true;outcome.archivePending=false;
+          } else {
           outcome.deferred=Boolean(error.deferred);
           if (!outcome.deferred) outcome.error=String(error.message || error).slice(0,500);
+          }
         }
         // A separate fenced checkpoint survives a receipt failure or restart.
         await this.saveProgress(row,state,requests);
@@ -477,6 +497,14 @@ export class SqlHistoryQueue {
       let ref, error;
       try {
         const raw = JSON.parse(row.payload_json);
+        if (retirementEnabled(this.env)) {
+          requests.reserve("history");
+          if (await eventIsRetired(this.env,raw,row.episode_id)) {
+            await this.batch([this.db.prepare("DELETE FROM history_sql_queue_events WHERE event_id=?1 AND archive_lease_token=?2")
+              .bind(row.event_id,token)],requests);
+            continue;
+          }
+        }
         this.verifyIdentity(raw,row);
         ref = await archiveHistoryEvent(this.env,raw,this.archiveOptions(requests,1));
       } catch (caught) { error=String(caught.message || caught).slice(0,500); }

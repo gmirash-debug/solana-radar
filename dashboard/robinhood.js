@@ -1,9 +1,9 @@
 import {validSnapshot, isFresh, selectTokens, formatSupplyPercent, walletFresh, supplyRange,
-  REVIEW_GROUPS, reviewGroup, positionBounds, marketFresh, comparePositions, ageFilterLabel, relaySignalLabel} from "./robinhood-state.js?v=20261008-pool-history-v2";
-import {renderAccumulationEvidence, accumulationSummary} from "./accumulation-evidence.js?v=20261008-pool-history-v2";
-import {renderCoordinatedActivity} from "./coordinated-activity.js?v=20261008-pool-history-v2";
-import {installTerminology} from "./terminology.js?v=20261008-pool-history-v2";
-import {gmgnUrl, renderGmgnMarket, renderGmgnHolders, renderGmgnSecurity} from "./gmgn-context.js?v=20261008-pool-history-v2";
+  REVIEW_GROUPS, reviewGroup, positionBounds, marketFresh, comparePositions, ageFilterLabel, relaySignalLabel} from "./robinhood-state.js?v=20261009-low-cap-retirement";
+import {renderAccumulationEvidence, accumulationSummary} from "./accumulation-evidence.js?v=20261009-low-cap-retirement";
+import {renderCoordinatedActivity} from "./coordinated-activity.js?v=20261009-low-cap-retirement";
+import {installTerminology} from "./terminology.js?v=20261009-low-cap-retirement";
+import {gmgnUrl, renderGmgnMarket, renderGmgnHolders, renderGmgnSecurity} from "./gmgn-context.js?v=20261009-low-cap-retirement";
 
 const $ = selector => document.querySelector(selector);
 const terminology = installTerminology(document);
