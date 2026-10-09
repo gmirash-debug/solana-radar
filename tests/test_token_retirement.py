@@ -137,6 +137,42 @@ class TokenRetirementTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(restored, state)
 
+    def test_small_clock_write_recovers_an_ambiguous_commit_by_exact_readback(self):
+        import scanner
+        config = {}
+        state = {"token_low_cap_watch": {"token": {"samples": 1}}}
+        with patch.object(scanner, "remote_data_url_from_env", return_value="https://test"), \
+             patch.object(scanner, "remote_ingest_secret", return_value="test-only"), \
+             patch.object(scanner, "remote_api_call", side_effect=[RuntimeError("timeout"),
+                 {"document": {"value": {"version": 1, "watches": state["token_low_cap_watch"]}, "revision": 7}}]):
+            self.assertTrue(scanner.persist_low_cap_watch(state, config, iso(self.start)))
+        self.assertEqual(config["_low_cap_watch_revision"], 7)
+
+    def test_unverified_small_clock_cannot_retire_and_does_not_upload_a_huge_checkpoint(self):
+        import scanner
+        token = "CrJPSvj625TnPdWS42aG5ybMcHeFvnNqq5AExVespump"
+        state = {"pools": {"pool": {"signal_thesis": {"token_address": token}}},
+                 "market": {token: {"latest_mcap_usd": 19000,
+                    "current_market_verified_at": iso(self.start + 24 * 3600)}}}
+        state["token_low_cap_watch"] = {token: {"below_since": iso(self.start),
+            "last_quote_at": iso(self.start + 23 * 3600), "samples": 24, "max_gap_seconds": 3600, "mcap_usd": 19000}}
+        with patch.object(scanner, "load_alert_history", return_value=[]), \
+             patch.object(scanner, "persist_low_cap_watch", return_value=False), \
+             patch.object(scanner, "remote_api_call") as remote, \
+             patch.object(scanner, "save_runtime_state") as save:
+            scanner.update_token_retirements(state, [], {"token_retirement_enabled": True}, iso(self.start + 24 * 3600))
+        remote.assert_not_called()
+        self.assertFalse(state.get("token_retirements"))
+        self.assertEqual(state["maintenance"]["token_retirement"]["clock_storage"], "pending")
+        self.assertEqual(save.call_args.kwargs["sync"], False)
+
+    def test_a_durable_due_clock_retries_on_the_same_still_fresh_quote(self):
+        for hour in range(25):
+            self.observe(hour)
+        first = self.state["token_low_cap_watch"]["token"]["samples"]
+        self.assertEqual(len(self.observe(24)), 1)
+        self.assertEqual(self.state["token_low_cap_watch"]["token"]["samples"], first)
+
 
 if __name__ == "__main__":
     unittest.main()

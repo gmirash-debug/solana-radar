@@ -311,7 +311,7 @@ def next_runtime_metadata(state, persisted, writer, observed_at=None):
     return runtime
 
 
-def save_runtime_state(state, config, writer, observed_at=None):
+def save_runtime_state(state, config, writer, observed_at=None, *, sync=True):
     """Persist a versioned state revision so concurrent writers are observable."""
     if not isinstance(state, dict):
         raise TypeError("scanner runtime state must be a mapping")
@@ -322,7 +322,8 @@ def save_runtime_state(state, config, writer, observed_at=None):
         observed_at,
     )
     save_json(STATE_PATH, state, compact=bool(config.get("state_json_compact", True)))
-    sync_runtime_checkpoint(state, config, "deep")
+    if sync:
+        sync_runtime_checkpoint(state, config, "deep")
     return state["_runtime"]
 
 
@@ -614,9 +615,40 @@ def load_token_retirements(state, config):
                 raise RuntimeError("token_retirement_fence_oversize")
             seen_cursors.add(cursor)
         state["token_retirements"] = markers
+        document = remote_api_call("GET", "/api/runtime/token-low-cap-watch", config).get("document")
+        if document:
+            value = document.get("value") or {}
+            if value.get("version") != 1 or not isinstance(value.get("watches"), dict):
+                raise RuntimeError("token_low_cap_watch_invalid")
+            state["token_low_cap_watch"] = value["watches"]
+            config["_low_cap_watch_revision"] = int(document.get("revision") or 0)
     purge_retired_state(state)
     history = load_alert_history(retirements=state.get("token_retirements"))
     write_jsonl(ALERTS_PATH, history)
+
+
+def persist_low_cap_watch(state, config, observed_at):
+    if not remote_data_url_from_env() or not remote_ingest_secret():
+        return True
+    value = {"version": 1, "watches": copy.deepcopy(state.get("token_low_cap_watch") or {})}
+    revision = int(config.get("_low_cap_watch_revision") or 0) + 1
+    payload = {"value": value, "updated_at": observed_at, "revision": revision}
+    try:
+        result = remote_api_call("POST", "/api/runtime/token-low-cap-watch", config, payload)
+        if result.get("ok") is True and result.get("accepted") is True:
+            config["_low_cap_watch_revision"] = int(result.get("revision") or revision)
+            return True
+    except (RuntimeError, requests.RequestException):
+        pass
+    # An ambiguous small write is recovered only by exact value read-back.
+    try:
+        document = remote_api_call("GET", "/api/runtime/token-low-cap-watch", config).get("document") or {}
+        if document.get("value") == value:
+            config["_low_cap_watch_revision"] = int(document.get("revision") or 0)
+            return True
+    except (RuntimeError, requests.RequestException):
+        pass
+    return False
 
 
 def update_token_retirements(state, alerts, config, observed_at):
@@ -639,6 +671,12 @@ def update_token_retirements(state, alerts, config, observed_at):
         actions.append({**proof, "mcap_usd": cap, "quote_at": iso(quote_at), "reactivated_at": observed_at})
     previous_watch = copy.deepcopy(state.get("token_low_cap_watch") or {})
     actions.extend(observe_low_caps(state, tracked_tokens(state, load_alert_history()), observed_at))
+    clock_changed = previous_watch != state.get("token_low_cap_watch", {})
+    written_watch = copy.deepcopy(state.get("token_low_cap_watch") or {})
+    clock_synced = persist_low_cap_watch(state, config, observed_at) if clock_changed or actions or config.get("_low_cap_watch_pending") else True
+    config["_low_cap_watch_pending"] = not clock_synced
+    if not clock_synced:
+        actions = [action for action in actions if action["operation"] != "retire"]
     if actions:
         if remote_data_url_from_env() and remote_ingest_secret():
             for start in range(0, len(actions), 25):
@@ -659,13 +697,17 @@ def update_token_retirements(state, alerts, config, observed_at):
                     "token_address": action["token_address"], "retired_at": action["retired_at"],
                     "reactivated_at": action.get("reactivated_at"), "reason": "below_20k_24h"}
     purge_retired_state(state)
+    if written_watch != state.get("token_low_cap_watch", {}):
+        clock_synced = persist_low_cap_watch(state, config, observed_at)
+        config["_low_cap_watch_pending"] = not clock_synced
     state.setdefault("maintenance", {})["token_retirement"] = {
         "checked_at": observed_at, "policy": TOKEN_RETIREMENT_POLICY,
         "watching": len(state.get("token_low_cap_watch", {})),
+        "clock_storage": "synced" if clock_synced else "pending",
         "retired_now": sum(action["operation"] == "retire" for action in actions),
         "recaptured_now": sum(action["operation"] == "recapture" for action in actions)}
     if any(action["operation"] == "retire" for action in actions) or previous_watch != state.get("token_low_cap_watch", {}):
-        save_runtime_state(state, config, "token_retirement_watch", observed_at)
+        save_runtime_state(state, config, "token_retirement_watch", observed_at, sync=False)
 
 
 def compact_alert_for_dashboard(alert):

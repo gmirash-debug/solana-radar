@@ -25,6 +25,11 @@ Existing tokens begin their observation window on a fresh verified quote. Market
 refresh and lifecycle processing run before RPC analysis, including passes with
 no new transaction history. Retirement is saved before later RPC failures can
 leave an old private checkpoint as the current state.
+The observation clock has its own small versioned SQL document, independent from
+large private history checkpoints. An ambiguous write requires exact read-back.
+If it cannot be acknowledged, the scanner keeps its local data and defers automatic
+retirement rather than treating an unpersisted clock as authoritative evidence.
+Local clock saves do not upload the full history checkpoint before RPC analysis.
 Known low-cap tokens use a 15-minute public market-quote refresh TTL, within the
 20-minute freshness contract. This reuses the existing batched market provider;
 it does not add wallet-history RPC work. Other caught-token quotes keep their

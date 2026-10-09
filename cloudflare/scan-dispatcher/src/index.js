@@ -1433,6 +1433,26 @@ export default {
           if (request.method === "POST") return json(await updateRetirements(env,(await storageRequestJson(request,32*1024)).actions),200,corsHeaders(request,env));
           return json({ok:false,error:"GET or POST required"},405,corsHeaders(request,env));
         }
+        if (url.pathname === "/api/runtime/token-low-cap-watch") {
+          if (!runtimeUsesSql(env) || !retirementEnabled(env)) return json({ok:false,error:"token_retirement_disabled"},503);
+          if (!["GET","POST"].includes(request.method)) return json({ok:false,error:"GET or POST required"},405);
+          if (request.method === "GET") return sqlRuntimeResponse(env,request,"token_low_cap_watch");
+          const payload=await storageRequestJson(request,512*1024), value=payload?.value;
+          if (value?.version!==1 || !value.watches || typeof value.watches!=="object" || Array.isArray(value.watches)
+              || Object.keys(value.watches).length>1000) return json({ok:false,error:"token_low_cap_watch_invalid"},400);
+          for (const [token,row] of Object.entries(value.watches)) {
+            if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(token) || !row
+                || !Number.isFinite(Date.parse(row.below_since)) || !Number.isFinite(Date.parse(row.last_quote_at))
+                || Date.parse(row.last_quote_at)<Date.parse(row.below_since)
+                || Date.parse(row.last_quote_at)>Date.now()+300000
+                || !Number.isSafeInteger(row.samples) || row.samples<1
+                || typeof row.mcap_usd!=="number" || !Number.isFinite(row.mcap_usd) || row.mcap_usd<=0 || row.mcap_usd>=20000
+                || typeof row.max_gap_seconds!=="number" || !Number.isFinite(row.max_gap_seconds)
+                || row.max_gap_seconds<0 || row.max_gap_seconds>7200) return json({ok:false,error:"token_low_cap_watch_invalid"},400);
+          }
+          return sqlRuntimeResponse(env,new Request(request.url,{method:"POST",headers:{"content-type":"application/json"},
+            body:JSON.stringify(payload)}),"token_low_cap_watch");
+        }
         if (url.pathname === "/api/storage/evidence-archive") {
           if (env.STORAGE_EPOCH && request.headers.get("x-radar-storage-epoch") !== env.STORAGE_EPOCH) {
             return json({ok:false,error:"storage_epoch_mismatch"},409,corsHeaders(request,env));
