@@ -111,7 +111,7 @@ class TokenRetirementTests(unittest.TestCase):
     def test_lifecycle_contract_is_outside_the_checksummed_checkpoint_manifest(self):
         import scanner
         from runtime_checkpoint import hydrate_checkpoint, restore_checkpoint
-        state = {"pools": {}, "token_retirements": {}, "token_low_cap_watch": {"token": {"samples": 1}},
+        state = {"pools": {}, "wallet_cache": {}, "token_retirements": {}, "token_low_cap_watch": {"token": {"samples": 1}},
                  "_runtime": {"updated_at": iso(self.start), "revision": 1}}
         uploads = []
         def upload(path, config, payload, deadline, params=None):
