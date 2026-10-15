@@ -111,11 +111,21 @@ class Client:
             raise Unavailable("invalid_response") from None
 
 
+def holder_stats(data):
+    """Holder concentration and wallet-tag counts; the Solana and Robinhood schemas match."""
+    stat = data.get("stat") if isinstance(data.get("stat"), dict) else {}
+    tags = data.get("wallet_tags_stat") if isinstance(data.get("wallet_tags_stat"), dict) else {}
+    return {"concentration": {key: fraction(stat.get(key)) for key in
+                              ("top_10_holder_rate", "dev_team_hold_rate", "fresh_wallet_rate", "top70_sniper_hold_rate")},
+            "wallet_tags": {key: number(tags.get(key)) for key in
+                            ("smart_wallets", "renowned_wallets", "fresh_wallets", "sniper_wallets", "bundler_wallets")},
+            "holder_count": number(stat.get("holder_count") if stat.get("holder_count") is not None else data.get("holder_count"))}
+
+
 def normalize_info(data, token):
     ath = token_ath(data, token, "robinhood")
     price = data.get("price") if isinstance(data.get("price"), dict) else {}
-    stat = data.get("stat") if isinstance(data.get("stat"), dict) else {}
-    tags = data.get("wallet_tags_stat") if isinstance(data.get("wallet_tags_stat"), dict) else {}
+    holders = holder_stats(data)
     pool = data.get("pool") if isinstance(data.get("pool"), dict) else {}
     return {"token": token, "chain_id": 4663, "ath": ath,
             "price_usd": number(price.get("price"), True), "liquidity_usd": number(pool.get("liquidity")),
@@ -123,10 +133,7 @@ def normalize_info(data, token):
             "activity": {window: {field: number(price.get(f"{field}_{window}"))
                          for field in ("buys", "sells", "buy_volume", "sell_volume", "volume")}
                          for window in ("1m", "5m", "1h", "6h", "24h")},
-            "concentration": {key: fraction(stat.get(key)) for key in
-                              ("top_10_holder_rate", "dev_team_hold_rate", "fresh_wallet_rate", "top70_sniper_hold_rate")},
-            "wallet_tags": {key: number(tags.get(key)) for key in
-                            ("smart_wallets", "renowned_wallets", "fresh_wallets", "sniper_wallets", "bundler_wallets")}}
+            "concentration": holders["concentration"], "wallet_tags": holders["wallet_tags"]}
 
 
 def normalize_security(data, token):

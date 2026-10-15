@@ -14,8 +14,10 @@ export function isTrackedAlertTier(tier) {
   return ["candidate", "actionable", "hot_reactivation", "watch", "late_chase"].includes(tier);
 }
 
-export function resolveWorkflowStatus({ lifecycle, dataStatus, currentTier, currentConfirmed = false, thesisConfirmed = false }) {
+export function resolveWorkflowStatus({ lifecycle, dataStatus, currentTier, currentConfirmed = false, thesisConfirmed = false, riskExcluded = false }) {
   if (lifecycle === "closed") return "inactive";
+  // Scanner noise-cut gate: concentrated/unverified supply or operator-like cohorts are not candidates.
+  if (riskExcluded) return "noise";
   if (dataStatus !== "current") return "recheck_due";
   if (lifecycle === "weakening") return thesisConfirmed ? "weakening" : "candidate";
   if (currentConfirmed && ["actionable", "hot_reactivation"].includes(currentTier)) return "hot";
