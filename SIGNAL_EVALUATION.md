@@ -57,8 +57,13 @@ market snapshots; existing signal-only outcomes cannot supply their returns.
   thresholds, holdout selection and bootstrap settings.
 - `counts`: input signals/controls, invalid/future rows, unique episodes/tokens,
   duplicate/conflicting/repeated captures, primary signals/controls, selected
-  pairs, baseline exclusion reasons and rejected feature values. Exception
-  counters are sparse: an absent counter means zero.
+  pairs, baseline exclusion reasons (also `baseline_exclusion_counts_by_cohort`)
+  and rejected feature values. `unmatched_signal_reasons` says why each
+  baseline-eligible signal got no control: `no_control_in_stratum_split`,
+  `no_control_within_capture_gap`, `controls_already_matched` or
+  `covariate_caliper`; `caliper_failures` counts which of age/mcap/liquidity
+  exceeded its ratio for the in-window controls of caliper-blocked signals.
+  Exception counters are sparse: an absent counter means zero.
 - `holdout`: explicit or automatically selected boundary and purge rule.
 - `horizons`: primary signal/control outcome-status counts, complete price pairs in
   non-purged splits, and the number of sample-ready strata. Counts of missing
@@ -78,6 +83,20 @@ Full output also contains `strata` with control status counts and per-feature
 diagnostics, `episode_diagnostics` with each exclusion/outcome/partition, and
 `control_matches` identifying both tokens and the capture-time matching distance.
 The full output contains token identifiers; the summary contains no wallet data.
+
+`capture_rows` (`evaluate_signals(..., capture_row_limit=n)`, newest first, at most
+`n` rows per cohort; `totals` keeps the full counts) is a compact table for
+offline lift checks such as kline retro-backtests. `columns` are `cohort`,
+`token_address`, `captured_at`, frozen capture `price_usd`/`mcap_usd`/
+`liquidity_usd`/`age_hours`, `stratum` (index into `strata`, each
+`[strategy_version, config_version, signal_family]`), `status` (`primary` or the
+exclusion that keeps the row out of matching) and one cell per horizon: the
+endpoint `price_usd` when eligible on a price basis, otherwise the outcome status.
+Rows carry capture-time values only, never later market data. The scanner
+publishes it as `report.signal_evaluation.capture_rows` (default 250 rows per
+cohort, `signal_evaluation_published_rows_per_cohort`; the published report stays well
+below the Worker's 1.5 MB compact-report limit) together with the
+collector's last-run `collection` counters; both survive the dashboard listing.
 
 ## Saved Inputs
 
@@ -343,7 +362,8 @@ by this module:
    maintenance. These are row bounds, not promised byte sizes. Expired archive
    rows must be reported as retention-limited coverage, not outcome failures.
 5. At existing scanner/report runs, fill due control horizons using already
-   stored fresh market observations whose real timestamps satisfy the horizon.
+   stored fresh market observations whose real timestamps satisfy the horizon
+   (the installed collector adds a bounded GMGN kline fallback, see below).
    Reuse correctly anchored signal checkpoints from `state.signal_outcomes`.
    Do not request prices, balances, wallets or history. No timely observed
    endpoint means missing after the grace window, not a zero loss or a fabricated
@@ -356,6 +376,51 @@ by this module:
    window/version and do not shrink it after seeing bad outcomes. A 400-row
    smoke fixture is covered by the focused tests; this is not a production
    throughput guarantee for the full 90-day archive.
+
+## Installed Collector (`prospective_evidence.py`)
+
+The scanner calls `capture_evaluation_rows` on every run that scanned pools.
+Signals are the current alerts; controls exist only on deep runs.
+
+- **Control selection.** Fully scanned, non-alert pools are ordered by
+  `sha256(config_version|captured_at|token)`. The first six with a fresh
+  (<=1h) snapshot carrying positive price, market cap, liquidity and a known
+  pair age become controls (`selection_method =
+  prospective_universe_complete_capture`). Candidates without these capture
+  covariates can never form a matched price pair. They are skipped and counted
+  as `controls_skipped_incomplete_capture`, so a later candidate takes the slot.
+  This depends only on capture-time data.
+- **Why outcomes went missing/late before.** In GMGN attention mode, a market
+  entry refreshes only while the token stays in the attention lists. The registry
+  keeps current candidates only, and the caught-market refresh covers alerts
+  only. A control that left the lists kept its capture snapshot forever, so its
+  horizons became `missing`. When it reappeared, that single later snapshot was
+  frozen as `delayed` for every horizon already due. Only the latest snapshot is
+  stored, so hourly deep-scan gaps also turned on-time observations into `late`
+  ones, in both cohorts.
+- **Horizon fill, identical for signals and controls.** (1) A stored snapshot
+  observed within `[target, target+1h]` is frozen (`source=market_snapshot`).
+  (2) Once that window has closed without one, the run asks GMGN `market kline`
+  (5m, `[target-5m, target+1h]`). It freezes the first trade observable at or
+  after the target: the close of the candle containing the target, observed at
+  that candle's end, or else the open of the first later candle
+  (`source=gmgn_kline`). Prices are never carried across a no-trade gap. (3) A
+  later snapshot is frozen as `delayed` only if the kline shows no on-time
+  trade, or the kline is unavailable or exhausted after three failed attempts.
+  Rows whose market entry was pruned still use step 2.
+- **Superseding.** An existing `delayed` snapshot checkpoint is replaced once by
+  an on-time kline checkpoint, and the old one is kept under `superseded`. This
+  rule never looks at returns: every delayed checkpoint gets the same single
+  attempt. A later snapshot never replaces a checkpoint.
+- **Budget.** Only deep runs use the fallback. Each run makes at most
+  `signal_evaluation_kline_max_calls` (36) calls within
+  `signal_evaluation_kline_max_seconds` (120). The oldest targets go first. The
+  first GMGN error stops the fallback for that run, so a rate limit cannot
+  cascade into the rest of the scan. The calls use the existing rate-limited
+  GMGN client (kline weight 2) and no Solana RPC. Set
+  `signal_evaluation_kline_fallback_enabled=false` to return to snapshot-only
+  filling. `collection.deep` reports requests, checkpoints, superseded,
+  no-trade, error and deferred counts.
 
 Remaining limits: saved data cannot recover omitted controls or missing catch
 versions/covariates; retention/deletion/truncated report coverage can create

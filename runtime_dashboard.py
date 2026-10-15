@@ -68,8 +68,10 @@ def list_report(report):
         result[field] = [list_evidence(row) for row in report.get(field, [])]
     evaluation = report.get("signal_evaluation")
     if isinstance(evaluation, dict):
+        # capture_rows is the bounded per-capture table offline lift checks need.
         result["signal_evaluation"] = {key: evaluation[key] for key in
-            ("mode", "counts", "horizons", "generated_at", "version") if key in evaluation}
+            ("mode", "counts", "horizons", "generated_at", "version", "as_of", "policy_id", "holdout",
+             "capture_rows", "collection") if key in evaluation}
         if isinstance(evaluation.get("horizons"), dict):
             result["signal_evaluation"]["horizons"] = {key: fact_map(value) for key, value in evaluation["horizons"].items()}
     return result

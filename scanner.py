@@ -13443,6 +13443,29 @@ def outcome_market_snapshot(entry, observed_at):
     }
 
 
+def evaluation_kline_fetcher(config):
+    """GMGN kline for shadow horizon endpoints; None when GMGN cannot be asked at all."""
+    if (not config.get("signal_evaluation_kline_fallback_enabled", True) or not config.get("gmgn_enabled", True)
+            or not os.environ.get("GMGN_API_KEY")):
+        return None
+
+    def fetch(token_address, resolution, start, end):
+        if config.get("_gmgn_circuit_open"):
+            raise RuntimeError("GMGN rate/auth circuit is open for this scan")
+        return fetch_gmgn_kline(config, token_address, resolution, start, end)
+
+    return fetch
+
+
+def shadow_signal_evaluation(state, config, generated_at):
+    dataset = state.get("signal_evaluation_dataset", {})
+    result = evaluate_signals({"generated_at": generated_at, "signal_evaluation_dataset": dataset},
+        options=EvaluationOptions(bootstrap_samples=200, holdout_start=config.get("signal_evaluation_holdout_start")),
+        capture_row_limit=max(0, int(config.get("signal_evaluation_published_rows_per_cohort", 250))))
+    return {**result["summary"], "capture_rows": result["capture_rows"],
+            "collection": copy.deepcopy(dataset.get("collection") or {})}
+
+
 def outcome_return_pct(outcome, snapshot):
     caught_price = nullable_market_number(outcome.get("caught_price_usd"))
     current_price = nullable_market_number(snapshot.get("price_usd"))
@@ -15092,9 +15115,7 @@ def publish_targeted_balance_report(rpc, universe, state, config, lane_configs, 
     report["stats"]["wallet_activity"] = config.get("_wallet_activity_stats", {})
     if report["stats"]["wallet_activity"].get("pages"):
         report["check_scope"] = "cohort_balances_and_wallet_activity"
-    report["signal_evaluation"] = evaluate_signals({"generated_at": generated_at,
-        "signal_evaluation_dataset": state.get("signal_evaluation_dataset", {})},
-        options=EvaluationOptions(bootstrap_samples=200, holdout_start=config.get("signal_evaluation_holdout_start")))["summary"]
+    report["signal_evaluation"] = shadow_signal_evaluation(state, config, generated_at)
     config["_persistence"] = sync_remote_snapshot(report, state, config)
     report["stats"]["persistence"] = config["_persistence"]
     write_report_json(report)
@@ -15470,9 +15491,12 @@ def run_once(config, lane_name=None):
         config,
     )
     update_signal_outcomes(state, outcome_alerts, generated_at, config)
+    targeted_scan = config.get("_scan_profile") == "targeted"
     capture_evaluation_rows(state, universe, summaries, all_alerts, generated_at,
         config.get("_evaluation_config_version") or effective_config_version(config), outcome_market_snapshot,
-        targeted=config.get("_scan_profile") == "targeted")
+        targeted=targeted_scan, kline=None if targeted_scan else evaluation_kline_fetcher(config),
+        kline_max_calls=int(config.get("signal_evaluation_kline_max_calls", 36)),
+        kline_max_seconds=float(config.get("signal_evaluation_kline_max_seconds", 120)))
     record_market_activity_baselines(
         state,
         [*universe, *refreshed_caught_pools],
@@ -15504,9 +15528,7 @@ def run_once(config, lane_name=None):
     report_payload["lanes_scanned"] = list(lane_stats)
     report_payload["scan_profile"] = config.get("_scan_profile") or "deep"
     report_payload["last_deep_scan_at"] = state.get("last_deep_scan_at")
-    report_payload["signal_evaluation"] = evaluate_signals({"generated_at": generated_at,
-        "signal_evaluation_dataset": state.get("signal_evaluation_dataset", {})},
-        options=EvaluationOptions(bootstrap_samples=200, holdout_start=config.get("signal_evaluation_holdout_start"))) ["summary"]
+    report_payload["signal_evaluation"] = shadow_signal_evaluation(state, config, generated_at)
     report_payload["stats"]["launch_history"] = config.get("_launch_history_stats", {})
     report_payload["stats"]["position_history"] = config.get("_position_history_stats", {})
     report_payload["stats"]["wallet_activity"] = config.get("_wallet_activity_stats", {})
