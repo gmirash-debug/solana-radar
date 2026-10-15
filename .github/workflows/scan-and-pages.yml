@@ -206,7 +206,9 @@ jobs:
               print(f"reason=provider_backoff_{int(failed_age_seconds)}s")
               raise SystemExit
 
-          if age_seconds < (10 if targeted else 50) * 60:
+          # Each published scan rewrites thesis details and market rows in Turso;
+          # keep targeted passes to about one between hourly deep scans.
+          if age_seconds < (25 if targeted else 50) * 60:
               print("should_scan=false")
               print(f"reason=fresh_{event_name}_{int(age_seconds)}s")
           else:

@@ -692,7 +692,7 @@
   "signal_outcomes_enabled": true,
   "signal_outcomes_retention_days": 90,
   "signal_outcomes_max_tokens": 500,
-  "history_ledger_enabled": true,
+  "history_ledger_enabled": false,
   "history_ledger_max_theses": 120,
   "remote_discovery_state_enabled": true,
   "remote_discovery_page_size": 50,
