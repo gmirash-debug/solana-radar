@@ -86,6 +86,32 @@ class StorageReliabilityTests(unittest.TestCase):
                 self.assertEqual(recover_storage.main(),exit_code)
             self.assertEqual(json.loads(output.call_args.args[0])["status"],status)
 
+    def test_recovery_skips_cold_sql_replay_unless_requested(self):
+        calls=[]
+        def remote(method,path,config,payload=None,params=None):
+            calls.append((method,path))
+            if path=="/api/runtime/storage-recovery":
+                return {"document":{"value":{"after":""}}}
+            if path=="/api/storage/outbox":
+                return {"entries":[]}
+            raise AssertionError(path)
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(scanner,"REMOTE_OUTBOX_DIR",Path(directory)), \
+             patch.object(scanner,"STATE_PATH",Path(directory)/"missing-state.json"), \
+             patch.object(scanner,"load_env"), \
+             patch.object(scanner,"remote_data_url_from_env",return_value="https://example.invalid"), \
+             patch.object(scanner,"remote_ingest_secret",return_value="test"), \
+             patch.object(scanner,"remote_api_call",side_effect=remote):
+            result=recover_storage.recover(25,60)
+            self.assertEqual(result["sql_replay"],"disabled")
+            self.assertEqual(calls,[])
+            recover_storage.recover(25,60,sql_replay=True)
+        self.assertIn(("GET","/api/storage/outbox"),calls)
+        with patch("sys.argv",["recover_storage"]),patch.object(recover_storage,"recover",return_value={"deferred":0}) as run, \
+             patch("builtins.print"):
+            recover_storage.main()
+        self.assertFalse(run.call_args.args[2])
+
     def test_checkpoint_identity_survives_sorted_state_round_trip(self):
         state={"z":{"last":1,"first":2},"a":[{"y":3,"x":4}],
                "_runtime":{"writer":"test","updated_at":"2026-10-05T12:00:00Z","revision":3}}

@@ -57,7 +57,7 @@ def recover_checkpoint(state,config,deadline):
     return {**saved,"canonicalized":canonicalized,"restored_newer":restored}
 
 
-def recover(maximum=10, seconds=120):
+def recover(maximum=10, seconds=120, sql_replay=False):
     scanner.load_env()
     config = {"remote_legacy_snapshot_enabled":False}
     url, secret = scanner.remote_data_url_from_env(), scanner.remote_ingest_secret()
@@ -91,6 +91,11 @@ def recover(maximum=10, seconds=120):
             result["deferred"]+=1
             break
     if time.monotonic()>=deadline:
+        return result
+    if not sql_replay:
+        # Archived originals stay durable in R2. Replaying them rewrites thesis,
+        # market and history rows in Turso, which the free write quota cannot afford.
+        result["sql_replay"]="disabled"
         return result
     cursor = scanner.remote_api_call("GET","/api/runtime/storage-recovery",config)
     after = ((cursor.get("document") or {}).get("value") or {}).get("after","")
@@ -135,9 +140,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--max-items",type=int,default=10,choices=range(1,26))
     parser.add_argument("--max-seconds",type=int,default=120,choices=range(1,601))
+    parser.add_argument("--sql-replay",action="store_true",
+                        help="also replay archived cold-outbox snapshots into SQL (costs Turso row writes)")
     args = parser.parse_args()
     try:
-        result=recover(args.max_items,args.max_seconds)
+        result=recover(args.max_items,args.max_seconds,args.sql_replay)
         result["status"] = "checkpoint_pending" if result.get("checkpoint_saved") is False else "partial" if result["deferred"] else "ok"
         print(json.dumps(result))
         return 1 if result["status"]=="checkpoint_pending" else 0

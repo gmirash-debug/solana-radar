@@ -252,6 +252,20 @@ class WorkflowContracts(unittest.TestCase):
         budget = int(re.search(r"--max-seconds (\d+)", step)[1])
         self.assertGreater(int(re.search(r"timeout-minutes: (\d+)", step)[1]) * 60, budget + 30)
 
+    def test_turso_free_tier_write_cadence(self):
+        pulse = (WORKFLOWS / "discovery-pulse.yml").read_text()
+        self.assertIn("age_seconds < 14 * 60", pulse)
+        scan = (WORKFLOWS / "scan-and-pages.yml").read_text()
+        self.assertIn("(25 if targeted else 50) * 60", scan)
+        self.assertNotIn("--sql-replay", self.steps["Recover durable storage without scanning"])
+        config = json.loads((ROOT / "config.example.json").read_text())
+        self.assertFalse(config["history_ledger_enabled"])
+        worker = (ROOT / "cloudflare/scan-dispatcher/wrangler.toml").read_text()
+        daily = int(re.search(r'^HISTORY_QUEUE_DAILY_HIST_WRITE_UNITS = "(\d+)"', worker, re.M)[1])
+        live = int(re.search(r'^HISTORY_QUEUE_LIVE_RESERVED_UNITS = "(\d+)"', worker, re.M)[1])
+        self.assertLessEqual(daily, 30000)
+        self.assertLessEqual(live, daily)
+
     def test_push_manual_and_successful_due_deep_publish_but_failed_scan_does_not(self):
         for should_scan, exit_code, expected in (("false", "", True), ("true", "0", True),
                                                  ("true", "1", False), ("true", "124", False)):

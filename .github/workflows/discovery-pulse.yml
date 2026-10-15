@@ -75,7 +75,9 @@ jobs:
               age_seconds = (datetime.now(timezone.utc) - last_success).total_seconds()
           except Exception:
               age_seconds = None
-          if age_seconds is not None and age_seconds < 4 * 60:
+          # Turso free tier: each pulse upserts every hot token and its checkpoint;
+          # the Worker dispatches every 5 minutes, so skip pulses younger than 14 minutes.
+          if age_seconds is not None and age_seconds < 14 * 60:
               print("should_run=false")
               print(f"reason=fresh_discovery_{int(age_seconds)}s")
           else:
