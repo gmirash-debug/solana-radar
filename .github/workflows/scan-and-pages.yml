@@ -298,7 +298,8 @@ jobs:
 
       - name: Recover durable storage without scanning
         if: steps.plan.outputs.recover_storage == 'true'
-        timeout-minutes: 5
+        # The tool's own budget is 420 seconds; leave room for setup and the final cursor write.
+        timeout-minutes: 8
         env:
           RADAR_DATA_API_URL: https://solana-radar-scan-dispatcher.gmirash-solana-radar.workers.dev
           RADAR_INGEST_SECRET: ${{ secrets.RADAR_INGEST_SECRET }}

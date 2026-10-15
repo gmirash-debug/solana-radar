@@ -248,6 +248,9 @@ class WorkflowContracts(unittest.TestCase):
         self.assertTrue(condition(self.steps["Restore Python package downloads"], values))
         self.assertTrue(condition(self.steps["Install Python dependencies"], values))
         self.assertFalse(condition(self.steps["Run scanner"], values))
+        step = self.steps["Recover durable storage without scanning"]
+        budget = int(re.search(r"--max-seconds (\d+)", step)[1])
+        self.assertGreater(int(re.search(r"timeout-minutes: (\d+)", step)[1]) * 60, budget + 30)
 
     def test_push_manual_and_successful_due_deep_publish_but_failed_scan_does_not(self):
         for should_scan, exit_code, expected in (("false", "", True), ("true", "0", True),

@@ -323,6 +323,62 @@ class RuntimeCheckpointTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, "compressed"):
                 checkpoint._read_member(encoded, changed)
 
+    def large_state(self):
+        alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        swaps = [{"signature": f"sig-{index:06d}", "kind": "buy" if index % 3 else "sell",
+                  "sol_amount": index / 7, "owner": f"owner-{index % 97}"} for index in range(120)]
+        return {"_runtime": {"revision": 1, "updated_at": "2026-10-15T18:00:00Z"},
+                "pools": {f"{letter}{index:03d}pool": {"cursor": f"{letter}{index}", "wave_swaps": swaps}
+                          for letter in alphabet for index in range(40)}}
+
+    def test_parts_are_sized_by_encoded_bytes_not_raw_records(self):
+        state = self.large_state()
+        for pool in list(state["pools"].values())[::2]:
+            pool["wave_swaps"] = pool["wave_swaps"] * 4
+        _, root, parts = staged(state)
+        with patch.object(checkpoint, "RECORD_BYTES", 180 * 1024), patch.object(checkpoint, "GROUP_MIN_BYTES", 0):
+            _, former, _ = staged(state)
+        self.assertGreater(len(canonical(state)), 40 * 1024 * 1024)
+        self.assertLess(len(root["parts"]) * 2, len(former["parts"]))
+        self.assertTrue(all(part["encoded_bytes"] <= checkpoint.PART_BYTES for part in parts.values()))
+        self.assertEqual(checkpoint.decode_checkpoint(checkpoint.hydrate_checkpoint(root, parts.__getitem__)), state)
+
+    def test_incompressible_records_are_halved_until_they_fit_a_part(self):
+        state = {"pools": {"pool-a": {"evidence": random.Random(5).randbytes(900000).hex()}}}
+        _, root, parts = staged(state)
+        self.assertGreater(len(root["parts"]), 1)
+        self.assertTrue(all(part["encoded_bytes"] <= checkpoint.PART_BYTES for part in parts.values()))
+        self.assertTrue(all(ref["decoded_bytes"] <= checkpoint.RECORD_BYTES for ref in root["parts"]))
+        self.assertEqual(checkpoint.decode_checkpoint(checkpoint.hydrate_checkpoint(root, parts.__getitem__)), state)
+        self.assertEqual(root, staged(copy.deepcopy(state))[1])
+
+    def test_sparse_lexical_buckets_share_members(self):
+        alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        state = {name: {f"{letter}key": {"value": letter} for letter in alphabet}
+                 for name in ("market", "pools", "discovery_queue", "activity_baselines", "signal_outcomes")}
+        _, root, parts = staged(state)
+        groups = [ref for ref in root["parts"] if ref["role"] == "group"]
+        # One packed member per map instead of one per first character.
+        self.assertEqual(sorted(ref["path"][0] for ref in groups), sorted(state))
+        self.assertEqual(len(root["parts"]), 2 + 3 * len(state))
+        self.assertEqual(checkpoint.decode_checkpoint(checkpoint.hydrate_checkpoint(root, parts.__getitem__)), state)
+
+    def test_part_capacity_error_names_the_largest_state_keys(self):
+        state = {"pools": {"pool": {"evidence": random.Random(9).randbytes(400000).hex()}},
+                 "market": {"token": {"price": 1}}}
+        with patch.object(checkpoint, "MAX_PARTS", 1):
+            with self.assertRaisesRegex(ValueError, r"checkpoint part capacity exceeded \(\d+/1 parts.*pools="):
+                checkpoint.build_checkpoint(state)
+
+    def test_manifests_written_with_former_180kib_records_still_hydrate(self):
+        state = self.state()
+        state["pools"]["pool-a"]["large"] = random.Random(3).randbytes(300000).hex()
+        with patch.object(checkpoint, "RECORD_BYTES", 180 * 1024), patch.object(checkpoint, "GROUP_MIN_BYTES", 0):
+            _, root, parts = staged(state)
+        self.assertTrue(all(ref["decoded_bytes"] <= 180 * 1024 for ref in root["parts"]))
+        self.assertEqual(checkpoint.decode_checkpoint(checkpoint.hydrate_checkpoint(root, parts.__getitem__)),
+                         {key: value for key, value in state.items() if key not in checkpoint.REBUILDABLE_KEYS})
+
 
 if __name__ == "__main__":
     unittest.main()

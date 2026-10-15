@@ -13,7 +13,12 @@ MAX_DECODED_BYTES = 128 * 1024 * 1024
 INLINE_BYTES = 256 * 1024
 PART_BYTES = 256 * 1024
 MAX_PARTS = MAX_ENCODED_BYTES // PART_BYTES
-RECORD_BYTES = 180 * 1024
+# Members are sized by their encoded part, not by raw JSON: a raw record of up
+# to RECORD_BYTES is halved (down to MIN_RECORD_BYTES) until it encodes within
+# PART_BYTES. Small adjacent lexical buckets share a member up to GROUP_MIN_BYTES.
+RECORD_BYTES = 1024 * 1024
+MIN_RECORD_BYTES = 16 * 1024
+GROUP_MIN_BYTES = 64 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_PATH_BYTES = 4096
 MEMBER_LAYOUT = "aligned-gzip-members-v1"
@@ -49,17 +54,20 @@ def _fragments(durable):
             yield [key], "value", prefix + _json_bytes(value)
             continue
         yield [key], "open", prefix + b"{"
-        group, entries = None, []
+        group, bucket, entries, size = None, None, [], 0
         for index, (child, entry) in enumerate(sorted(value.items())):
             raw = (b"," if index else b"") + _json_bytes(child) + b":" + _json_bytes(entry)
             # Fixed lexical buckets keep both pools and discovery maps below
             # the reference cap while limiting changes to the affected bucket.
-            bucket = child[:1]
-            if entries and bucket != group:
+            # Tiny buckets are packed with their neighbours so that a map with
+            # many sparse first characters cannot exhaust the part count.
+            if entries and child[:1] != bucket and size >= GROUP_MIN_BYTES:
                 yield [key, group], "group", b"".join(entries)
-                entries = []
-            group = bucket
+                entries, size, group = [], 0, None
+            bucket = child[:1]
+            group = bucket if group is None else group
             entries.append(raw)
+            size += len(raw)
         if entries:
             yield [key, group], "group", b"".join(entries)
         yield [key], "close", b"}"
@@ -88,6 +96,7 @@ def build_checkpoint(state):
         raise ValueError("checkpoint runtime metadata must be a mapping")
     parts, refs, inline, members = [], [], [], []
     encoded_bytes, decoded_bytes = 0, 0
+    usage = {}
     content_digest = hashlib.sha256()
     for path, role, fragment in _fragments(durable):
         if len(_json_bytes(path)) > MAX_PATH_BYTES:
@@ -97,10 +106,14 @@ def build_checkpoint(state):
         metadata = path == ["_runtime"]
         if metadata and len(fragment) > INLINE_BYTES:
             raise ValueError("checkpoint metadata exceeds inline safety limit; evidence was not truncated")
-        width = len(fragment) if metadata else RECORD_BYTES
-        for index, start in enumerate(range(0, len(fragment), width)):
-            chunk = fragment[start:start + width]
-            encoded = _member(chunk, path, role, index)
+        start, index = 0, 0
+        while start < len(fragment):
+            size = len(fragment) - start if metadata else min(RECORD_BYTES, len(fragment) - start)
+            encoded = _member(fragment[start:start + size], path, role, index)
+            while not metadata and len(encoded) > PART_BYTES and size > MIN_RECORD_BYTES:
+                size = max(MIN_RECORD_BYTES, size // 2)
+                encoded = _member(fragment[start:start + size], path, role, index)
+            chunk = fragment[start:start + size]
             encoded_bytes += len(encoded)
             if len(encoded) > PART_BYTES or encoded_bytes > MAX_ENCODED_BYTES:
                 raise ValueError("runtime checkpoint exceeds durable capacity; evidence was not truncated")
@@ -111,11 +124,19 @@ def build_checkpoint(state):
             if metadata:
                 inline.append({**ref, "before": len(parts), "data": encoded})
             else:
-                if len(parts) >= MAX_PARTS:
-                    raise ValueError("checkpoint part capacity exceeded; evidence was not truncated")
                 refs.append(ref)
                 parts.append({"schema_version": 1, "encoding": "gzip+base64-part",
                               "sha256": digest, "encoded_bytes": len(encoded), "data": encoded})
+                row = usage.setdefault(path[0] if path else "{}", [0, 0])
+                row[0] += 1
+                row[1] += len(chunk)
+            start += size
+            index += 1
+    if len(parts) > MAX_PARTS:
+        largest = ", ".join(f"{key}={count} parts/{raw_size / 1048576:.1f} MiB"
+                            for key, (count, raw_size) in sorted(usage.items(), key=lambda item: -item[1][0])[:5])
+        raise ValueError(f"checkpoint part capacity exceeded ({len(parts)}/{MAX_PARTS} parts, "
+                         f"{decoded_bytes / 1048576:.1f} MiB decoded; largest: {largest}); evidence was not truncated")
     if decoded_bytes != len(raw) or content_digest.hexdigest() != _digest(raw):
         raise ValueError("checkpoint member layout changed canonical JSON")
     payload = {"schema_version": 1, "encoding": "gzip+base64", "sha256": _digest(raw),
