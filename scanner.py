@@ -1400,6 +1400,12 @@ def write_dashboard_fallback(report_payload, state, config):
     return snapshot
 
 
+class RemoteStorageUnavailable(RuntimeError):
+    """A Worker/storage 5xx or 429: an outage to retry, not a scanner defect."""
+
+    category = "transport"
+
+
 def remote_api_call(method, path, config, payload=None, params=None):
     base_url = remote_data_url_from_env()
     if not base_url:
@@ -1427,7 +1433,10 @@ def remote_api_call(method, path, config, payload=None, params=None):
         except (ValueError, AttributeError):
             detail = "remote request failed"
         detail = detail.replace(secret, "***")
-        raise RuntimeError(f"Remote HTTP {response.status_code}: {detail}")
+        message = f"Remote HTTP {response.status_code}: {detail}"
+        if response.status_code >= 500 or response.status_code == 429:
+            raise RemoteStorageUnavailable(message)
+        raise RuntimeError(message)
     result = response.json()
     if not result.get("ok"):
         raise RuntimeError(result.get("error") or f"unexpected remote response: {result}")

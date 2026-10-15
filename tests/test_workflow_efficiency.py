@@ -240,6 +240,15 @@ class WorkflowContracts(unittest.TestCase):
         self.assertIn("RADAR_DATA_API_URL:", self.steps["Run scanner"])
         self.assertIn("--targeted", self.steps["Run scanner"])
 
+    def test_scheduled_storage_recovery_installs_python_dependencies(self):
+        values = {"steps.plan.outputs.recover_storage": "true", "steps.plan.outputs.publish_pages": "false",
+                  "steps.plan.outputs.observe_robinhood": "false", "steps.plan.outputs.validate": "false",
+                  "steps.freshness.outputs.should_scan": "false"}
+        self.assertTrue(condition(self.steps["Recover durable storage without scanning"], values))
+        self.assertTrue(condition(self.steps["Restore Python package downloads"], values))
+        self.assertTrue(condition(self.steps["Install Python dependencies"], values))
+        self.assertFalse(condition(self.steps["Run scanner"], values))
+
     def test_push_manual_and_successful_due_deep_publish_but_failed_scan_does_not(self):
         for should_scan, exit_code, expected in (("false", "", True), ("true", "0", True),
                                                  ("true", "1", False), ("true", "124", False)):
