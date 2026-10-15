@@ -251,7 +251,7 @@ jobs:
         run: python tools/runtime_cache.py capture-outbox "$RUNNER_TEMP/radar-outbox-baseline.json"
 
       - name: Restore Python package downloads
-        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.publish_pages == 'true' || steps.plan.outputs.observe_robinhood == 'true' || steps.plan.outputs.validate == 'true'
+        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.publish_pages == 'true' || steps.plan.outputs.observe_robinhood == 'true' || steps.plan.outputs.validate == 'true' || steps.plan.outputs.recover_storage == 'true'
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
@@ -265,7 +265,7 @@ jobs:
           cache: npm
 
       - name: Install Python dependencies
-        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.publish_pages == 'true' || steps.plan.outputs.observe_robinhood == 'true' || steps.plan.outputs.validate == 'true'
+        if: steps.freshness.outputs.should_scan == 'true' || steps.plan.outputs.publish_pages == 'true' || steps.plan.outputs.observe_robinhood == 'true' || steps.plan.outputs.validate == 'true' || steps.plan.outputs.recover_storage == 'true'
         # Download caches are not installed environments. Always install on a new runner.
         run: python -m pip install -r requirements.txt
 

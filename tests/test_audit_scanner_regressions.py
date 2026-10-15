@@ -325,6 +325,30 @@ class AuditScannerRegressions(unittest.TestCase):
         self.assertEqual(health["scan_error_categories"], {"other": 1})
         self.assertEqual(scanner_failure_class({"scan_health": health}, 1), "hard_failure")
 
+    def test_o04_remote_storage_outage_is_a_soft_failure(self):
+        def response(status, error):
+            return Mock(status_code=status, json=Mock(return_value={"ok": False, "error": error}))
+
+        with patch.object(s, "remote_data_url_from_env", return_value="https://radar.example"), \
+             patch.object(s, "remote_ingest_secret", return_value="secret"), \
+             patch.object(s.requests, "request", return_value=response(503, "storage_sql_http_error")):
+            with self.assertRaises(s.RemoteStorageUnavailable) as raised:
+                s.remote_api_call("GET", "/api/runtime/token-low-cap-watch", {})
+        self.assertIsInstance(raised.exception, RuntimeError)
+        self.assertEqual(str(raised.exception), "Remote HTTP 503: storage_sql_http_error")
+        self.assertEqual(scanner_failure_class(failure_metadata(raised.exception), 1), "soft_provider_failure")
+
+        with patch.object(s, "remote_data_url_from_env", return_value="https://radar.example"), \
+             patch.object(s, "remote_ingest_secret", return_value="secret"), \
+             patch.object(s.requests, "request", return_value=response(400, "invalid_runtime_revision")):
+            with self.assertRaises(RuntimeError) as rejected:
+                s.remote_api_call("POST", "/api/runtime/rpc-ledger", {}, {})
+        self.assertNotIsInstance(rejected.exception, s.RemoteStorageUnavailable)
+        self.assertEqual(scanner_failure_class(failure_metadata(rejected.exception), 1), "hard_failure")
+
+        for error in (s.requests.ConnectionError("reset"), s.requests.Timeout("read timed out")):
+            self.assertEqual(scanner_failure_class(failure_metadata(error), 1), "soft_provider_failure")
+
     def test_o04_health_preserves_programming_error_type(self):
         error = KeyError("helius: credit quota timeout")
         health = s.build_scan_health([{"error": str(error), **failure_metadata(error)}], {}, {})

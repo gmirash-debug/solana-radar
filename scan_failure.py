@@ -23,6 +23,8 @@ def failure_metadata(error):
         category = "timeout"
     elif name == "HeliusRpcError" and category == "temporary":
         category = "transport"
+    elif category is None and any(cls.__name__ == "RequestException" for cls in type(error).__mro__):
+        category = "transport"
     return {"error_type": name, "error_category": category,
             "error_kind": "programming" if isinstance(error, (AssertionError, AttributeError, LookupError,
                 NameError, TypeError, ValueError)) or name == "StaleStateRevisionError" else "runtime"}
