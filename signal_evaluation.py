@@ -385,25 +385,30 @@ def _cutoff(rows, options):
     return times[index]
 
 
-def _distance(signal, control, options):
-    gap = abs(signal["caught_ts"] - control["caught_ts"])
-    if gap > options.max_capture_gap_seconds:
-        return None
-    distance = gap / max(1, options.max_capture_gap_seconds)
+def _caliper_ratios(signal, control, options):
     for name, maximum, floor in (
         ("caught_age_hours", options.age_ratio, 1),
         ("caught_mcap_usd", options.mcap_ratio, 0),
         ("caught_liquidity_usd", options.liquidity_ratio, 0),
     ):
         first, second = max(floor, signal[name]), max(floor, control[name])
-        ratio = max(first, second) / min(first, second)
-        if ratio > maximum:
+        yield name, first, second, max(first, second) / min(first, second) <= maximum
+
+
+def _distance(signal, control, options):
+    gap = abs(signal["caught_ts"] - control["caught_ts"])
+    if gap > options.max_capture_gap_seconds:
+        return None
+    distance = gap / max(1, options.max_capture_gap_seconds)
+    for _, first, second, within in _caliper_ratios(signal, control, options):
+        if not within:
             return None
         distance += abs(math.log(first / second))
     return distance
 
 
 def _match(rows, options):
+    """Return matches plus why each unmatched baseline-eligible signal found no control."""
     controls = [r for r in rows if r["cohort"] == "control" and not r["exclusion"] and not r["baseline_exclusion"]]
     by_stratum = defaultdict(list)
     for control in controls:
@@ -411,6 +416,7 @@ def _match(rows, options):
     timestamps = {key: [r["caught_ts"] for r in group] for key, group in by_stratum.items()}
     used = set()
     matches = []
+    reasons, caliper_failures = Counter(), Counter()
     for signal in rows:
         if signal["cohort"] != "signal" or signal["exclusion"] or signal["baseline_exclusion"]:
             continue
@@ -419,7 +425,8 @@ def _match(rows, options):
         times = timestamps.get(key, [])
         start = bisect_left(times, signal["caught_ts"] - options.max_capture_gap_seconds)
         end = bisect_right(times, signal["caught_ts"] + options.max_capture_gap_seconds)
-        for control in by_stratum[key][start:end]:
+        window = by_stratum.get(key, [])[start:end]
+        for control in window:
             if control["key"] in used:
                 continue
             distance = _distance(signal, control, options)
@@ -429,7 +436,19 @@ def _match(rows, options):
             distance, _, _, control = min(candidates, key=lambda item: item[:3])
             used.add(control["key"])
             matches.append((signal, control, distance))
-    return matches
+        elif key not in by_stratum:
+            reasons["no_control_in_stratum_split"] += 1
+        elif not window:
+            reasons["no_control_within_capture_gap"] += 1
+        elif all(control["key"] in used for control in window):
+            reasons["controls_already_matched"] += 1
+        else:
+            reasons["covariate_caliper"] += 1
+            for control in window:
+                if control["key"] not in used:
+                    caliper_failures.update(name for name, _, _, within in _caliper_ratios(signal, control, options)
+                                            if not within)
+    return matches, dict(reasons), dict(caliper_failures)
 
 
 def _percentile(values, percentile):
@@ -522,17 +541,62 @@ def _group_result(rows, matches, horizon, split, options):
     }
 
 
-def evaluate_signals(payload, *, as_of=None, options=None):
+CAPTURE_COLUMNS = ("cohort", "token_address", "captured_at", "price_usd", "mcap_usd", "liquidity_usd",
+                   "age_hours", "stratum", "status")
+
+
+def _compact(value, digits=6):
+    return None if value is None else float(f"{value:.{digits}g}")
+
+
+def _capture_rows(rows, options, limit):
+    """Per-capture table for offline matching: frozen capture values, never later market data."""
+    strata = sorted({row["stratum"] for row in rows})
+    index = {stratum: position for position, stratum in enumerate(strata)}
+    table = {
+        "columns": [*CAPTURE_COLUMNS, *options.horizons], "strata": [list(stratum) for stratum in strata],
+        "stratum_fields": ["strategy_version", "config_version", "signal_family"],
+        "horizon_cells": "endpoint price_usd when eligible on a price basis, otherwise the outcome status",
+        "status_values": "primary, or the dedup exclusion / baseline exclusion that keeps the row out of matching",
+        "limit_per_cohort": limit, "totals": {}, "rows": [],
+    }
+    for cohort in ("signal", "control"):
+        group = sorted((row for row in rows if row["cohort"] == cohort),
+                       key=lambda row: (-row["caught_ts"], row["token_address"]))
+        table["totals"][cohort] = len(group)
+        for row in group if limit is None else group[:max(0, limit)]:
+            cells = []
+            for horizon in options.horizons:
+                outcome = row["outcomes"][horizon]
+                if outcome["status"] == "eligible" and outcome["return_basis"] == "price":
+                    cells.append(_compact(_number(_mapping(row["horizons"].get(horizon)).get("price_usd"))))
+                else:
+                    cells.append("eligible_without_price" if outcome["status"] == "eligible" else outcome["status"])
+            age = row["caught_age_hours"]
+            table["rows"].append([
+                cohort, row["token_address"], row["caught_at"], _compact(row["caught_price_usd"]),
+                _compact(row["caught_mcap_usd"]), _compact(row["caught_liquidity_usd"]),
+                None if age is None else round(age, 2), index[row["stratum"]],
+                row["exclusion"] or row["baseline_exclusion"] or "primary", *cells,
+            ])
+    return table
+
+
+def evaluate_signals(payload, *, as_of=None, options=None, capture_row_limit=None):
     """Return JSON-safe shadow evaluation without mutating input or fetching data.
 
     Accepts saved reports/snapshots, scanner signal_outcomes, or the documented
     signal_evaluation_dataset. Summary is suitable for report['signal_evaluation'].
+    `capture_rows` is a separate per-capture table, newest first and limited per cohort.
     """
     if not isinstance(payload, dict):
         raise ValueError("input must be a JSON object")
     options = EvaluationOptions() if options is None else options
     if not isinstance(options, EvaluationOptions):
         raise ValueError("options must be EvaluationOptions")
+    if capture_row_limit is not None and (isinstance(capture_row_limit, bool) or not isinstance(capture_row_limit, int)
+                                          or capture_row_limit < 0):
+        raise ValueError("capture_row_limit must be a nonnegative integer")
     report, signal_rows, control_rows, source = _extract(payload)
     saved_time = report.get("as_of") if report.get("as_of") is not None else report.get("generated_at")
     as_of_ts = _timestamp(as_of if as_of is not None else saved_time)
@@ -553,7 +617,7 @@ def evaluate_signals(payload, *, as_of=None, options=None):
                 end >= cutoff or (checkpoint_at is not None and checkpoint_at >= cutoff)
             )
             row["partitions"][horizon] = "purged" if purged else row["split"]
-    matches = _match(rows, options)
+    matches, unmatched_reasons, caliper_failures = _match(rows, options)
     strata = []
     for stratum in sorted({r["stratum"] for r in active if r["cohort"] == "signal"}):
         group = [r for r in active if r["stratum"] == stratum]
@@ -583,6 +647,11 @@ def evaluate_signals(payload, *, as_of=None, options=None):
     counts.update(primary_signals=sum(r["cohort"] == "signal" for r in active),
                   primary_controls=sum(r["cohort"] == "control" for r in active), selected_pairs=len(matches))
     counts["baseline_exclusion_counts"] = dict(Counter(r["baseline_exclusion"] for r in active if r["baseline_exclusion"]))
+    counts["baseline_exclusion_counts_by_cohort"] = {cohort: dict(Counter(
+        r["baseline_exclusion"] for r in active if r["cohort"] == cohort and r["baseline_exclusion"]))
+        for cohort in ("signal", "control")}
+    counts["unmatched_signal_reasons"] = unmatched_reasons
+    counts["caliper_failures"] = caliper_failures
     counts["rejected_feature_values"] = sum(r["rejected_features"] for r in active)
     warnings = [
         "Observational shadow diagnostics, not trading edge, causality, or execution evidence.",
@@ -641,6 +710,7 @@ def evaluate_signals(payload, *, as_of=None, options=None):
     } for row in rows]
     return {
         "summary": summary, "strata": strata, "episode_diagnostics": diagnostics,
+        "capture_rows": _capture_rows(rows, options, capture_row_limit),
         "control_matches": [{"signal_episode_id": s["episode_id"], "control_episode_id": c["episode_id"],
                              "signal_token": s["token_address"], "control_token": c["token_address"],
                              "capture_distance": distance,

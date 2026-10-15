@@ -180,6 +180,9 @@ entry features from later balances. One first observation per horizon is frozen;
 late/missing values are not zero returns. Versions, controls, price coverage,
 cost assumptions and the October 17 holdout boundary remain explicit.
 Collection is bounded to 5,000 signal and 5,000 control rows; pruning is counted.
+Controls leave the GMGN lists, so after a horizon's one-hour window closes without
+an on-time snapshot, deep runs read a bounded GMGN 5m kline for it (36 calls/run).
+No RPC is used. The report publishes compact per-capture rows for offline lift checks.
 Learning shows a compact shadow summary, not a claim of a profitable strategy.
 See `SIGNAL_EVALUATION.md` for sampling and statistical limitations.
 
