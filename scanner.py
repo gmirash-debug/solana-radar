@@ -11982,6 +11982,7 @@ def scan_pool_signatures(rpc, pool, config, state, classification_budget, fallba
         return [], {
             "pool": pool.as_dict(),
             "error": error,
+            **failure_metadata(exc),
             "fallback_error": fallback_error,
             "trade_source": "pool_signatures",
         }

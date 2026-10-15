@@ -297,6 +297,34 @@ class AuditScannerRegressions(unittest.TestCase):
             self.assertEqual(health["status"], "degraded")
             self.assertEqual(health["coverage_by_source"]["pool_signatures"]["history_gaps"], 1)
 
+    def test_o04_signature_fallback_preserves_provider_failure_type(self):
+        class Rpc:
+            def __init__(self, error):
+                self.error = error
+
+            def signatures_for_address(self, _address, limit=100):
+                raise self.error
+
+        pool = s.Pool(pool_address="pool", token_address="token")
+        config = {"initial_backfill_signatures": 25}
+        unavailable = s.RpcProvidersUnavailable(
+            "all RPC providers failed for getSignaturesForAddress: helius=quota, alchemy=quota, publicnode=rpc")
+        _alerts, failed = s.scan_pool_signatures(Rpc(unavailable), pool, config, {}, {},
+                                                 fallback_error="enhanced history unavailable")
+        self.assertEqual(failed["error_type"], "RpcProvidersUnavailable")
+        self.assertEqual(failed["error_category"], "rpc_all_unavailable")
+        health = s.build_scan_health([failed, failed, {}], {}, {})
+        self.assertEqual(health["status"], "unhealthy")
+        self.assertEqual(health["scan_error_categories"], {"rpc_all_unavailable": 2})
+        rejected = RuntimeError("unhealthy scan rejected: " + "; ".join(health["reasons"]))
+        status = {"error": str(rejected), **failure_metadata(rejected), "scan_health": health}
+        self.assertEqual(scanner_failure_class(status, 1), "soft_provider_failure")
+
+        _alerts, broken = s.scan_pool_signatures(Rpc(KeyError("cursor")), pool, config, {}, {})
+        health = s.build_scan_health([broken], {}, {})
+        self.assertEqual(health["scan_error_categories"], {"other": 1})
+        self.assertEqual(scanner_failure_class({"scan_health": health}, 1), "hard_failure")
+
     def test_o04_health_preserves_programming_error_type(self):
         error = KeyError("helius: credit quota timeout")
         health = s.build_scan_health([{"error": str(error), **failure_metadata(error)}], {}, {})
