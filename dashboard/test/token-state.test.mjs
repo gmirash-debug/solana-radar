@@ -151,3 +151,12 @@ test("fresh direct report market supersedes an older market cache", () => {
   assert.equal(market.mcapUsd, 36_700);
   assert.equal(market.priceUsd, 0.0000367);
 });
+
+test("scanner noise-cut gate hides an unconfirmed thesis from tracked candidates", () => {
+  const status = resolveWorkflowStatus({ lifecycle: "weakening", dataStatus: "current", currentTier: "watch", riskExcluded: true });
+  assert.equal(status, "noise");
+  assert.equal(matchesWorkflowFilter(status), false);
+  assert.equal(matchesWorkflowFilter(status, "all", true), true);
+  assert.equal(resolveWorkflowStatus({ lifecycle: "closed", dataStatus: "current", riskExcluded: true }), "inactive");
+  assert.equal(resolveWorkflowStatus({ lifecycle: "weakening", dataStatus: "current", currentTier: "watch" }), "candidate");
+});

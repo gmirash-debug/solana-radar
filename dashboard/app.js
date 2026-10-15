@@ -1573,6 +1573,7 @@ function buildTokenSignals() {
       currentTier: token.currentSignalTier,
       currentConfirmed: !originalHistoryUnknown && token.currentSignalAlerts.some((alert) => alert.signal_confirmation?.status === "confirmed"),
       thesisConfirmed: !originalHistoryUnknown && token.signalThesis?.signal_confirmation?.status === "confirmed",
+      riskExcluded: token.signalThesis?.noise_cut?.gate?.status === "excluded",
     });
     token.signalLifecycle = {
       scannerOperational,

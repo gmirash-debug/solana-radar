@@ -28,6 +28,7 @@ from gmgn_discovery import (attention_mode, fetch_attention, merge_candidates, m
     current_candidates, history_plan, record_history_check, collect_signature_ranges, initial_history_hours,
     unprocessed_transactions, remember_transactions, prune_processed_signatures)
 from coordinated_activity import analyze_coordinated_activity, compact_coordinated_activity
+import noise_cut
 from wallet_links import SERVICE_KINDS, infrastructure_sources, normalize_link as normalize_wallet_link, source_kind
 from solana_position_lineage import annotate_pool_activity, freeze_receipt_seeds
 from position_history_rpc import check_receipt_positions
@@ -4136,6 +4137,13 @@ def pool_matches_config(pool, config):
     if attention_mode(config):
         if not clean_solana_address(pool.token_address) or not pool.gmgn_attention:
             return False
+        # No age cap for attention candidates, but launch-phase tokens are dominated by
+        # bundled operator inventory, so an explicit minimum age keeps them out.
+        age_min = config.get("age_min_hours")
+        if age_min is not None:
+            age_hours = pool.age_hours()
+            if age_hours is None or age_hours < float(age_min):
+                return False
         minimum = config.get("mcap_min_usd")
         maximum = config.get("mcap_max_usd")
         if minimum is None and maximum is None:
@@ -6769,27 +6777,35 @@ def score_events(events, config):
         if count >= 2
     ]
 
-    score = 0
+    def support_points(linked):
+        if support_wallet_count >= min_wallets and (hard_wallet_count or linked):
+            return 10
+        return 5 if support_wallet_count >= min_wallets * 2 else 0
+
+    base_score = 0
     if hard_classes.get("dormant", 0):
-        score += 35
-    if hard_wallet_count >= min_wallets:
-        score += 25
-    elif hard_wallet_count >= max(2, min_wallets - 1):
-        score += 15
+        base_score += 35
     if hard_sol >= min_sol:
-        score += 25
+        base_score += 25
     elif hard_sol >= min_sol * 0.5:
-        score += 10
-    if common_funders:
-        score += 25
-    if common_recipients:
-        score += 20
+        base_score += 10
     if any(event.get("sol_amount", 0.0) >= float(config["big_buy_sol"]) for event in hard_events):
-        score += 10
-    if support_wallet_count >= min_wallets and (hard_wallet_count or common_funders or common_recipients):
-        score += 10
-    elif support_wallet_count >= min_wallets * 2:
-        score += 5
+        base_score += 10
+    cluster_points = 25 if hard_wallet_count >= min_wallets else 15 if hard_wallet_count >= max(2, min_wallets - 1) else 0
+    legacy_score = min(
+        base_score + cluster_points + (25 if common_funders else 0) + (20 if common_recipients else 0)
+        + support_points(bool(common_funders or common_recipients)),
+        100,
+    )
+    coordination_risk = []
+    if noise_cut.coordination_as_risk(config):
+        # Coordinated fresh wallets look like an operator inventory, not organic demand.
+        coordination_risk = noise_cut.classic_coordination_risk(
+            hard_wallet_count >= min_wallets, common_funders, common_recipients, config)
+        score = max(0, int(min(base_score + support_points(False), 100)
+                           - sum(item["points"] for item in coordination_risk)))
+    else:
+        score = legacy_score
 
     evidence = {
         "hard_wallets": hard_wallet_count,
@@ -6799,6 +6815,8 @@ def score_events(events, config):
         "hard_classes": dict(hard_classes),
         "support_classes": dict(support_classes),
         "support_only": bool(support_events) and not hard_events and not common_funders and not common_recipients,
+        "evidence_score": legacy_score,
+        "coordination_risk": coordination_risk,
     }
     return min(score, 100), suspicious, common_funders, common_recipients, evidence
 
@@ -6934,14 +6952,15 @@ def classify_alert_tier(pool, alert, evidence, config):
     baseline = alert.get("reactivation_baseline") or {}
     baseline_ready = baseline.get("status") == "ready"
     baseline_confirmed = bool(baseline.get("reactivation_confirmed"))
+    coordination_risk = noise_cut.coordination_as_risk(config)
 
-    if hard_cluster:
+    if hard_cluster and not coordination_risk:
         reasons.append("hard wallet cluster")
     if hard_flow:
         reasons.append("hard flow")
     if dormant:
         reasons.append("dormant wallet")
-    if coordination:
+    if coordination and not coordination_risk:
         reasons.append("linked wallets")
     if support_wallets:
         reasons.append("low_tx support")
@@ -6959,6 +6978,10 @@ def classify_alert_tier(pool, alert, evidence, config):
 
     if support_only:
         penalties.append("low_tx only")
+    if coordination_risk and hard_cluster:
+        penalties.append(noise_cut.RISK_PENALTIES["hard_wallet_cluster"])
+    if coordination_risk and coordination:
+        penalties.append(noise_cut.RISK_PENALTIES["linked_wallets"])
     if concentrated_wave:
         penalties.append("concentrated buyer flow")
     if linked_concentration:
@@ -6986,7 +7009,7 @@ def classify_alert_tier(pool, alert, evidence, config):
         float(alert.get("suspicious_sol") or 0) >= float(config.get("excess_flow_sol", 100))
         and actionable_mcap
         and mcap > actionable_mcap
-        and not coordination
+        and (coordination_risk or not coordination)
     ):
         penalties.append("excess flow after move")
 
@@ -7012,11 +7035,11 @@ def classify_alert_tier(pool, alert, evidence, config):
         >= int(config.get("reactivation_wallet_graph_min_effective_buyers", 6))
         and not linked_concentration
     )
-    hard_signal = hard_cluster or hard_flow or dormant or coordination or wave_signal
+    hard_signal = hard_flow or dormant or wave_signal or (not coordination_risk and (hard_cluster or coordination))
     if concentrated_wave or linked_noise:
         tier = "noise"
     elif not hard_signal:
-        tier = "noise" if support_only else "watch"
+        tier = "noise" if support_only or (coordination_risk and (hard_cluster or coordination)) else "watch"
     elif hot_reactivation:
         tier = "hot_reactivation"
     elif "late mcap" in penalties or "blowoff volume" in penalties or "excess flow after move" in penalties:
@@ -7027,7 +7050,7 @@ def classify_alert_tier(pool, alert, evidence, config):
             and "too close to ATH" not in penalties
             and "ath unverified" not in penalties
         )
-        classic_actionable = coordination and (hard_cluster or hard_flow or dormant)
+        classic_actionable = not coordination_risk and coordination and (hard_cluster or hard_flow or dormant)
         baseline_allows_actionable = (
             (baseline_ready and baseline_confirmed)
             or not config.get("reactivation_baseline_required_for_actionable", True)
@@ -7049,12 +7072,12 @@ def classify_alert_tier(pool, alert, evidence, config):
             and sticky_bought_pct >= float(config.get("sticky_accumulation_actionable_sticky_bought_pct", 50.0))
             and net_retention_pct >= float(config.get("sticky_accumulation_actionable_net_token_retention_pct", 70.0))
         )
-        classic_actionable = coordination and (hard_cluster or hard_flow or dormant)
+        classic_actionable = not coordination_risk and coordination and (hard_cluster or hard_flow or dormant)
         clean_entry = "above actionable mcap" not in penalties and "hot volume" not in penalties
         tier = "actionable" if clean_entry and (sticky_actionable or classic_actionable) else "watch"
     elif actionable_mcap and mcap > actionable_mcap:
         tier = "watch"
-    elif "hot volume" in penalties and not coordination:
+    elif "hot volume" in penalties and (coordination_risk or not coordination):
         tier = "watch"
     else:
         tier = "actionable"
@@ -7092,7 +7115,9 @@ def build_alerts(pool, events, config):
         score, suspicious, common_funders, common_recipients, evidence = score_events(window, config)
         suspicious_wallet_count = len({item["signer"] for item in suspicious})
         suspicious_sol = sum(item.get("sol_amount", 0.0) for item in suspicious)
-        if score < 40:
+        # Risk-only classified alerts are evidence about the pool, so emit them on evidence strength.
+        emission_score = evidence["evidence_score"] if noise_cut.classified_wallets_risk_only(config) else score
+        if emission_score < 40:
             continue
         hard_signal = (
             evidence["hard_wallets"] >= int(config["alert_min_suspicious_wallets"])
@@ -7140,6 +7165,8 @@ def build_alerts(pool, events, config):
             "routed_buys": sum(1 for item in suspicious if item.get("routed")),
             "events": suspicious[: int(config.get("alert_event_export_limit", 80))],
         }
+        if evidence["coordination_risk"]:
+            alert["coordination_risk"] = evidence["coordination_risk"]
         tier, reasons, penalties, quality_metrics = classify_alert_tier(pool, alert, evidence, config)
         alert.update(
             {
@@ -7915,6 +7942,8 @@ def capture_signal_thesis(
 
     candidates = []
     for alert in alerts or []:
+        if noise_cut.excluded_from_candidates(alert):
+            continue
         incoming = signal_thesis_from_alert(
             alert,
             config,
@@ -8661,6 +8690,9 @@ def signal_theses_for_report(state, deleted=None, config=None):
             continue
         thesis = public_signal_thesis(private_thesis)
         if thesis:
+            gate = noise_cut.thesis_gate(private_thesis, config)
+            if gate:
+                thesis["noise_cut"] = {"gate": gate}
             theses.append(thesis)
     return sorted(
         theses,
@@ -8760,6 +8792,7 @@ def wave_quality_score(alert, config):
         config.get("actionable_min_balance_coverage_pct", 80)
     ):
         score -= 10
+    score -= noise_cut.wave_coordination_penalty(alert, config)
     return max(0, min(95, int(round(score))))
 
 
@@ -11470,6 +11503,7 @@ def apply_alert_data_quality(
     config,
 ):
     fetch_stats = fetch_stats or {}
+    noise_cut.attach_classified_wallet_evidence(alerts, config)
     partial_reasons = []
     if fetch_stats.get("evidence_pending"):
         partial_reasons.append("wallet verification pending")
@@ -11596,7 +11630,7 @@ def apply_signal_confirmation(alert, config):
         )
     if reasons and alert.get("action_tier") not in ("noise", "late_chase"):
         alert["action_tier"] = "candidate"
-    return alert
+    return noise_cut.apply_noise_cut(alert, config)
 
 
 def schedule_signal_recheck(pool_state, alerts, config):
@@ -12994,6 +13028,53 @@ def filter_reactivation_by_ath(http, state, pools, config, observed_at):
     if rate_limited:
         stats["rate_limited"] = 1
     config["_ath_filter_stats"] = dict(stats)
+    return kept
+
+
+def filter_reactivation_by_gmgn_holder_stats(state, pools, config, observed_at):
+    """Drop bundled or sniped launches using GMGN token info already fetched this scan.
+
+    No extra GMGN requests: fresh ``stat``/``wallet_tags_stat`` come from the
+    token-info cache filled by the ATH step and are kept per token for a TTL.
+    Pools with a tracked thesis stay scannable so their evidence keeps refreshing.
+    """
+    if config.get("lane") != "reactivation" or not noise_cut.gmgn_prefilter_enabled(config):
+        return pools
+    snapshots = state.setdefault("gmgn_holder_stats", {})
+    cache = config.get("_gmgn_token_info_cache") or {}
+    now = int(time.time())
+    max_age = float(config.get("gmgn_prefilter_max_age_minutes", 360)) * 60
+    for token in [key for key, value in snapshots.items()
+                  if not isinstance(value, dict) or now - parse_timestamp(value.get("checked_at")) > max_age]:
+        snapshots.pop(token, None)
+    pools_state = state.get("pools") or {}
+    stats = Counter()
+    kept = []
+    for pool in pools:
+        token = pool.token_address or pool.pool_address
+        fresh = noise_cut.solana_holder_stats(cache.get(token)) if token else None
+        if fresh:
+            snapshots[token] = {**fresh, "checked_at": observed_at}
+            stats["fresh_stats"] += 1
+        snapshot = snapshots.get(token)
+        if not snapshot:
+            stats["unknown"] += 1
+            kept.append(pool)
+            continue
+        reasons = noise_cut.gmgn_prefilter_reasons(snapshot, config)
+        if not reasons:
+            stats["passed"] += 1
+            kept.append(pool)
+        elif isinstance((pools_state.get(pool.pool_address) or {}).get("signal_thesis"), dict):
+            stats["kept_tracked"] += 1
+            kept.append(pool)
+        else:
+            stats["excluded"] += 1
+            for reason in reasons:
+                stats[f"excluded_{reason.split(' ', 1)[0]}"] += 1
+    stats["input_pools"] = len(pools)
+    stats["kept_pools"] = len(kept)
+    config["_gmgn_prefilter_stats"] = dict(stats)
     return kept
 
 
@@ -14497,6 +14578,7 @@ def build_report_payload(universe, summaries, alerts, rpc_calls, config, generat
             "supply_integrity": (
                 config.get("_selection_stats") or {}
             ).get("supply_integrity", {}),
+            **({"gmgn_prefilter": config["_gmgn_prefilter_stats"]} if config.get("_gmgn_prefilter_stats") else {}),
             "deleted_tokens": {
                 "tokens": len(deleted_tokens["tokens"]),
                 "pools": len(deleted_tokens["pools"]),
@@ -14788,6 +14870,7 @@ def scan_with_config(http, rpc, state, config, base_universe=None):
     if config.get("_scan_profile") == "targeted":
         config["_ath_fetch_pool_addresses"] = [pool.pool_address for pool in fast_candidate_pools(universe, state, int(time.time()))]
     universe = filter_reactivation_by_ath(http, state, universe, config, observed_at)
+    universe = filter_reactivation_by_gmgn_holder_stats(state, universe, config, observed_at)
     ath_filter_stats = config.get("_ath_filter_stats") or {}
     if ath_filter_stats:
         print(

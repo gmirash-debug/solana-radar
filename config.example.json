@@ -484,6 +484,33 @@
   "supply_integrity_watch_cohort_supply_pct": 3,
   "supply_integrity_watch_top1_pct": 10,
   "supply_integrity_watch_top5_pct": 30,
+  "noise_cut_coordination_as_risk": false,
+  "noise_cut_coordination_risk_points": {
+    "common_funder": 25,
+    "common_recipient": 20,
+    "common_executor": 15,
+    "hard_wallet_cluster": 25
+  },
+  "noise_cut_synchronous_buys_min_wallets": 5,
+  "noise_cut_classified_wallets_risk_only": false,
+  "noise_cut_risk_gates_enabled": false,
+  "noise_cut_gate_supply_statuses": [
+    "concentrated",
+    "unverified"
+  ],
+  "noise_cut_gate_coordination_codes": [
+    "young_low_activity"
+  ],
+  "gmgn_prefilter_enabled": false,
+  "gmgn_prefilter_max_age_minutes": 360,
+  "gmgn_prefilter_max": {
+    "top_10_holder_rate": 0.5,
+    "dev_team_hold_rate": 0.2,
+    "fresh_wallet_rate": 0.3,
+    "top70_sniper_hold_rate": 0.2,
+    "bundler_wallet_share": null,
+    "sniper_wallets": null
+  },
   "dex_allowlist": [
     "pumpfun-amm",
     "pumpswap"
