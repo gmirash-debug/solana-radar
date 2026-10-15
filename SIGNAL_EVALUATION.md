@@ -93,8 +93,9 @@ offline lift checks such as kline retro-backtests. `columns` are `cohort`,
 exclusion that keeps the row out of matching) and one cell per horizon: the
 endpoint `price_usd` when eligible on a price basis, otherwise the outcome status.
 Rows carry capture-time values only, never later market data. The scanner
-publishes it as `report.signal_evaluation.capture_rows` (default 1000 rows per
-cohort, `signal_evaluation_published_rows_per_cohort`) together with the
+publishes it as `report.signal_evaluation.capture_rows` (default 250 rows per
+cohort, `signal_evaluation_published_rows_per_cohort`; the published report stays well
+below the Worker's 1.5 MB compact-report limit) together with the
 collector's last-run `collection` counters; both survive the dashboard listing.
 
 ## Saved Inputs

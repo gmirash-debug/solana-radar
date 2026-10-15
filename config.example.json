@@ -7,7 +7,7 @@
   "signal_evaluation_kline_fallback_enabled": true,
   "signal_evaluation_kline_max_calls": 36,
   "signal_evaluation_kline_max_seconds": 120,
-  "signal_evaluation_published_rows_per_cohort": 1000,
+  "signal_evaluation_published_rows_per_cohort": 250,
   "launch_history_enabled": true,
   "launch_history_tasks_per_scan": 1,
   "launch_history_window_seconds": 21600,

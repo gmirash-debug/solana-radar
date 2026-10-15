@@ -284,6 +284,28 @@ class PublicationTests(unittest.TestCase):
         controls = [row for row in ready["report"]["signal_evaluation"]["capture_rows"]["rows"] if row[0] == "control"]
         self.assertEqual({row[1] for row in controls}, {"control-a", "control-b"})
 
+    def test_default_published_rows_keep_the_compact_report_small(self):
+        base = {"strategy_version": "v", "config_version": "c", "signal_family": "f", "caught_age_hours": 48,
+                "caught_mcap_usd": 100000, "caught_liquidity_usd": 20000, "caught_price_usd": 1}
+
+        def horizons(index):
+            return {name: {"target_at": iso(index * 60 + hours * HOUR), "at": iso(index * 60 + hours * HOUR + 30),
+                           "price_usd": 1.5, "quality_status": "complete"}
+                    for name, hours in (("1h", 1), ("6h", 6), ("24h", 24), ("72h", 72))}
+
+        mint = "So1anaMint{:05d}pumpxxxxxxxxxxxxxxxxxxxxxxx"
+        signals = [{**base, "token_address": mint.format(i), "caught_at": iso(i * 60), "horizons": horizons(i)}
+                   for i in range(600)]
+        controls = [{**base, "token_address": mint.format(10000 + i), "caught_at": iso(i * 60), "horizons": horizons(i),
+                     "signal_present": False, "selection_at": iso(i * 60), "selection_method": "m"}
+                    for i in range(600)]
+        state = {"signal_evaluation_dataset": {"episodes": signals, "controls": controls, "collection": {}}}
+        evaluation = s.shadow_signal_evaluation(state, {}, iso(100 * HOUR))
+        rows = evaluation["capture_rows"]["rows"]
+        self.assertEqual(len([row for row in rows if row[0] == "signal"]), 250)
+        self.assertEqual(len([row for row in rows if row[0] == "control"]), 250)
+        self.assertLess(len(s.json.dumps(evaluation, separators=(",", ":"))), 300 * 1024)
+
     def test_unmatched_signal_reasons_explain_zero_pairs(self):
         base = {"strategy_version": "v", "config_version": "c", "signal_family": "f", "caught_age_hours": 48,
                 "caught_mcap_usd": 100000, "caught_liquidity_usd": 20000, "caught_price_usd": 1, "horizons": {}}

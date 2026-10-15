@@ -13461,7 +13461,7 @@ def shadow_signal_evaluation(state, config, generated_at):
     dataset = state.get("signal_evaluation_dataset", {})
     result = evaluate_signals({"generated_at": generated_at, "signal_evaluation_dataset": dataset},
         options=EvaluationOptions(bootstrap_samples=200, holdout_start=config.get("signal_evaluation_holdout_start")),
-        capture_row_limit=max(0, int(config.get("signal_evaluation_published_rows_per_cohort", 1000))))
+        capture_row_limit=max(0, int(config.get("signal_evaluation_published_rows_per_cohort", 250))))
     return {**result["summary"], "capture_rows": result["capture_rows"],
             "collection": copy.deepcopy(dataset.get("collection") or {})}
 
